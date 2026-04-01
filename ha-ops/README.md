@@ -31,9 +31,12 @@
 
 For a private GitHub repository, prefer an SSH deploy key:
 
-1. Generate a read-only deploy key for `ha-config`.
-2. Put the private key into the add-on `git_ssh_key` option.
-3. Set `repo_url` to `git@github.com:alex-ander-is/ha-config.git`.
+1. Set `repo_url` to `git@github.com:alex-ander-is/ha-config.git`.
+2. Open the add-on ingress page and click `Generate Deploy Key`.
+3. Copy the displayed public key into GitHub Deploy Keys for `ha-config`.
+4. Leave `git_ssh_key` empty if you want HA Ops to use its generated key automatically.
+
+If you prefer to manage the private key yourself, you can still paste it into `git_ssh_key`.
 
 ## Expected `ha-config` layout
 

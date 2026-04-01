@@ -3,6 +3,7 @@ from urllib.parse import parse_qs, urlparse
 import html
 import json
 import os
+import socket
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -16,6 +17,9 @@ STATE_PATH = Path("/data/state.json")
 RELEASES_DIR = Path("/data/releases")
 CONFIG_DIR = Path("/homeassistant")
 ADDON_CONFIGS_DIR = Path("/addon_configs")
+WORK_DIR = Path("/data/work")
+GENERATED_DEPLOY_KEY_PATH = WORK_DIR / "generated_deploy_key"
+GENERATED_DEPLOY_KEY_PUB_PATH = WORK_DIR / "generated_deploy_key.pub"
 
 STATE_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
@@ -86,6 +90,62 @@ def list_releases():
             }
         )
     return releases
+
+
+def generated_deploy_key_exists():
+    return GENERATED_DEPLOY_KEY_PATH.exists() and GENERATED_DEPLOY_KEY_PUB_PATH.exists()
+
+
+def load_generated_public_key():
+    if not GENERATED_DEPLOY_KEY_PUB_PATH.exists():
+        return ""
+    return GENERATED_DEPLOY_KEY_PUB_PATH.read_text().strip()
+
+
+def git_auth_mode(options):
+    if options.get("git_ssh_key", "").strip():
+        return "manual"
+    if generated_deploy_key_exists():
+        return "generated"
+    return "none"
+
+
+def setup_git_ssh_env(env, key_text=None, key_path=None):
+    if key_text:
+        WORK_DIR.mkdir(parents=True, exist_ok=True)
+        key_path = WORK_DIR / "manual_deploy_key"
+        key_path.write_text(key_text)
+        os.chmod(key_path, 0o600)
+
+    if key_path:
+        env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+
+def generate_deploy_key():
+    WORK_DIR.mkdir(parents=True, exist_ok=True)
+    for path in [GENERATED_DEPLOY_KEY_PATH, GENERATED_DEPLOY_KEY_PUB_PATH]:
+        if path.exists():
+            path.unlink()
+
+    comment = f"ha-ops@{socket.gethostname()}"
+    result = run_command(
+        [
+            "ssh-keygen",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            comment,
+            "-f",
+            str(GENERATED_DEPLOY_KEY_PATH),
+        ]
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ssh-keygen failed:\n{result.stderr.strip() or result.stdout.strip()}")
+
+    os.chmod(GENERATED_DEPLOY_KEY_PATH, 0o600)
+    return load_generated_public_key()
 
 
 def run_command(command, env=None, cwd=None):
@@ -235,11 +295,9 @@ def ensure_repo(options):
     env = os.environ.copy()
     git_ssh_key = options.get("git_ssh_key", "").strip()
     if git_ssh_key:
-        key_path = Path("/data/work/deploy_key")
-        key_path.parent.mkdir(parents=True, exist_ok=True)
-        key_path.write_text(git_ssh_key)
-        os.chmod(key_path, 0o600)
-        env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+        setup_git_ssh_env(env, key_text=git_ssh_key)
+    elif generated_deploy_key_exists():
+        setup_git_ssh_env(env, key_path=GENERATED_DEPLOY_KEY_PATH)
 
     if not repo_dir.exists():
         repo_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -781,6 +839,46 @@ def render_releases(releases):
     )
 
 
+def render_git_auth(options):
+    mode = git_auth_mode(options)
+    public_key = html.escape(load_generated_public_key())
+    repo_url = options.get("repo_url", "")
+    uses_ssh = repo_url.startswith("git@") or repo_url.startswith("ssh://")
+
+    if mode == "manual":
+        status = "<p>Using the private key from <code>git_ssh_key</code> in add-on configuration.</p>"
+        key_block = ""
+    elif mode == "generated":
+        status = "<p>Using the deploy key generated and stored inside HA Ops.</p>"
+        key_block = (
+            "<p>Add this public key to GitHub as a read-only Deploy Key for <code>ha-config</code>.</p>"
+            f"<pre>{public_key}</pre>"
+        )
+    else:
+        status = "<p>No SSH key is configured yet.</p>"
+        key_block = ""
+
+    hint = ""
+    if uses_ssh and mode == "none":
+        hint = "<p>Click <strong>Generate Deploy Key</strong>, then paste the public key into GitHub Deploy Keys.</p>"
+    elif not uses_ssh:
+        hint = "<p>Your repository URL is not SSH-based, so a deploy key may not be needed.</p>"
+
+    action = (
+        "<form method='post' action='/generate-key'>"
+        "<button type='submit' class='secondary'>Generate Deploy Key</button>"
+        "</form>"
+    )
+    if mode == "generated":
+        action = (
+            "<form method='post' action='/generate-key'>"
+            "<button type='submit' class='secondary'>Regenerate Deploy Key</button>"
+            "</form>"
+        )
+
+    return f"{status}{hint}<div class='actions'>{action}</div>{key_block}"
+
+
 def render_page():
     options = load_options()
     state = read_state()
@@ -797,6 +895,7 @@ def render_page():
     repo_url = html.escape(options.get("repo_url", ""))
     branch = html.escape(options.get("repo_branch", "main"))
     manifest_path = html.escape(options.get("manifest_path", "ha-ops.json"))
+    auth_mode = html.escape(git_auth_mode(options))
     details = "\n".join(state.get("last_details", []))
     details_html = html.escape(details)
 
@@ -965,6 +1064,8 @@ def render_page():
           <dd><code>{branch}</code></dd>
           <dt>Manifest</dt>
           <dd><code>{manifest_path}</code></dd>
+          <dt>Git auth</dt>
+          <dd><code>{auth_mode}</code></dd>
           <dt>Last run</dt>
           <dd>{last_run}</dd>
           <dt>Fetched commit</dt>
@@ -988,6 +1089,11 @@ def render_page():
         <pre>{details_html or "No details yet."}</pre>
       </section>
     </div>
+
+    <section class="card wide">
+      <h2>Git Access</h2>
+      {render_git_auth(options)}
+    </section>
 
     <section class="card wide">
       <h2>Managed Targets</h2>
@@ -1022,6 +1128,31 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         length = int(self.headers.get("Content-Length", "0"))
         body = parse_qs(self.rfile.read(length).decode()) if length else {}
+
+        if parsed.path == "/generate-key":
+            try:
+                generate_deploy_key()
+                write_state(
+                    {
+                        "last_run_at": utc_now(),
+                        "last_status": "idle",
+                        "last_action": "generate_key",
+                        "last_message": "Generated a new deploy key. Add the public key to GitHub Deploy Keys.",
+                    }
+                )
+            except Exception as exc:
+                write_state(
+                    {
+                        "last_run_at": utc_now(),
+                        "last_status": "error",
+                        "last_action": "generate_key",
+                        "last_message": str(exc),
+                    }
+                )
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.end_headers()
+            return
 
         if parsed.path == "/apply":
             start_apply()
