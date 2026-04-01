@@ -128,24 +128,29 @@ def generate_deploy_key():
             path.unlink()
 
     comment = f"ha-ops@{socket.gethostname()}"
-    result = run_command(
-        [
-            "ssh-keygen",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-C",
-            comment,
-            "-f",
-            str(GENERATED_DEPLOY_KEY_PATH),
-        ]
-    )
+    try:
+        result = run_command(
+            [
+                "ssh-keygen",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-C",
+                comment,
+                "-f",
+                str(GENERATED_DEPLOY_KEY_PATH),
+            ]
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ssh-keygen is not available inside the add-on image") from exc
     if result.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed:\n{result.stderr.strip() or result.stdout.strip()}")
 
     os.chmod(GENERATED_DEPLOY_KEY_PATH, 0o600)
-    return load_generated_public_key()
+    public_key = load_generated_public_key()
+    log(f"Generated deploy key with comment {comment}")
+    return public_key
 
 
 def run_command(command, env=None, cwd=None):
@@ -157,6 +162,10 @@ def run_command(command, env=None, cwd=None):
         capture_output=True,
         check=False,
     )
+
+
+def log(message):
+    print(f"[ha-ops] {message}", flush=True)
 
 
 def add_detail(details, message):
@@ -1110,6 +1119,12 @@ def render_page():
 
 
 class Handler(BaseHTTPRequestHandler):
+    def send_html(self, content, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(content.encode("utf-8"))
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/health":
@@ -1119,10 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"ok": True}).encode())
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(render_page().encode("utf-8"))
+        self.send_html(render_page())
 
     def do_POST(self):
         parsed = urlparse(self.path)
@@ -1131,27 +1143,29 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/generate-key":
             try:
-                generate_deploy_key()
+                public_key = generate_deploy_key()
                 write_state(
                     {
                         "last_run_at": utc_now(),
                         "last_status": "idle",
                         "last_action": "generate_key",
                         "last_message": "Generated a new deploy key. Add the public key to GitHub Deploy Keys.",
+                        "last_details": [public_key],
                     }
                 )
+                log("Generate Deploy Key completed successfully")
             except Exception as exc:
+                log(f"Generate Deploy Key failed: {exc}")
                 write_state(
                     {
                         "last_run_at": utc_now(),
                         "last_status": "error",
                         "last_action": "generate_key",
                         "last_message": str(exc),
+                        "last_details": [str(exc)],
                     }
                 )
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            self.send_html(render_page())
             return
 
         if parsed.path == "/apply":
