@@ -916,59 +916,60 @@ def render_page():
   <title>HA Ops</title>
   <style>
     :root {{
-      color-scheme: dark;
-      --bg: #070b16;
-      --panel: rgba(15, 23, 42, 0.92);
-      --line: rgba(148, 163, 184, 0.2);
-      --text: #e5eef9;
-      --muted: #9fb0c6;
-      --accent: #22c55e;
-      --accent2: #14b8a6;
-      --warn: #fb923c;
-      --danger: #f87171;
+      color-scheme: light dark;
+      --ha-bg: var(--primary-background-color, #f6f8fb);
+      --ha-card-bg: var(--card-background-color, #ffffff);
+      --ha-text: var(--primary-text-color, #111827);
+      --ha-muted: var(--secondary-text-color, #6b7280);
+      --ha-border: var(--divider-color, rgba(0, 0, 0, 0.12));
+      --ha-primary: var(--primary-color, #03a9f4);
+      --ha-primary-contrast: var(--text-primary-color, #ffffff);
+      --ha-error: var(--error-color, #db4437);
+      --ha-success: var(--success-color, #43a047);
+      --ha-info: var(--info-color, #039be5);
+      --ha-radius: var(--ha-card-border-radius, 12px);
+      --ha-shadow: var(--ha-card-box-shadow, none);
+      --ha-font: var(--paper-font-common-base_-_font-family, system-ui, sans-serif);
+      --ha-code-bg: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
     }}
     * {{
       box-sizing: border-box;
     }}
     body {{
       margin: 0;
-      font-family: ui-sans-serif, sans-serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(20, 184, 166, 0.28), transparent 32%),
-        radial-gradient(circle at top right, rgba(34, 197, 94, 0.18), transparent 28%),
-        linear-gradient(180deg, #0f172a, #020617 68%);
+      font-family: var(--ha-font);
+      color: var(--ha-text);
+      background: var(--ha-bg);
     }}
     main {{
       max-width: 1180px;
       margin: 0 auto;
-      padding: 28px 18px 48px;
+      padding: 16px;
     }}
     .grid {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 18px;
+      gap: 16px;
     }}
     .card {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      padding: 22px;
-      box-shadow: 0 24px 80px rgba(2, 6, 23, 0.34);
-      backdrop-filter: blur(16px);
+      background: var(--ha-card-bg);
+      border: 1px solid var(--ha-border);
+      border-radius: var(--ha-radius);
+      padding: 20px;
+      box-shadow: var(--ha-shadow);
     }}
     h1, h2 {{
       margin: 0 0 14px;
-      letter-spacing: -0.03em;
+      color: var(--ha-text);
     }}
     h1 {{
-      font-size: 2.1rem;
+      font-size: 2rem;
     }}
     h2 {{
       font-size: 1.1rem;
     }}
     p, li {{
-      color: var(--muted);
+      color: var(--ha-muted);
       line-height: 1.55;
     }}
     dl {{
@@ -978,7 +979,7 @@ def render_page():
       margin: 18px 0 0;
     }}
     dt {{
-      color: var(--muted);
+      color: var(--ha-muted);
     }}
     dd {{
       margin: 0;
@@ -987,22 +988,23 @@ def render_page():
     .badge {{
       display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 7px 12px;
+      padding: 6px 12px;
       border-radius: 999px;
       font-size: 0.8rem;
-      letter-spacing: 0.06em;
       text-transform: uppercase;
-      background: rgba(34, 197, 94, 0.16);
-      color: #bbf7d0;
+      background: color-mix(in srgb, var(--ha-success) 14%, transparent);
+      color: var(--ha-success);
+      border: 1px solid color-mix(in srgb, var(--ha-success) 30%, transparent);
     }}
     .badge.error {{
-      background: rgba(248, 113, 113, 0.16);
-      color: #fecaca;
+      background: color-mix(in srgb, var(--ha-error) 14%, transparent);
+      color: var(--ha-error);
+      border-color: color-mix(in srgb, var(--ha-error) 30%, transparent);
     }}
     .badge.running {{
-      background: rgba(20, 184, 166, 0.16);
-      color: #99f6e4;
+      background: color-mix(in srgb, var(--ha-info) 14%, transparent);
+      color: var(--ha-info);
+      border-color: color-mix(in srgb, var(--ha-info) 30%, transparent);
     }}
     .actions {{
       display: flex;
@@ -1011,29 +1013,34 @@ def render_page():
       margin-top: 22px;
     }}
     button {{
-      border: none;
+      border: 1px solid color-mix(in srgb, var(--ha-primary) 35%, transparent);
       border-radius: 999px;
-      background: linear-gradient(135deg, var(--accent), var(--accent2));
-      color: white;
+      background: var(--ha-primary);
+      color: var(--ha-primary-contrast);
       font-size: 0.96rem;
-      padding: 12px 18px;
+      padding: 10px 16px;
       cursor: pointer;
       font-weight: 600;
     }}
+    button:disabled {{
+      opacity: 0.6;
+      cursor: default;
+    }}
     button.secondary {{
-      background: rgba(148, 163, 184, 0.16);
-      color: var(--text);
+      background: var(--ha-card-bg);
+      color: var(--ha-text);
+      border-color: var(--ha-border);
     }}
     pre {{
       margin: 0;
-      background: rgba(2, 6, 23, 0.7);
-      border: 1px solid var(--line);
-      border-radius: 16px;
+      background: var(--ha-code-bg);
+      border: 1px solid var(--ha-border);
+      border-radius: calc(var(--ha-radius) - 2px);
       padding: 14px;
       overflow: auto;
       white-space: pre-wrap;
       line-height: 1.45;
-      color: #dbeafe;
+      color: var(--ha-text);
     }}
     table {{
       width: 100%;
@@ -1043,16 +1050,17 @@ def render_page():
     th, td {{
       text-align: left;
       padding: 12px 10px;
-      border-bottom: 1px solid var(--line);
+      border-bottom: 1px solid var(--ha-border);
       vertical-align: top;
     }}
     th {{
-      color: var(--muted);
+      color: var(--ha-muted);
       font-weight: 600;
     }}
     code {{
       font-family: ui-monospace, monospace;
       font-size: 0.92em;
+      color: var(--ha-text);
     }}
     .wide {{
       margin-top: 18px;
@@ -1060,7 +1068,18 @@ def render_page():
     .client-status {{
       margin-top: 14px;
       min-height: 1.4em;
-      color: #bfdbfe;
+      color: var(--ha-muted);
+    }}
+    @media (max-width: 640px) {{
+      main {{
+        padding: 12px;
+      }}
+      .card {{
+        padding: 16px;
+      }}
+      dl {{
+        grid-template-columns: 1fr;
+      }}
     }}
   </style>
 </head>
