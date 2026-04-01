@@ -834,7 +834,7 @@ def render_releases(releases):
             f"<td><code>{commit}</code></td>"
             f"<td><code>{backup_slug}</code></td>"
             "<td>"
-            f"<form method='post' action='/rollback'>"
+            f"<form method='post' action='rollback' data-async-form='true'>"
             f"<input type='hidden' name='release' value='{name}'>"
             "<button type='submit' class='secondary'>Rollback</button>"
             "</form>"
@@ -874,13 +874,13 @@ def render_git_auth(options):
         hint = "<p>Your repository URL is not SSH-based, so a deploy key may not be needed.</p>"
 
     action = (
-        "<form method='post' action='/generate-key'>"
+        "<form method='post' action='generate-key' data-async-form='true'>"
         "<button type='submit' class='secondary'>Generate Deploy Key</button>"
         "</form>"
     )
     if mode == "generated":
         action = (
-            "<form method='post' action='/generate-key'>"
+            "<form method='post' action='generate-key' data-async-form='true'>"
             "<button type='submit' class='secondary'>Regenerate Deploy Key</button>"
             "</form>"
         )
@@ -1057,6 +1057,11 @@ def render_page():
     .wide {{
       margin-top: 18px;
     }}
+    .client-status {{
+      margin-top: 14px;
+      min-height: 1.4em;
+      color: #bfdbfe;
+    }}
   </style>
 </head>
 <body>
@@ -1087,8 +1092,9 @@ def render_page():
           <dd><code>{last_backup_slug}</code></dd>
         </dl>
         <p>{message}</p>
+        <p id="client-status" class="client-status"></p>
         <div class="actions">
-          <form method="post" action="/apply">
+          <form method="post" action="apply" data-async-form="true">
             <button type="submit">Pull And Apply</button>
           </form>
         </div>
@@ -1114,6 +1120,72 @@ def render_page():
       {render_releases(releases)}
     </section>
   </main>
+  <script>
+    (() => {{
+      const clientStatus = document.getElementById("client-status");
+
+      function setClientStatus(message) {{
+        if (clientStatus) {{
+          clientStatus.textContent = message || "";
+        }}
+      }}
+
+      async function submitAsyncForm(form) {{
+        const button = form.querySelector("button[type='submit']");
+        const originalText = button ? button.textContent : "";
+        if (button) {{
+          button.disabled = true;
+          button.textContent = "Working...";
+        }}
+        setClientStatus("Working...");
+
+        try {{
+          const response = await fetch(form.getAttribute("action"), {{
+            method: "POST",
+            headers: {{
+              "Accept": "application/json",
+              "X-Requested-With": "fetch"
+            }},
+            body: new URLSearchParams(new FormData(form))
+          }});
+
+          let payload = {{}};
+          try {{
+            payload = await response.json();
+          }} catch (_error) {{
+            payload = {{}};
+          }}
+
+          if (!response.ok || payload.ok === false) {{
+            setClientStatus(payload.message || "Request failed.");
+            window.setTimeout(() => window.location.reload(), 600);
+          }} else {{
+            setClientStatus(payload.message || "Done. Refreshing...");
+            window.setTimeout(() => window.location.reload(), 350);
+          }}
+        }} catch (error) {{
+          setClientStatus(error?.message || "Network error.");
+        }} finally {{
+          if (button) {{
+            button.disabled = false;
+            button.textContent = originalText;
+          }}
+        }}
+      }}
+
+      for (const form of document.querySelectorAll("form[data-async-form='true']")) {{
+        form.addEventListener("submit", (event) => {{
+          event.preventDefault();
+          submitAsyncForm(form);
+        }});
+      }}
+
+      const badge = document.querySelector(".badge");
+      if (badge && badge.textContent.trim().toLowerCase() === "running") {{
+        window.setTimeout(() => window.location.reload(), 3000);
+      }}
+    }})();
+  </script>
 </body>
 </html>"""
 
@@ -1124,6 +1196,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         self.wfile.write(content.encode("utf-8"))
+
+    def send_json(self, payload, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode("utf-8"))
+
+    def wants_json(self):
+        accept = self.headers.get("Accept", "")
+        requested_with = self.headers.get("X-Requested-With", "")
+        return "application/json" in accept or requested_with == "fetch"
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -1154,6 +1237,15 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
                 log("Generate Deploy Key completed successfully")
+                if self.wants_json():
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "message": "Generated a new deploy key. Reloading UI.",
+                            "public_key": public_key,
+                        }
+                    )
+                    return
             except Exception as exc:
                 log(f"Generate Deploy Key failed: {exc}")
                 write_state(
@@ -1165,25 +1257,33 @@ class Handler(BaseHTTPRequestHandler):
                         "last_details": [str(exc)],
                     }
                 )
+                if self.wants_json():
+                    self.send_json({"ok": False, "message": str(exc)}, status=500)
+                    return
             self.send_html(render_page())
             return
 
         if parsed.path == "/apply":
             start_apply()
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            if self.wants_json():
+                self.send_json({"ok": True, "message": "Apply started. Refreshing..."})
+            else:
+                self.send_html(render_page())
             return
 
         if parsed.path == "/rollback":
             release = body.get("release", [""])[0]
             if not release:
-                self.send_error(400, "Missing release")
+                if self.wants_json():
+                    self.send_json({"ok": False, "message": "Missing release"}, status=400)
+                else:
+                    self.send_error(400, "Missing release")
                 return
             start_rollback(release)
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.end_headers()
+            if self.wants_json():
+                self.send_json({"ok": True, "message": f"Rollback to {release} started. Refreshing..."})
+            else:
+                self.send_html(render_page())
             return
 
         self.send_error(404)
