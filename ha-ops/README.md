@@ -25,7 +25,7 @@
 - `create_release_snapshot`: Save `/config` into `/data/releases/<timestamp>` before every apply.
 - `create_ha_backup`: Create a Home Assistant partial backup before every apply.
 - `ha_backup_name_prefix`: Prefix used for generated Home Assistant backup names.
-- `restart_after_apply`: Restart Home Assistant Core after a successful apply.
+- `restart_after_apply`: Default restart behavior for targets that do not define `restart_after_sync` in the deployment manifest.
 
 ## GitHub deploy key
 

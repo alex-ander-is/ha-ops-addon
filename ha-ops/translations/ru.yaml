@@ -1,0 +1,31 @@
+configuration:
+  repo_url:
+    name: URL репозитория HA Config
+    description: SSH или HTTPS URL Git-репозитория, в котором хранится управляемая конфигурация Home Assistant.
+  repo_branch:
+    name: Ветка HA Config
+    description: Git-ветка, которую HA Ops будет подтягивать и применять.
+  repo_path:
+    name: Локальная папка checkout
+    description: Имя папки внутри данных add-on, в которой хранится локальный checkout репозитория.
+  manifest_path:
+    name: Путь к manifest
+    description: Путь внутри репозитория к manifest-файлу HA Ops, обычно ha-ops.json.
+  apply_path:
+    name: Fallback путь для Home Assistant
+    description: Устаревший fallback-путь, который используется только если deployment manifest отсутствует.
+  git_ssh_key:
+    name: Ручной override приватного SSH-ключа
+    description: Необязательный приватный ключ. Оставьте пустым, чтобы использовать deploy key, сгенерированный HA Ops.
+  create_release_snapshot:
+    name: Создавать локальный release snapshot
+    description: Перед каждым apply сохранять быструю локальную копию всех управляемых live-целей, чтобы можно было быстро откатиться.
+  create_ha_backup:
+    name: Создавать backup Home Assistant
+    description: Перед каждым apply просить Supervisor создать штатный partial backup.
+  ha_backup_name_prefix:
+    name: Префикс имени backup
+    description: Префикс, который HA Ops использует при создании backup в Home Assistant.
+  restart_after_apply:
+    name: Перезапускать цели после apply
+    description: Поведение по умолчанию для перезапуска целей, если в deployment manifest не задано своё правило.

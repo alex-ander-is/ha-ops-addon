@@ -394,6 +394,7 @@ def resolve_addon_slug(target, addons):
 
 
 def resolve_targets(repo_dir, manifest, addons):
+    options = load_options()
     targets = []
     for target in manifest.get("targets", []):
         target_type = target.get("type")
@@ -407,6 +408,9 @@ def resolve_targets(repo_dir, manifest, addons):
 
         resolved = dict(target)
         resolved["source_path"] = str(source)
+        resolved["restart_after_sync"] = bool(
+            target.get("restart_after_sync", options.get("restart_after_apply", True))
+        )
 
         if target_type == "homeassistant":
             resolved["resolved_slug"] = None
