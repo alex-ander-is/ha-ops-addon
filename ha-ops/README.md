@@ -58,7 +58,7 @@ ha-config/
 
 - The add-on is intentionally one-way: Git is the source of truth, `/config` is the deployment target.
 - Export and Push are explicit bootstrap actions on the `export` branch. They are not part of normal apply.
-- Export skips database, log, backup, deps, and tts files by default.
+- Export skips runtime storage, cache, database, log, backup, deps, frontend bundle, media cache, and tts files by default.
 - Add-on configs are accessed through `/addon_configs`, which means Mosquitto and Zigbee2MQTT can be managed in the same flow.
 - The deployment manifest keeps path and restart rules in the private repo instead of hardcoding them into the add-on.
 - If `.storage` is present in the source tree, Home Assistant Core is stopped before the sync to avoid live-state overwrite races.

@@ -23,7 +23,13 @@ GENERATED_DEPLOY_KEY_PUB_PATH = WORK_DIR / "generated_deploy_key.pub"
 EXPORT_BRANCH = "export"
 EXPORT_EXCLUDES = [
     ".cloud/",
+    ".cache/",
+    ".DS_Store",
     ".google.token",
+    ".ha_run.lock",
+    ".storage/",
+    ".vscode/",
+    "__pycache__/",
     "backups/",
     "deps/",
     "home-assistant.log*",
@@ -31,7 +37,16 @@ EXPORT_EXCLUDES = [
     "*.db",
     "*.db-*",
     "*.log",
+    "*.pyc",
+    "*.pyo",
+    "node_modules/",
     "tts/",
+    "www/community/",
+    "www/media/",
+    "www/tmp/",
+    "zigbee2mqtt/coordinator_backup*.json",
+    "zigbee2mqtt/database.db*",
+    "zigbee2mqtt/state.json",
 ]
 
 STATE_LOCK = threading.Lock()
@@ -824,31 +839,42 @@ def run_push_job():
         if current_branch != EXPORT_BRANCH:
             raise RuntimeError(f"Local checkout is on branch {current_branch or '(detached)'}. Run Export before Push.")
         status = git_status_porcelain(repo_dir)
-        if status:
-            add_detail(details, "Committing local exported changes.")
-            add = run_command(["git", "add", "-A"], cwd=repo_dir)
-            if add.returncode != 0:
-                raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
-
-            message = f"Export Home Assistant config {release_now()}"
-            commit = run_command(
-                [
-                    "git",
-                    "-c",
-                    "user.name=HA Ops",
-                    "-c",
-                    "user.email=ha-ops@local",
-                    "commit",
-                    "-m",
-                    message,
-                ],
-                cwd=repo_dir,
+        if not status:
+            add_detail(details, "No local Git changes to commit or push.")
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "success",
+                    "last_action": "push",
+                    "last_message": "No local Git changes to push.",
+                    "last_details": details,
+                }
             )
-            if commit.returncode != 0:
-                raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
-            add_detail(details, commit.stdout.strip())
-        else:
-            add_detail(details, "No local Git changes to commit.")
+            return True
+
+        add_detail(details, "Committing local exported changes.")
+        add = run_command(["git", "add", "-A"], cwd=repo_dir)
+        if add.returncode != 0:
+            raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+
+        message = f"Export Home Assistant config {release_now()}"
+        commit = run_command(
+            [
+                "git",
+                "-c",
+                "user.name=HA Ops",
+                "-c",
+                "user.email=ha-ops@local",
+                "commit",
+                "-m",
+                message,
+            ],
+            cwd=repo_dir,
+        )
+        if commit.returncode != 0:
+            raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
+        commit_summary = commit.stdout.strip().splitlines()[0] if commit.stdout.strip() else "Created export commit."
+        add_detail(details, commit_summary)
 
         add_detail(details, f"Pushing to origin/{EXPORT_BRANCH}.")
         push = run_command(["git", "push", "-u", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
@@ -1191,6 +1217,7 @@ def render_page():
     auth_mode = html.escape(git_auth_mode(options))
     details = "\n".join(state.get("last_details", []))
     details_html = html.escape(details)
+    action_disabled = "disabled" if status == "running" else ""
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1398,13 +1425,13 @@ def render_page():
         <p id="client-status" class="client-status"></p>
         <div class="actions">
           <form method="post" action="apply" data-async-form="true">
-            <button type="submit">Pull And Apply</button>
+            <button type="submit" {action_disabled}>Pull And Apply</button>
           </form>
           <form method="post" action="export" data-async-form="true">
-            <button type="submit" class="secondary">Export</button>
+            <button type="submit" class="secondary" {action_disabled}>Export</button>
           </form>
           <form method="post" action="push" data-async-form="true">
-            <button type="submit" class="secondary">Push</button>
+            <button type="submit" class="secondary" {action_disabled}>Push</button>
           </form>
         </div>
       </section>
