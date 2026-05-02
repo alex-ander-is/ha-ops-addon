@@ -20,6 +20,19 @@ ADDON_CONFIGS_DIR = Path("/addon_configs")
 WORK_DIR = Path("/data/work")
 GENERATED_DEPLOY_KEY_PATH = WORK_DIR / "generated_deploy_key"
 GENERATED_DEPLOY_KEY_PUB_PATH = WORK_DIR / "generated_deploy_key.pub"
+EXPORT_BRANCH = "export"
+EXPORT_EXCLUDES = [
+    ".cloud/",
+    ".google.token",
+    "backups/",
+    "deps/",
+    "home-assistant.log*",
+    "home-assistant_v2.db*",
+    "*.db",
+    "*.db-*",
+    "*.log",
+    "tts/",
+]
 
 STATE_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
@@ -119,6 +132,16 @@ def setup_git_ssh_env(env, key_text=None, key_path=None):
 
     if key_path:
         env["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+
+
+def git_env(options):
+    env = os.environ.copy()
+    git_ssh_key = options.get("git_ssh_key", "").strip()
+    if git_ssh_key:
+        setup_git_ssh_env(env, key_text=git_ssh_key)
+    elif generated_deploy_key_exists():
+        setup_git_ssh_env(env, key_path=GENERATED_DEPLOY_KEY_PATH)
+    return env
 
 
 def generate_deploy_key():
@@ -295,18 +318,13 @@ def create_ha_backup(name_prefix, resolved_targets):
     return slug
 
 
-def ensure_repo(options):
+def ensure_repo(options, reset_to_origin=True):
     repo_dir = Path("/data") / options.get("repo_path", "ha-config")
     repo_url = options.get("repo_url", "").strip()
     if not repo_url:
         raise RuntimeError("repo_url is empty")
 
-    env = os.environ.copy()
-    git_ssh_key = options.get("git_ssh_key", "").strip()
-    if git_ssh_key:
-        setup_git_ssh_env(env, key_text=git_ssh_key)
-    elif generated_deploy_key_exists():
-        setup_git_ssh_env(env, key_path=GENERATED_DEPLOY_KEY_PATH)
+    env = git_env(options)
 
     if not repo_dir.exists():
         repo_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -321,7 +339,14 @@ def ensure_repo(options):
     branch = options.get("repo_branch", "main")
     checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)
     if checkout.returncode != 0:
-        raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
+        if reset_to_origin:
+            raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
+        checkout = run_command(["git", "checkout", "-B", branch], env=env, cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout -B {branch} failed:\n{checkout.stderr.strip()}")
+
+    if not reset_to_origin:
+        return repo_dir
 
     reset = run_command(["git", "reset", "--hard", f"origin/{branch}"], env=env, cwd=repo_dir)
     if reset.returncode != 0:
@@ -335,6 +360,36 @@ def git_commit(repo_dir, ref):
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or f"git rev-parse {ref} failed")
     return result.stdout.strip()
+
+
+def git_ref_exists(repo_dir, ref):
+    result = run_command(["git", "rev-parse", "--verify", "--quiet", ref], cwd=repo_dir)
+    return result.returncode == 0
+
+
+def git_current_branch(repo_dir):
+    result = run_command(["git", "branch", "--show-current"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git branch failed:\n{result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def checkout_export_branch(repo_dir, env, base_branch):
+    fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
+    if fetch.returncode != 0:
+        raise RuntimeError(f"git fetch failed:\n{fetch.stderr.strip()}")
+
+    if git_ref_exists(repo_dir, f"refs/remotes/origin/{EXPORT_BRANCH}"):
+        checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH, f"origin/{EXPORT_BRANCH}"], env=env, cwd=repo_dir)
+    elif git_ref_exists(repo_dir, f"refs/remotes/origin/{base_branch}"):
+        checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH, f"origin/{base_branch}"], env=env, cwd=repo_dir)
+    elif git_ref_exists(repo_dir, "HEAD"):
+        checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH], env=env, cwd=repo_dir)
+    else:
+        checkout = run_command(["git", "checkout", "--orphan", EXPORT_BRANCH], env=env, cwd=repo_dir)
+
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout {EXPORT_BRANCH} failed:\n{checkout.stderr.strip()}")
 
 
 def load_manifest(repo_dir, options):
@@ -356,6 +411,13 @@ def load_manifest(repo_dir, options):
         return fallback, manifest_path
 
     return load_json(manifest_path, {}), manifest_path
+
+
+def ensure_manifest_file(manifest, manifest_path):
+    if manifest_path.exists():
+        return
+    ensure_dir(manifest_path.parent)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
 
 
 def resolve_addon_slug(target, addons):
@@ -393,7 +455,7 @@ def resolve_addon_slug(target, addons):
     raise RuntimeError(f"Add-on target '{target.get('id')}' is missing resolver fields")
 
 
-def resolve_targets(repo_dir, manifest, addons):
+def resolve_targets(repo_dir, manifest, addons, require_source=True):
     options = load_options()
     targets = []
     for target in manifest.get("targets", []):
@@ -401,7 +463,7 @@ def resolve_targets(repo_dir, manifest, addons):
         source = repo_dir / target.get("source", "")
         optional = bool(target.get("optional", False))
 
-        if not source.exists():
+        if require_source and not source.exists():
             if optional:
                 continue
             raise RuntimeError(f"Source path does not exist for target '{target.get('id')}': {source}")
@@ -445,6 +507,19 @@ def sync_tree(src, dest, delete=True):
     result = run_command(command)
     if result.returncode != 0:
         raise RuntimeError(f"Sync failed from {src} to {dest}:\n{result.stderr.strip()}")
+
+
+def export_tree(src, dest, delete=True):
+    ensure_dir(dest)
+    command = ["rsync", "-a"]
+    if delete:
+        command.append("--delete")
+    for pattern in EXPORT_EXCLUDES:
+        command.extend(["--exclude", pattern])
+    command.extend([f"{src}/", f"{dest}/"])
+    result = run_command(command)
+    if result.returncode != 0:
+        raise RuntimeError(f"Export failed from {src} to {dest}:\n{result.stderr.strip()}")
 
 
 def clear_tree(dest):
@@ -614,6 +689,201 @@ def apply_targets(resolved_targets, details):
             core_restart()
 
 
+def export_targets(resolved_targets, details):
+    for target in resolved_targets:
+        live_path = Path(target["live_path"])
+        source_path = Path(target["source_path"])
+        if not live_path.exists():
+            if target.get("optional", False):
+                add_detail(details, f"Skipping optional target {target['id']} because {live_path} does not exist.")
+                continue
+            raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
+
+        add_detail(details, f"Exporting {target['id']} from {live_path} to {source_path}.")
+        export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
+
+
+def git_status_porcelain(repo_dir):
+    result = run_command(["git", "status", "--porcelain"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git status failed:\n{result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def run_export_job():
+    if not RUN_LOCK.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "export",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    options = load_options()
+    resolved_targets = []
+
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "export",
+            "last_message": "Preparing export.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        repo_dir = ensure_repo(options, reset_to_origin=False)
+        env = git_env(options)
+        checkout_export_branch(repo_dir, env, options.get("repo_branch", "main"))
+        try:
+            commit = git_commit(repo_dir, "HEAD")
+        except RuntimeError:
+            commit = "unborn"
+        manifest, manifest_path = load_manifest(repo_dir, options)
+        ensure_manifest_file(manifest, manifest_path)
+        addons = get_installed_addons()
+        resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
+
+        add_detail(details, f"Using repository at commit {commit}.")
+        add_detail(details, f"Using manifest {manifest_path}.")
+        add_detail(details, "Export excludes database, log, backup, deps, and tts files.")
+        export_targets(resolved_targets, details)
+
+        status = git_status_porcelain(repo_dir)
+        if status:
+            add_detail(details, f"Export created local Git changes on branch {EXPORT_BRANCH}. Use Push to commit and send them.")
+        else:
+            add_detail(details, f"Export finished with no Git changes on branch {EXPORT_BRANCH}.")
+
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "export",
+                "last_message": "Export finished successfully.",
+                "last_details": details,
+                "last_fetched_commit": commit,
+                "last_targets": resolved_targets,
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "export",
+                "last_message": str(exc),
+                "last_details": details,
+                "last_targets": resolved_targets,
+            }
+        )
+        return False
+    finally:
+        RUN_LOCK.release()
+
+
+def run_push_job():
+    if not RUN_LOCK.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "push",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    options = load_options()
+
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "push",
+            "last_message": "Preparing push.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        repo_dir = Path("/data") / options.get("repo_path", "ha-config")
+        if not repo_dir.exists():
+            raise RuntimeError("Local checkout does not exist. Run Export or Pull And Apply first.")
+
+        env = git_env(options)
+        current_branch = git_current_branch(repo_dir)
+        if current_branch != EXPORT_BRANCH:
+            raise RuntimeError(f"Local checkout is on branch {current_branch or '(detached)'}. Run Export before Push.")
+        status = git_status_porcelain(repo_dir)
+        if status:
+            add_detail(details, "Committing local exported changes.")
+            add = run_command(["git", "add", "-A"], cwd=repo_dir)
+            if add.returncode != 0:
+                raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+
+            message = f"Export Home Assistant config {release_now()}"
+            commit = run_command(
+                [
+                    "git",
+                    "-c",
+                    "user.name=HA Ops",
+                    "-c",
+                    "user.email=ha-ops@local",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+                cwd=repo_dir,
+            )
+            if commit.returncode != 0:
+                raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
+            add_detail(details, commit.stdout.strip())
+        else:
+            add_detail(details, "No local Git changes to commit.")
+
+        add_detail(details, f"Pushing to origin/{EXPORT_BRANCH}.")
+        push = run_command(["git", "push", "-u", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
+        if push.returncode != 0:
+            raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
+
+        commit = git_commit(repo_dir, "HEAD")
+        add_detail(details, f"Pushed commit {commit}.")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "push",
+                "last_message": "Push finished successfully.",
+                "last_details": details,
+                "last_fetched_commit": commit,
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "push",
+                "last_message": str(exc),
+                "last_details": details,
+            }
+        )
+        return False
+    finally:
+        RUN_LOCK.release()
+
+
 def run_apply_job():
     if not RUN_LOCK.acquire(blocking=False):
         write_state(
@@ -762,6 +1032,16 @@ def run_rollback_job(release_name):
 
 def start_apply():
     thread = threading.Thread(target=run_apply_job, daemon=True)
+    thread.start()
+
+
+def start_export():
+    thread = threading.Thread(target=run_export_job, daemon=True)
+    thread.start()
+
+
+def start_push():
+    thread = threading.Thread(target=run_push_job, daemon=True)
     thread.start()
 
 
@@ -1120,6 +1400,12 @@ def render_page():
           <form method="post" action="apply" data-async-form="true">
             <button type="submit">Pull And Apply</button>
           </form>
+          <form method="post" action="export" data-async-form="true">
+            <button type="submit" class="secondary">Export</button>
+          </form>
+          <form method="post" action="push" data-async-form="true">
+            <button type="submit" class="secondary">Push</button>
+          </form>
         </div>
       </section>
       <section class="card">
@@ -1290,6 +1576,22 @@ class Handler(BaseHTTPRequestHandler):
             start_apply()
             if self.wants_json():
                 self.send_json({"ok": True, "message": "Apply started. Refreshing..."})
+            else:
+                self.send_html(render_page())
+            return
+
+        if parsed.path == "/export":
+            start_export()
+            if self.wants_json():
+                self.send_json({"ok": True, "message": "Export started. Refreshing..."})
+            else:
+                self.send_html(render_page())
+            return
+
+        if parsed.path == "/push":
+            start_push()
+            if self.wants_json():
+                self.send_json({"ok": True, "message": "Push started. Refreshing..."})
             else:
                 self.send_html(render_page())
             return

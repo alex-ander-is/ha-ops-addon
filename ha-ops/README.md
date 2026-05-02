@@ -12,7 +12,9 @@
 6. Stop add-ons before sync when their live data should not be updated hot, then start them again after the sync.
 7. Restart managed add-ons like Mosquitto and Zigbee2MQTT when their config changes.
 8. Stop or restart Home Assistant Core at the correct step when `/config/.storage` is part of the apply.
-9. Allow rollback to any saved local release from the ingress UI.
+9. Export current live target config back into the local Git checkout on the `export` branch for bootstrap.
+10. Commit and push exported local Git changes to `origin/export` from the ingress UI.
+11. Allow rollback to any saved local release from the ingress UI.
 
 ## Add-on options
 
@@ -55,6 +57,8 @@ ha-config/
 ## Notes
 
 - The add-on is intentionally one-way: Git is the source of truth, `/config` is the deployment target.
+- Export and Push are explicit bootstrap actions on the `export` branch. They are not part of normal apply.
+- Export skips database, log, backup, deps, and tts files by default.
 - Add-on configs are accessed through `/addon_configs`, which means Mosquitto and Zigbee2MQTT can be managed in the same flow.
 - The deployment manifest keeps path and restart rules in the private repo instead of hardcoding them into the add-on.
 - If `.storage` is present in the source tree, Home Assistant Core is stopped before the sync to avoid live-state overwrite races.
