@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.10
+
+- Recreate the local `export` branch from `origin/main` on every Export.
+- Push `origin/export` with `--force-with-lease` so export stays a fresh review branch.
+
 ## 0.3.9
 
 - Remove previously exported excluded files from the `export` branch before copying live config.

@@ -431,9 +431,7 @@ def checkout_export_branch(repo_dir, env, base_branch):
     if fetch.returncode != 0:
         raise RuntimeError(f"git fetch failed:\n{fetch.stderr.strip()}")
 
-    if git_ref_exists(repo_dir, f"refs/remotes/origin/{EXPORT_BRANCH}"):
-        checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH, f"origin/{EXPORT_BRANCH}"], env=env, cwd=repo_dir)
-    elif git_ref_exists(repo_dir, f"refs/remotes/origin/{base_branch}"):
+    if git_ref_exists(repo_dir, f"refs/remotes/origin/{base_branch}"):
         checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH, f"origin/{base_branch}"], env=env, cwd=repo_dir)
     elif git_ref_exists(repo_dir, "HEAD"):
         checkout = run_command(["git", "checkout", "-B", EXPORT_BRANCH], env=env, cwd=repo_dir)
@@ -956,7 +954,7 @@ def run_push_job():
             add_detail(details, f"Local branch {EXPORT_BRANCH} is ahead by {ahead_count} commit(s).")
 
         add_detail(details, f"Pushing to origin/{EXPORT_BRANCH}.")
-        push = run_command(["git", "push", "-u", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
+        push = run_command(["git", "push", "-u", "--force-with-lease", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
         if push.returncode != 0:
             raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
 
