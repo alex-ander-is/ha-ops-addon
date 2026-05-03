@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.17
+
+- Export and apply config-only Zigbee2MQTT files from Home Assistant config storage.
+
 ## 0.3.16
 
 - Force-stage allowlisted Home Assistant `.storage` config files during Export and Push even when repository `.gitignore` ignores `.storage`.

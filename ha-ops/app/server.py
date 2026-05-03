@@ -95,6 +95,11 @@ HOMEASSISTANT_EXPORT_DIRS = [
     "themes",
     "ui_lovelace_minimalist",
 ]
+ZIGBEE2MQTT_CONFIG_PATHS = [
+    "zigbee2mqtt/configuration.yaml",
+    "zigbee2mqtt/external_converters",
+    "zigbee2mqtt/scripts",
+]
 HOMEASSISTANT_APPLY_EXCLUDES = EXPORT_EXCLUDES + [
     ".HA_VERSION",
     "custom_components/",
@@ -698,6 +703,17 @@ def export_storage_allowlist(src, dest):
     return copied
 
 
+def copy_homeassistant_path_allowlist(src, dest, paths):
+    copied = 0
+    for name in paths:
+        src_path = src / name
+        if not src_path.exists():
+            continue
+        copy_export_path(src_path, dest / name)
+        copied += 1
+    return copied
+
+
 def copy_export_path(src, dest):
     ensure_dir(dest.parent)
     if src.is_dir():
@@ -724,8 +740,25 @@ def export_homeassistant_config(src, dest):
         copy_export_path(src_path, dest / name)
         copied += 1
 
+    zigbee2mqtt_count = copy_homeassistant_path_allowlist(src, dest, ZIGBEE2MQTT_CONFIG_PATHS)
     storage_count = export_storage_allowlist(src, dest)
-    return copied, storage_count
+    return copied, zigbee2mqtt_count, storage_count
+
+
+def sync_homeassistant_path_allowlist(src, dest, paths):
+    copied = 0
+    for name in paths:
+        src_path = src / name
+        if not src_path.exists():
+            continue
+        dest_path = dest / name
+        if src_path.is_dir():
+            sync_tree(src_path, dest_path, delete=True, excludes=EXPORT_EXCLUDES)
+        else:
+            ensure_dir(dest_path.parent)
+            shutil.copy2(src_path, dest_path)
+        copied += 1
+    return copied
 
 
 def sync_storage_allowlist(src, dest):
@@ -889,6 +922,9 @@ def apply_targets(resolved_targets, details):
         add_detail(details, f"Syncing {target['id']} from {source_path} to {live_path}.")
         if target["type"] == "homeassistant":
             sync_tree(source_path, live_path, delete=bool(target.get("delete", True)), excludes=HOMEASSISTANT_APPLY_EXCLUDES)
+            zigbee2mqtt_count = sync_homeassistant_path_allowlist(source_path, live_path, ZIGBEE2MQTT_CONFIG_PATHS)
+            if zigbee2mqtt_count:
+                add_detail(details, f"Synced {zigbee2mqtt_count} Zigbee2MQTT config path(s).")
             copied_count = sync_storage_allowlist(source_path, live_path)
             if copied_count:
                 add_detail(details, f"Synced {copied_count} allowlisted .storage config file(s).")
@@ -932,8 +968,10 @@ def export_targets(resolved_targets, details):
 
         if target["type"] == "homeassistant":
             add_detail(details, f"Exporting config-only {target['id']} from {live_path} to {source_path}.")
-            copied_count, storage_count = export_homeassistant_config(live_path, source_path)
+            copied_count, zigbee2mqtt_count, storage_count = export_homeassistant_config(live_path, source_path)
             add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
+            if zigbee2mqtt_count:
+                add_detail(details, f"Exported {zigbee2mqtt_count} Zigbee2MQTT config path(s).")
             if storage_count:
                 add_detail(details, f"Exported {storage_count} allowlisted .storage config file(s).")
         else:
