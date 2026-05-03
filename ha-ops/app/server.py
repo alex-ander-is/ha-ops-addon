@@ -469,6 +469,16 @@ def git_ahead_count(repo_dir, local_ref, remote_ref):
     return int(result.stdout.strip() or "0")
 
 
+def git_remote_head(repo_dir, env, branch):
+    result = run_command(["git", "ls-remote", "--heads", "origin", branch], env=env, cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git ls-remote failed:\n{result.stderr.strip()}")
+    output = result.stdout.strip()
+    if not output:
+        return None
+    return output.split()[0]
+
+
 def checkout_export_branch(repo_dir, env, base_branch):
     fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
     if fetch.returncode != 0:
@@ -1045,8 +1055,17 @@ def run_push_job():
         else:
             add_detail(details, f"Local branch {EXPORT_BRANCH} is ahead by {ahead_count} commit(s).")
 
+        remote_export_head = git_remote_head(repo_dir, env, EXPORT_BRANCH)
+        push_command = ["git", "push", "-u"]
+        if remote_export_head:
+            add_detail(details, f"Remote origin/{EXPORT_BRANCH} is at {remote_export_head}.")
+            push_command.append(f"--force-with-lease=refs/heads/{EXPORT_BRANCH}:{remote_export_head}")
+        else:
+            add_detail(details, f"Remote branch origin/{EXPORT_BRANCH} does not exist yet.")
+        push_command.extend(["origin", EXPORT_BRANCH])
+
         add_detail(details, f"Pushing to origin/{EXPORT_BRANCH}.")
-        push = run_command(["git", "push", "-u", "--force-with-lease", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
+        push = run_command(push_command, env=env, cwd=repo_dir)
         if push.returncode != 0:
             raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
 

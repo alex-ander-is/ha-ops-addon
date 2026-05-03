@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.13
+
+- Read the current remote `origin/export` SHA before Push and use an explicit force-with-lease.
+
 ## 0.3.12
 
 - Export selected safe Home Assistant `.storage` configuration files.
