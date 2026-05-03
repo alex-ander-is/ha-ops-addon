@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.9
+
+- Remove previously exported excluded files from the `export` branch before copying live config.
+- Report how many excluded items were cleaned from each export destination.
+
 ## 0.3.8
 
 - Push local `export` commits even when the working tree has no uncommitted changes.

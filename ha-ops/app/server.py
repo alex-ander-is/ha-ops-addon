@@ -1,8 +1,10 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
+import fnmatch
 import html
 import json
 import os
+import shutil
 import socket
 import subprocess
 import threading
@@ -48,6 +50,31 @@ EXPORT_EXCLUDES = [
     "zigbee2mqtt/database.db*",
     "zigbee2mqtt/state.json",
 ]
+EXPORT_CLEAN_PATHS = [
+    ".cloud",
+    ".cache",
+    ".DS_Store",
+    ".google.token",
+    ".ha_run.lock",
+    ".storage",
+    ".vscode",
+    "backups",
+    "deps",
+    "home-assistant.log*",
+    "home-assistant_v2.db*",
+    "*.db",
+    "*.db-*",
+    "*.log",
+    "tts",
+    "www/community",
+    "www/media",
+    "www/tmp",
+    "zigbee2mqtt/coordinator_backup*.json",
+    "zigbee2mqtt/database.db*",
+    "zigbee2mqtt/state.json",
+]
+EXPORT_CLEAN_DIR_NAMES = {"__pycache__", "node_modules"}
+EXPORT_CLEAN_FILE_PATTERNS = ["*.pyc", "*.pyo"]
 
 STATE_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
@@ -547,6 +574,37 @@ def export_tree(src, dest, delete=True):
         raise RuntimeError(f"Export failed from {src} to {dest}:\n{result.stderr.strip()}")
 
 
+def safe_remove_path(path):
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink()
+
+
+def clean_export_destination(dest):
+    ensure_dir(dest)
+    removed = set()
+
+    for pattern in EXPORT_CLEAN_PATHS:
+        matches = list(dest.glob(pattern)) if any(char in pattern for char in "*?[") else [dest / pattern]
+        for path in matches:
+            if path.exists() or path.is_symlink():
+                safe_remove_path(path)
+                removed.add(str(path.relative_to(dest)))
+
+    for path in list(dest.rglob("*")):
+        relative = str(path.relative_to(dest))
+        if path.is_dir() and path.name in EXPORT_CLEAN_DIR_NAMES:
+            safe_remove_path(path)
+            removed.add(relative)
+            continue
+        if path.is_file() and any(fnmatch.fnmatch(path.name, pattern) for pattern in EXPORT_CLEAN_FILE_PATTERNS):
+            safe_remove_path(path)
+            removed.add(relative)
+
+    return len(removed)
+
+
 def clear_tree(dest):
     ensure_dir(dest)
     empty_dir = Path("/data/work/empty")
@@ -725,6 +783,9 @@ def export_targets(resolved_targets, details):
             raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
 
         add_detail(details, f"Exporting {target['id']} from {live_path} to {source_path}.")
+        removed_count = clean_export_destination(source_path)
+        if removed_count:
+            add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} export destination.")
         export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
 
 
