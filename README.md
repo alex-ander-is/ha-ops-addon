@@ -1,25 +1,23 @@
 # ha-ops-addon
 
-Public Home Assistant add-on repository for operating a Git-backed HA configuration.
+Home Assistant add-on repository for HA Ops.
 
-The first add-on in this repository is `ha-ops`, an ingress UI that:
+`ha-ops` is an ingress UI for managing a Git-backed Home Assistant configuration:
 
-- fetches `ha-config` from Git
-- snapshots managed live targets
-- applies Home Assistant, Mosquitto, and Zigbee2MQTT config from Git
-- creates an optional HA partial backup before apply
-- supports rollback from saved local releases
+- Pull And Apply from `ha-config/main`
+- Export live config into a local `export` branch
+- Push `export` to `origin/export` for review
+- create release snapshots and optional Home Assistant backups
+- roll back from saved local releases
 
-See [`ha-ops/README.md`](./ha-ops/README.md) for setup details.
+See [`ha-ops/README.md`](./ha-ops/README.md) for setup and behavior.
 
 ## Install
 
-For development, copy or clone this repository into the Home Assistant add-ons directory on HAOS:
+Add this repository URL in the Home Assistant add-on store, then install `HA Ops`.
+
+For local HAOS development, clone this repository into:
 
 ```text
 /addons/ha-ops-addon
 ```
-
-Then add that local repository in Home Assistant and install the `HA Ops` add-on.
-
-For long-term use, publish this repository on GitHub and add its URL in the Home Assistant add-on store.

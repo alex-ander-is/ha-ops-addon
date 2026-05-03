@@ -1,70 +1,82 @@
 # HA Ops
 
-`ha-ops` is a custom Home Assistant add-on that treats a Git repository as the source of truth for `/config`.
+HA Ops manages a Git-backed Home Assistant config from an ingress UI.
 
-## Current behavior
+## Actions
 
-1. Clone or update a private `ha-config` repository into the add-on data directory.
-2. Read `ha-ops.json` from that repository to determine which targets are managed.
-3. Optionally create a Home Assistant partial backup for the managed targets.
-4. Snapshot all managed live targets into `/data/releases/<timestamp>`.
-5. Sync each target from Git into its live path.
-6. Stop add-ons before sync when their live data should not be updated hot, then start them again after the sync.
-7. Restart managed add-ons like Mosquitto and Zigbee2MQTT when their config changes.
-8. Stop or restart Home Assistant Core at the correct step when `/config/.storage` is part of the apply.
-9. Export current live target config back into the local Git checkout on the `export` branch for bootstrap.
-10. Commit and push exported local Git changes to `origin/export` from the ingress UI.
-11. Allow rollback to any saved local release from the ingress UI.
+- `Pull And Apply`: fetch `repo_branch`, read `ha-ops.json`, snapshot live targets, then apply Git config to Home Assistant.
+- `Export`: recreate local `export` from `origin/<repo_branch>` and copy live config into it.
+- `Push`: commit local export changes and push them to `origin/export`.
+- `Rollback`: restore a saved local release snapshot.
+
+## Source of truth
+
+- `main` is the source of truth for Apply.
+- `export` is a review branch for bootstrapping or refreshing config from the live Home Assistant instance.
+- HA Ops never merges `export` into `main`; review and merge are done in Git.
+
+## Export policy
+
+Home Assistant export is config-only.
+
+Exported:
+
+- root `*.yaml` and `*.yml`, except `secrets.yaml`
+- `blueprints/`
+- `custom_templates/`
+- `dashboards/`
+- `packages/`
+- `templates/`
+- `themes/`
+- `ui_lovelace_minimalist/`
+- selected safe `.storage` config files
+- selected Zigbee2MQTT config paths under `zigbee2mqtt/`
+
+Skipped:
+
+- `secrets.yaml`
+- auth, session, and token `.storage` files
+- databases and logs
+- cache, backups, deps, tts, media
+- downloaded `custom_components`
+- frontend assets and `www`
+- binaries and generated runtime files
+
+## Apply policy
+
+- Home Assistant config is synced from Git into `/homeassistant`.
+- Selected `.storage` files are applied as an overlay.
+- Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
+- If selected `.storage` files are present, Home Assistant Core is stopped before sync.
 
 ## Add-on options
 
 - `repo_url`: Git URL of the private config repository.
-- `repo_branch`: Branch to apply from.
-- `repo_path`: Local checkout directory inside `/data`.
-- `manifest_path`: Path to the deployment manifest inside the Git repository.
-- `apply_path`: Path inside the Git repo that should be mirrored into `/config`.
-- `git_ssh_key`: Optional deploy key for `git@github.com:...` style URLs.
-- `create_release_snapshot`: Save `/config` into `/data/releases/<timestamp>` before every apply.
-- `create_ha_backup`: Create a Home Assistant partial backup before every apply.
-- `ha_backup_name_prefix`: Prefix used for generated Home Assistant backup names.
-- `restart_after_apply`: Default restart behavior for targets that do not define `restart_after_sync` in the deployment manifest.
+- `repo_branch`: branch to apply from, usually `main`.
+- `repo_path`: local checkout directory inside `/data`.
+- `manifest_path`: path to `ha-ops.json` inside the Git repository.
+- `apply_path`: fallback Home Assistant source path.
+- `git_ssh_key`: optional private deploy key.
+- `create_release_snapshot`: save local release snapshots before Apply.
+- `create_ha_backup`: create Home Assistant partial backups before Apply.
+- `ha_backup_name_prefix`: prefix for generated Home Assistant backup names.
+- `restart_after_apply`: default restart behavior for manifest targets.
 
-## GitHub deploy key
+## Deploy key
 
-For a private GitHub repository, prefer an SSH deploy key:
+For a private GitHub repository:
 
-1. Set `repo_url` to `git@github.com:alex-ander-is/ha-config.git`.
-2. Open the add-on ingress page and click `Generate Deploy Key`.
-3. Copy the displayed public key into GitHub Deploy Keys for `ha-config`.
-4. Leave `git_ssh_key` empty if you want HA Ops to use its generated key automatically.
+1. Set `repo_url` to the SSH URL.
+2. Open HA Ops.
+3. Click `Generate Deploy Key`.
+4. Add the shown public key to GitHub Deploy Keys.
+5. Leave `git_ssh_key` empty to use the generated key.
 
-If you prefer to manage the private key yourself, you can still paste it into `git_ssh_key`.
-
-## Expected `ha-config` layout
+## Expected repository layout
 
 ```text
 ha-config/
   ha-ops.json
   homeassistant/
-    configuration.yaml
-    automations.yaml
-    .storage/
   addons/
-    mosquitto/
-    zigbee2mqtt/
 ```
-
-## Notes
-
-- The add-on is intentionally one-way: Git is the source of truth, `/config` is the deployment target.
-- Export and Push are explicit bootstrap actions on the `export` branch. They are not part of normal apply.
-- Home Assistant Export is config-only: YAML files, selected config directories, and selected safe `.storage` config files.
-- Export skips runtime storage, cache, database, log, backup, deps, frontend bundle, media cache, and tts files by default.
-- Export also removes previously exported excluded files from the local checkout before copying fresh live config.
-- Export copies selected safe Home Assistant `.storage` config files, but not auth/session/token files.
-- Apply syncs selected `.storage` files as an overlay, so unmanaged auth/session/token files are left intact.
-- Apply leaves downloaded custom components, frontend assets, binaries, secrets, and runtime files unmanaged.
-- Add-on configs are accessed through `/addon_configs`, which means Mosquitto and Zigbee2MQTT can be managed in the same flow.
-- The deployment manifest keeps path and restart rules in the private repo instead of hardcoding them into the add-on.
-- If `.storage` is present in the source tree, Home Assistant Core is stopped before the sync to avoid live-state overwrite races.
-- Zigbee2MQTT can be configured with `stop_addon_before_sync` so its `database.db`, `state.json`, and coordinator backups are not updated while the add-on is live.
