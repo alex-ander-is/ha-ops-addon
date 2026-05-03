@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.12
+
+- Export selected safe Home Assistant `.storage` configuration files.
+- Apply selected `.storage` files in overlay mode so auth/session/token files are not deleted.
+
 ## 0.3.11
 
 - Show the running HA Ops version in the ingress UI footer.

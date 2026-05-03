@@ -51,6 +51,39 @@ EXPORT_EXCLUDES = [
     "zigbee2mqtt/database.db*",
     "zigbee2mqtt/state.json",
 ]
+STORAGE_EXPORT_ALLOWLIST = [
+    "core.area_registry",
+    "core.config",
+    "core.config_entries",
+    "core.device_registry",
+    "core.entity_registry",
+    "core.floor_registry",
+    "core.label_registry",
+    "core.logger",
+    "core.uuid",
+    "counter",
+    "energy",
+    "frontend_theme",
+    "homeassistant.exposed_entities",
+    "input_boolean",
+    "input_button",
+    "input_datetime",
+    "input_number",
+    "input_select",
+    "input_text",
+    "lovelace",
+    "lovelace.lovelace",
+    "lovelace.map",
+    "lovelace_dashboards",
+    "lovelace_resources",
+    "person",
+    "schedule",
+    "scene",
+    "script",
+    "tag",
+    "timer",
+    "zone",
+]
 EXPORT_CLEAN_PATHS = [
     ".cloud",
     ".cache",
@@ -558,11 +591,13 @@ def ensure_dir(path):
     path.mkdir(parents=True, exist_ok=True)
 
 
-def sync_tree(src, dest, delete=True):
+def sync_tree(src, dest, delete=True, excludes=None):
     ensure_dir(dest)
     command = ["rsync", "-a"]
     if delete:
         command.append("--delete")
+    for pattern in excludes or []:
+        command.extend(["--exclude", pattern])
     command.extend([f"{src}/", f"{dest}/"])
     result = run_command(command)
     if result.returncode != 0:
@@ -611,6 +646,44 @@ def clean_export_destination(dest):
             removed.add(relative)
 
     return len(removed)
+
+
+def export_storage_allowlist(src, dest):
+    src_storage = src / ".storage"
+    if not src_storage.exists():
+        return 0
+
+    dest_storage = dest / ".storage"
+    ensure_dir(dest_storage)
+    copied = 0
+    for name in STORAGE_EXPORT_ALLOWLIST:
+        src_path = src_storage / name
+        if not src_path.exists():
+            continue
+        dest_path = dest_storage / name
+        ensure_dir(dest_path.parent)
+        shutil.copy2(src_path, dest_path)
+        copied += 1
+    return copied
+
+
+def sync_storage_allowlist(src, dest):
+    src_storage = src / ".storage"
+    if not src_storage.exists():
+        return 0
+
+    dest_storage = dest / ".storage"
+    ensure_dir(dest_storage)
+    copied = 0
+    for name in STORAGE_EXPORT_ALLOWLIST:
+        src_path = src_storage / name
+        if not src_path.exists():
+            continue
+        dest_path = dest_storage / name
+        ensure_dir(dest_path.parent)
+        shutil.copy2(src_path, dest_path)
+        copied += 1
+    return copied
 
 
 def clear_tree(dest):
@@ -753,7 +826,12 @@ def apply_targets(resolved_targets, details):
             addon_was_started = stop_addon_for_sync(slug)
 
         add_detail(details, f"Syncing {target['id']} from {source_path} to {live_path}.")
-        sync_tree(source_path, live_path, delete=bool(target.get("delete", True)))
+        if target["type"] == "homeassistant" and source_has_storage(source_path):
+            sync_tree(source_path, live_path, delete=bool(target.get("delete", True)), excludes=[".storage/"])
+            copied_count = sync_storage_allowlist(source_path, live_path)
+            add_detail(details, f"Synced {copied_count} allowlisted .storage config file(s).")
+        else:
+            sync_tree(source_path, live_path, delete=bool(target.get("delete", True)))
 
         if target["type"] == "addon" and target.get("restart_after_sync", True):
             slug = target["resolved_slug"]
@@ -795,6 +873,10 @@ def export_targets(resolved_targets, details):
         if removed_count:
             add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} export destination.")
         export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
+        if target["type"] == "homeassistant":
+            copied_count = export_storage_allowlist(live_path, source_path)
+            if copied_count:
+                add_detail(details, f"Exported {copied_count} allowlisted .storage config file(s).")
 
 
 def git_status_porcelain(repo_dir):
