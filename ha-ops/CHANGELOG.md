@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.14
+
+- Export only Home Assistant config paths instead of downloaded custom components, frontend assets, binaries, secrets, and runtime files.
+- Leave non-config Home Assistant paths unmanaged during Apply.
+
 ## 0.3.13
 
 - Read the current remote `origin/export` SHA before Push and use an explicit force-with-lease.

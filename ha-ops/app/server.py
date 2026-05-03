@@ -84,6 +84,27 @@ STORAGE_EXPORT_ALLOWLIST = [
     "timer",
     "zone",
 ]
+HOMEASSISTANT_EXPORT_ROOT_PATTERNS = ["*.yaml", "*.yml"]
+HOMEASSISTANT_EXPORT_ROOT_EXCLUDES = {"secrets.yaml"}
+HOMEASSISTANT_EXPORT_DIRS = [
+    "blueprints",
+    "custom_templates",
+    "dashboards",
+    "packages",
+    "templates",
+    "themes",
+    "ui_lovelace_minimalist",
+]
+HOMEASSISTANT_APPLY_EXCLUDES = EXPORT_EXCLUDES + [
+    ".HA_VERSION",
+    "custom_components/",
+    "go2rtc-*",
+    "image/",
+    "secrets.yaml",
+    "www/",
+    "zha_quirks/",
+    "zigbee2mqtt/",
+]
 EXPORT_CLEAN_PATHS = [
     ".cloud",
     ".cache",
@@ -677,6 +698,36 @@ def export_storage_allowlist(src, dest):
     return copied
 
 
+def copy_export_path(src, dest):
+    ensure_dir(dest.parent)
+    if src.is_dir():
+        sync_tree(src, dest, delete=True, excludes=EXPORT_EXCLUDES)
+    else:
+        shutil.copy2(src, dest)
+
+
+def export_homeassistant_config(src, dest):
+    clear_tree(dest)
+    copied = 0
+
+    for pattern in HOMEASSISTANT_EXPORT_ROOT_PATTERNS:
+        for src_path in sorted(src.glob(pattern)):
+            if not src_path.is_file() or src_path.name in HOMEASSISTANT_EXPORT_ROOT_EXCLUDES:
+                continue
+            copy_export_path(src_path, dest / src_path.name)
+            copied += 1
+
+    for name in HOMEASSISTANT_EXPORT_DIRS:
+        src_path = src / name
+        if not src_path.exists():
+            continue
+        copy_export_path(src_path, dest / name)
+        copied += 1
+
+    storage_count = export_storage_allowlist(src, dest)
+    return copied, storage_count
+
+
 def sync_storage_allowlist(src, dest):
     src_storage = src / ".storage"
     if not src_storage.exists():
@@ -836,10 +887,11 @@ def apply_targets(resolved_targets, details):
             addon_was_started = stop_addon_for_sync(slug)
 
         add_detail(details, f"Syncing {target['id']} from {source_path} to {live_path}.")
-        if target["type"] == "homeassistant" and source_has_storage(source_path):
-            sync_tree(source_path, live_path, delete=bool(target.get("delete", True)), excludes=[".storage/"])
+        if target["type"] == "homeassistant":
+            sync_tree(source_path, live_path, delete=bool(target.get("delete", True)), excludes=HOMEASSISTANT_APPLY_EXCLUDES)
             copied_count = sync_storage_allowlist(source_path, live_path)
-            add_detail(details, f"Synced {copied_count} allowlisted .storage config file(s).")
+            if copied_count:
+                add_detail(details, f"Synced {copied_count} allowlisted .storage config file(s).")
         else:
             sync_tree(source_path, live_path, delete=bool(target.get("delete", True)))
 
@@ -878,15 +930,18 @@ def export_targets(resolved_targets, details):
                 continue
             raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
 
-        add_detail(details, f"Exporting {target['id']} from {live_path} to {source_path}.")
-        removed_count = clean_export_destination(source_path)
-        if removed_count:
-            add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} export destination.")
-        export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
         if target["type"] == "homeassistant":
-            copied_count = export_storage_allowlist(live_path, source_path)
-            if copied_count:
-                add_detail(details, f"Exported {copied_count} allowlisted .storage config file(s).")
+            add_detail(details, f"Exporting config-only {target['id']} from {live_path} to {source_path}.")
+            copied_count, storage_count = export_homeassistant_config(live_path, source_path)
+            add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
+            if storage_count:
+                add_detail(details, f"Exported {storage_count} allowlisted .storage config file(s).")
+        else:
+            add_detail(details, f"Exporting {target['id']} from {live_path} to {source_path}.")
+            removed_count = clean_export_destination(source_path)
+            if removed_count:
+                add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} export destination.")
+            export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
 
 
 def git_status_porcelain(repo_dir):
@@ -937,7 +992,7 @@ def run_export_job():
 
         add_detail(details, f"Using repository at commit {commit}.")
         add_detail(details, f"Using manifest {manifest_path}.")
-        add_detail(details, "Export excludes database, log, backup, deps, and tts files.")
+        add_detail(details, "Home Assistant export is config-only; add-on exports keep their configured trees.")
         export_targets(resolved_targets, details)
 
         status = git_status_porcelain(repo_dir)
