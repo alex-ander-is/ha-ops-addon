@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.15
+
+- Show `Running...` in Last Run Details while an operation is running and no details are available yet.
+
 ## 0.3.14
 
 - Export only Home Assistant config paths instead of downloaded custom components, frontend assets, binaries, secrets, and runtime files.

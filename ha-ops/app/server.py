@@ -1447,7 +1447,8 @@ def render_page():
     releases = list_releases()
     manifest_preview = current_manifest_preview()
     target_state = state.get("last_targets") or manifest_preview
-    status = html.escape(state.get("last_status", "idle"))
+    last_status = state.get("last_status", "idle")
+    status = html.escape(last_status)
     message = html.escape(state.get("last_message", ""))
     last_run = html.escape(str(state.get("last_run_at")))
     last_release = html.escape(str(state.get("last_release")))
@@ -1459,8 +1460,9 @@ def render_page():
     manifest_path = html.escape(options.get("manifest_path", "ha-ops.json"))
     auth_mode = html.escape(git_auth_mode(options))
     details = "\n".join(state.get("last_details", []))
-    details_html = html.escape(details)
-    action_disabled = "disabled" if status == "running" else ""
+    details_placeholder = "Running..." if last_status == "running" else "No details yet."
+    details_html = html.escape(details or details_placeholder)
+    action_disabled = "disabled" if last_status == "running" else ""
     version = html.escape(addon_version())
 
     return f"""<!doctype html>
@@ -1650,7 +1652,7 @@ def render_page():
       <section class="card">
         <h1>HA Ops</h1>
         <p>Git-backed config deployer for Home Assistant, Mosquitto, and Zigbee2MQTT.</p>
-        <div class="badge {'error' if status == 'error' else 'running' if status == 'running' else ''}">{status}</div>
+        <div class="badge {'error' if last_status == 'error' else 'running' if last_status == 'running' else ''}">{status}</div>
         <dl>
           <dt>Repo URL</dt>
           <dd><code>{repo_url or "(not configured)"}</code></dd>
@@ -1687,7 +1689,7 @@ def render_page():
       </section>
       <section class="card">
         <h2>Last Run Details</h2>
-        <pre>{details_html or "No details yet."}</pre>
+        <pre>{details_html}</pre>
       </section>
     </div>
 
