@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY run.sh /run.sh
 COPY app /app
+COPY config.yaml /app/config.yaml
 
 RUN chmod a+x /run.sh
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 HOST = "0.0.0.0"
 PORT = 8099
+ADDON_CONFIG_PATH = Path("/app/config.yaml")
 OPTIONS_PATH = Path("/data/options.json")
 STATE_PATH = Path("/data/state.json")
 RELEASES_DIR = Path("/data/releases")
@@ -96,6 +97,15 @@ def load_json(path, default):
 
 def load_options():
     return load_json(OPTIONS_PATH, {})
+
+
+def addon_version():
+    if not ADDON_CONFIG_PATH.exists():
+        return "unknown"
+    for line in ADDON_CONFIG_PATH.read_text().splitlines():
+        if line.startswith("version:"):
+            return line.split(":", 1)[1].strip().strip("\"'")
+    return "unknown"
 
 
 def default_state():
@@ -1295,6 +1305,7 @@ def render_page():
     details = "\n".join(state.get("last_details", []))
     details_html = html.escape(details)
     action_disabled = "disabled" if status == "running" else ""
+    version = html.escape(addon_version())
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1458,6 +1469,12 @@ def render_page():
       min-height: 1.4em;
       color: var(--ha-muted);
     }}
+    footer {{
+      margin-top: 18px;
+      color: var(--ha-muted);
+      font-size: 0.86rem;
+      text-align: center;
+    }}
     @media (max-width: 640px) {{
       main {{
         padding: 12px;
@@ -1532,6 +1549,7 @@ def render_page():
       <h2>Release Snapshots</h2>
       {render_releases(releases)}
     </section>
+    <footer>HA Ops {version}</footer>
   </main>
   <script>
     (() => {{

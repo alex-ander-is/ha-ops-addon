@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11
+
+- Show the running HA Ops version in the ingress UI footer.
+
 ## 0.3.10
 
 - Recreate the local `export` branch from `origin/main` on every Export.
