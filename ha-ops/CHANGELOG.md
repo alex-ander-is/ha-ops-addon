@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.18
+
+- Exclude temporary files and `node_modules` symlinks from exported Zigbee2MQTT external converters.
+
 ## 0.3.17
 
 - Export and apply config-only Zigbee2MQTT files from Home Assistant config storage.
