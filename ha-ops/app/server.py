@@ -951,6 +951,35 @@ def git_status_porcelain(repo_dir):
     return result.stdout.strip()
 
 
+def stage_homeassistant_storage_allowlist(repo_dir, options, details):
+    manifest, _manifest_path = load_manifest(repo_dir, options)
+    paths = []
+
+    for target in manifest.get("targets", []):
+        if target.get("type") != "homeassistant":
+            continue
+
+        source = repo_dir / target.get("source", options.get("apply_path", "homeassistant"))
+        storage = source / ".storage"
+        if not storage.exists():
+            continue
+
+        for name in STORAGE_EXPORT_ALLOWLIST:
+            path = storage / name
+            if path.exists():
+                paths.append(str(path.relative_to(repo_dir)))
+
+    if not paths:
+        return 0
+
+    add = run_command(["git", "add", "-f", "--"] + paths, cwd=repo_dir)
+    if add.returncode != 0:
+        raise RuntimeError(f"git add allowlisted .storage failed:\n{add.stderr.strip()}")
+
+    add_detail(details, f"Staged {len(paths)} allowlisted .storage config file(s).")
+    return len(paths)
+
+
 def run_export_job():
     if not RUN_LOCK.acquire(blocking=False):
         write_state(
@@ -994,6 +1023,7 @@ def run_export_job():
         add_detail(details, f"Using manifest {manifest_path}.")
         add_detail(details, "Home Assistant export is config-only; add-on exports keep their configured trees.")
         export_targets(resolved_targets, details)
+        stage_homeassistant_storage_allowlist(repo_dir, options, details)
 
         status = git_status_porcelain(repo_dir)
         if status:
@@ -1064,6 +1094,7 @@ def run_push_job():
         current_branch = git_current_branch(repo_dir)
         if current_branch != EXPORT_BRANCH:
             raise RuntimeError(f"Local checkout is on branch {current_branch or '(detached)'}. Run Export before Push.")
+        stage_homeassistant_storage_allowlist(repo_dir, options, details)
         status = git_status_porcelain(repo_dir)
         if status:
             add_detail(details, "Committing local exported changes.")

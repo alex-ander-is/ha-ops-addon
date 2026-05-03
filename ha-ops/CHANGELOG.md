@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.16
+
+- Force-stage allowlisted Home Assistant `.storage` config files during Export and Push even when repository `.gitignore` ignores `.storage`.
+
 ## 0.3.15
 
 - Show `Running...` in Last Run Details while an operation is running and no details are available yet.

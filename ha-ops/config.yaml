@@ -1,6 +1,6 @@
 name: "HA Ops"
 description: "Git-backed Home Assistant, Mosquitto, and Zigbee2MQTT operator with rollback"
-version: "0.3.15"
+version: "0.3.16"
 slug: "ha_ops"
 init: false
 startup: services
