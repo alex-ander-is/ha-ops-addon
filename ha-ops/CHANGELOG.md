@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.8
+
+- Push local `export` commits even when the working tree has no uncommitted changes.
+- Report whether `origin/export` is missing or already up to date.
+
 ## 0.3.7
 
 - Disable Apply, Export, and Push buttons while an action is running.

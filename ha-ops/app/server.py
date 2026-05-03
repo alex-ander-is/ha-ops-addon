@@ -389,6 +389,16 @@ def git_current_branch(repo_dir):
     return result.stdout.strip()
 
 
+def git_ahead_count(repo_dir, local_ref, remote_ref):
+    if not git_ref_exists(repo_dir, remote_ref):
+        return None
+
+    result = run_command(["git", "rev-list", "--count", f"{remote_ref}..{local_ref}"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git rev-list failed:\n{result.stderr.strip()}")
+    return int(result.stdout.strip() or "0")
+
+
 def checkout_export_branch(repo_dir, env, base_branch):
     fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
     if fetch.returncode != 0:
@@ -839,42 +849,50 @@ def run_push_job():
         if current_branch != EXPORT_BRANCH:
             raise RuntimeError(f"Local checkout is on branch {current_branch or '(detached)'}. Run Export before Push.")
         status = git_status_porcelain(repo_dir)
-        if not status:
-            add_detail(details, "No local Git changes to commit or push.")
+        if status:
+            add_detail(details, "Committing local exported changes.")
+            add = run_command(["git", "add", "-A"], cwd=repo_dir)
+            if add.returncode != 0:
+                raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+
+            message = f"Export Home Assistant config {release_now()}"
+            commit = run_command(
+                [
+                    "git",
+                    "-c",
+                    "user.name=HA Ops",
+                    "-c",
+                    "user.email=ha-ops@local",
+                    "commit",
+                    "-m",
+                    message,
+                ],
+                cwd=repo_dir,
+            )
+            if commit.returncode != 0:
+                raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
+            commit_summary = commit.stdout.strip().splitlines()[0] if commit.stdout.strip() else "Created export commit."
+            add_detail(details, commit_summary)
+        else:
+            add_detail(details, "No local Git changes to commit.")
+
+        ahead_count = git_ahead_count(repo_dir, EXPORT_BRANCH, f"refs/remotes/origin/{EXPORT_BRANCH}")
+        if ahead_count == 0:
+            add_detail(details, "No local export commits to push.")
             write_state(
                 {
                     "last_run_at": utc_now(),
                     "last_status": "success",
                     "last_action": "push",
-                    "last_message": "No local Git changes to push.",
+                    "last_message": "No local export commits to push.",
                     "last_details": details,
                 }
             )
             return True
-
-        add_detail(details, "Committing local exported changes.")
-        add = run_command(["git", "add", "-A"], cwd=repo_dir)
-        if add.returncode != 0:
-            raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
-
-        message = f"Export Home Assistant config {release_now()}"
-        commit = run_command(
-            [
-                "git",
-                "-c",
-                "user.name=HA Ops",
-                "-c",
-                "user.email=ha-ops@local",
-                "commit",
-                "-m",
-                message,
-            ],
-            cwd=repo_dir,
-        )
-        if commit.returncode != 0:
-            raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
-        commit_summary = commit.stdout.strip().splitlines()[0] if commit.stdout.strip() else "Created export commit."
-        add_detail(details, commit_summary)
+        if ahead_count is None:
+            add_detail(details, f"Remote branch origin/{EXPORT_BRANCH} does not exist yet.")
+        else:
+            add_detail(details, f"Local branch {EXPORT_BRANCH} is ahead by {ahead_count} commit(s).")
 
         add_detail(details, f"Pushing to origin/{EXPORT_BRANCH}.")
         push = run_command(["git", "push", "-u", "origin", EXPORT_BRANCH], env=env, cwd=repo_dir)
