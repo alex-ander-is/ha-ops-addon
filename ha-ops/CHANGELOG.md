@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6
+
+- Split server internals into UI, state, supervisor, backups, manifest, Git, sync, jobs, and target modules.
+- Avoid stopping Home Assistant Core twice when Apply fails after Core was already stopped for `.storage` sync.
+- Recursively remove excluded runtime files from add-on save destinations before exporting live config.
+- Reject add-on manifest live paths outside expected add-on config roots.
+- Filter release snapshots to managed config paths to avoid storing runtime databases and logs.
+- Add regression coverage for rollback, delete semantics, protected storage, conflict blocking, and clean checkout imports.
+
 ## 0.4.5
 
 - Apply selected add-ons as an overlay by default so partial Git sources do not delete live-only add-on files.

@@ -1,7 +1,45 @@
-def run_save_job(deps):
-    run_lock = deps["run_lock"]
-    write_state = deps["write_state"]
-    utc_now = deps["utc_now"]
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class JobContext:
+    add_detail: Any
+    apply_targets: Any
+    build_apply_preview: Any
+    commit_if_needed: Any
+    create_release_snapshot: Any
+    enforce_apply_limits: Any
+    ensure_fresh_system_backup: Any
+    ensure_preview_matches_state: Any
+    ensure_repo: Any
+    export_targets: Any
+    get_installed_addons: Any
+    git_conflict_paths: Any
+    git_env: Any
+    git_head_or_unborn: Any
+    git_pull_rebase: Any
+    load_manifest: Any
+    load_options: Any
+    option_bool: Any
+    prune_release_snapshots: Any
+    push_branch: Any
+    read_state: Any
+    release_now: Any
+    repo_checkout_path: Any
+    resolve_targets: Any
+    restore_release_snapshot: Any
+    run_lock: Any
+    stage_all: Any
+    stage_homeassistant_storage_allowlist: Any
+    utc_now: Any
+    write_state: Any
+
+
+def run_save_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
 
     if not run_lock.acquire(blocking=False):
         write_state(
@@ -15,7 +53,7 @@ def run_save_job(deps):
         return False
 
     details = []
-    options = deps["load_options"]()
+    options = ctx.load_options()
     resolved_targets = []
 
     write_state(
@@ -29,37 +67,37 @@ def run_save_job(deps):
     )
 
     try:
-        state = deps["read_state"]()
+        state = ctx.read_state()
         if state.get("conflicts"):
             raise RuntimeError("Resolve Git conflicts before running Save HA to Git.")
 
-        repo_dir = deps["ensure_repo"](options, reset_to_origin=False)
-        env = deps["git_env"](options)
+        repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
+        env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
-        deps["git_pull_rebase"](repo_dir, env, branch)
-        commit = deps["git_head_or_unborn"](repo_dir)
-        addons = deps["get_installed_addons"]()
-        manifest, manifest_path = deps["load_manifest"](repo_dir, options, addons)
-        resolved_targets = deps["resolve_targets"](repo_dir, manifest, addons, require_source=False)
+        ctx.git_pull_rebase(repo_dir, env, branch)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        deps["add_detail"](details, f"Using branch {branch} at commit {commit}.")
-        deps["add_detail"](details, f"Using manifest {manifest_path}.")
-        deps["add_detail"](details, "Saving live Home Assistant config to Git.")
-        deps["export_targets"](resolved_targets, details)
-        deps["stage_homeassistant_storage_allowlist"](repo_dir, options, details)
-        deps["stage_all"](repo_dir)
+        ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
+        ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        ctx.add_detail(details, "Saving live Home Assistant config to Git.")
+        ctx.export_targets(resolved_targets, details)
+        ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
+        ctx.stage_all(repo_dir)
 
-        new_commit = deps["commit_if_needed"](repo_dir, f"Save Home Assistant config {deps['release_now']()}")
+        new_commit = ctx.commit_if_needed(repo_dir, f"Save Home Assistant config {ctx.release_now()}")
         if new_commit:
-            deps["add_detail"](details, f"Created commit {new_commit}.")
+            ctx.add_detail(details, f"Created commit {new_commit}.")
             try:
-                deps["push_branch"](repo_dir, env, branch)
+                ctx.push_branch(repo_dir, env, branch)
             except RuntimeError:
-                deps["git_pull_rebase"](repo_dir, env, branch)
-                deps["push_branch"](repo_dir, env, branch)
-            deps["add_detail"](details, f"Pushed to origin/{branch}.")
+                ctx.git_pull_rebase(repo_dir, env, branch)
+                ctx.push_branch(repo_dir, env, branch)
+            ctx.add_detail(details, f"Pushed to origin/{branch}.")
         else:
-            deps["add_detail"](details, "No live Home Assistant changes to save.")
+            ctx.add_detail(details, "No live Home Assistant changes to save.")
 
         write_state({"conflicts": []})
 
@@ -77,10 +115,10 @@ def run_save_job(deps):
     except Exception as exc:
         details.append(str(exc))
         try:
-            repo_path = deps["repo_checkout_path"](options)
+            repo_path = ctx.repo_checkout_path(options)
         except RuntimeError:
             repo_path = None
-        conflicts = deps["git_conflict_paths"](repo_path) if repo_path and repo_path.exists() else []
+        conflicts = ctx.git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -97,10 +135,10 @@ def run_save_job(deps):
         run_lock.release()
 
 
-def run_apply_job(deps):
-    run_lock = deps["run_lock"]
-    write_state = deps["write_state"]
-    utc_now = deps["utc_now"]
+def run_apply_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
 
     if not run_lock.acquire(blocking=False):
         write_state(
@@ -114,10 +152,11 @@ def run_apply_job(deps):
         return False
 
     details = []
-    options = deps["load_options"]()
+    options = ctx.load_options()
     release_name = None
     backup_slug = None
     resolved_targets = []
+    core_stopped_for_apply = False
 
     write_state(
         {
@@ -130,34 +169,35 @@ def run_apply_job(deps):
     )
 
     try:
-        state = deps["read_state"]()
+        state = ctx.read_state()
         if state.get("conflicts"):
             raise RuntimeError("Resolve Git conflicts before running Apply Git to HA.")
 
-        repo_dir = deps["ensure_repo"](options)
-        commit = deps["git_head_or_unborn"](repo_dir)
-        addons = deps["get_installed_addons"]()
-        manifest, manifest_path = deps["load_manifest"](repo_dir, options, addons)
-        resolved_targets = deps["resolve_targets"](repo_dir, manifest, addons, require_source=False)
+        repo_dir = ctx.ensure_repo(options)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        deps["add_detail"](details, f"Fetched repository at commit {commit}.")
-        deps["add_detail"](details, f"Using manifest {manifest_path}.")
-        deps["add_detail"](details, "Rebuilding apply preview for safety checks.")
-        preview = deps["build_apply_preview"](resolved_targets)
-        deps["ensure_preview_matches_state"](state, commit, preview)
-        deps["enforce_apply_limits"](options, preview)
+        ctx.add_detail(details, f"Fetched repository at commit {commit}.")
+        ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
+        preview = ctx.build_apply_preview(resolved_targets)
+        ctx.ensure_preview_matches_state(state, commit, preview)
+        ctx.enforce_apply_limits(options, preview)
 
-        backup_slug = deps["ensure_fresh_system_backup"](options, details)
+        backup_slug = ctx.ensure_fresh_system_backup(options, details)
 
-        if deps["option_bool"](options, "create_release_snapshot", True):
-            deps["add_detail"](details, "Creating local release snapshot.")
-            release_name = deps["create_release_snapshot"](resolved_targets, commit, backup_slug)
-            deps["add_detail"](details, f"Created local release snapshot {release_name}.")
+        if ctx.option_bool(options, "create_release_snapshot", True):
+            ctx.add_detail(details, "Creating local release snapshot.")
+            release_name = ctx.create_release_snapshot(resolved_targets, commit, backup_slug)
+            ctx.add_detail(details, f"Created local release snapshot {release_name}.")
 
-        deps["apply_targets"](resolved_targets, details)
-        pruned = deps["prune_release_snapshots"](options, protected_release=release_name)
+        apply_result = ctx.apply_targets(resolved_targets, details) or {}
+        core_stopped_for_apply = bool(apply_result.get("core_stopped"))
+        pruned = ctx.prune_release_snapshots(options, protected_release=release_name)
         if pruned:
-            deps["add_detail"](details, f"Pruned {len(pruned)} old local release snapshot(s): {', '.join(pruned)}.")
+            ctx.add_detail(details, f"Pruned {len(pruned)} old local release snapshot(s): {', '.join(pruned)}.")
 
         write_state(
             {
@@ -175,10 +215,11 @@ def run_apply_job(deps):
         return True
     except Exception as exc:
         details.append(str(exc))
+        core_stopped_for_apply = core_stopped_for_apply or bool(getattr(exc, "core_stopped", False))
         if release_name:
             try:
-                deps["add_detail"](details, f"Restoring local release snapshot {release_name} after failure.")
-                deps["restore_release_snapshot"](release_name, details)
+                ctx.add_detail(details, f"Restoring local release snapshot {release_name} after failure.")
+                ctx.restore_release_snapshot(release_name, details, core_already_stopped=core_stopped_for_apply)
             except Exception as rollback_exc:
                 details.append(f"Rollback from local release failed: {rollback_exc}")
 
@@ -199,10 +240,10 @@ def run_apply_job(deps):
         run_lock.release()
 
 
-def run_preview_job(deps):
-    run_lock = deps["run_lock"]
-    write_state = deps["write_state"]
-    utc_now = deps["utc_now"]
+def run_preview_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
 
     if not run_lock.acquire(blocking=False):
         write_state(
@@ -216,7 +257,7 @@ def run_preview_job(deps):
         return False
 
     details = []
-    options = deps["load_options"]()
+    options = ctx.load_options()
     resolved_targets = []
 
     write_state(
@@ -230,20 +271,20 @@ def run_preview_job(deps):
     )
 
     try:
-        state = deps["read_state"]()
+        state = ctx.read_state()
         if state.get("conflicts"):
             raise RuntimeError("Resolve Git conflicts before running Preview Git to HA.")
 
-        repo_dir = deps["ensure_repo"](options)
-        commit = deps["git_head_or_unborn"](repo_dir)
-        addons = deps["get_installed_addons"]()
-        manifest, manifest_path = deps["load_manifest"](repo_dir, options, addons)
-        resolved_targets = deps["resolve_targets"](repo_dir, manifest, addons, require_source=False)
+        repo_dir = ctx.ensure_repo(options)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        deps["add_detail"](details, f"Fetched repository at commit {commit}.")
-        deps["add_detail"](details, f"Using manifest {manifest_path}.")
-        deps["add_detail"](details, "Building apply preview without changing live config.")
-        preview = deps["build_apply_preview"](resolved_targets)
+        ctx.add_detail(details, f"Fetched repository at commit {commit}.")
+        ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        ctx.add_detail(details, "Building apply preview without changing live config.")
+        preview = ctx.build_apply_preview(resolved_targets)
 
         write_state(
             {
@@ -278,10 +319,10 @@ def run_preview_job(deps):
         run_lock.release()
 
 
-def run_rollback_job(release_name, deps):
-    run_lock = deps["run_lock"]
-    write_state = deps["write_state"]
-    utc_now = deps["utc_now"]
+def run_rollback_job(release_name, ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
 
     if not run_lock.acquire(blocking=False):
         write_state(
@@ -306,7 +347,7 @@ def run_rollback_job(release_name, deps):
     )
 
     try:
-        metadata = deps["restore_release_snapshot"](release_name, details)
+        metadata = ctx.restore_release_snapshot(release_name, details)
         write_state(
             {
                 "last_run_at": utc_now(),

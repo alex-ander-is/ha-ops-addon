@@ -152,13 +152,35 @@ def path_from_metadata(value):
     return None
 
 
+def path_is_within(path, root):
+    try:
+        resolved_path = path.resolve()
+        resolved_root = root.resolve()
+    except OSError:
+        resolved_path = path
+        resolved_root = root
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def validate_addon_live_path(path, allowed_roots, target_id):
+    if any(path_is_within(path, root) for root in allowed_roots):
+        return path
+    roots = ", ".join(str(root) for root in allowed_roots)
+    raise RuntimeError(f"Add-on live path escapes allowed config roots for target '{target_id}': {path}. Allowed roots: {roots}")
+
+
 def addon_config_path_candidates(target, slug, addon, addon_configs_dir, config_dir, addon_is_zigbee2mqtt):
     candidates = []
+    target_id = str(target.get("id") or slug)
+    allowed_roots = [addon_configs_dir / slug]
+    if addon_is_zigbee2mqtt(addon or {"slug": slug}):
+        allowed_roots.extend([config_dir / "zigbee2mqtt", Path("/share/zigbee2mqtt")])
+
     for source in (target, addon):
         for key in ("live_path", "config_path", "configuration_path", "addon_config_path", "data_path"):
             path = path_from_metadata(source.get(key))
             if path:
-                candidates.append(path)
+                candidates.append(validate_addon_live_path(path, allowed_roots, target_id))
 
     candidates.append(addon_configs_dir / slug)
 

@@ -584,28 +584,28 @@ def repo_source_path(repo_dir, source, target_id):
 
 
 def sync_deps():
-    return {
-        "add_detail": add_detail,
-        "addon_action": addon_action,
-        "clean_dir_names": EXPORT_CLEAN_DIR_NAMES,
-        "clean_file_patterns": EXPORT_CLEAN_FILE_PATTERNS,
-        "clean_paths": EXPORT_CLEAN_PATHS,
-        "core_restart": core_restart,
-        "core_start": core_start,
-        "core_stop": core_stop,
-        "do_core_check": do_core_check,
-        "export_excludes": EXPORT_EXCLUDES,
-        "ha_dirs": HOMEASSISTANT_EXPORT_DIRS,
-        "ha_root_excludes": HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
-        "ha_root_patterns": HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
-        "protected_storage_files": PROTECTED_STORAGE_FILES,
-        "restart_or_start_addon": restart_or_start_addon,
-        "run_command": run_command,
-        "stop_addon_for_sync": stop_addon_for_sync,
-        "storage_allowlist": STORAGE_EXPORT_ALLOWLIST,
-        "work_dir": WORK_DIR,
-        "zigbee2mqtt_paths": ZIGBEE2MQTT_CONFIG_PATHS,
-    }
+    return sync_logic.SyncContext(
+        add_detail=add_detail,
+        addon_action=addon_action,
+        clean_dir_names=EXPORT_CLEAN_DIR_NAMES,
+        clean_file_patterns=EXPORT_CLEAN_FILE_PATTERNS,
+        clean_paths=EXPORT_CLEAN_PATHS,
+        core_restart=core_restart,
+        core_start=core_start,
+        core_stop=core_stop,
+        do_core_check=do_core_check,
+        export_excludes=EXPORT_EXCLUDES,
+        ha_dirs=HOMEASSISTANT_EXPORT_DIRS,
+        ha_root_excludes=HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
+        ha_root_patterns=HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
+        protected_storage_files=PROTECTED_STORAGE_FILES,
+        restart_or_start_addon=restart_or_start_addon,
+        run_command=run_command,
+        stop_addon_for_sync=stop_addon_for_sync,
+        storage_allowlist=STORAGE_EXPORT_ALLOWLIST,
+        work_dir=WORK_DIR,
+        zigbee2mqtt_paths=ZIGBEE2MQTT_CONFIG_PATHS,
+    )
 
 
 def has_managed_content(path):
@@ -713,7 +713,10 @@ def create_release_snapshot(resolved_targets, commit, backup_slug):
 
         existed = live_path.exists()
         if existed:
-            sync_tree(live_path, target_snapshot, delete=True)
+            if target.get("type") == "homeassistant":
+                export_homeassistant_config(live_path, target_snapshot, target)
+            else:
+                export_tree(live_path, target_snapshot, delete=True)
 
         metadata["targets"].append(
             {
@@ -784,7 +787,7 @@ def prune_release_snapshots(options, protected_release=None):
     return removed
 
 
-def restore_release_snapshot(release_name, details):
+def restore_release_snapshot(release_name, details, core_already_stopped=False):
     release_dir = safe_release_dir(release_name)
     metadata_path = release_dir / "release.json"
     if not metadata_path.exists():
@@ -792,7 +795,7 @@ def restore_release_snapshot(release_name, details):
 
     metadata = load_json(metadata_path, {})
     targets = metadata.get("targets", [])
-    core_stopped = False
+    core_stopped = core_already_stopped
     homeassistant_seen = False
 
     for target in targets:
@@ -805,6 +808,8 @@ def restore_release_snapshot(release_name, details):
             add_detail(details, f"Stopping Home Assistant Core for rollback of release {release_name}.")
             core_stop()
             core_stopped = True
+            homeassistant_seen = True
+        elif target_type == "homeassistant":
             homeassistant_seen = True
         elif target_type == "addon" and target.get("stop_addon_before_sync", False):
             slug = target.get("resolved_slug")
@@ -953,38 +958,38 @@ def stage_homeassistant_storage_allowlist(repo_dir, options, details):
 
 
 def job_deps():
-    return {
-        "add_detail": add_detail,
-        "apply_targets": apply_targets,
-        "build_apply_preview": build_apply_preview,
-        "commit_if_needed": commit_if_needed,
-        "create_release_snapshot": create_release_snapshot,
-        "enforce_apply_limits": enforce_apply_limits,
-        "ensure_fresh_system_backup": ensure_fresh_system_backup,
-        "ensure_preview_matches_state": ensure_preview_matches_state,
-        "ensure_repo": ensure_repo,
-        "export_targets": export_targets,
-        "get_installed_addons": get_installed_addons,
-        "git_conflict_paths": git_conflict_paths,
-        "git_env": git_env,
-        "git_head_or_unborn": git_head_or_unborn,
-        "git_pull_rebase": git_pull_rebase,
-        "load_manifest": load_manifest,
-        "load_options": load_options,
-        "option_bool": option_bool,
-        "prune_release_snapshots": prune_release_snapshots,
-        "push_branch": push_branch,
-        "read_state": read_state,
-        "release_now": release_now,
-        "repo_checkout_path": repo_checkout_path,
-        "resolve_targets": resolve_targets,
-        "restore_release_snapshot": restore_release_snapshot,
-        "run_lock": RUN_LOCK,
-        "stage_all": stage_all,
-        "stage_homeassistant_storage_allowlist": stage_homeassistant_storage_allowlist,
-        "utc_now": utc_now,
-        "write_state": write_state,
-    }
+    return job_logic.JobContext(
+        add_detail=add_detail,
+        apply_targets=apply_targets,
+        build_apply_preview=build_apply_preview,
+        commit_if_needed=commit_if_needed,
+        create_release_snapshot=create_release_snapshot,
+        enforce_apply_limits=enforce_apply_limits,
+        ensure_fresh_system_backup=ensure_fresh_system_backup,
+        ensure_preview_matches_state=ensure_preview_matches_state,
+        ensure_repo=ensure_repo,
+        export_targets=export_targets,
+        get_installed_addons=get_installed_addons,
+        git_conflict_paths=git_conflict_paths,
+        git_env=git_env,
+        git_head_or_unborn=git_head_or_unborn,
+        git_pull_rebase=git_pull_rebase,
+        load_manifest=load_manifest,
+        load_options=load_options,
+        option_bool=option_bool,
+        prune_release_snapshots=prune_release_snapshots,
+        push_branch=push_branch,
+        read_state=read_state,
+        release_now=release_now,
+        repo_checkout_path=repo_checkout_path,
+        resolve_targets=resolve_targets,
+        restore_release_snapshot=restore_release_snapshot,
+        run_lock=RUN_LOCK,
+        stage_all=stage_all,
+        stage_homeassistant_storage_allowlist=stage_homeassistant_storage_allowlist,
+        utc_now=utc_now,
+        write_state=write_state,
+    )
 
 
 def run_save_job():

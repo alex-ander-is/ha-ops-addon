@@ -820,6 +820,37 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(server.target_save_delete(target))
             self.assertFalse(server.target_restore_delete(target))
 
+    def test_addon_save_recursively_removes_excluded_destination_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            (source / "nested").mkdir(parents=True)
+            (source / "nested" / "old.db").write_text("old\n")
+            (source / "nested" / "old.log").write_text("old\n")
+
+            server.export_targets(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "save_delete": False,
+                    }
+                ],
+                [],
+            )
+
+            self.assertFalse((source / "nested" / "old.db").exists())
+            self.assertFalse((source / "nested" / "old.log").exists())
+            self.assertEqual((source / "configuration.yaml").read_text(), "live\n")
+
     def test_allow_protected_storage_true_applies_protected_storage(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -950,7 +981,7 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
-            self.assertEqual(events, ["stop", "check", "stop", "start"])
+            self.assertEqual(events, ["stop", "check", "start"])
 
     def test_clean_git_checkout_imports_server(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -995,6 +1026,89 @@ class ServerTests(unittest.TestCase):
 
             with self.assertRaises(RuntimeError):
                 server.repo_source_path(repo, "escape", "homeassistant")
+
+    def test_addon_manifest_live_path_outside_allowed_roots_is_rejected(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            target = {
+                "id": "addon-local_zigbee2mqtt",
+                "type": "addon",
+                "source": "addons/local_zigbee2mqtt",
+                "addon_slug": "local_zigbee2mqtt",
+                "live_path": str(root / "wrong"),
+            }
+
+            with self.assertRaises(RuntimeError):
+                server.resolve_targets(
+                    root / "repo",
+                    {"targets": [target]},
+                    [{"slug": "local_zigbee2mqtt", "name": "Plain add-on"}],
+                    require_source=False,
+                )
+
+    def test_addon_manifest_live_path_for_other_addon_is_rejected(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            target = {
+                "id": "addon-local_zigbee2mqtt",
+                "type": "addon",
+                "source": "addons/local_zigbee2mqtt",
+                "addon_slug": "local_zigbee2mqtt",
+                "live_path": str(server.ADDON_CONFIGS_DIR / "other_addon"),
+            }
+
+            with self.assertRaises(RuntimeError):
+                server.resolve_targets(
+                    root / "repo",
+                    {"targets": [target]},
+                    [{"slug": "local_zigbee2mqtt", "name": "Plain add-on"}],
+                    require_source=False,
+                )
+
+    def test_release_snapshot_excludes_runtime_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            (server.CONFIG_DIR / "home-assistant_v2.db").write_text("db\n")
+            (server.CONFIG_DIR / "home-assistant.log").write_text("log\n")
+            addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            addon_live.mkdir()
+            (addon_live / "configuration.yaml").write_text("addon\n")
+            (addon_live / "nested").mkdir()
+            (addon_live / "nested" / "runtime.db").write_text("db\n")
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(root / "repo" / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                    },
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(root / "repo" / "addons" / "local_zigbee2mqtt"),
+                        "live_path": str(addon_live),
+                    },
+                ],
+                "abc123",
+                None,
+            )
+
+            release_dir = server.RELEASES_DIR / release
+            self.assertTrue((release_dir / "homeassistant" / "configuration.yaml").exists())
+            self.assertFalse((release_dir / "homeassistant" / "home-assistant_v2.db").exists())
+            self.assertFalse((release_dir / "homeassistant" / "home-assistant.log").exists())
+            self.assertTrue((release_dir / "addon-local_zigbee2mqtt" / "configuration.yaml").exists())
+            self.assertFalse((release_dir / "addon-local_zigbee2mqtt" / "nested" / "runtime.db").exists())
 
     def test_pending_conflicts_block_preview_and_save(self):
         server = load_server()
