@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- Make Managed Add-ons checkboxes control add-on targets even when `ha-ops.json` exists.
+- Preserve manifest options for selected add-ons while excluding unchecked add-ons.
+
 ## 0.4.0
 
 - Replace the export-branch flow with `Save HA to Git`, `Preview Git to HA`, and `Apply Git to HA`.

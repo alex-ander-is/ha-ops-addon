@@ -281,6 +281,127 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
+    def test_selected_addon_is_saved_when_manifest_exists(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "ha-ops.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "targets": [
+                            {
+                                "id": "homeassistant",
+                                "type": "homeassistant",
+                                "source": "homeassistant",
+                                "delete": False,
+                            }
+                        ],
+                    }
+                )
+            )
+            self.git_commit_all(seed, "manifest")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            addon_live.mkdir()
+            (addon_live / "configuration.yaml").write_text("addon\n")
+            server.write_state({"managed_addons": ["local_zigbee2mqtt"]})
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
+
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
+
+    def test_unchecked_manifest_addon_is_excluded(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "ha-ops.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "targets": [
+                            {
+                                "id": "homeassistant",
+                                "type": "homeassistant",
+                                "source": "homeassistant",
+                            },
+                            {
+                                "id": "addon-local_zigbee2mqtt",
+                                "type": "addon",
+                                "source": "addons/local_zigbee2mqtt",
+                                "addon_slug": "local_zigbee2mqtt",
+                            },
+                        ],
+                    }
+                )
+            )
+
+            manifest, _path = server.load_manifest(
+                repo,
+                {"manifest_path": "ha-ops.json"},
+                [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}],
+            )
+
+            self.assertEqual([target["type"] for target in manifest["targets"]], ["homeassistant"])
+
+    def test_selected_manifest_addon_preserves_manifest_options(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "ha-ops.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "targets": [
+                            {
+                                "id": "custom-z2m",
+                                "type": "addon",
+                                "source": "custom/z2m",
+                                "addon_slug": "local_zigbee2mqtt",
+                                "stop_addon_before_sync": True,
+                            }
+                        ],
+                    }
+                )
+            )
+            server.write_state({"managed_addons": ["local_zigbee2mqtt"]})
+
+            manifest, _path = server.load_manifest(
+                repo,
+                {"manifest_path": "ha-ops.json"},
+                [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}],
+            )
+
+            self.assertEqual(len(manifest["targets"]), 1)
+            self.assertEqual(manifest["targets"][0]["source"], "custom/z2m")
+            self.assertTrue(manifest["targets"][0]["stop_addon_before_sync"])
+
     def test_zigbee2mqtt_non_default_slug_uses_existing_config_path(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

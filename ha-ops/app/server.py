@@ -762,39 +762,92 @@ def set_selected_addon_slugs(slugs):
     return cleaned
 
 
-def default_manifest(options):
-    targets = [
-        {
-            "id": "homeassistant",
-            "type": "homeassistant",
-            "source": options.get("apply_path", "homeassistant"),
-            "delete": False,
-            "allow_protected_storage": False,
-            "stop_core_before_sync_if_storage": True,
-            "restart_after_sync": options.get("restart_after_apply", True),
-        }
-    ]
-    for slug in selected_addon_slugs():
-        targets.append(
+def default_homeassistant_manifest(options):
+    return {
+        "version": 1,
+        "targets": [
             {
-                "id": f"addon-{slug}",
-                "type": "addon",
-                "source": f"addons/{slug}",
-                "addon_slug": slug,
-                "delete": True,
-                "restart_after_sync": True,
-                "optional": True,
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source": options.get("apply_path", "homeassistant"),
+                "delete": False,
+                "allow_protected_storage": False,
+                "stop_core_before_sync_if_storage": True,
+                "restart_after_sync": options.get("restart_after_apply", True),
             }
-        )
-    return {"version": 1, "targets": targets}
+        ],
+    }
 
 
-def load_manifest(repo_dir, options):
+def default_addon_target(slug):
+    return {
+        "id": f"addon-{slug}",
+        "type": "addon",
+        "source": f"addons/{slug}",
+        "addon_slug": slug,
+        "delete": True,
+        "restart_after_sync": True,
+        "optional": True,
+    }
+
+
+def addon_target_slug(target, addons=None):
+    exact = target.get("addon_slug")
+    if exact:
+        return exact
+    if addons is None:
+        return None
+    try:
+        return resolve_addon_slug(target, addons)
+    except RuntimeError:
+        return None
+
+
+def selected_addon_target(slug, template=None):
+    target = dict(template or default_addon_target(slug))
+    target["type"] = "addon"
+    target["addon_slug"] = slug
+    target.pop("addon_slug_suffix", None)
+    target.pop("addon_name_contains", None)
+    target.setdefault("id", f"addon-{slug}")
+    target.setdefault("source", f"addons/{slug}")
+    target.setdefault("delete", True)
+    target.setdefault("restart_after_sync", True)
+    target.setdefault("optional", True)
+    return target
+
+
+def manifest_with_selected_addons(manifest, addons=None):
+    selected = selected_addon_slugs()
+    targets = []
+    addon_templates = {}
+
+    for target in manifest.get("targets", []):
+        if target.get("type") != "addon":
+            targets.append(target)
+            continue
+        slug = addon_target_slug(target, addons)
+        if slug:
+            addon_templates[slug] = target
+
+    for slug in selected:
+        targets.append(selected_addon_target(slug, addon_templates.get(slug)))
+
+    effective = dict(manifest)
+    effective["targets"] = targets
+    return effective
+
+
+def default_manifest(options):
+    return manifest_with_selected_addons(default_homeassistant_manifest(options))
+
+
+def load_manifest(repo_dir, options, addons=None):
     manifest_path = repo_dir / options.get("manifest_path", "ha-ops.json")
     if not manifest_path.exists():
-        return default_manifest(options), manifest_path
+        return manifest_with_selected_addons(default_homeassistant_manifest(options), addons), manifest_path
 
-    return load_json(manifest_path, {}), manifest_path
+    return manifest_with_selected_addons(load_json(manifest_path, {}), addons), manifest_path
 
 
 def resolve_addon_slug(target, addons):
@@ -1609,8 +1662,8 @@ def run_save_job():
         branch = options.get("repo_branch", "main")
         git_pull_rebase(repo_dir, env, branch)
         commit = git_head_or_unborn(repo_dir)
-        manifest, manifest_path = load_manifest(repo_dir, options)
         addons = get_installed_addons()
+        manifest, manifest_path = load_manifest(repo_dir, options, addons)
         resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
 
         add_detail(details, f"Using branch {branch} at commit {commit}.")
@@ -1700,8 +1753,8 @@ def run_apply_job():
 
         repo_dir = ensure_repo(options)
         commit = git_head_or_unborn(repo_dir)
-        manifest, manifest_path = load_manifest(repo_dir, options)
         addons = get_installed_addons()
+        manifest, manifest_path = load_manifest(repo_dir, options, addons)
         resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
 
         add_detail(details, f"Fetched repository at commit {commit}.")
@@ -1796,8 +1849,8 @@ def run_preview_job():
 
         repo_dir = ensure_repo(options)
         commit = git_head_or_unborn(repo_dir)
-        manifest, manifest_path = load_manifest(repo_dir, options)
         addons = get_installed_addons()
+        manifest, manifest_path = load_manifest(repo_dir, options, addons)
         resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
 
         add_detail(details, f"Fetched repository at commit {commit}.")
@@ -1962,8 +2015,12 @@ def current_manifest_preview():
     options = load_options()
     repo_dir = DATA_DIR / options.get("repo_path", "ha-config")
     try:
+        try:
+            addons = get_installed_addons()
+        except Exception:
+            addons = None
         if repo_dir.exists():
-            manifest, _ = load_manifest(repo_dir, options)
+            manifest, _ = load_manifest(repo_dir, options, addons)
         else:
             manifest = default_manifest(options)
         previews = []

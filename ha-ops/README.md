@@ -60,6 +60,7 @@ Skipped:
 - HA Ops discovers installed add-ons through Supervisor.
 - Add-ons are unmanaged by default.
 - Check an add-on in the UI to include its config in `Save HA to Git` and future Git-to-HA apply.
+- Uncheck an add-on in the UI to exclude it, even when `ha-ops.json` exists.
 - Zigbee2MQTT is detected from installed add-on metadata instead of a hard-coded slug.
 - If Zigbee2MQTT stores config under `/config/zigbee2mqtt`, HA Ops can use that existing path instead of assuming `/addon_configs/<slug>`.
 
