@@ -657,6 +657,10 @@ def apply_homeassistant_config(src, dest, target, details=None):
     return sync_logic.apply_homeassistant_config(src, dest, target, sync_deps(), details)
 
 
+def restore_homeassistant_config(src, dest, target):
+    return sync_logic.restore_homeassistant_config(src, dest, target, sync_deps())
+
+
 def sync_homeassistant_path_allowlist(src, dest, paths):
     return sync_logic.sync_homeassistant_path_allowlist(src, dest, paths, EXPORT_EXCLUDES, run_command)
 
@@ -818,8 +822,10 @@ def restore_release_snapshot(release_name, details, core_already_stopped=False):
 
         if target.get("existed", True):
             add_detail(details, f"Restoring {target['id']} from release {release_name}.")
-            restore_excludes = EXPORT_EXCLUDES if target_type == "addon" else None
-            sync_tree(snapshot_path, live_path, delete=bool(target.get("delete", True)), excludes=restore_excludes)
+            if target_type == "homeassistant":
+                restore_homeassistant_config(snapshot_path, live_path, target)
+            else:
+                sync_tree(snapshot_path, live_path, delete=bool(target.get("delete", True)), excludes=EXPORT_EXCLUDES)
         else:
             add_detail(details, f"Clearing {target['id']} because it did not exist in release {release_name}.")
             clear_tree(live_path)

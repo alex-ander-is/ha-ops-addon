@@ -30,8 +30,16 @@ Saved:
 - `templates/`
 - `themes/`
 - `ui_lovelace_minimalist/`
-- selected safe `.storage` config files
+- selected allowlisted `.storage` config files, including protected registry and instance files
 - selected add-on config folders
+
+Preserved:
+
+- Git-only files outside the Home Assistant managed export paths, for example docs or README files inside `homeassistant/`
+
+Note:
+
+- Save exports the full `.storage` allowlist. Protected files such as `core.config_entries`, device and entity registries, and `person` are saved to Git by design.
 
 Skipped:
 
@@ -48,8 +56,9 @@ Skipped:
 - Git config is applied as an overlay, not as a destructive mirror.
 - Missing files in Git do not delete live Home Assistant files.
 - Selected add-on config is applied as an overlay by default.
+- Selected add-on runtime files such as databases and logs are ignored on apply, even when present in Git.
 - Empty Git source is a no-op.
-- Directories that exist in Git are synced as managed directories.
+- Home Assistant directories that exist in Git are applied as overlays.
 - Selected `.storage` files are applied as an overlay, except protected files unless `allow_protected_storage` is explicitly set.
 - Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
 - Apply requires a fresh system backup visible in Home Assistant Backups and stored in a configured backup location by default.

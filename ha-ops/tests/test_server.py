@@ -203,6 +203,100 @@ class ServerTests(unittest.TestCase):
             )
             self.assertIn("homeassistant/configuration.yaml", result.stdout)
 
+    def test_save_exports_protected_storage_allowlist_even_when_ignored(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / ".gitignore").write_text("homeassistant/.storage/\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / ".storage").mkdir()
+            (server.CONFIG_DIR / ".storage" / "core.config_entries").write_text("protected\n")
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("safe\n")
+            (server.CONFIG_DIR / ".storage" / "auth").write_text("secret\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "homeassistant/.storage/core.config_entries"), "protected\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/.storage/input_boolean"), "safe\n")
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotIn("homeassistant/.storage/auth", result.stdout)
+
+    def test_save_homeassistant_preserves_git_only_files_outside_managed_paths(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / "docs").mkdir(parents=True)
+            (seed / "homeassistant" / "packages").mkdir()
+            (seed / "homeassistant" / "README.md").write_text("manual\n")
+            (seed / "homeassistant" / "docs" / "note.txt").write_text("manual\n")
+            (seed / "homeassistant" / "old.yaml").write_text("stale\n")
+            (seed / "homeassistant" / "packages" / "stale.yaml").write_text("stale\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "current.yaml").write_text("current\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_job())
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn("homeassistant/README.md", result.stdout)
+            self.assertIn("homeassistant/docs/note.txt", result.stdout)
+            self.assertIn("homeassistant/configuration.yaml", result.stdout)
+            self.assertIn("homeassistant/packages/current.yaml", result.stdout)
+            self.assertNotIn("homeassistant/old.yaml", result.stdout)
+            self.assertNotIn("homeassistant/packages/stale.yaml", result.stdout)
+
     def test_empty_git_apply_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -357,6 +451,7 @@ class ServerTests(unittest.TestCase):
             live.mkdir()
             (live / "configuration.yaml").write_text("live\n")
             (live / "database.db").write_text("live-only\n")
+            (live / "extra.yaml").write_text("live-only\n")
 
             server.apply_targets(
                 [
@@ -374,7 +469,42 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertEqual((live / "configuration.yaml").read_text(), "git\n")
-            self.assertFalse((live / "database.db").exists())
+            self.assertEqual((live / "database.db").read_text(), "live-only\n")
+            self.assertFalse((live / "extra.yaml").exists())
+
+    def test_addon_apply_ignores_excluded_runtime_files_from_git(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            (source / "database.db").write_text("git-runtime\n")
+            (source / "home-assistant.log").write_text("git-log\n")
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            (live / "database.db").write_text("live-runtime\n")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "restart_after_sync": False,
+                        "delete": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual((live / "configuration.yaml").read_text(), "git\n")
+            self.assertEqual((live / "database.db").read_text(), "live-runtime\n")
+            self.assertFalse((live / "home-assistant.log").exists())
 
     def test_core_check_runs_before_start_when_storage_stops_core(self):
         server = load_server()
@@ -440,6 +570,26 @@ class ServerTests(unittest.TestCase):
                 )
 
             self.assertEqual(events, ["stop", "check"])
+
+    def test_homeassistant_directory_apply_preserves_live_only_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            (source / "packages").mkdir(parents=True)
+            (source / "packages" / "git.yaml").write_text("git\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "live-only.yaml").write_text("live\n")
+
+            server.apply_homeassistant_config(
+                source,
+                server.CONFIG_DIR,
+                {"id": "homeassistant"},
+            )
+
+            self.assertEqual((server.CONFIG_DIR / "packages" / "git.yaml").read_text(), "git\n")
+            self.assertEqual((server.CONFIG_DIR / "packages" / "live-only.yaml").read_text(), "live\n")
 
     def test_selected_addon_is_saved_to_git(self):
         server = load_server()
@@ -729,7 +879,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "error")
             self.assertIn("Resolve Git conflicts", state["last_message"])
 
-    def test_selected_addon_delete_true_preview_counts_live_only_deletion(self):
+    def test_selected_addon_delete_true_preview_counts_managed_live_only_deletion(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -741,6 +891,7 @@ class ServerTests(unittest.TestCase):
             live.mkdir()
             (live / "configuration.yaml").write_text("live\n")
             (live / "database.db").write_text("live-only\n")
+            (live / "extra.yaml").write_text("live-only\n")
 
             preview = server.build_apply_preview(
                 [
@@ -756,7 +907,9 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertEqual(preview["deletions"], 1)
-            self.assertIn("database.db", preview["diff"])
+            self.assertIn("extra.yaml", preview["diff"])
+            preview_file = server.WORK_DIR / "apply-preview" / "addon-local_zigbee2mqtt" / "database.db"
+            self.assertEqual(preview_file.read_text(), "live-only\n")
 
     def test_selected_addon_delete_false_preview_preserves_live_only_file(self):
         server = load_server()
@@ -982,6 +1135,100 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
             self.assertEqual(events, ["stop", "check", "start"])
+
+    def test_failed_apply_rolls_back_new_homeassistant_directory_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / "packages").mkdir(parents=True)
+            (seed / "homeassistant" / "packages" / "new.yaml").write_text("git\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job())
+
+            def fail_check():
+                raise RuntimeError("bad config")
+
+            server.do_core_check = fail_check
+
+            self.assertFalse(server.run_apply_job())
+            self.assertFalse((server.CONFIG_DIR / "packages" / "new.yaml").exists())
+
+    def test_core_start_failure_rolls_back_without_second_stop(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "restart_after_apply": True,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_restart = lambda: events.append("restart")
+
+            start_calls = {"count": 0}
+
+            def start_or_fail_once():
+                events.append("start")
+                start_calls["count"] += 1
+                if start_calls["count"] == 1:
+                    raise RuntimeError("start failed")
+
+            server.core_start = start_or_fail_once
+
+            self.assertTrue(server.run_preview_job())
+            self.assertFalse(server.run_apply_job())
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
+            self.assertEqual(events, ["stop", "check", "start", "start"])
 
     def test_clean_git_checkout_imports_server(self):
         with tempfile.TemporaryDirectory() as tmp:

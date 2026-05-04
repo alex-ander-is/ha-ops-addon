@@ -159,8 +159,32 @@ def clear_tree(dest, work_dir, run_command):
     sync_tree(empty_dir, dest, True, None, run_command)
 
 
+def clean_homeassistant_export_destination(dest, target, ctx):
+    ensure_dir(dest)
+    clean_export_destination(dest, ctx.clean_paths, ctx.clean_dir_names, ctx.clean_file_patterns)
+
+    for pattern in ctx.ha_root_patterns:
+        for dest_path in sorted(dest.glob(pattern)):
+            if not dest_path.is_file() or dest_path.name in ctx.ha_root_excludes:
+                continue
+            safe_remove_path(dest_path)
+
+    for name in ctx.ha_dirs:
+        clear_managed_destination_path(dest / name, ctx.export_excludes, ctx.work_dir, ctx.run_command)
+
+    if target and target.get("include_zigbee2mqtt_legacy"):
+        for name in ctx.zigbee2mqtt_paths:
+            clear_managed_destination_path(dest / name, ctx.export_excludes, ctx.work_dir, ctx.run_command)
+
+    dest_storage = dest / ".storage"
+    for name in ctx.storage_allowlist:
+        dest_path = dest_storage / name
+        if dest_path.exists() or dest_path.is_symlink():
+            safe_remove_path(dest_path)
+
+
 def export_homeassistant_config(src, dest, target, ctx):
-    clear_tree(dest, ctx.work_dir, ctx.run_command)
+    clean_homeassistant_export_destination(dest, target, ctx)
     copied = 0
 
     for pattern in ctx.ha_root_patterns:
@@ -210,7 +234,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
         src_path = src / name
         if not src_path.exists():
             continue
-        sync_homeassistant_path_allowlist(src, dest, [name], ctx.export_excludes, ctx.run_command)
+        sync_homeassistant_path_allowlist(src, dest, [name], ctx.export_excludes, ctx.run_command, delete=False)
         copied += 1
 
     zigbee2mqtt_count = 0
@@ -221,6 +245,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
             ctx.zigbee2mqtt_paths,
             ctx.export_excludes,
             ctx.run_command,
+            delete=False,
         )
     copied_count, skipped_protected = sync_storage_allowlist(
         src,
@@ -240,7 +265,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
     return skipped_protected
 
 
-def sync_homeassistant_path_allowlist(src, dest, paths, export_excludes, run_command):
+def sync_homeassistant_path_allowlist(src, dest, paths, export_excludes, run_command, delete=True):
     copied = 0
     for name in paths:
         src_path = src / name
@@ -248,12 +273,73 @@ def sync_homeassistant_path_allowlist(src, dest, paths, export_excludes, run_com
             continue
         dest_path = dest / name
         if src_path.is_dir():
-            sync_tree(src_path, dest_path, True, export_excludes, run_command)
+            sync_tree(src_path, dest_path, delete, export_excludes, run_command)
         else:
             ensure_dir(dest_path.parent)
             shutil.copy2(src_path, dest_path)
         copied += 1
     return copied
+
+
+def clear_managed_destination_path(dest_path, export_excludes, work_dir, run_command):
+    if not dest_path.exists() and not dest_path.is_symlink():
+        return
+    if dest_path.is_dir() and not dest_path.is_symlink():
+        empty_dir = work_dir / "empty"
+        ensure_dir(empty_dir)
+        sync_tree(empty_dir, dest_path, True, export_excludes, run_command)
+    else:
+        safe_remove_path(dest_path)
+
+
+def restore_homeassistant_config(src, dest, target, ctx):
+    ensure_dir(dest)
+    restored_root_names = set()
+
+    for pattern in ctx.ha_root_patterns:
+        for src_path in sorted(src.glob(pattern)):
+            if not src_path.is_file() or src_path.name in ctx.ha_root_excludes:
+                continue
+            restored_root_names.add(src_path.name)
+            dest_path = dest / src_path.name
+            ensure_dir(dest_path.parent)
+            shutil.copy2(src_path, dest_path)
+
+    for pattern in ctx.ha_root_patterns:
+        for dest_path in sorted(dest.glob(pattern)):
+            if not dest_path.is_file() or dest_path.name in ctx.ha_root_excludes:
+                continue
+            if dest_path.name not in restored_root_names:
+                safe_remove_path(dest_path)
+
+    for name in ctx.ha_dirs:
+        src_path = src / name
+        dest_path = dest / name
+        if src_path.exists():
+            sync_homeassistant_path_allowlist(src, dest, [name], ctx.export_excludes, ctx.run_command, delete=True)
+        else:
+            clear_managed_destination_path(dest_path, ctx.export_excludes, ctx.work_dir, ctx.run_command)
+
+    if target.get("include_zigbee2mqtt_legacy"):
+        for name in ctx.zigbee2mqtt_paths:
+            src_path = src / name
+            dest_path = dest / name
+            if src_path.exists():
+                sync_homeassistant_path_allowlist(src, dest, [name], ctx.export_excludes, ctx.run_command, delete=True)
+            else:
+                clear_managed_destination_path(dest_path, ctx.export_excludes, ctx.work_dir, ctx.run_command)
+
+    src_storage = src / ".storage"
+    dest_storage = dest / ".storage"
+    ensure_dir(dest_storage)
+    for name in ctx.storage_allowlist:
+        src_path = src_storage / name
+        dest_path = dest_storage / name
+        if src_path.exists():
+            ensure_dir(dest_path.parent)
+            shutil.copy2(src_path, dest_path)
+        elif dest_path.exists() or dest_path.is_symlink():
+            safe_remove_path(dest_path)
 
 
 def sync_storage_allowlist(src, dest, storage_allowlist, protected_storage_files, allow_protected=False):
@@ -324,7 +410,7 @@ def apply_targets(resolved_targets, details, ctx):
             if not source_path.exists() or not has_managed_content(source_path):
                 ctx.add_detail(details, f"Skipping {target['id']} because Git has no config for this add-on yet.")
                 continue
-            sync_tree(source_path, live_path, target_model.apply_delete(target), None, ctx.run_command)
+            sync_tree(source_path, live_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
 
         if target["type"] == "addon" and target.get("restart_after_sync", True):
             slug = target["resolved_slug"]
@@ -349,7 +435,11 @@ def apply_targets(resolved_targets, details, ctx):
     if core_stopped:
         if homeassistant_target.get("restart_after_sync", True):
             ctx.add_detail(details, "Starting Home Assistant Core after sync.")
-            ctx.core_start()
+            try:
+                ctx.core_start()
+            except Exception as exc:
+                setattr(exc, "core_stopped", True)
+                raise
     else:
         if homeassistant_target.get("restart_after_sync", True):
             ctx.add_detail(details, "Restarting Home Assistant Core.")
@@ -402,7 +492,7 @@ def sync_to_preview(target, preview_path, ctx):
             skipped_protected = []
     else:
         if source_path.exists() and has_managed_content(source_path):
-            sync_tree(source_path, preview_path, target_model.apply_delete(target), None, ctx.run_command)
+            sync_tree(source_path, preview_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
         skipped_protected = []
     return skipped_protected
 
