@@ -47,6 +47,7 @@ Skipped:
 
 - Git config is applied as an overlay, not as a destructive mirror.
 - Missing files in Git do not delete live Home Assistant files.
+- Selected add-on config is applied as an overlay by default.
 - Empty Git source is a no-op.
 - Directories that exist in Git are synced as managed directories.
 - Selected `.storage` files are applied as an overlay, except protected files unless `allow_protected_storage` is explicitly set.
@@ -61,6 +62,7 @@ Skipped:
 - Add-ons are unmanaged by default.
 - Check an add-on in the UI to include its config in `Save HA to Git` and future Git-to-HA apply.
 - Uncheck an add-on in the UI to exclude it, even when `ha-ops.json` exists.
+- Set `delete: true` in an optional manifest only when intentionally mirroring an add-on folder destructively.
 - Zigbee2MQTT is detected from installed add-on metadata instead of a hard-coded slug.
 - If Zigbee2MQTT stores config under `/config/zigbee2mqtt`, HA Ops can use that existing path instead of assuming `/addon_configs/<slug>`.
 

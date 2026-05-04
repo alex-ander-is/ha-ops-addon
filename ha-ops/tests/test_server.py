@@ -172,6 +172,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(targets[0]["type"], "homeassistant")
             self.assertEqual(targets[1]["addon_slug"], "local_zigbee2mqtt")
             self.assertEqual(targets[1]["source"], "addons/local_zigbee2mqtt")
+            self.assertFalse(targets[1]["delete"])
 
     def test_save_ha_to_git_initializes_empty_repo(self):
         server = load_server()
@@ -313,6 +314,67 @@ class ServerTests(unittest.TestCase):
                 [],
             )
             self.assertEqual((live / "configuration.yaml").read_text(), "live\n")
+
+    def test_partial_addon_git_source_does_not_delete_live_only_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            (live / "database.db").write_text("live-only\n")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "restart_after_sync": False,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual((live / "configuration.yaml").read_text(), "git\n")
+            self.assertEqual((live / "database.db").read_text(), "live-only\n")
+
+    def test_explicit_addon_delete_removes_live_only_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            (live / "database.db").write_text("live-only\n")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "restart_after_sync": False,
+                        "delete": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual((live / "configuration.yaml").read_text(), "git\n")
+            self.assertFalse((live / "database.db").exists())
 
     def test_core_check_runs_before_start_when_storage_stops_core(self):
         server = load_server()

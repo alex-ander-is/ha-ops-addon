@@ -808,7 +808,8 @@ def default_addon_target(slug):
         "type": "addon",
         "source": f"addons/{slug}",
         "addon_slug": slug,
-        "delete": True,
+        "delete": False,
+        "restore_delete": True,
         "restart_after_sync": True,
         "optional": True,
     }
@@ -834,7 +835,8 @@ def selected_addon_target(slug, template=None):
     target.pop("addon_name_contains", None)
     target.setdefault("id", f"addon-{slug}")
     target.setdefault("source", f"addons/{slug}")
-    target.setdefault("delete", True)
+    target.setdefault("delete", False)
+    target.setdefault("restore_delete", True)
     target.setdefault("restart_after_sync", True)
     target.setdefault("optional", True)
     return target
@@ -1285,7 +1287,7 @@ def create_release_snapshot(resolved_targets, commit, backup_slug):
                 "resolved_slug": target.get("resolved_slug"),
                 "live_path": target["live_path"],
                 "source_path": target["source_path"],
-                "delete": bool(target.get("delete", True)),
+                "delete": target_restore_delete(target),
                 "restart_after_sync": bool(target.get("restart_after_sync", True)),
                 "stop_addon_before_sync": bool(target.get("stop_addon_before_sync", False)),
                 "stop_core_before_sync_if_storage": bool(target.get("stop_core_before_sync_if_storage", False)),
@@ -1415,6 +1417,18 @@ def stop_addon_for_sync(slug):
     return was_started
 
 
+def target_apply_delete(target):
+    return bool(target.get("delete", False))
+
+
+def target_save_delete(target):
+    return bool(target.get("save_delete", True))
+
+
+def target_restore_delete(target):
+    return bool(target.get("restore_delete", target.get("delete", True)))
+
+
 def apply_targets(resolved_targets, details):
     homeassistant_target = None
     core_stopped = False
@@ -1443,7 +1457,7 @@ def apply_targets(resolved_targets, details):
             if not source_path.exists() or not has_managed_content(source_path):
                 add_detail(details, f"Skipping {target['id']} because Git has no config for this add-on yet.")
                 continue
-            sync_tree(source_path, live_path, delete=bool(target.get("delete", True)))
+            sync_tree(source_path, live_path, delete=target_apply_delete(target))
 
         if target["type"] == "addon" and target.get("restart_after_sync", True):
             slug = target["resolved_slug"]
@@ -1494,7 +1508,7 @@ def export_targets(resolved_targets, details):
             removed_count = clean_export_destination(source_path)
             if removed_count:
                 add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} save destination.")
-            export_tree(live_path, source_path, delete=bool(target.get("delete", True)))
+            export_tree(live_path, source_path, delete=target_save_delete(target))
 
 
 def sync_to_preview(target, preview_path):
@@ -1516,7 +1530,7 @@ def sync_to_preview(target, preview_path):
             skipped_protected = []
     else:
         if source_path.exists() and has_managed_content(source_path):
-            sync_tree(source_path, preview_path, delete=bool(target.get("delete", True)))
+            sync_tree(source_path, preview_path, delete=target_apply_delete(target))
         skipped_protected = []
     return skipped_protected
 

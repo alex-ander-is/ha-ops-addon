@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.5
+
+- Apply selected add-ons as an overlay by default so partial Git sources do not delete live-only add-on files.
+- Keep destructive add-on deletes available only through explicit `delete: true`.
+
 ## 0.4.4
 
 - Run Home Assistant config check after syncing and before starting Core when `.storage` apply stopped Core.
