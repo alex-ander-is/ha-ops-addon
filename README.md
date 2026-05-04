@@ -4,7 +4,7 @@ Home Assistant add-on repository for HA Ops.
 
 `ha-ops` is an ingress UI for managing a Git-backed Home Assistant configuration:
 
-- Pull And Apply from `ha-config/main`
+- Preview Apply and Pull & Apply from `ha-config/main`
 - Export live config into a local `export` branch
 - Push `export` to `origin/export` for review
 - create release snapshots and optional Home Assistant backups

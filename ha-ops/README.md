@@ -4,7 +4,8 @@ HA Ops manages a Git-backed Home Assistant config from an ingress UI.
 
 ## Actions
 
-- `Pull And Apply`: fetch `repo_branch`, read `ha-ops.json`, snapshot live targets, then apply Git config to Home Assistant.
+- `Preview Apply`: fetch `repo_branch`, read `ha-ops.json`, and show the diff that Apply would make.
+- `Pull & Apply`: fetch `repo_branch`, read `ha-ops.json`, snapshot live targets, then apply Git config to Home Assistant.
 - `Export`: recreate local `export` from `origin/<repo_branch>` and copy live config into it.
 - `Push`: commit local export changes and push them to `origin/export`.
 - `Rollback`: restore a saved local release snapshot.
@@ -48,6 +49,7 @@ Skipped:
 - Selected `.storage` files are applied as an overlay.
 - Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
 - If selected `.storage` files are present, Home Assistant Core is stopped before sync.
+- Optional add-on targets whose source folder only contains `.gitkeep` are skipped.
 
 ## Add-on options
 

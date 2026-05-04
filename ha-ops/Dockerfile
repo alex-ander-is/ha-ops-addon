@@ -1,7 +1,7 @@
 ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
 FROM $BUILD_FROM
 
-RUN apk add --no-cache bash curl git openssh-client openssh-keygen python3 rsync
+RUN apk add --no-cache bash curl diffutils git openssh-client openssh-keygen python3 rsync
 
 WORKDIR /app
 

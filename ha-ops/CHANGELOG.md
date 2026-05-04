@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.19
+
+- Add an Apply Preview action that shows a diff before applying Git config.
+- Show latest Home Assistant backup status in the UI.
+- Rename the action button to `Pull & Apply`.
+- Use checksum-based sync so same-size config edits are not skipped.
+- Skip optional add-on targets whose source folder only contains `.gitkeep`.
+- Validate manifest paths, rollback release names, and make deploy key regeneration atomic.
+
 ## 0.3.18
 
 - Exclude temporary files and `node_modules` symlinks from exported Zigbee2MQTT external converters.
