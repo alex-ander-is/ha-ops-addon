@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- Reject empty, absolute, current-directory, and parent-escaping `repo_path` values before touching the local checkout.
+
 ## 0.4.2
 
 - Clean untracked and ignored files from the local checkout before reading Git sources or saving live config.

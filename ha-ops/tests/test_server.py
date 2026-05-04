@@ -229,6 +229,37 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "homeassistant:\n")
 
+    def test_repo_path_rejects_empty_absolute_and_parent_escape(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            for value in ["", " ", ".", "/tmp/ha-config", "../ha-config", "ha-config/../other"]:
+                with self.subTest(repo_path=value):
+                    with self.assertRaises(RuntimeError):
+                        server.repo_checkout_path({"repo_path": value})
+
+            self.assertEqual(
+                server.repo_checkout_path({"repo_path": "ha-config"}),
+                (server.DATA_DIR / "ha-config").resolve(),
+            )
+
+    def test_invalid_repo_path_does_not_clean_external_checkout(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            outside = root / "outside"
+            self.git(["init", str(outside)], root)
+            marker = outside / "keep-me.txt"
+            marker.write_text("untracked\n")
+
+            with self.assertRaises(RuntimeError):
+                server.ensure_repo({"repo_path": str(outside), "repo_url": "unused"})
+
+            self.assertTrue(marker.exists())
+
     def test_preview_ignores_untracked_checkout_files(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -619,8 +619,21 @@ def ensure_fresh_system_backup(options, details):
     return slug
 
 
+def repo_checkout_path(options):
+    value = str(options.get("repo_path", "ha-config")).strip()
+    path = Path(value)
+    if not value or value == "." or path.is_absolute() or ".." in path.parts:
+        raise RuntimeError("Invalid repo_path. Use a relative folder inside /data, for example ha-config.")
+
+    repo_dir = (DATA_DIR / path).resolve()
+    data_dir = DATA_DIR.resolve()
+    if repo_dir == data_dir or data_dir not in repo_dir.parents:
+        raise RuntimeError("Invalid repo_path. Use a relative folder inside /data, for example ha-config.")
+    return repo_dir
+
+
 def ensure_repo(options, reset_to_origin=True):
-    repo_dir = DATA_DIR / options.get("repo_path", "ha-config")
+    repo_dir = repo_checkout_path(options)
     repo_url = options.get("repo_url", "").strip()
     if not repo_url:
         raise RuntimeError("repo_url is empty")
@@ -1707,8 +1720,11 @@ def run_save_job():
         return True
     except Exception as exc:
         details.append(str(exc))
-        repo_path = DATA_DIR / options.get("repo_path", "ha-config")
-        conflicts = git_conflict_paths(repo_path) if repo_path.exists() else []
+        try:
+            repo_path = repo_checkout_path(options)
+        except RuntimeError:
+            repo_path = None
+        conflicts = git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -1981,7 +1997,7 @@ def safe_repo_relative_path(value):
 
 def resolve_git_conflict(path, choice):
     options = load_options()
-    repo_dir = DATA_DIR / options.get("repo_path", "ha-config")
+    repo_dir = repo_checkout_path(options)
     branch = options.get("repo_branch", "main")
     safe_path = safe_repo_relative_path(path)
     if choice == "ha":
@@ -2020,8 +2036,8 @@ def resolve_git_conflict(path, choice):
 
 def current_manifest_preview():
     options = load_options()
-    repo_dir = DATA_DIR / options.get("repo_path", "ha-config")
     try:
+        repo_dir = repo_checkout_path(options)
         try:
             addons = get_installed_addons()
         except Exception:
