@@ -28,9 +28,11 @@ class JobContext:
     read_state: Any
     release_now: Any
     repo_checkout_path: Any
+    restore_save_git_resolutions: Any
     resolve_targets: Any
     restore_release_snapshot: Any
     run_lock: Any
+    save_unknown_base_conflicts: Any
     stage_all: Any
     stage_homeassistant_storage_allowlist: Any
     utc_now: Any
@@ -70,6 +72,8 @@ def run_save_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("conflicts"):
+            if state.get("conflict_type") == "save_unknown_base":
+                raise RuntimeError("Resolve unknown-base Save conflicts before running Save HA to Git.")
             raise RuntimeError("Resolve Git conflicts before running Save HA to Git.")
 
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
@@ -83,8 +87,28 @@ def run_save_job(ctx):
 
         ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        save_resolutions = state.get("save_conflict_resolutions", {})
+        save_conflicts = ctx.save_unknown_base_conflicts(resolved_targets, repo_dir, save_resolutions, details)
+        if save_conflicts:
+            message = "Resolve unknown-base Save conflicts before running Save HA to Git."
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "error",
+                    "last_action": "save",
+                    "last_message": message,
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                    "conflicts": save_conflicts,
+                    "conflict_type": "save_unknown_base",
+                    "save_conflict_resolutions": save_resolutions,
+                }
+            )
+            return False
+
         ctx.add_detail(details, "Saving live Home Assistant config to Git.")
         ctx.export_targets(resolved_targets, details)
+        ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
         ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
         ctx.stage_all(repo_dir)
 
@@ -102,7 +126,7 @@ def run_save_job(ctx):
         else:
             ctx.add_detail(details, "No live Home Assistant changes to save.")
 
-        write_state({"conflicts": []})
+        write_state({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
 
         write_state(
             {

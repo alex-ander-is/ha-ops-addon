@@ -596,6 +596,76 @@ def export_targets(resolved_targets, details, ctx):
             export_tree(live_path, source_path, target_model.save_delete(target), ctx.export_excludes, ctx.run_command)
 
 
+def export_target_to_path(target, dest, ctx):
+    live_path = Path(target["live_path"])
+    if target["type"] == "homeassistant":
+        export_homeassistant_config(live_path, dest, target, ctx)
+        return
+    clean_export_destination(
+        dest,
+        ctx.clean_paths,
+        ctx.clean_dir_names,
+        ctx.clean_file_patterns,
+    )
+    export_tree(live_path, dest, target_model.save_delete(target), ctx.export_excludes, ctx.run_command)
+
+
+def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, ctx):
+    preview_root = ctx.work_dir / "save-preview"
+    clear_tree(preview_root, ctx.work_dir, ctx.run_command)
+    repo_dir = Path(repo_dir)
+    conflicts = []
+
+    for target in resolved_targets:
+        live_path = Path(target["live_path"])
+        source_path = Path(target["source_path"])
+        if not live_path.exists():
+            if target.get("optional", False):
+                continue
+            raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
+        if not has_managed_content(source_path):
+            continue
+
+        preview_path = preview_root / target["id"]
+        export_target_to_path(target, preview_path, ctx)
+        if not preview_path.exists():
+            continue
+
+        for exported_path in sorted(preview_path.rglob("*")):
+            if not exported_path.is_file():
+                continue
+            relative = exported_path.relative_to(preview_path)
+            source_file = source_path / relative
+            if not source_file.exists() or not source_file.is_file():
+                continue
+            repo_relative = source_file.relative_to(repo_dir).as_posix()
+            if resolutions.get(repo_relative) in {"ha", "git"}:
+                continue
+            if file_differs(exported_path, source_file):
+                conflicts.append(repo_relative)
+
+    if conflicts:
+        ctx.add_detail(details, f"Found {len(conflicts)} unknown-base Save conflict(s).")
+    return conflicts
+
+
+def restore_save_git_resolutions(repo_dir, resolutions, details, ctx):
+    git_paths = sorted(path for path, choice in resolutions.items() if choice == "git")
+    if not git_paths:
+        return 0
+
+    for path in git_paths:
+        safe_path = Path(path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise RuntimeError("Invalid Save conflict path")
+
+    result = ctx.run_command(["git", "checkout", "--"] + git_paths, cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git checkout Save conflict resolution failed:\n{result.stderr.strip()}")
+    ctx.add_detail(details, f"Kept {len(git_paths)} Git version file(s) selected during Save conflict resolution.")
+    return len(git_paths)
+
+
 def sync_to_preview(target, preview_path, ctx):
     source_path = Path(target["source_path"])
     live_path = Path(target["live_path"])

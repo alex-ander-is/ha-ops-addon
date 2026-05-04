@@ -58,6 +58,8 @@ def default_state():
         "last_preview_deletions": None,
         "managed_addons": [],
         "conflicts": [],
+        "conflict_type": None,
+        "save_conflict_resolutions": {},
     }
 
 

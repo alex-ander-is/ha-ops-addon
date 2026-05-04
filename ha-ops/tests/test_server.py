@@ -203,6 +203,109 @@ class ServerTests(unittest.TestCase):
             )
             self.assertIn("homeassistant/configuration.yaml", result.stdout)
 
+    def test_save_unknown_base_blocks_same_file_difference(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["conflict_type"], "save_unknown_base")
+            self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+    def test_save_unknown_base_use_git_keeps_git_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            message = server.resolve_git_conflict("homeassistant/configuration.yaml", "git")
+            self.assertIn("Run Save HA to Git again", message)
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+    def test_save_unknown_base_use_ha_overwrites_git_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            message = server.resolve_git_conflict("homeassistant/configuration.yaml", "ha")
+            self.assertIn("Run Save HA to Git again", message)
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
+
+    def test_save_unknown_base_allows_same_file_same_content(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "same\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("same\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["conflicts"], [])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "same\n")
+
     def test_save_exports_protected_storage_allowlist_even_when_ignored(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -685,7 +788,7 @@ class ServerTests(unittest.TestCase):
             repo = server.DATA_DIR / "ha-config"
             self.git(["clone", str(remote), str(repo)], root)
             (repo / "stale.txt").write_text("stale\n")
-            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
             server.OPTIONS_PATH.write_text(
                 json.dumps(
                     {
@@ -714,7 +817,9 @@ class ServerTests(unittest.TestCase):
             root = Path(tmp)
             self.configure_paths(server, root)
             remote = self.seed_remote(root)
-            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
             server.OPTIONS_PATH.write_text(
                 json.dumps(
                     {
@@ -742,7 +847,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
 
             self.assertTrue(server.run_save_job())
-            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "homeassistant:\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
             self.assertGreaterEqual(calls["count"], 2)
 
     def test_selected_addon_is_saved_when_manifest_exists(self):

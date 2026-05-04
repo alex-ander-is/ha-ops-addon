@@ -484,7 +484,13 @@ def git_conflict_paths(repo_dir):
 
 
 def git_pull_rebase(repo_dir, env, branch):
-    return git_ops.git_pull_rebase(repo_dir, env, branch, run_command, lambda conflicts: write_state({"conflicts": conflicts}))
+    return git_ops.git_pull_rebase(
+        repo_dir,
+        env,
+        branch,
+        run_command,
+        lambda conflicts: write_state({"conflicts": conflicts, "conflict_type": "git_rebase"}),
+    )
 
 
 def stage_all(repo_dir):
@@ -917,6 +923,14 @@ def export_targets(resolved_targets, details):
     return sync_logic.export_targets(resolved_targets, details, sync_deps())
 
 
+def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details):
+    return sync_logic.save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, sync_deps())
+
+
+def restore_save_git_resolutions(repo_dir, resolutions, details):
+    return sync_logic.restore_save_git_resolutions(repo_dir, resolutions, details, sync_deps())
+
+
 def sync_to_preview(target, preview_path):
     return sync_logic.sync_to_preview(target, preview_path, sync_deps())
 
@@ -1023,9 +1037,11 @@ def job_deps():
         read_state=read_state,
         release_now=release_now,
         repo_checkout_path=repo_checkout_path,
+        restore_save_git_resolutions=restore_save_git_resolutions,
         resolve_targets=resolve_targets,
         restore_release_snapshot=restore_release_snapshot,
         run_lock=RUN_LOCK,
+        save_unknown_base_conflicts=save_unknown_base_conflicts,
         stage_all=stage_all,
         stage_homeassistant_storage_allowlist=stage_homeassistant_storage_allowlist,
         utc_now=utc_now,
@@ -1073,7 +1089,48 @@ def safe_repo_relative_path(value):
     return git_ops.safe_repo_relative_path(value)
 
 
+def resolve_save_unknown_base_conflict(path, choice):
+    safe_path = safe_repo_relative_path(path)
+    if choice not in {"ha", "git"}:
+        raise RuntimeError("Invalid conflict choice")
+
+    state = read_state()
+    conflicts = list(state.get("conflicts", []))
+    if safe_path not in conflicts:
+        raise RuntimeError("Save conflict path is not pending")
+
+    resolutions = dict(state.get("save_conflict_resolutions", {}))
+    resolutions[safe_path] = choice
+    remaining = [item for item in conflicts if item != safe_path]
+    if remaining:
+        write_state(
+            {
+                "conflicts": remaining,
+                "conflict_type": "save_unknown_base",
+                "save_conflict_resolutions": resolutions,
+                "last_status": "error",
+                "last_message": f"Resolved {safe_path}. {len(remaining)} Save conflict(s) remain.",
+            }
+        )
+        return f"Resolved {safe_path}. {len(remaining)} Save conflict(s) remain."
+
+    write_state(
+        {
+            "conflicts": [],
+            "conflict_type": None,
+            "save_conflict_resolutions": resolutions,
+            "last_status": "idle",
+            "last_message": "Save conflicts resolved. Run Save HA to Git again.",
+        }
+    )
+    return "All Save conflicts resolved. Run Save HA to Git again."
+
+
 def resolve_git_conflict(path, choice):
+    state = read_state()
+    if state.get("conflict_type") == "save_unknown_base":
+        return resolve_save_unknown_base_conflict(path, choice)
+
     options = load_options()
     repo_dir = repo_checkout_path(options)
     branch = options.get("repo_branch", "main")
@@ -1093,7 +1150,7 @@ def resolve_git_conflict(path, choice):
 
     conflicts = git_conflict_paths(repo_dir)
     if conflicts:
-        write_state({"conflicts": conflicts})
+        write_state({"conflicts": conflicts, "conflict_type": "git_rebase"})
         return f"Resolved {safe_path}. {len(conflicts)} conflict(s) remain."
 
     env = git_env(options)
@@ -1108,7 +1165,15 @@ def resolve_git_conflict(path, choice):
         else:
             raise RuntimeError(f"git rebase --continue failed:\n{output}")
     push_branch(repo_dir, env, branch)
-    write_state({"conflicts": [], "last_status": "success", "last_message": "Conflicts resolved and pushed."})
+    write_state(
+        {
+            "conflicts": [],
+            "conflict_type": None,
+            "save_conflict_resolutions": {},
+            "last_status": "success",
+            "last_message": "Conflicts resolved and pushed.",
+        }
+    )
     return "All conflicts resolved and pushed."
 
 
