@@ -38,57 +38,49 @@ class ReleaseTarget(ResolvedTarget, total=False):
     existed: bool
 
 
-def bool_option(target: Mapping[str, Any], name: str, default: bool) -> bool:
-    return policies.bool_option(target, name, default)
-
-
-def policy_bool(target: Mapping[str, Any], name: str, default: bool, legacy_names=()) -> bool:
-    return policies.policy_bool(target, name, default, legacy_names)
-
-
 def apply_delete(target: Mapping[str, Any]) -> bool:
-    return bool_option(target, "delete", False)
+    return policies.apply_delete(target)
 
 
 def save_delete(target: Mapping[str, Any]) -> bool:
-    return bool_option(target, "save_delete", True)
+    return policies.save_delete(target)
 
 
 def restore_delete(target: Mapping[str, Any]) -> bool:
-    return bool(target.get("restore_delete", target.get("delete", True)))
+    return policies.restore_delete(target)
 
 
 def allow_protected_storage(target: Mapping[str, Any]) -> bool:
-    return bool_option(target, "allow_protected_storage", False)
+    return policies.allow_protected_storage(target)
 
 
 def reload_yaml_after_apply(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "reload_yaml_after_apply", True)
+    return policies.reload_yaml_after_apply(target)
 
 
 def restart_core_after_apply(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "restart_core_after_apply", False, ("restart_after_sync",))
+    return policies.restart_core_after_apply(target)
 
 
 def stop_core_before_storage_apply(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "stop_core_before_storage_apply", True, ("stop_core_before_sync_if_storage",))
+    return policies.stop_core_before_storage_apply(target)
 
 
 def start_core_after_storage_apply(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "start_core_after_storage_apply", True, ("restart_after_sync",))
+    return policies.start_core_after_storage_apply(target)
 
 
 def reload_yaml_after_rollback(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "reload_yaml_after_rollback", False)
+    return policies.reload_yaml_after_rollback(target)
 
 
 def restart_core_after_rollback(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "restart_core_after_rollback", False, ("restart_after_sync",))
+    return policies.restart_core_after_rollback(target)
 
 
 def stop_core_before_storage_rollback(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "stop_core_before_storage_rollback", True, ("stop_core_before_sync_if_storage",))
+    return policies.stop_core_before_storage_rollback(target)
 
 
 def start_core_after_storage_rollback(target: Mapping[str, Any]) -> bool:
-    return policy_bool(target, "start_core_after_storage_rollback", True, ("restart_after_sync",))
+    return policies.start_core_after_storage_rollback(target)

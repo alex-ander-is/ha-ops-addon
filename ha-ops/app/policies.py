@@ -146,16 +146,8 @@ def bool_option(values, name, default):
     return bool_value(values.get(name, default))
 
 
-def policy_bool(values, name, default, legacy_names=()):
-    if name in values:
-        return bool_value(values.get(name))
-    for legacy_name in legacy_names:
-        if legacy_name in values:
-            return bool_value(values.get(legacy_name))
-    return default
-
-
-def policy_bool_with_options(values, options, name, default, legacy_names=()):
+def policy_bool(values, name, default, legacy_names=(), options=None):
+    options = options or {}
     if name in values:
         return bool_value(values.get(name))
     if name in options:
@@ -166,3 +158,107 @@ def policy_bool_with_options(values, options, name, default, legacy_names=()):
         if legacy_name in options:
             return bool_value(options.get(legacy_name))
     return default
+
+
+def policy_bool_with_options(values, options, name, default, legacy_names=()):
+    return policy_bool(values, name, default, legacy_names, options)
+
+
+def apply_delete(values):
+    return bool_option(values, "delete", False)
+
+
+def save_delete(values):
+    return bool_option(values, "save_delete", True)
+
+
+def restore_delete(values):
+    if "restore_delete" in values:
+        return bool_value(values.get("restore_delete"))
+    if "delete" in values:
+        return bool_value(values.get("delete"))
+    return True
+
+
+def allow_protected_storage(values):
+    return bool_option(values, "allow_protected_storage", False)
+
+
+def restart_after_sync(values, options=None):
+    return policy_bool(values, "restart_after_sync", True, ("restart_after_apply",), options)
+
+
+def reload_yaml_after_apply(values, options=None):
+    return policy_bool(values, "reload_yaml_after_apply", True, options=options)
+
+
+def restart_core_after_apply(values, options=None):
+    return policy_bool(
+        values,
+        "restart_core_after_apply",
+        False,
+        ("restart_after_sync", "restart_after_apply"),
+        options,
+    )
+
+
+def stop_core_before_storage_apply(values, options=None):
+    return policy_bool(values, "stop_core_before_storage_apply", True, ("stop_core_before_sync_if_storage",), options)
+
+
+def start_core_after_storage_apply(values, options=None):
+    return policy_bool(
+        values,
+        "start_core_after_storage_apply",
+        True,
+        ("restart_after_sync", "restart_after_apply"),
+        options,
+    )
+
+
+def reload_yaml_after_rollback(values, options=None):
+    return policy_bool(values, "reload_yaml_after_rollback", False, options=options)
+
+
+def restart_core_after_rollback(values, options=None):
+    return policy_bool(
+        values,
+        "restart_core_after_rollback",
+        False,
+        ("restart_after_sync", "restart_after_apply"),
+        options,
+    )
+
+
+def stop_core_before_storage_rollback(values, options=None):
+    return policy_bool(values, "stop_core_before_storage_rollback", True, ("stop_core_before_sync_if_storage",), options)
+
+
+def start_core_after_storage_rollback(values, options=None):
+    return policy_bool(
+        values,
+        "start_core_after_storage_rollback",
+        True,
+        ("restart_after_sync", "restart_after_apply"),
+        options,
+    )
+
+
+def homeassistant_lifecycle_policy(values, options=None):
+    return {
+        "reload_yaml_after_apply": reload_yaml_after_apply(values, options),
+        "restart_core_after_apply": restart_core_after_apply(values, options),
+        "stop_core_before_storage_apply": stop_core_before_storage_apply(values, options),
+        "start_core_after_storage_apply": start_core_after_storage_apply(values, options),
+        "reload_yaml_after_rollback": reload_yaml_after_rollback(values, options),
+        "restart_core_after_rollback": restart_core_after_rollback(values, options),
+        "stop_core_before_storage_rollback": stop_core_before_storage_rollback(values, options),
+        "start_core_after_storage_rollback": start_core_after_storage_rollback(values, options),
+    }
+
+
+def default_homeassistant_lifecycle_policy(options):
+    policy = homeassistant_lifecycle_policy({}, options)
+    policy["restart_core_after_rollback"] = policy_bool({}, "restart_core_after_rollback", False, options=options)
+    policy["start_core_after_storage_rollback"] = policy_bool({}, "start_core_after_storage_rollback", True, options=options)
+    return policy

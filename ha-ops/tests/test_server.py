@@ -189,6 +189,37 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(targets[1]["source"], "addons/local_zigbee2mqtt")
             self.assertFalse(targets[1]["delete"])
 
+    def test_policy_booleans_are_centralized_for_manifest_and_targets(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            source = repo / "homeassistant"
+            source.mkdir(parents=True)
+            manifest = {
+                "targets": [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source": "homeassistant",
+                        "restart_after_apply": "true",
+                    }
+                ]
+            }
+
+            target = server.resolve_targets(repo, manifest, [], require_source=True)[0]
+
+            self.assertTrue(target["restart_after_sync"])
+            self.assertTrue(target["restart_core_after_apply"])
+            self.assertTrue(target["start_core_after_storage_apply"])
+            self.assertTrue(target["restart_core_after_rollback"])
+            self.assertTrue(target["start_core_after_storage_rollback"])
+            self.assertTrue(server.target_restore_delete({"delete": "true"}))
+            self.assertFalse(server.target_apply_delete({"delete": "false"}))
+            self.assertFalse(server.target_save_delete({"save_delete": "false"}))
+            self.assertFalse(server.target_restore_delete({"restore_delete": "false", "delete": "true"}))
+
     def test_save_ha_to_git_initializes_empty_repo(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
