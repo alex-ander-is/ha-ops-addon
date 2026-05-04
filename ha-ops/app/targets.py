@@ -1,5 +1,7 @@
 from typing import Any, Mapping, Optional, TypedDict
 
+import policies
+
 
 class Target(TypedDict, total=False):
     id: str
@@ -37,24 +39,11 @@ class ReleaseTarget(ResolvedTarget, total=False):
 
 
 def bool_option(target: Mapping[str, Any], name: str, default: bool) -> bool:
-    return bool(target.get(name, default))
-
-
-def bool_value(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return policies.bool_option(target, name, default)
 
 
 def policy_bool(target: Mapping[str, Any], name: str, default: bool, legacy_names=()) -> bool:
-    if name in target:
-        return bool_value(target.get(name))
-    for legacy_name in legacy_names:
-        if legacy_name in target:
-            return bool_value(target.get(legacy_name))
-    return default
+    return policies.policy_bool(target, name, default, legacy_names)
 
 
 def apply_delete(target: Mapping[str, Any]) -> bool:

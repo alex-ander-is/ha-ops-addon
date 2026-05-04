@@ -7,7 +7,6 @@ import socket
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -22,6 +21,8 @@ import backups as backup_policy
 import git_ops
 import jobs as job_logic
 import manifest as manifest_logic
+import policies
+import releases as release_logic
 import targets as target_model
 
 
@@ -37,123 +38,6 @@ ADDON_CONFIGS_DIR = Path("/addon_configs")
 WORK_DIR = Path("/data/work")
 GENERATED_DEPLOY_KEY_PATH = WORK_DIR / "generated_deploy_key"
 GENERATED_DEPLOY_KEY_PUB_PATH = WORK_DIR / "generated_deploy_key.pub"
-EXPORT_EXCLUDES = [
-    ".cloud/",
-    ".cache/",
-    ".DS_Store",
-    ".google.token",
-    ".ha_run.lock",
-    ".storage/",
-    ".vscode/",
-    "__pycache__/",
-    "backups/",
-    "deps/",
-    "home-assistant.log*",
-    "home-assistant_v2.db*",
-    "*.db",
-    "*.db-*",
-    "*.log",
-    "*.pyc",
-    "*.pyo",
-    ".tmp-*",
-    "node_modules",
-    "node_modules/",
-    "tts/",
-    "www/community/",
-    "www/media/",
-    "www/tmp/",
-    "zigbee2mqtt/coordinator_backup*.json",
-    "zigbee2mqtt/database.db*",
-    "zigbee2mqtt/state.json",
-]
-STORAGE_EXPORT_ALLOWLIST = [
-    "core.area_registry",
-    "core.config",
-    "core.config_entries",
-    "core.device_registry",
-    "core.entity_registry",
-    "core.floor_registry",
-    "core.label_registry",
-    "core.logger",
-    "core.uuid",
-    "counter",
-    "energy",
-    "frontend_theme",
-    "homeassistant.exposed_entities",
-    "input_boolean",
-    "input_button",
-    "input_datetime",
-    "input_number",
-    "input_select",
-    "input_text",
-    "lovelace",
-    "lovelace.lovelace",
-    "lovelace.map",
-    "lovelace_dashboards",
-    "lovelace_resources",
-    "person",
-    "schedule",
-    "scene",
-    "script",
-    "tag",
-    "timer",
-    "zone",
-]
-PROTECTED_STORAGE_FILES = {
-    "core.config",
-    "core.config_entries",
-    "core.device_registry",
-    "core.entity_registry",
-    "core.uuid",
-    "person",
-}
-DEFAULT_BACKUP_MAX_AGE_HOURS = 24
-DEFAULT_MAX_APPLY_DELETIONS = 25
-DEFAULT_RELEASE_KEEP_COUNT = 5
-DEFAULT_RELEASE_KEEP_DAYS = 7
-HOMEASSISTANT_EXPORT_ROOT_PATTERNS = ["*.yaml", "*.yml"]
-HOMEASSISTANT_EXPORT_ROOT_EXCLUDES = {"secrets.yaml"}
-HOMEASSISTANT_EXPORT_DIRS = [
-    "blueprints",
-    "custom_templates",
-    "dashboards",
-    "packages",
-    "templates",
-    "themes",
-    "ui_lovelace_minimalist",
-]
-ZIGBEE2MQTT_CONFIG_PATHS = [
-    "zigbee2mqtt/configuration.yaml",
-    "zigbee2mqtt/external_converters",
-    "zigbee2mqtt/scripts",
-]
-EXPORT_CLEAN_PATHS = [
-    ".cloud",
-    ".cache",
-    ".DS_Store",
-    ".google.token",
-    ".ha_run.lock",
-    ".storage",
-    ".vscode",
-    "backups",
-    "deps",
-    "home-assistant.log*",
-    "home-assistant_v2.db*",
-    "*.db",
-    "*.db-*",
-    "*.log",
-    ".tmp-*",
-    "node_modules",
-    "tts",
-    "www/community",
-    "www/media",
-    "www/tmp",
-    "zigbee2mqtt/coordinator_backup*.json",
-    "zigbee2mqtt/database.db*",
-    "zigbee2mqtt/state.json",
-]
-EXPORT_CLEAN_DIR_NAMES = {"__pycache__", "node_modules"}
-EXPORT_CLEAN_FILE_PATTERNS = ["*.pyc", "*.pyo"]
 
 RUN_LOCK = threading.Lock()
 
@@ -204,25 +88,7 @@ def write_state(updates):
 
 
 def list_releases():
-    releases = []
-    if not RELEASES_DIR.exists():
-        return releases
-
-    for path in sorted(RELEASES_DIR.iterdir(), reverse=True):
-        if not path.is_dir():
-            continue
-        metadata_path = path / "release.json"
-        metadata = load_json(metadata_path, {})
-        releases.append(
-            {
-                "name": path.name,
-                "created_at": metadata.get("created_at"),
-                "commit": metadata.get("commit"),
-                "backup_slug": metadata.get("backup_slug"),
-                "targets": metadata.get("targets", []),
-            }
-        )
-    return releases
+    return release_logic.list_releases(release_deps())
 
 
 def generated_deploy_key_exists():
@@ -427,7 +293,7 @@ def latest_system_backup_status(options=None):
     options = options or load_options()
     return backup_policy.latest_system_backup_status(
         options,
-        DEFAULT_BACKUP_MAX_AGE_HOURS,
+        policies.DEFAULT_BACKUP_MAX_AGE_HOURS,
         option_int,
         option_bool,
         backup_manager_info,
@@ -609,25 +475,25 @@ def sync_deps():
     return sync_logic.SyncContext(
         add_detail=add_detail,
         addon_action=addon_action,
-        clean_dir_names=EXPORT_CLEAN_DIR_NAMES,
-        clean_file_patterns=EXPORT_CLEAN_FILE_PATTERNS,
-        clean_paths=EXPORT_CLEAN_PATHS,
+        clean_dir_names=policies.EXPORT_CLEAN_DIR_NAMES,
+        clean_file_patterns=policies.EXPORT_CLEAN_FILE_PATTERNS,
+        clean_paths=policies.EXPORT_CLEAN_PATHS,
         core_restart=core_restart,
         core_reload_yaml=core_reload_yaml,
         core_start=core_start,
         core_stop=core_stop,
         do_core_check=do_core_check,
-        export_excludes=EXPORT_EXCLUDES,
-        ha_dirs=HOMEASSISTANT_EXPORT_DIRS,
-        ha_root_excludes=HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
-        ha_root_patterns=HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
-        protected_storage_files=PROTECTED_STORAGE_FILES,
+        export_excludes=policies.EXPORT_EXCLUDES,
+        ha_dirs=policies.HOMEASSISTANT_EXPORT_DIRS,
+        ha_root_excludes=policies.HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
+        ha_root_patterns=policies.HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
+        protected_storage_files=policies.PROTECTED_STORAGE_FILES,
         restart_or_start_addon=restart_or_start_addon,
         run_command=run_command,
         stop_addon_for_sync=stop_addon_for_sync,
-        storage_allowlist=STORAGE_EXPORT_ALLOWLIST,
+        storage_allowlist=policies.STORAGE_EXPORT_ALLOWLIST,
         work_dir=WORK_DIR,
-        zigbee2mqtt_paths=ZIGBEE2MQTT_CONFIG_PATHS,
+        zigbee2mqtt_paths=policies.ZIGBEE2MQTT_CONFIG_PATHS,
     )
 
 
@@ -644,7 +510,7 @@ def sync_tree(src, dest, delete=True, excludes=None):
 
 
 def export_tree(src, dest, delete=True):
-    return sync_logic.export_tree(src, dest, delete, EXPORT_EXCLUDES, run_command)
+    return sync_logic.export_tree(src, dest, delete, policies.EXPORT_EXCLUDES, run_command)
 
 
 def safe_remove_path(path):
@@ -654,22 +520,22 @@ def safe_remove_path(path):
 def clean_export_destination(dest):
     return sync_logic.clean_export_destination(
         dest,
-        EXPORT_CLEAN_PATHS,
-        EXPORT_CLEAN_DIR_NAMES,
-        EXPORT_CLEAN_FILE_PATTERNS,
+        policies.EXPORT_CLEAN_PATHS,
+        policies.EXPORT_CLEAN_DIR_NAMES,
+        policies.EXPORT_CLEAN_FILE_PATTERNS,
     )
 
 
 def export_storage_allowlist(src, dest):
-    return sync_logic.export_storage_allowlist(src, dest, STORAGE_EXPORT_ALLOWLIST)
+    return sync_logic.export_storage_allowlist(src, dest, policies.STORAGE_EXPORT_ALLOWLIST)
 
 
 def copy_homeassistant_path_allowlist(src, dest, paths):
-    return sync_logic.copy_homeassistant_path_allowlist(src, dest, paths, EXPORT_EXCLUDES, run_command)
+    return sync_logic.copy_homeassistant_path_allowlist(src, dest, paths, policies.EXPORT_EXCLUDES, run_command)
 
 
 def copy_export_path(src, dest):
-    return sync_logic.copy_export_path(src, dest, EXPORT_EXCLUDES, run_command)
+    return sync_logic.copy_export_path(src, dest, policies.EXPORT_EXCLUDES, run_command)
 
 
 def export_homeassistant_config(src, dest, target=None):
@@ -685,15 +551,15 @@ def restore_homeassistant_config(src, dest, target):
 
 
 def sync_homeassistant_path_allowlist(src, dest, paths):
-    return sync_logic.sync_homeassistant_path_allowlist(src, dest, paths, EXPORT_EXCLUDES, run_command)
+    return sync_logic.sync_homeassistant_path_allowlist(src, dest, paths, policies.EXPORT_EXCLUDES, run_command)
 
 
 def sync_storage_allowlist(src, dest, allow_protected=False):
     return sync_logic.sync_storage_allowlist(
         src,
         dest,
-        STORAGE_EXPORT_ALLOWLIST,
-        PROTECTED_STORAGE_FILES,
+        policies.STORAGE_EXPORT_ALLOWLIST,
+        policies.PROTECTED_STORAGE_FILES,
         allow_protected,
     )
 
@@ -702,196 +568,59 @@ def clear_tree(dest):
     return sync_logic.clear_tree(dest, WORK_DIR, run_command)
 
 
+def release_deps():
+    return release_logic.ReleaseContext(
+        add_detail=add_detail,
+        addon_action=addon_action,
+        clear_tree=clear_tree,
+        core_reload_yaml=core_reload_yaml,
+        core_restart=core_restart,
+        core_start=core_start,
+        core_stop=core_stop,
+        export_homeassistant_config=export_homeassistant_config,
+        export_tree=export_tree,
+        load_json=load_json,
+        option_int=option_int,
+        parse_backup_date=parse_backup_date,
+        release_now=release_now,
+        releases_dir=RELEASES_DIR,
+        restart_or_start_addon=restart_or_start_addon,
+        restore_homeassistant_config=restore_homeassistant_config,
+        safe_remove_path=safe_remove_path,
+        stop_addon_for_sync=stop_addon_for_sync,
+        sync_deps=sync_deps,
+        sync_tree=sync_tree,
+        utc_now=utc_now,
+    )
+
+
 def safe_release_dir(release_name):
-    if not release_name or Path(release_name).name != release_name:
-        raise RuntimeError("Invalid release name")
-    release_dir = (RELEASES_DIR / release_name).resolve()
-    releases_root = RELEASES_DIR.resolve()
-    if release_dir.parent != releases_root:
-        raise RuntimeError("Invalid release name")
-    return release_dir
+    return release_logic.safe_release_dir(release_name, release_deps())
 
 
 def source_has_applicable_storage(path, allow_protected=False):
     return sync_logic.source_has_applicable_storage(
         path,
-        STORAGE_EXPORT_ALLOWLIST,
-        PROTECTED_STORAGE_FILES,
+        policies.STORAGE_EXPORT_ALLOWLIST,
+        policies.PROTECTED_STORAGE_FILES,
         allow_protected,
     )
 
 
 def create_release_snapshot(resolved_targets, commit, backup_slug):
-    release_name = release_now()
-    release_dir = RELEASES_DIR / release_name
-    ensure_dir(release_dir)
-
-    metadata = {
-        "created_at": utc_now(),
-        "commit": commit,
-        "backup_slug": backup_slug,
-        "targets": [],
-    }
-
-    for target in resolved_targets:
-        live_path = Path(target["live_path"])
-        target_snapshot = release_dir / target["id"]
-        ensure_dir(target_snapshot)
-
-        existed = live_path.exists()
-        if existed:
-            if target.get("type") == "homeassistant":
-                export_homeassistant_config(live_path, target_snapshot, target)
-            else:
-                export_tree(live_path, target_snapshot, delete=True)
-
-        metadata["targets"].append(
-            {
-                "id": target["id"],
-                "type": target["type"],
-                "resolved_slug": target.get("resolved_slug"),
-                "live_path": target["live_path"],
-                "source_path": target["source_path"],
-                "delete": target_restore_delete(target),
-                "restart_after_sync": bool(target.get("restart_after_sync", True)),
-                "reload_yaml_after_rollback": bool(target.get("reload_yaml_after_rollback", False)),
-                "restart_core_after_rollback": bool(target.get("restart_core_after_rollback", False)),
-                "stop_core_before_storage_rollback": bool(target.get("stop_core_before_storage_rollback", True)),
-                "start_core_after_storage_rollback": bool(target.get("start_core_after_storage_rollback", True)),
-                "stop_addon_before_sync": bool(target.get("stop_addon_before_sync", False)),
-                "stop_core_before_sync_if_storage": bool(target.get("stop_core_before_sync_if_storage", False)),
-                "existed": existed,
-            }
-        )
-
-    (release_dir / "release.json").write_text(json.dumps(metadata, indent=2, sort_keys=True))
-    return release_name
+    return release_logic.create_release_snapshot(resolved_targets, commit, backup_slug, release_deps())
 
 
 def release_created_at(path):
-    metadata = load_json(path / "release.json", {})
-    created_at = parse_backup_date(metadata.get("created_at"))
-    if created_at:
-        return created_at
-    try:
-        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
-    except OSError:
-        return datetime.min.replace(tzinfo=timezone.utc)
+    return release_logic.release_created_at(path, release_deps())
 
 
 def prune_release_snapshots(options, protected_release=None):
-    if not RELEASES_DIR.exists():
-        return []
-
-    keep_count = option_int(options, "release_snapshot_keep_count", DEFAULT_RELEASE_KEEP_COUNT, minimum=0)
-    keep_days = option_int(options, "release_snapshot_keep_days", DEFAULT_RELEASE_KEEP_DAYS, minimum=0)
-    now = datetime.now(timezone.utc)
-    releases = []
-    for path in RELEASES_DIR.iterdir():
-        if not path.is_dir() or path.name == protected_release:
-            continue
-        releases.append((path, release_created_at(path)))
-
-    to_delete = set()
-    if keep_days:
-        for path, created_at in releases:
-            age_days = (now - created_at.astimezone(timezone.utc)).total_seconds() / 86400
-            if age_days > keep_days:
-                to_delete.add(path)
-
-    remaining = sorted(
-        [(path, created_at) for path, created_at in releases if path not in to_delete],
-        key=lambda item: item[1],
-        reverse=True,
-    )
-    protected_slots = 1 if protected_release else 0
-    remaining_keep_count = max(0, keep_count - protected_slots)
-    if len(remaining) > remaining_keep_count:
-        for path, _created_at in remaining[remaining_keep_count:]:
-            to_delete.add(path)
-
-    removed = []
-    for path in sorted(to_delete, key=lambda item: item.name):
-        safe_dir = safe_release_dir(path.name)
-        safe_remove_path(safe_dir)
-        removed.append(path.name)
-    return removed
+    return release_logic.prune_release_snapshots(options, protected_release, release_deps())
 
 
 def restore_release_snapshot(release_name, details, core_already_stopped=False):
-    release_dir = safe_release_dir(release_name)
-    metadata_path = release_dir / "release.json"
-    if not metadata_path.exists():
-        raise RuntimeError(f"Release metadata not found for {release_name}")
-
-    metadata = load_json(metadata_path, {})
-    targets = metadata.get("targets", [])
-    core_stopped = core_already_stopped
-    homeassistant_seen = False
-    homeassistant_should_restart = False
-    homeassistant_should_start = False
-    homeassistant_should_reload = False
-
-    for target in targets:
-        live_path = Path(target["live_path"])
-        snapshot_path = release_dir / target["id"]
-        target_type = target.get("type")
-        addon_was_started = False
-
-        if target_type == "homeassistant":
-            homeassistant_seen = True
-            homeassistant_changes = sync_logic.homeassistant_change_set(snapshot_path, live_path, target, sync_deps(), mode="rollback")
-            should_stop_for_storage = bool(homeassistant_changes.changed_storage and target_model.stop_core_before_storage_rollback(target))
-            if should_stop_for_storage and not core_stopped:
-                add_detail(details, f"Stopping Home Assistant Core for rollback of release {release_name}.")
-                core_stop()
-                core_stopped = True
-            elif homeassistant_changes.changed_storage:
-                add_detail(details, "Warning: .storage will be restored while Home Assistant Core is running.")
-            if target_model.restart_core_after_rollback(target):
-                homeassistant_should_restart = True
-            elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_rollback(target):
-                homeassistant_should_reload = True
-            if core_stopped and target_model.start_core_after_storage_rollback(target):
-                homeassistant_should_start = True
-        elif target_type == "addon" and target.get("stop_addon_before_sync", False):
-            slug = target.get("resolved_slug")
-            add_detail(details, f"Stopping add-on {slug} before rollback sync.")
-            addon_was_started = stop_addon_for_sync(slug)
-
-        if target.get("existed", True):
-            add_detail(details, f"Restoring {target['id']} from release {release_name}.")
-            if target_type == "homeassistant":
-                restore_homeassistant_config(snapshot_path, live_path, target)
-            else:
-                sync_tree(snapshot_path, live_path, delete=bool(target.get("delete", True)), excludes=EXPORT_EXCLUDES)
-        else:
-            add_detail(details, f"Clearing {target['id']} because it did not exist in release {release_name}.")
-            clear_tree(live_path)
-
-        if target_type == "addon" and target.get("restart_after_sync", True):
-            slug = target.get("resolved_slug")
-            if target.get("stop_addon_before_sync", False):
-                if addon_was_started:
-                    add_detail(details, f"Starting add-on {slug} after rollback.")
-                    addon_action(slug, "start")
-            else:
-                add_detail(details, f"Restarting add-on {slug} after rollback.")
-                restart_or_start_addon(slug)
-
-    if homeassistant_seen and homeassistant_should_start:
-        add_detail(details, "Starting Home Assistant Core after rollback.")
-        core_start()
-    elif homeassistant_seen and core_stopped:
-        add_detail(details, "Home Assistant Core was left stopped after .storage rollback by policy.")
-    elif homeassistant_seen and homeassistant_should_restart:
-        add_detail(details, "Restarting Home Assistant Core after rollback.")
-        core_restart()
-    elif homeassistant_seen and homeassistant_should_reload:
-        add_detail(details, "Reloading Home Assistant YAML config after rollback.")
-        core_reload_yaml()
-
-    return metadata
+    return release_logic.restore_release_snapshot(release_name, details, core_already_stopped, release_deps())
 
 
 def restart_or_start_addon(slug):
@@ -979,7 +708,7 @@ def ensure_preview_matches_state(state, commit, preview):
 
 
 def enforce_apply_limits(options, preview):
-    max_deletions = option_int(options, "max_apply_deletions", DEFAULT_MAX_APPLY_DELETIONS, minimum=0)
+    max_deletions = option_int(options, "max_apply_deletions", policies.DEFAULT_MAX_APPLY_DELETIONS, minimum=0)
     if preview["deletions"] > max_deletions:
         raise RuntimeError(
             f"Apply would delete {preview['deletions']} file(s), above the limit of {max_deletions}. Review the preview or raise max_apply_deletions."
@@ -1003,7 +732,7 @@ def stage_homeassistant_storage_allowlist(repo_dir, options, details):
         if not storage.exists():
             continue
 
-        for name in STORAGE_EXPORT_ALLOWLIST:
+        for name in policies.STORAGE_EXPORT_ALLOWLIST:
             path = storage / name
             if path.exists():
                 paths.append(str(path.relative_to(repo_dir)))

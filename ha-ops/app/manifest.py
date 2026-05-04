@@ -1,25 +1,8 @@
 from pathlib import Path
 
+import policies
 
-def bool_value(value):
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
-def policy_bool(target, options, name, default, legacy_names=()):
-    if name in target:
-        return bool_value(target.get(name))
-    if name in options:
-        return bool_value(options.get(name))
-    for legacy_name in legacy_names:
-        if legacy_name in target:
-            return bool_value(target.get(legacy_name))
-        if legacy_name in options:
-            return bool_value(options.get(legacy_name))
-    return default
+policy_bool = policies.policy_bool_with_options
 
 
 def selected_addon_slugs(read_state):

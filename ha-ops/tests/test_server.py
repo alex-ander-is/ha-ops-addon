@@ -102,6 +102,18 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(server.git_conflict_paths(repo), ["homeassistant/configuration.yaml"])
         return remote
 
+    def test_state_write_replaces_temp_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            server.write_state({"last_status": "success", "last_message": "ok"})
+
+            self.assertEqual(server.read_state()["last_status"], "success")
+            self.assertEqual(server.read_state()["last_message"], "ok")
+            self.assertFalse((server.STATE_PATH.parent / f".{server.STATE_PATH.name}.tmp").exists())
+
     def test_empty_git_preview_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

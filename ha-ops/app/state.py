@@ -1,6 +1,9 @@
 import json
+import os
 import threading
 from datetime import datetime, timezone
+
+import policies
 
 
 STATE_LOCK = threading.Lock()
@@ -25,20 +28,11 @@ def load_options(path):
 
 
 def option_bool(options, name, default):
-    value = options.get(name, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return policies.option_bool(options, name, default)
 
 
 def option_int(options, name, default, minimum=0):
-    try:
-        value = int(options.get(name, default))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, value)
+    return policies.option_int(options, name, default, minimum)
 
 
 def default_state():
@@ -71,5 +65,8 @@ def write_state(path, updates):
     with STATE_LOCK:
         current = read_state(path)
         current.update(updates)
-        path.write_text(json.dumps(current, indent=2, sort_keys=True))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = path.with_name(f".{path.name}.tmp")
+        temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+        os.replace(temp_path, path)
         return current
