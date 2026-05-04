@@ -230,6 +230,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
         if details is not None:
             ctx.add_detail(details, f"Skipping {target['id']} because Git has no Home Assistant config yet.")
         return []
+    reject_source_symlinks(target, ctx, src)
 
     copied = 0
     for pattern in ctx.ha_root_patterns:
@@ -402,6 +403,69 @@ def is_excluded_path(path, root, patterns):
     return any(clean_path_matches(path, relative, pattern) for pattern in patterns)
 
 
+def collect_symlinks_under(path, root, excludes=None):
+    if not path.exists() and not path.is_symlink():
+        return []
+    if path.is_symlink():
+        return [path.relative_to(root).as_posix()]
+    if not path.is_dir():
+        return []
+
+    found = []
+    for item in path.rglob("*"):
+        if not item.is_symlink():
+            continue
+        if excludes and is_excluded_path(item, root, excludes):
+            continue
+        found.append(item.relative_to(root).as_posix())
+    return found
+
+
+def homeassistant_source_symlinks(src, target, ctx):
+    found = []
+
+    for pattern in ctx.ha_root_patterns:
+        for src_path in sorted(src.glob(pattern)):
+            if src_path.name in ctx.ha_root_excludes:
+                continue
+            if src_path.is_symlink():
+                found.append(src_path.relative_to(src).as_posix())
+
+    managed_dirs = list(ctx.ha_dirs)
+    if target.get("include_zigbee2mqtt_legacy"):
+        managed_dirs.extend(ctx.zigbee2mqtt_paths)
+    for name in managed_dirs:
+        found.extend(collect_symlinks_under(src / name, src, ctx.export_excludes))
+
+    src_storage = src / ".storage"
+    for name in ctx.storage_allowlist:
+        src_path = src_storage / name
+        if src_path.is_symlink():
+            found.append(src_path.relative_to(src).as_posix())
+
+    return sorted(set(found))
+
+
+def target_source_symlinks(target, ctx, source_path=None):
+    source_path = Path(source_path or target["source_path"])
+    if not source_path.exists() and not source_path.is_symlink():
+        return []
+    if source_path.is_symlink():
+        return ["."]
+    if target.get("type", "homeassistant") == "homeassistant":
+        return homeassistant_source_symlinks(source_path, target, ctx)
+    return sorted(set(collect_symlinks_under(source_path, source_path, ctx.export_excludes)))
+
+
+def reject_source_symlinks(target, ctx, source_path=None):
+    symlinks = target_source_symlinks(target, ctx, source_path)
+    if symlinks:
+        preview = ", ".join(symlinks[:10])
+        if len(symlinks) > 10:
+            preview += f", and {len(symlinks) - 10} more"
+        raise RuntimeError(f"Git source for target '{target['id']}' contains symlink(s), refusing to apply: {preview}")
+
+
 def source_tree_has_overlay_changes(src, dest, excludes):
     if src.is_file():
         return file_differs(src, dest)
@@ -495,6 +559,9 @@ def apply_targets(resolved_targets, details, ctx):
         source_path = Path(target["source_path"])
         live_path = Path(target["live_path"])
         addon_was_started = False
+
+        if source_path.exists() and has_managed_content(source_path):
+            reject_source_symlinks(target, ctx)
 
         if target["type"] == "homeassistant":
             homeassistant_target = target
@@ -701,11 +768,13 @@ def sync_to_preview(target, preview_path, ctx):
 
     if target["type"] == "homeassistant":
         if source_path.exists() and has_managed_content(source_path):
+            reject_source_symlinks(target, ctx)
             skipped_protected = apply_homeassistant_config(source_path, preview_path, target, ctx)
         else:
             skipped_protected = []
     else:
         if source_path.exists() and has_managed_content(source_path):
+            reject_source_symlinks(target, ctx)
             sync_tree(source_path, preview_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
         skipped_protected = []
     return skipped_protected

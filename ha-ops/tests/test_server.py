@@ -1344,6 +1344,75 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((live / ".storage" / "core.config_entries").read_text(), "live\n")
             self.assertEqual((live / ".storage" / "input_boolean").read_text(), "safe\n")
 
+    def test_homeassistant_apply_rejects_git_source_symlink(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            outside = root / "outside.yaml"
+            outside.write_text("outside\n")
+            (source / "packages").mkdir(parents=True)
+            (source / "packages" / "link.yaml").symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "contains symlink"):
+                server.apply_homeassistant_config(source, live, {"id": "homeassistant"})
+            self.assertFalse((live / "packages" / "link.yaml").exists())
+
+    def test_addon_apply_rejects_git_source_symlink(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            outside = root / "outside.txt"
+            outside.write_text("outside\n")
+            (source / "nested").mkdir(parents=True)
+            (source / "nested" / "link.txt").symlink_to(outside)
+            live.mkdir()
+
+            with self.assertRaisesRegex(RuntimeError, "contains symlink"):
+                server.apply_targets(
+                    [
+                        {
+                            "id": "addon-local_zigbee2mqtt",
+                            "type": "addon",
+                            "source_path": str(source),
+                            "live_path": str(live),
+                            "resolved_slug": "local_zigbee2mqtt",
+                            "restart_after_sync": False,
+                        }
+                    ],
+                    [],
+                )
+            self.assertFalse((live / "nested" / "link.txt").exists())
+
+    def test_apply_preview_rejects_git_source_symlink(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            outside = root / "outside.yaml"
+            outside.write_text("outside\n")
+            (source / "packages").mkdir(parents=True)
+            (source / "packages" / "link.yaml").symlink_to(outside)
+
+            with self.assertRaisesRegex(RuntimeError, "contains symlink"):
+                server.build_apply_preview(
+                    [
+                        {
+                            "id": "homeassistant",
+                            "type": "homeassistant",
+                            "source_path": str(source),
+                            "live_path": str(server.CONFIG_DIR),
+                            "delete": False,
+                        }
+                    ]
+                )
+
     def test_apply_failure_restores_release_snapshot_and_starts_core(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
