@@ -22,10 +22,28 @@ configuration:
     description: Перед каждым apply сохранять быструю локальную копию всех управляемых live-целей, чтобы можно было быстро откатиться.
   create_ha_backup:
     name: Создавать backup Home Assistant
-    description: Перед каждым apply просить Supervisor создать штатный partial backup.
+    description: Если свежего backup нет, перед apply просить Supervisor создать полный системный backup.
   ha_backup_name_prefix:
     name: Префикс имени backup
     description: Префикс, который HA Ops использует при создании backup в Home Assistant.
+  require_fresh_backup:
+    name: Требовать свежий системный backup
+    description: Блокировать apply, если в Settings > System > Backups нет свежего системного backup.
+  backup_max_age_hours:
+    name: Максимальный возраст backup в часах
+    description: Максимальный возраст последнего системного backup перед apply.
+  backup_require_location:
+    name: Требовать backup location
+    description: Требовать, чтобы свежий системный backup был сохранен в настроенную location, например NAS.
+  max_apply_deletions:
+    name: Максимум удалений при apply
+    description: Блокировать apply, если preview показывает больше удаляемых файлов.
+  release_snapshot_keep_count:
+    name: Количество локальных snapshot
+    description: Сколько локальных release snapshot HA Ops хранит максимум.
+  release_snapshot_keep_days:
+    name: Возраст локальных snapshot в днях
+    description: Сколько дней HA Ops хранит локальные release snapshot максимум.
   restart_after_apply:
     name: Перезапускать цели после apply
     description: Поведение по умолчанию для перезапуска целей, если в deployment manifest не задано своё правило.

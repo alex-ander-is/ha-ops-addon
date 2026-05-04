@@ -22,10 +22,28 @@ configuration:
     description: Save a fast local copy of all managed live targets before every apply, so HA Ops can roll back quickly.
   create_ha_backup:
     name: Create Home Assistant Backup
-    description: Ask Supervisor to create an official partial backup before every apply.
+    description: Ask Supervisor to create a full system backup if no fresh backup is available before apply.
   ha_backup_name_prefix:
     name: Backup Name Prefix
     description: Prefix used when HA Ops creates a Home Assistant backup.
+  require_fresh_backup:
+    name: Require Fresh System Backup
+    description: Block apply unless Home Assistant has a fresh system backup visible in Settings > System > Backups.
+  backup_max_age_hours:
+    name: Backup Max Age Hours
+    description: Maximum allowed age for the latest system backup before apply.
+  backup_require_location:
+    name: Require Backup Location
+    description: Require the fresh system backup to be stored in a configured backup location, such as NAS.
+  max_apply_deletions:
+    name: Max Apply Deletions
+    description: Block apply when the preview would delete more files than this limit.
+  release_snapshot_keep_count:
+    name: Local Snapshot Keep Count
+    description: Maximum number of HA Ops local release snapshots to keep.
+  release_snapshot_keep_days:
+    name: Local Snapshot Keep Days
+    description: Maximum age in days for HA Ops local release snapshots.
   restart_after_apply:
     name: Restart Targets After Apply
     description: Default restart behavior for targets that do not define their own restart rule in the deployment manifest.

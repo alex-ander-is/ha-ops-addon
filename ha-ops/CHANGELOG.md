@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0
+
+- Replace the export-branch flow with `Save HA to Git`, `Preview Git to HA`, and `Apply Git to HA`.
+- Make empty or partial Git repositories safe: Apply is an overlay/no-op and does not delete live-only config.
+- Add installed add-on discovery with managed add-on checkboxes.
+- Add file-level Git conflict resolution for save conflicts.
+- Keep commit metadata out of the main status UI because live Home Assistant can change outside Git.
+
+## 0.3.20
+
+- Require a fresh system backup before Apply and create a full system backup when needed.
+- Require the backup to be stored in a configured backup location by default.
+- Require Apply to match the last Preview Apply commit and diff fingerprint.
+- Block Apply when previewed deletions exceed the configured limit.
+- Skip protected `.storage` files unless a target explicitly sets `allow_protected_storage`.
+- Prune local release snapshots by count and age.
+
 ## 0.3.19
 
 - Add an Apply Preview action that shows a diff before applying Git config.

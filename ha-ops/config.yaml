@@ -1,6 +1,6 @@
 name: "HA Ops"
-description: "Git-backed Home Assistant, Mosquitto, and Zigbee2MQTT operator with rollback"
-version: "0.3.19"
+description: "Git-backed Home Assistant config operator with preview, backups, and rollback"
+version: "0.4.0"
 slug: "ha_ops"
 init: false
 startup: services
@@ -26,6 +26,12 @@ options:
   create_release_snapshot: true
   create_ha_backup: true
   ha_backup_name_prefix: "ha-ops"
+  require_fresh_backup: true
+  backup_max_age_hours: 24
+  backup_require_location: true
+  max_apply_deletions: 25
+  release_snapshot_keep_count: 5
+  release_snapshot_keep_days: 7
   restart_after_apply: true
 schema:
   repo_url: str
@@ -37,6 +43,12 @@ schema:
   create_release_snapshot: bool
   create_ha_backup: bool
   ha_backup_name_prefix: str
+  require_fresh_backup: bool
+  backup_max_age_hours: int
+  backup_require_location: bool
+  max_apply_deletions: int
+  release_snapshot_keep_count: int
+  release_snapshot_keep_days: int
   restart_after_apply: bool
 arch:
   - aarch64
