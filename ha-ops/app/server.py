@@ -1458,13 +1458,14 @@ def apply_targets(resolved_targets, details):
     if homeassistant_target is None:
         return
 
+    add_detail(details, "Running Home Assistant config check.")
+    do_core_check()
+
     if core_stopped:
         if homeassistant_target.get("restart_after_sync", True):
             add_detail(details, "Starting Home Assistant Core after sync.")
             core_start()
     else:
-        add_detail(details, "Running Home Assistant config check.")
-        do_core_check()
         if homeassistant_target.get("restart_after_sync", True):
             add_detail(details, "Restarting Home Assistant Core.")
             core_restart()

@@ -314,6 +314,71 @@ class ServerTests(unittest.TestCase):
             )
             self.assertEqual((live / "configuration.yaml").read_text(), "live\n")
 
+    def test_core_check_runs_before_start_when_storage_stops_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            (source / ".storage").mkdir(parents=True)
+            (source / ".storage" / "input_boolean").write_text("{}\n")
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_sync_if_storage": True,
+                        "restart_after_sync": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["stop", "check", "start"])
+
+    def test_core_check_failure_prevents_start_after_storage_sync(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            (source / ".storage").mkdir(parents=True)
+            (source / ".storage" / "input_boolean").write_text("{}\n")
+            events = []
+            server.core_stop = lambda: events.append("stop")
+
+            def fail_check():
+                events.append("check")
+                raise RuntimeError("bad config")
+
+            server.do_core_check = fail_check
+            server.core_start = lambda: events.append("start")
+
+            with self.assertRaises(RuntimeError):
+                server.apply_targets(
+                    [
+                        {
+                            "id": "homeassistant",
+                            "type": "homeassistant",
+                            "source_path": str(source),
+                            "live_path": str(server.CONFIG_DIR),
+                            "stop_core_before_sync_if_storage": True,
+                            "restart_after_sync": True,
+                        }
+                    ],
+                    [],
+                )
+
+            self.assertEqual(events, ["stop", "check"])
+
     def test_selected_addon_is_saved_to_git(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

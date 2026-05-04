@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.4
+
+- Run Home Assistant config check after syncing and before starting Core when `.storage` apply stopped Core.
+
 ## 0.4.3
 
 - Reject empty, absolute, current-directory, and parent-escaping `repo_path` values before touching the local checkout.
