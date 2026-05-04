@@ -72,6 +72,16 @@ def clean_repo_untracked(repo_dir, run_command):
         raise RuntimeError(f"git clean failed:\n{clean.stderr.strip()}")
 
 
+def reset_repo_worktree(repo_dir, run_command):
+    reset = run_command(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
+    if reset.returncode != 0:
+        unstage = run_command(["git", "rm", "-r", "--cached", "--ignore-unmatch", "."], cwd=repo_dir)
+        if unstage.returncode != 0:
+            raise RuntimeError(f"git reset failed:\n{reset.stderr.strip() or reset.stdout.strip()}")
+
+    clean_repo_untracked(repo_dir, run_command)
+
+
 def git_commit(repo_dir, ref, run_command):
     result = run_command(["git", "rev-parse", ref], cwd=repo_dir)
     if result.returncode != 0:

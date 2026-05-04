@@ -565,26 +565,47 @@ def apply_targets(resolved_targets, details, ctx):
     return {"core_stopped": False}
 
 
-def export_targets(resolved_targets, details, ctx):
+def build_save_export(resolved_targets, details, ctx):
+    export_root = ctx.work_dir / "save-export"
+    clear_tree(export_root, ctx.work_dir, ctx.run_command)
+
     for target in resolved_targets:
         live_path = Path(target["live_path"])
-        source_path = Path(target["source_path"])
         if not live_path.exists():
             if target.get("optional", False):
                 ctx.add_detail(details, f"Skipping optional target {target['id']} because {live_path} does not exist.")
                 continue
             raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
 
+        export_path = export_root / target["id"]
         if target["type"] == "homeassistant":
-            ctx.add_detail(details, f"Saving config-only {target['id']} from {live_path} to {source_path}.")
-            copied_count, zigbee2mqtt_count, storage_count = export_homeassistant_config(live_path, source_path, target, ctx)
-            ctx.add_detail(details, f"Saved {copied_count} Home Assistant config path(s).")
+            ctx.add_detail(details, f"Exporting config-only {target['id']} from {live_path} to a temporary tree.")
+            copied_count, zigbee2mqtt_count, storage_count = export_homeassistant_config(live_path, export_path, target, ctx)
+            ctx.add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
             if zigbee2mqtt_count:
-                ctx.add_detail(details, f"Saved {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
+                ctx.add_detail(details, f"Exported {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
             if storage_count:
-                ctx.add_detail(details, f"Saved {storage_count} allowlisted .storage config file(s).")
+                ctx.add_detail(details, f"Exported {storage_count} allowlisted .storage config file(s).")
         else:
-            ctx.add_detail(details, f"Saving {target['id']} from {live_path} to {source_path}.")
+            ctx.add_detail(details, f"Exporting {target['id']} from {live_path} to a temporary tree.")
+            export_target_to_path(target, export_path, ctx)
+
+    return export_root
+
+
+def apply_save_export(resolved_targets, export_root, details, ctx):
+    for target in resolved_targets:
+        export_path = Path(export_root) / target["id"]
+        if not export_path.exists():
+            continue
+
+        source_path = Path(target["source_path"])
+        if target["type"] == "homeassistant":
+            ctx.add_detail(details, f"Saving config-only {target['id']} to {source_path}.")
+            clean_homeassistant_export_destination(source_path, target, ctx)
+            sync_tree(export_path, source_path, False, None, ctx.run_command)
+        else:
+            ctx.add_detail(details, f"Saving {target['id']} to {source_path}.")
             removed_count = clean_export_destination(
                 source_path,
                 ctx.clean_paths,
@@ -593,7 +614,12 @@ def export_targets(resolved_targets, details, ctx):
             )
             if removed_count:
                 ctx.add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} save destination.")
-            export_tree(live_path, source_path, target_model.save_delete(target), ctx.export_excludes, ctx.run_command)
+            sync_tree(export_path, source_path, target_model.save_delete(target), None, ctx.run_command)
+
+
+def export_targets(resolved_targets, details, ctx):
+    export_root = build_save_export(resolved_targets, details, ctx)
+    apply_save_export(resolved_targets, export_root, details, ctx)
 
 
 def export_target_to_path(target, dest, ctx):

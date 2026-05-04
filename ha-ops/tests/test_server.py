@@ -73,6 +73,9 @@ class ServerTests(unittest.TestCase):
         )
         return result.stdout
 
+    def repo_status(self, repo):
+        return self.git(["status", "--porcelain"], repo).stdout.strip()
+
     def make_rebase_conflict(self, server, root):
         remote = self.seed_remote(root)
         repo = server.DATA_DIR / "ha-config"
@@ -305,6 +308,71 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertEqual(state["conflicts"], [])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "same\n")
+
+    def test_save_export_failure_does_not_dirty_checkout(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            repo = server.DATA_DIR / "ha-config"
+            self.git(["clone", str(remote), str(repo)], root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("new\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            original_run_command = server.run_command
+
+            def fail_save_export(command, env=None, cwd=None):
+                if command and command[0] == "rsync" and any("save-export" in str(item) for item in command):
+                    return subprocess.CompletedProcess(command, 1, "", "export failed")
+                return original_run_command(command, env=env, cwd=cwd)
+
+            server.run_command = fail_save_export
+
+            self.assertFalse(server.run_save_job())
+            self.assertEqual(self.repo_status(repo), "")
+            self.assertFalse((repo / "homeassistant" / "packages" / "new.yaml").exists())
+
+    def test_save_stage_failure_cleans_partial_checkout_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            repo = server.DATA_DIR / "ha-config"
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("new\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.stage_all = lambda repo_dir: (_ for _ in ()).throw(RuntimeError("stage failed"))
+
+            self.assertFalse(server.run_save_job())
+            self.assertEqual(self.repo_status(repo), "")
+            self.assertFalse((repo / "homeassistant" / "packages" / "new.yaml").exists())
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
 
     def test_save_exports_protected_storage_allowlist_even_when_ignored(self):
         server = load_server()

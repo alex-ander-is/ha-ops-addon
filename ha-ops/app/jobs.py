@@ -28,6 +28,7 @@ class JobContext:
     read_state: Any
     release_now: Any
     repo_checkout_path: Any
+    reset_repo_worktree: Any
     restore_save_git_resolutions: Any
     resolve_targets: Any
     restore_release_snapshot: Any
@@ -58,6 +59,9 @@ def run_save_job(ctx):
     details = []
     options = ctx.load_options()
     resolved_targets = []
+    repo_dir = None
+    checkout_dirty_for_save = False
+    save_commit_created = False
 
     write_state(
         {
@@ -107,6 +111,7 @@ def run_save_job(ctx):
             return False
 
         ctx.add_detail(details, "Saving live Home Assistant config to Git.")
+        checkout_dirty_for_save = True
         ctx.export_targets(resolved_targets, details)
         ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
         ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
@@ -114,6 +119,7 @@ def run_save_job(ctx):
 
         new_commit = ctx.commit_if_needed(repo_dir, f"Save Home Assistant config {ctx.release_now()}")
         if new_commit:
+            save_commit_created = True
             ctx.add_detail(details, f"Created commit {new_commit}.")
 
         if ctx.git_has_unpushed_commits(repo_dir, branch):
@@ -141,6 +147,12 @@ def run_save_job(ctx):
         return True
     except Exception as exc:
         details.append(str(exc))
+        if repo_dir and checkout_dirty_for_save and not save_commit_created:
+            try:
+                ctx.reset_repo_worktree(repo_dir)
+                details.append("Cleaned incomplete Save changes from the checkout.")
+            except Exception as cleanup_exc:
+                details.append(f"Failed to clean incomplete Save changes from the checkout: {cleanup_exc}")
         try:
             repo_path = ctx.repo_checkout_path(options)
         except RuntimeError:

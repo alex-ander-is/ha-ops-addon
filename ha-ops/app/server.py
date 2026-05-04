@@ -459,6 +459,10 @@ def clean_repo_untracked(repo_dir):
     return git_ops.clean_repo_untracked(repo_dir, run_command)
 
 
+def reset_repo_worktree(repo_dir):
+    return git_ops.reset_repo_worktree(repo_dir, run_command)
+
+
 def git_commit(repo_dir, ref):
     return git_ops.git_commit(repo_dir, ref, run_command)
 
@@ -1037,6 +1041,7 @@ def job_deps():
         read_state=read_state,
         release_now=release_now,
         repo_checkout_path=repo_checkout_path,
+        reset_repo_worktree=reset_repo_worktree,
         restore_save_git_resolutions=restore_save_git_resolutions,
         resolve_targets=resolve_targets,
         restore_release_snapshot=restore_release_snapshot,
