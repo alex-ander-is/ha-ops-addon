@@ -633,6 +633,8 @@ def ensure_repo(options, reset_to_origin=True):
         if clone.returncode != 0:
             raise RuntimeError(f"git clone failed:\n{clone.stderr.strip()}")
 
+    clean_repo_untracked(repo_dir)
+
     fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
     if fetch.returncode != 0:
         raise RuntimeError(f"git fetch failed:\n{fetch.stderr.strip()}")
@@ -665,7 +667,15 @@ def ensure_repo(options, reset_to_origin=True):
         if reset.returncode != 0:
             raise RuntimeError(f"git reset to origin/{branch} failed:\n{reset.stderr.strip()}")
 
+    clean_repo_untracked(repo_dir)
+
     return repo_dir
+
+
+def clean_repo_untracked(repo_dir):
+    clean = run_command(["git", "clean", "-ffdx"], cwd=repo_dir)
+    if clean.returncode != 0:
+        raise RuntimeError(f"git clean failed:\n{clean.stderr.strip()}")
 
 
 def git_commit(repo_dir, ref):

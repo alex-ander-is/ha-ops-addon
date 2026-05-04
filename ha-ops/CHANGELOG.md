@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.2
+
+- Clean untracked and ignored files from the local checkout before reading Git sources or saving live config.
+- Prevent stale files left in `/data/ha-config` from affecting Preview, Apply, or Save.
+
 ## 0.4.1
 
 - Make Managed Add-ons checkboxes control add-on targets even when `ha-ops.json` exists.

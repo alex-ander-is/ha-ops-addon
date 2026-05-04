@@ -229,6 +229,36 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "homeassistant:\n")
 
+    def test_preview_ignores_untracked_checkout_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            repo = server.DATA_DIR / "ha-config"
+            self.git(["clone", str(remote), str(repo)], root)
+            stale = repo / "homeassistant" / "configuration.yaml"
+            stale.parent.mkdir(parents=True)
+            stale.write_text("stale:\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_preview_job())
+            state = server.read_state()
+            self.assertIn("no file changes", state["last_diff"].lower())
+            self.assertFalse(stale.exists())
+
     def test_live_only_addon_absent_from_git_is_not_deleted(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -280,6 +310,38 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
+
+    def test_save_does_not_commit_untracked_checkout_junk(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            repo = server.DATA_DIR / "ha-config"
+            self.git(["clone", str(remote), str(repo)], root)
+            (repo / "stale.txt").write_text("stale\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_job())
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotIn("stale.txt", result.stdout)
 
     def test_selected_addon_is_saved_when_manifest_exists(self):
         server = load_server()
