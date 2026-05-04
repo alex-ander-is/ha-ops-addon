@@ -16,6 +16,7 @@ class SyncContext:
     clean_file_patterns: list
     clean_paths: list
     core_restart: Callable[[], Any]
+    core_reload_yaml: Callable[[], Any]
     core_start: Callable[[], Any]
     core_stop: Callable[[], Any]
     do_core_check: Callable[[], Any]
@@ -30,6 +31,16 @@ class SyncContext:
     storage_allowlist: list
     work_dir: Path
     zigbee2mqtt_paths: list
+
+
+@dataclass
+class ChangeSet:
+    changed_yaml: bool = False
+    changed_storage: bool = False
+    changed_protected_storage: bool = False
+
+    def any(self):
+        return self.changed_yaml or self.changed_storage or self.changed_protected_storage
 
 
 def has_managed_content(path):
@@ -377,9 +388,108 @@ def source_has_applicable_storage(path, storage_allowlist, protected_storage_fil
     return False
 
 
+def file_differs(src_path, dest_path):
+    if not dest_path.exists() or not dest_path.is_file():
+        return True
+    try:
+        return src_path.read_bytes() != dest_path.read_bytes()
+    except OSError:
+        return True
+
+
+def is_excluded_path(path, root, patterns):
+    relative = str(path.relative_to(root))
+    return any(clean_path_matches(path, relative, pattern) for pattern in patterns)
+
+
+def source_tree_has_overlay_changes(src, dest, excludes):
+    if src.is_file():
+        return file_differs(src, dest)
+    if not src.exists():
+        return False
+    for src_path in src.rglob("*"):
+        if not src_path.is_file() or is_excluded_path(src_path, src, excludes):
+            continue
+        relative = src_path.relative_to(src)
+        if file_differs(src_path, dest / relative):
+            return True
+    return False
+
+
+def destination_tree_has_managed_extra(src, dest, excludes):
+    if not dest.exists():
+        return False
+    if dest.is_file():
+        return not src.exists()
+    for dest_path in dest.rglob("*"):
+        if not dest_path.is_file() or is_excluded_path(dest_path, dest, excludes):
+            continue
+        relative = dest_path.relative_to(dest)
+        if not (src / relative).exists():
+            return True
+    return False
+
+
+def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
+    changes = ChangeSet()
+    if not src.exists() or not has_managed_content(src):
+        return changes
+
+    restored_root_names = set()
+    for pattern in ctx.ha_root_patterns:
+        for src_path in sorted(src.glob(pattern)):
+            if not src_path.is_file() or src_path.name in ctx.ha_root_excludes:
+                continue
+            restored_root_names.add(src_path.name)
+            if file_differs(src_path, dest / src_path.name):
+                changes.changed_yaml = True
+
+    if mode == "rollback":
+        for pattern in ctx.ha_root_patterns:
+            for dest_path in sorted(dest.glob(pattern)):
+                if not dest_path.is_file() or dest_path.name in ctx.ha_root_excludes:
+                    continue
+                if dest_path.name not in restored_root_names:
+                    changes.changed_yaml = True
+
+    managed_dirs = list(ctx.ha_dirs)
+    if target.get("include_zigbee2mqtt_legacy"):
+        managed_dirs.extend(ctx.zigbee2mqtt_paths)
+
+    for name in managed_dirs:
+        src_path = src / name
+        dest_path = dest / name
+        if source_tree_has_overlay_changes(src_path, dest_path, ctx.export_excludes):
+            changes.changed_yaml = True
+        if mode == "rollback" and destination_tree_has_managed_extra(src_path, dest_path, ctx.export_excludes):
+            changes.changed_yaml = True
+
+    src_storage = src / ".storage"
+    dest_storage = dest / ".storage"
+    allow_protected = mode == "rollback" or target_model.allow_protected_storage(target)
+    for name in ctx.storage_allowlist:
+        is_protected = name in ctx.protected_storage_files
+        if is_protected and not allow_protected:
+            continue
+        src_path = src_storage / name
+        dest_path = dest_storage / name
+        changed = False
+        if src_path.exists():
+            changed = file_differs(src_path, dest_path)
+        elif mode == "rollback" and (dest_path.exists() or dest_path.is_symlink()):
+            changed = True
+        if changed:
+            changes.changed_storage = True
+            if is_protected:
+                changes.changed_protected_storage = True
+
+    return changes
+
+
 def apply_targets(resolved_targets, details, ctx):
     homeassistant_target = None
     core_stopped = False
+    homeassistant_changes = ChangeSet()
 
     for target in resolved_targets:
         source_path = Path(target["source_path"])
@@ -388,16 +498,17 @@ def apply_targets(resolved_targets, details, ctx):
 
         if target["type"] == "homeassistant":
             homeassistant_target = target
-            allow_protected_storage = target_model.allow_protected_storage(target)
-            if target.get("stop_core_before_sync_if_storage", False) and source_has_applicable_storage(
-                source_path,
-                ctx.storage_allowlist,
-                ctx.protected_storage_files,
-                allow_protected_storage,
-            ) and not core_stopped:
+            homeassistant_changes = homeassistant_change_set(source_path, live_path, target, ctx, mode="apply")
+            if (
+                homeassistant_changes.changed_storage
+                and target_model.stop_core_before_storage_apply(target)
+                and not core_stopped
+            ):
                 ctx.add_detail(details, "Stopping Home Assistant Core before syncing .storage.")
                 ctx.core_stop()
                 core_stopped = True
+            elif homeassistant_changes.changed_storage:
+                ctx.add_detail(details, "Warning: .storage will be written while Home Assistant Core is running.")
         elif target["type"] == "addon" and target.get("stop_addon_before_sync", False):
             slug = target["resolved_slug"]
             ctx.add_detail(details, f"Stopping add-on {slug} before sync.")
@@ -424,6 +535,8 @@ def apply_targets(resolved_targets, details, ctx):
 
     if homeassistant_target is None:
         return {"core_stopped": core_stopped}
+    if not homeassistant_changes.any():
+        return {"core_stopped": core_stopped}
 
     ctx.add_detail(details, "Running Home Assistant config check.")
     try:
@@ -433,17 +546,22 @@ def apply_targets(resolved_targets, details, ctx):
         raise
 
     if core_stopped:
-        if homeassistant_target.get("restart_after_sync", True):
+        if target_model.start_core_after_storage_apply(homeassistant_target):
             ctx.add_detail(details, "Starting Home Assistant Core after sync.")
             try:
                 ctx.core_start()
             except Exception as exc:
                 setattr(exc, "core_stopped", True)
                 raise
+        else:
+            ctx.add_detail(details, "Home Assistant Core was left stopped after .storage sync by policy.")
     else:
-        if homeassistant_target.get("restart_after_sync", True):
+        if target_model.restart_core_after_apply(homeassistant_target):
             ctx.add_detail(details, "Restarting Home Assistant Core.")
             ctx.core_restart()
+        elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_apply(homeassistant_target):
+            ctx.add_detail(details, "Reloading Home Assistant YAML config.")
+            ctx.core_reload_yaml()
     return {"core_stopped": False}
 
 

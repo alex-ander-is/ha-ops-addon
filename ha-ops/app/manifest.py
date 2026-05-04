@@ -1,6 +1,27 @@
 from pathlib import Path
 
 
+def bool_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def policy_bool(target, options, name, default, legacy_names=()):
+    if name in target:
+        return bool_value(target.get(name))
+    if name in options:
+        return bool_value(options.get(name))
+    for legacy_name in legacy_names:
+        if legacy_name in target:
+            return bool_value(target.get(legacy_name))
+        if legacy_name in options:
+            return bool_value(options.get(legacy_name))
+    return default
+
+
 def selected_addon_slugs(read_state):
     state = read_state()
     return sorted(str(slug) for slug in state.get("managed_addons", []) if slug)
@@ -22,8 +43,32 @@ def default_homeassistant_manifest(options):
                 "source": options.get("apply_path", "homeassistant"),
                 "delete": False,
                 "allow_protected_storage": False,
-                "stop_core_before_sync_if_storage": True,
-                "restart_after_sync": options.get("restart_after_apply", True),
+                "reload_yaml_after_apply": policy_bool({}, options, "reload_yaml_after_apply", True),
+                "restart_core_after_apply": policy_bool(
+                    {},
+                    options,
+                    "restart_core_after_apply",
+                    False,
+                    ("restart_after_apply",),
+                ),
+                "stop_core_before_storage_apply": policy_bool(
+                    {},
+                    options,
+                    "stop_core_before_storage_apply",
+                    True,
+                    ("stop_core_before_sync_if_storage",),
+                ),
+                "start_core_after_storage_apply": policy_bool(
+                    {},
+                    options,
+                    "start_core_after_storage_apply",
+                    True,
+                    ("restart_after_apply",),
+                ),
+                "reload_yaml_after_rollback": policy_bool({}, options, "reload_yaml_after_rollback", False),
+                "restart_core_after_rollback": policy_bool({}, options, "restart_core_after_rollback", False),
+                "stop_core_before_storage_rollback": policy_bool({}, options, "stop_core_before_storage_rollback", True),
+                "start_core_after_storage_rollback": policy_bool({}, options, "start_core_after_storage_rollback", True),
             }
         ],
     }
@@ -231,9 +276,52 @@ def resolve_targets(
             raise RuntimeError(f"Source path does not exist for target '{target.get('id')}': {source}")
         resolved = dict(target)
         resolved["source_path"] = str(source)
-        resolved["restart_after_sync"] = bool(
-            target.get("restart_after_sync", options.get("restart_after_apply", True))
-        )
+        resolved["restart_after_sync"] = policy_bool(target, options, "restart_after_sync", True, ("restart_after_apply",))
+        if target_type == "homeassistant":
+            resolved["reload_yaml_after_apply"] = policy_bool(target, options, "reload_yaml_after_apply", True)
+            resolved["restart_core_after_apply"] = policy_bool(
+                target,
+                options,
+                "restart_core_after_apply",
+                False,
+                ("restart_after_sync", "restart_after_apply"),
+            )
+            resolved["stop_core_before_storage_apply"] = policy_bool(
+                target,
+                options,
+                "stop_core_before_storage_apply",
+                True,
+                ("stop_core_before_sync_if_storage",),
+            )
+            resolved["start_core_after_storage_apply"] = policy_bool(
+                target,
+                options,
+                "start_core_after_storage_apply",
+                True,
+                ("restart_after_sync", "restart_after_apply"),
+            )
+            resolved["reload_yaml_after_rollback"] = policy_bool(target, options, "reload_yaml_after_rollback", False)
+            resolved["restart_core_after_rollback"] = policy_bool(
+                target,
+                options,
+                "restart_core_after_rollback",
+                False,
+                ("restart_after_sync", "restart_after_apply"),
+            )
+            resolved["stop_core_before_storage_rollback"] = policy_bool(
+                target,
+                options,
+                "stop_core_before_storage_rollback",
+                True,
+                ("stop_core_before_sync_if_storage",),
+            )
+            resolved["start_core_after_storage_rollback"] = policy_bool(
+                target,
+                options,
+                "start_core_after_storage_rollback",
+                True,
+                ("restart_after_sync", "restart_after_apply"),
+            )
 
         if target_type == "homeassistant":
             resolved["resolved_slug"] = None

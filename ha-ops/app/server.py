@@ -359,6 +359,10 @@ def core_restart():
     return supervisor.core_restart(call_supervisor)
 
 
+def core_reload_yaml():
+    return supervisor.core_reload_yaml(call_supervisor)
+
+
 def do_core_check():
     return supervisor.do_core_check(call_supervisor)
 
@@ -469,6 +473,10 @@ def git_remote_head(repo_dir, env, branch):
 
 def git_head_or_unborn(repo_dir):
     return git_ops.git_head_or_unborn(repo_dir, run_command)
+
+
+def git_has_unpushed_commits(repo_dir, branch):
+    return git_ops.git_has_unpushed_commits(repo_dir, branch, run_command)
 
 
 def git_conflict_paths(repo_dir):
@@ -591,6 +599,7 @@ def sync_deps():
         clean_file_patterns=EXPORT_CLEAN_FILE_PATTERNS,
         clean_paths=EXPORT_CLEAN_PATHS,
         core_restart=core_restart,
+        core_reload_yaml=core_reload_yaml,
         core_start=core_start,
         core_stop=core_stop,
         do_core_check=do_core_check,
@@ -731,6 +740,10 @@ def create_release_snapshot(resolved_targets, commit, backup_slug):
                 "source_path": target["source_path"],
                 "delete": target_restore_delete(target),
                 "restart_after_sync": bool(target.get("restart_after_sync", True)),
+                "reload_yaml_after_rollback": bool(target.get("reload_yaml_after_rollback", False)),
+                "restart_core_after_rollback": bool(target.get("restart_core_after_rollback", False)),
+                "stop_core_before_storage_rollback": bool(target.get("stop_core_before_storage_rollback", True)),
+                "start_core_after_storage_rollback": bool(target.get("start_core_after_storage_rollback", True)),
                 "stop_addon_before_sync": bool(target.get("stop_addon_before_sync", False)),
                 "stop_core_before_sync_if_storage": bool(target.get("stop_core_before_sync_if_storage", False)),
                 "existed": existed,
@@ -801,6 +814,9 @@ def restore_release_snapshot(release_name, details, core_already_stopped=False):
     targets = metadata.get("targets", [])
     core_stopped = core_already_stopped
     homeassistant_seen = False
+    homeassistant_should_restart = False
+    homeassistant_should_start = False
+    homeassistant_should_reload = False
 
     for target in targets:
         live_path = Path(target["live_path"])
@@ -808,13 +824,22 @@ def restore_release_snapshot(release_name, details, core_already_stopped=False):
         target_type = target.get("type")
         addon_was_started = False
 
-        if target_type == "homeassistant" and not core_stopped:
-            add_detail(details, f"Stopping Home Assistant Core for rollback of release {release_name}.")
-            core_stop()
-            core_stopped = True
+        if target_type == "homeassistant":
             homeassistant_seen = True
-        elif target_type == "homeassistant":
-            homeassistant_seen = True
+            homeassistant_changes = sync_logic.homeassistant_change_set(snapshot_path, live_path, target, sync_deps(), mode="rollback")
+            should_stop_for_storage = bool(homeassistant_changes.changed_storage and target_model.stop_core_before_storage_rollback(target))
+            if should_stop_for_storage and not core_stopped:
+                add_detail(details, f"Stopping Home Assistant Core for rollback of release {release_name}.")
+                core_stop()
+                core_stopped = True
+            elif homeassistant_changes.changed_storage:
+                add_detail(details, "Warning: .storage will be restored while Home Assistant Core is running.")
+            if target_model.restart_core_after_rollback(target):
+                homeassistant_should_restart = True
+            elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_rollback(target):
+                homeassistant_should_reload = True
+            if core_stopped and target_model.start_core_after_storage_rollback(target):
+                homeassistant_should_start = True
         elif target_type == "addon" and target.get("stop_addon_before_sync", False):
             slug = target.get("resolved_slug")
             add_detail(details, f"Stopping add-on {slug} before rollback sync.")
@@ -840,9 +865,17 @@ def restore_release_snapshot(release_name, details, core_already_stopped=False):
                 add_detail(details, f"Restarting add-on {slug} after rollback.")
                 restart_or_start_addon(slug)
 
-    if homeassistant_seen:
+    if homeassistant_seen and homeassistant_should_start:
         add_detail(details, "Starting Home Assistant Core after rollback.")
         core_start()
+    elif homeassistant_seen and core_stopped:
+        add_detail(details, "Home Assistant Core was left stopped after .storage rollback by policy.")
+    elif homeassistant_seen and homeassistant_should_restart:
+        add_detail(details, "Restarting Home Assistant Core after rollback.")
+        core_restart()
+    elif homeassistant_seen and homeassistant_should_reload:
+        add_detail(details, "Reloading Home Assistant YAML config after rollback.")
+        core_reload_yaml()
 
     return metadata
 
@@ -979,6 +1012,7 @@ def job_deps():
         get_installed_addons=get_installed_addons,
         git_conflict_paths=git_conflict_paths,
         git_env=git_env,
+        git_has_unpushed_commits=git_has_unpushed_commits,
         git_head_or_unborn=git_head_or_unborn,
         git_pull_rebase=git_pull_rebase,
         load_manifest=load_manifest,

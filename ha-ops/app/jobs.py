@@ -17,6 +17,7 @@ class JobContext:
     get_installed_addons: Any
     git_conflict_paths: Any
     git_env: Any
+    git_has_unpushed_commits: Any
     git_head_or_unborn: Any
     git_pull_rebase: Any
     load_manifest: Any
@@ -90,6 +91,8 @@ def run_save_job(ctx):
         new_commit = ctx.commit_if_needed(repo_dir, f"Save Home Assistant config {ctx.release_now()}")
         if new_commit:
             ctx.add_detail(details, f"Created commit {new_commit}.")
+
+        if ctx.git_has_unpushed_commits(repo_dir, branch):
             try:
                 ctx.push_branch(repo_dir, env, branch)
             except RuntimeError:

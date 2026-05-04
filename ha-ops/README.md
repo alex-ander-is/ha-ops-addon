@@ -64,6 +64,9 @@ Skipped:
 - Apply requires a fresh system backup visible in Home Assistant Backups and stored in a configured backup location by default.
 - Apply must match the last `Preview Git to HA` commit and diff fingerprint.
 - Local release snapshots are pruned by configured count and age.
+- A change resolver classifies Home Assistant changes as YAML and/or `.storage`; lifecycle actions are controlled by explicit flags.
+- YAML-only apply reloads Home Assistant YAML by default instead of restarting Core.
+- `.storage` apply or rollback can stop/start Core by policy because Home Assistant may otherwise keep stale state or rewrite those files.
 
 ## Managed Add-ons
 
@@ -92,7 +95,15 @@ Skipped:
 - `max_apply_deletions`: maximum number of previewed file deletions allowed before Apply.
 - `release_snapshot_keep_count`: maximum local release snapshots to keep, default `5`.
 - `release_snapshot_keep_days`: maximum local release snapshot age in days, default `7`.
-- `restart_after_apply`: default restart behavior for targets that do not define their own restart rule.
+- `reload_yaml_after_apply`: reload Home Assistant YAML after YAML changes, default `true`.
+- `restart_core_after_apply`: restart Home Assistant Core after Apply, default `false`.
+- `stop_core_before_storage_apply`: stop Home Assistant Core before applying `.storage`, default `true`.
+- `start_core_after_storage_apply`: start Home Assistant Core after HA Ops stopped it for Apply, default `true`.
+- `reload_yaml_after_rollback`: reload Home Assistant YAML after rollback YAML changes, default `false`.
+- `restart_core_after_rollback`: restart Home Assistant Core after rollback, default `false`.
+- `stop_core_before_storage_rollback`: stop Home Assistant Core before rolling back `.storage`, default `true`.
+- `start_core_after_storage_rollback`: start Home Assistant Core after HA Ops stopped it for rollback, default `true`.
+- `restart_after_apply`: legacy alias for `restart_core_after_apply` when explicit lifecycle flags are not set.
 
 ## Deploy Key
 

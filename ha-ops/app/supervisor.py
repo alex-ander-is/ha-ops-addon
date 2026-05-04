@@ -88,6 +88,12 @@ def core_restart(call_supervisor):
         raise RuntimeError(f"Core restart failed: {payload}")
 
 
+def core_reload_yaml(call_supervisor):
+    payload = call_supervisor("POST", "/core/api/services/homeassistant/reload_all", {})
+    if not supervisor_ok(payload) and not isinstance(payload, list):
+        raise RuntimeError(f"Core YAML reload failed: {payload}")
+
+
 def do_core_check(call_supervisor):
     payload = call_supervisor("POST", "/core/check")
     data = payload.get("data", {})

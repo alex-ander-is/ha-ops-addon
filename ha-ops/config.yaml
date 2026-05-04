@@ -32,7 +32,15 @@ options:
   max_apply_deletions: 25
   release_snapshot_keep_count: 5
   release_snapshot_keep_days: 7
-  restart_after_apply: true
+  reload_yaml_after_apply: true
+  restart_core_after_apply: false
+  stop_core_before_storage_apply: true
+  start_core_after_storage_apply: true
+  reload_yaml_after_rollback: false
+  restart_core_after_rollback: false
+  stop_core_before_storage_rollback: true
+  start_core_after_storage_rollback: true
+  restart_after_apply: false
 schema:
   repo_url: str
   repo_branch: str
@@ -49,6 +57,14 @@ schema:
   max_apply_deletions: int
   release_snapshot_keep_count: int
   release_snapshot_keep_days: int
+  reload_yaml_after_apply: bool
+  restart_core_after_apply: bool
+  stop_core_before_storage_apply: bool
+  start_core_after_storage_apply: bool
+  reload_yaml_after_rollback: bool
+  restart_core_after_rollback: bool
+  stop_core_before_storage_rollback: bool
+  start_core_after_storage_rollback: bool
   restart_after_apply: bool
 arch:
   - aarch64

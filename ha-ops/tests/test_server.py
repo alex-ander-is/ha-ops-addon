@@ -571,6 +571,63 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(events, ["stop", "check"])
 
+    def test_yaml_apply_reloads_without_restart_by_default(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            events = []
+            server.do_core_check = lambda: events.append("check")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "reload"])
+
+    def test_yaml_apply_can_explicitly_restart_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            events = []
+            server.do_core_check = lambda: events.append("check")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "restart_core_after_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "restart"])
+
     def test_homeassistant_directory_apply_preserves_live_only_files(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -650,6 +707,43 @@ class ServerTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertNotIn("stale.txt", result.stdout)
+
+    def test_save_retries_unpushed_local_commit_when_no_new_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_first_push(repo_dir, env, branch):
+                calls["count"] += 1
+                if calls["count"] <= 2:
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_push
+
+            self.assertFalse(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
+
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "homeassistant:\n")
+            self.assertGreaterEqual(calls["count"], 2)
 
     def test_selected_addon_is_saved_when_manifest_exists(self):
         server = load_server()
@@ -1083,7 +1177,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
-            self.assertEqual(events, ["check", "stop", "start"])
+            self.assertEqual(events, ["check"])
 
     def test_apply_failure_after_core_stop_rolls_back_and_starts_core(self):
         server = load_server()
@@ -1166,8 +1260,10 @@ class ServerTests(unittest.TestCase):
                 )
             )
             server.get_installed_addons = lambda: []
-            server.core_stop = lambda: None
-            server.core_start = lambda: None
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server.core_restart = lambda: events.append("restart")
 
             self.assertTrue(server.run_preview_job())
 
@@ -1178,6 +1274,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(server.run_apply_job())
             self.assertFalse((server.CONFIG_DIR / "packages" / "new.yaml").exists())
+            self.assertEqual(events, [])
 
     def test_core_start_failure_rolls_back_without_second_stop(self):
         server = load_server()

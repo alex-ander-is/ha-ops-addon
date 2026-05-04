@@ -94,6 +94,20 @@ def git_remote_head(repo_dir, env, branch, run_command):
     return output.split()[0]
 
 
+def git_has_unpushed_commits(repo_dir, branch, run_command):
+    remote_ref = f"refs/remotes/origin/{branch}"
+    if not git_ref_exists(repo_dir, remote_ref, run_command):
+        return git_ref_exists(repo_dir, "HEAD", run_command)
+
+    result = run_command(["git", "rev-list", "--count", f"{remote_ref}..HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git rev-list failed:\n{result.stderr.strip()}")
+    try:
+        return int(result.stdout.strip() or "0") > 0
+    except ValueError as exc:
+        raise RuntimeError(f"git rev-list returned invalid count: {result.stdout.strip()}") from exc
+
+
 def git_head_or_unborn(repo_dir, run_command):
     try:
         return git_commit(repo_dir, "HEAD", run_command)
