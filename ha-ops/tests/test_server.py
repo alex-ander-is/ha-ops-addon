@@ -1118,6 +1118,35 @@ class ServerTests(unittest.TestCase):
             self.assertIn("All conflicts resolved", message)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
+    def test_conflict_resolution_retries_push_after_rebase_continued(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.make_rebase_conflict(server, root)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_first_push(repo_dir, env, branch):
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_push
+
+            with self.assertRaises(RuntimeError):
+                server.resolve_git_conflict("homeassistant/configuration.yaml", "ha")
+            self.assertEqual(server.git_conflict_paths(server.DATA_DIR / "ha-config"), [])
+            self.assertEqual(server.read_state()["conflicts"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+            message = server.resolve_git_conflict("homeassistant/configuration.yaml", "ha")
+            self.assertIn("All conflicts resolved", message)
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
+            self.assertEqual(server.read_state()["conflicts"], [])
+            self.assertEqual(calls["count"], 2)
+
     def test_backup_gate_blocks_when_backup_is_missing_and_creation_disabled(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

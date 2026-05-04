@@ -487,6 +487,10 @@ def git_conflict_paths(repo_dir):
     return git_ops.git_conflict_paths(repo_dir, run_command)
 
 
+def git_rebase_in_progress(repo_dir):
+    return git_ops.git_rebase_in_progress(repo_dir, run_command)
+
+
 def git_pull_rebase(repo_dir, env, branch):
     return git_ops.git_pull_rebase(
         repo_dir,
@@ -1131,44 +1135,19 @@ def resolve_save_unknown_base_conflict(path, choice):
     return "All Save conflicts resolved. Run Save HA to Git again."
 
 
-def resolve_git_conflict(path, choice):
-    state = read_state()
-    if state.get("conflict_type") == "save_unknown_base":
-        return resolve_save_unknown_base_conflict(path, choice)
+def finish_git_conflict_resolution(repo_dir, env, branch):
+    if git_rebase_in_progress(repo_dir):
+        env["GIT_EDITOR"] = "true"
+        cont = run_command(["git", "rebase", "--continue"], env=env, cwd=repo_dir)
+        if cont.returncode != 0:
+            output = cont.stderr.strip() or cont.stdout.strip()
+            if "No changes" in output or "previous cherry-pick is now empty" in output:
+                skip = run_command(["git", "rebase", "--skip"], env=env, cwd=repo_dir)
+                if skip.returncode != 0:
+                    raise RuntimeError(f"git rebase --skip failed:\n{skip.stderr.strip() or skip.stdout.strip()}")
+            else:
+                raise RuntimeError(f"git rebase --continue failed:\n{output}")
 
-    options = load_options()
-    repo_dir = repo_checkout_path(options)
-    branch = options.get("repo_branch", "main")
-    safe_path = safe_repo_relative_path(path)
-    if choice == "ha":
-        checkout = run_command(["git", "checkout", "--theirs", "--", safe_path], cwd=repo_dir)
-    elif choice == "git":
-        checkout = run_command(["git", "checkout", "--ours", "--", safe_path], cwd=repo_dir)
-    else:
-        raise RuntimeError("Invalid conflict choice")
-    if checkout.returncode != 0:
-        raise RuntimeError(f"git checkout conflict version failed:\n{checkout.stderr.strip()}")
-
-    add = run_command(["git", "add", "--", safe_path], cwd=repo_dir)
-    if add.returncode != 0:
-        raise RuntimeError(f"git add conflict resolution failed:\n{add.stderr.strip()}")
-
-    conflicts = git_conflict_paths(repo_dir)
-    if conflicts:
-        write_state({"conflicts": conflicts, "conflict_type": "git_rebase"})
-        return f"Resolved {safe_path}. {len(conflicts)} conflict(s) remain."
-
-    env = git_env(options)
-    env["GIT_EDITOR"] = "true"
-    cont = run_command(["git", "rebase", "--continue"], env=env, cwd=repo_dir)
-    if cont.returncode != 0:
-        output = cont.stderr.strip() or cont.stdout.strip()
-        if "No changes" in output or "previous cherry-pick is now empty" in output:
-            skip = run_command(["git", "rebase", "--skip"], env=env, cwd=repo_dir)
-            if skip.returncode != 0:
-                raise RuntimeError(f"git rebase --skip failed:\n{skip.stderr.strip() or skip.stdout.strip()}")
-        else:
-            raise RuntimeError(f"git rebase --continue failed:\n{output}")
     push_branch(repo_dir, env, branch)
     write_state(
         {
@@ -1180,6 +1159,42 @@ def resolve_git_conflict(path, choice):
         }
     )
     return "All conflicts resolved and pushed."
+
+
+def resolve_git_conflict(path, choice):
+    state = read_state()
+    if state.get("conflict_type") == "save_unknown_base":
+        return resolve_save_unknown_base_conflict(path, choice)
+
+    options = load_options()
+    repo_dir = repo_checkout_path(options)
+    branch = options.get("repo_branch", "main")
+    safe_path = safe_repo_relative_path(path)
+    if choice not in {"ha", "git"}:
+        raise RuntimeError("Invalid conflict choice")
+
+    actual_conflicts = git_conflict_paths(repo_dir)
+    if actual_conflicts:
+        if safe_path not in actual_conflicts:
+            raise RuntimeError("Git conflict path is not pending")
+        if choice == "ha":
+            checkout = run_command(["git", "checkout", "--theirs", "--", safe_path], cwd=repo_dir)
+        else:
+            checkout = run_command(["git", "checkout", "--ours", "--", safe_path], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout conflict version failed:\n{checkout.stderr.strip()}")
+
+        add = run_command(["git", "add", "--", safe_path], cwd=repo_dir)
+        if add.returncode != 0:
+            raise RuntimeError(f"git add conflict resolution failed:\n{add.stderr.strip()}")
+
+        conflicts = git_conflict_paths(repo_dir)
+        if conflicts:
+            write_state({"conflicts": conflicts, "conflict_type": "git_rebase"})
+            return f"Resolved {safe_path}. {len(conflicts)} conflict(s) remain."
+
+    env = git_env(options)
+    return finish_git_conflict_resolution(repo_dir, env, branch)
 
 
 def current_manifest_preview():

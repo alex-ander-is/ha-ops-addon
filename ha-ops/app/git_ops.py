@@ -132,6 +132,20 @@ def git_conflict_paths(repo_dir, run_command):
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
+def git_path(repo_dir, name, run_command):
+    result = run_command(["git", "rev-parse", "--git-path", name], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git rev-parse --git-path failed:\n{result.stderr.strip()}")
+    path = Path(result.stdout.strip())
+    if path.is_absolute():
+        return path
+    return repo_dir / path
+
+
+def git_rebase_in_progress(repo_dir, run_command):
+    return git_path(repo_dir, "rebase-merge", run_command).exists() or git_path(repo_dir, "rebase-apply", run_command).exists()
+
+
 def git_pull_rebase(repo_dir, env, branch, run_command, write_conflicts):
     remote_head = git_remote_head(repo_dir, env, branch, run_command)
     if not remote_head:
