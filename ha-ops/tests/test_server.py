@@ -901,6 +901,75 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
             self.assertEqual(events, ["check", "stop", "start"])
 
+    def test_apply_failure_after_core_stop_rolls_back_and_starts_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git\n")
+            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "restart_after_apply": True,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server.core_restart = lambda: events.append("restart")
+
+            self.assertTrue(server.run_preview_job())
+
+            def fail_check():
+                events.append("check")
+                raise RuntimeError("bad config")
+
+            server.do_core_check = fail_check
+
+            self.assertFalse(server.run_apply_job())
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
+            self.assertEqual(events, ["stop", "check", "stop", "start"])
+
+    def test_clean_git_checkout_imports_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            checkout = root / "checkout"
+            self.git(["clone", str(ROOT.parent), str(checkout)], root)
+            status = self.git(["status", "--porcelain"], checkout).stdout.strip()
+            self.assertEqual(status, "")
+
+            script = (
+                "import importlib.util, pathlib; "
+                "path = pathlib.Path('ha-ops/app/server.py').resolve(); "
+                "spec = importlib.util.spec_from_file_location('server_clean_checkout', path); "
+                "module = importlib.util.module_from_spec(spec); "
+                "spec.loader.exec_module(module); "
+                "assert module.HOST == '0.0.0.0'"
+            )
+            subprocess.run(["python3", "-c", script], cwd=checkout, check=True, text=True, capture_output=True)
+
     def test_render_page_survives_unavailable_backup_api(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
