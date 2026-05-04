@@ -4,6 +4,7 @@
 
 - Make Managed Add-ons checkboxes control add-on targets even when `ha-ops.json` exists.
 - Preserve manifest options for selected add-ons while excluding unchecked add-ons.
+- Save selected add-ons from live config even when Git currently contains only a `.gitkeep` scaffold.
 
 ## 0.4.0
 

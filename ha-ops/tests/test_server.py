@@ -331,6 +331,43 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
+    def test_selected_addon_with_gitkeep_source_is_saved_from_live(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            gitkeep = seed / "addons" / "local_zigbee2mqtt" / ".gitkeep"
+            gitkeep.parent.mkdir(parents=True)
+            gitkeep.write_text("")
+            self.git_commit_all(seed, "scaffold addon")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            addon_live.mkdir()
+            (addon_live / "configuration.yaml").write_text("addon\n")
+            server.write_state({"managed_addons": ["local_zigbee2mqtt"]})
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
+
+            self.assertTrue(server.run_save_job())
+            self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
+
     def test_unchecked_manifest_addon_is_excluded(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -948,9 +948,6 @@ def resolve_targets(repo_dir, manifest, addons, require_source=True):
             if optional:
                 continue
             raise RuntimeError(f"Source path does not exist for target '{target.get('id')}': {source}")
-        if optional and target_type == "addon" and source.exists() and not has_managed_content(source):
-            continue
-
         resolved = dict(target)
         resolved["source_path"] = str(source)
         resolved["restart_after_sync"] = bool(
