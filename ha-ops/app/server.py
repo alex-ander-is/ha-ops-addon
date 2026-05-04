@@ -8,9 +8,22 @@ import os
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+
+APP_DIR = Path(__file__).resolve().parent
+if str(APP_DIR) not in sys.path:
+    sys.path.insert(0, str(APP_DIR))
+
+import state as state_store
+import supervisor
+import ui
+import backups as backup_policy
+import git_ops
+import manifest as manifest_logic
+import targets as target_model
 
 
 HOST = "0.0.0.0"
@@ -115,16 +128,6 @@ ZIGBEE2MQTT_CONFIG_PATHS = [
     "zigbee2mqtt/external_converters",
     "zigbee2mqtt/scripts",
 ]
-HOMEASSISTANT_APPLY_EXCLUDES = EXPORT_EXCLUDES + [
-    ".HA_VERSION",
-    "custom_components/",
-    "go2rtc-*",
-    "image/",
-    "secrets.yaml",
-    "www/",
-    "zha_quirks/",
-    "zigbee2mqtt/",
-]
 EXPORT_CLEAN_PATHS = [
     ".cloud",
     ".cache",
@@ -153,43 +156,31 @@ EXPORT_CLEAN_PATHS = [
 EXPORT_CLEAN_DIR_NAMES = {"__pycache__", "node_modules"}
 EXPORT_CLEAN_FILE_PATTERNS = ["*.pyc", "*.pyo"]
 
-STATE_LOCK = threading.Lock()
 RUN_LOCK = threading.Lock()
 
 
 def utc_now():
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return state_store.utc_now()
 
 
 def release_now():
-    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return state_store.release_now()
 
 
 def load_json(path, default):
-    if not path.exists():
-        return default
-    return json.loads(path.read_text())
+    return state_store.load_json(path, default)
 
 
 def load_options():
-    return load_json(OPTIONS_PATH, {})
+    return state_store.load_options(OPTIONS_PATH)
 
 
 def option_bool(options, name, default):
-    value = options.get(name, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
+    return state_store.option_bool(options, name, default)
 
 
 def option_int(options, name, default, minimum=0):
-    try:
-        value = int(options.get(name, default))
-    except (TypeError, ValueError):
-        value = default
-    return max(minimum, value)
+    return state_store.option_int(options, name, default, minimum)
 
 
 def addon_version():
@@ -202,35 +193,15 @@ def addon_version():
 
 
 def default_state():
-    return {
-        "last_run_at": None,
-        "last_status": "idle",
-        "last_action": None,
-        "last_message": "No runs yet.",
-        "last_details": [],
-        "last_release": None,
-        "last_backup_slug": None,
-        "last_targets": [],
-        "last_diff": "",
-        "last_diff_generated_at": None,
-        "last_preview_commit": None,
-        "last_preview_fingerprint": None,
-        "last_preview_deletions": None,
-        "managed_addons": [],
-        "conflicts": [],
-    }
+    return state_store.default_state()
 
 
 def read_state():
-    return load_json(STATE_PATH, default_state())
+    return state_store.read_state(STATE_PATH)
 
 
 def write_state(updates):
-    with STATE_LOCK:
-        state = read_state()
-        state.update(updates)
-        STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True))
-        return state
+    return state_store.write_state(STATE_PATH, updates)
 
 
 def list_releases():
@@ -358,656 +329,259 @@ def add_detail(details, message):
 
 
 def call_supervisor(method, path, payload=None):
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        raise RuntimeError("SUPERVISOR_TOKEN is not available")
-
-    command = [
-        "curl",
-        "-sS",
-        "--fail-with-body",
-        "-X",
-        method,
-        "-H",
-        f"Authorization: Bearer {token}",
-        "-H",
-        "Content-Type: application/json",
-    ]
-    if payload is not None:
-        command.extend(["-d", json.dumps(payload)])
-    command.append(f"http://supervisor{path}")
-
-    result = run_command(command)
-    if result.returncode != 0:
-        raise RuntimeError(f"Supervisor API call failed for {path}:\n{result.stderr.strip() or result.stdout.strip()}")
-
-    body = result.stdout.strip()
-    if not body:
-        return {}
-
-    try:
-        return json.loads(body)
-    except json.JSONDecodeError:
-        return {"raw": body}
+    return supervisor.call_supervisor(method, path, payload, run_command)
 
 
 def supervisor_ok(payload):
-    if not isinstance(payload, dict):
-        return False
-    if payload.get("result") == "ok":
-        return True
-    return "data" in payload and "result" not in payload
+    return supervisor.supervisor_ok(payload)
 
 
 def get_installed_addons():
-    payload = call_supervisor("GET", "/addons")
-    addons = payload.get("data", {}).get("addons")
-    if addons is None:
-        addons = payload.get("addons", [])
-    return addons
+    return supervisor.get_installed_addons(call_supervisor)
 
 
 def get_addon_info(slug):
-    payload = call_supervisor("GET", f"/addons/{slug}/info")
-    if "data" in payload:
-        return payload["data"]
-    return payload
+    return supervisor.get_addon_info(slug, call_supervisor)
 
 
 def addon_action(slug, action):
-    payload = call_supervisor("POST", f"/addons/{slug}/{action}")
-    if not supervisor_ok(payload):
-        raise RuntimeError(f"Add-on {slug} {action} failed: {payload}")
+    return supervisor.addon_action(slug, action, call_supervisor)
 
 
 def core_stop():
-    payload = call_supervisor("POST", "/core/stop")
-    if not supervisor_ok(payload):
-        raise RuntimeError(f"Core stop failed: {payload}")
+    return supervisor.core_stop(call_supervisor)
 
 
 def core_start():
-    payload = call_supervisor("POST", "/core/start")
-    if not supervisor_ok(payload):
-        raise RuntimeError(f"Core start failed: {payload}")
+    return supervisor.core_start(call_supervisor)
 
 
 def core_restart():
-    payload = call_supervisor("POST", "/core/restart")
-    if not supervisor_ok(payload):
-        raise RuntimeError(f"Core restart failed: {payload}")
+    return supervisor.core_restart(call_supervisor)
 
 
 def do_core_check():
-    payload = call_supervisor("POST", "/core/check")
-    data = payload.get("data", {})
-    if payload.get("result") == "ok" and data.get("result") == "valid":
-        return
-    raise RuntimeError(f"Home Assistant config check failed: {payload}")
+    return supervisor.do_core_check(call_supervisor)
 
 
 def backup_mount_info():
-    payload = call_supervisor("GET", "/mounts")
-    return payload.get("data", payload)
+    return supervisor.backup_mount_info(call_supervisor)
 
 
 def default_backup_mount():
-    try:
-        return backup_mount_info().get("default_backup_mount")
-    except Exception:
-        return None
+    return supervisor.default_backup_mount(backup_mount_info)
 
 
 def create_ha_backup(name_prefix, backup_location=None):
-    payload = {"name": f"{name_prefix} {release_now()}"}
-    payload["background"] = False
-    if backup_location:
-        payload["location"] = backup_location
-    result = call_supervisor("POST", "/backups/new/full", payload)
-    slug = result.get("data", {}).get("slug") or result.get("slug")
-    if not slug:
-        raise RuntimeError(f"Backup creation did not return a slug: {result}")
-    return slug
+    return supervisor.create_ha_backup(name_prefix, backup_location, call_supervisor, release_now)
 
 
 def backup_manager_info():
-    payload = call_supervisor("GET", "/backups/info")
-    return payload.get("data", payload)
+    return supervisor.backup_manager_info(call_supervisor)
 
 
 def parse_backup_date(value):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
+    return backup_policy.parse_backup_date(value)
 
 
 def backup_slug(backup):
-    return backup.get("slug") or backup.get("id")
+    return backup_policy.backup_slug(backup)
 
 
 def backup_name(backup):
-    return backup.get("name") or backup_slug(backup) or "unknown backup"
+    return backup_policy.backup_name(backup)
 
 
 def backup_locations(backup):
-    locations = backup.get("locations")
-    if isinstance(locations, list):
-        return len(locations)
-    location = backup.get("location")
-    if location:
-        return 1
-    return None
+    return backup_policy.backup_locations(backup)
 
 
 def backup_has_location(backup):
-    locations = backup_locations(backup)
-    return locations is not None and locations > 0
+    return backup_policy.backup_has_location(backup)
 
 
 def is_system_backup(backup):
-    backup_type = str(backup.get("type", "")).lower()
-    return backup_type in {"full", "automatic", "auto"}
+    return backup_policy.is_system_backup(backup)
 
 
 def backup_age_hours(backup_date):
-    return max(0, int(backup_age_seconds(backup_date) // 3600))
+    return backup_policy.backup_age_hours(backup_date)
 
 
 def backup_age_seconds(backup_date):
-    now = datetime.now(timezone.utc)
-    return max(0, int((now - backup_date.astimezone(timezone.utc)).total_seconds()))
+    return backup_policy.backup_age_seconds(backup_date)
 
 
 def backup_status_message(backup, backup_date):
-    age_hours = backup_age_hours(backup_date)
-    locations = backup_locations(backup)
-    location_text = f", {locations} location(s)" if locations is not None else ""
-    return f"{backup_name(backup)} at {backup.get('date')} ({age_hours} hour(s) ago{location_text})."
+    return backup_policy.backup_status_message(backup, backup_date)
 
 
 def find_backup_by_slug(backups, slug):
-    for backup in backups:
-        if backup_slug(backup) == slug:
-            return backup
-    return None
+    return backup_policy.find_backup_by_slug(backups, slug)
 
 
 def latest_system_backup_status(options=None):
     options = options or load_options()
-    max_age_hours = option_int(options, "backup_max_age_hours", DEFAULT_BACKUP_MAX_AGE_HOURS, minimum=1)
-    require_location = option_bool(options, "backup_require_location", True)
-    try:
-        info = backup_manager_info()
-        backups = info.get("backups", [])
-        dated_backups = [
-            (parse_backup_date(backup.get("date")), backup)
-            for backup in backups
-            if is_system_backup(backup) and (not require_location or backup_has_location(backup))
-        ]
-        dated_backups = [(date, backup) for date, backup in dated_backups if date is not None]
-        if not dated_backups:
-            return {
-                "available": True,
-                "message": "No system Home Assistant backups found.",
-                "stale": True,
-                "backup": None,
-                "age_hours": None,
-                "max_age_hours": max_age_hours,
-                "require_location": require_location,
-            }
-
-        latest_date, latest = max(dated_backups, key=lambda item: item[0])
-        age_hours = backup_age_hours(latest_date)
-        stale = backup_age_seconds(latest_date) > max_age_hours * 3600
-        return {
-            "available": True,
-            "message": backup_status_message(latest, latest_date),
-            "stale": stale,
-            "backup": latest,
-            "age_hours": age_hours,
-            "max_age_hours": max_age_hours,
-            "require_location": require_location,
-        }
-    except Exception as exc:
-        return {
-            "available": False,
-            "message": f"Backup status unavailable: {exc}",
-            "stale": True,
-            "backup": None,
-            "age_hours": None,
-            "max_age_hours": max_age_hours,
-            "require_location": require_location,
-        }
+    return backup_policy.latest_system_backup_status(
+        options,
+        DEFAULT_BACKUP_MAX_AGE_HOURS,
+        option_int,
+        option_bool,
+        backup_manager_info,
+    )
 
 
 def ensure_fresh_system_backup(options, details):
-    if not option_bool(options, "require_fresh_backup", True):
-        add_detail(details, "Fresh system backup requirement is disabled.")
-        return None
-
-    status = latest_system_backup_status(options)
-    if not status["stale"]:
-        backup = status.get("backup") or {}
-        add_detail(details, f"Fresh system backup found: {status['message']}")
-        return backup_slug(backup)
-
-    if not option_bool(options, "create_ha_backup", True):
-        raise RuntimeError(
-            f"No fresh system backup found within {status['max_age_hours']} hour(s): {status['message']}"
-        )
-
-    backup_location = default_backup_mount() if option_bool(options, "backup_require_location", True) else None
-    if option_bool(options, "backup_require_location", True) and not backup_location:
-        raise RuntimeError("No default backup location is configured. Configure Store in NAS or disable backup_require_location.")
-
-    add_detail(details, f"No fresh system backup found within {status['max_age_hours']} hour(s). Creating full system backup.")
-    slug = create_ha_backup(options.get("ha_backup_name_prefix", "ha-ops"), backup_location=backup_location)
-    info = backup_manager_info()
-    backup = find_backup_by_slug(info.get("backups", []), slug)
-    if not backup:
-        raise RuntimeError(f"Created backup {slug}, but it is not visible in Home Assistant backups.")
-
-    backup_date = parse_backup_date(backup.get("date"))
-    if not backup_date:
-        raise RuntimeError(f"Created backup {slug}, but its date is unavailable.")
-    if option_bool(options, "backup_require_location", True) and not backup_has_location(backup):
-        raise RuntimeError(f"Created backup {slug}, but it is not stored in a configured backup location.")
-    add_detail(details, f"Created fresh system backup: {backup_status_message(backup, backup_date)}")
-    return slug
+    return backup_policy.ensure_fresh_system_backup(
+        options,
+        details,
+        option_bool,
+        add_detail,
+        latest_system_backup_status,
+        default_backup_mount,
+        create_ha_backup,
+        backup_manager_info,
+    )
 
 
 def repo_checkout_path(options):
-    value = str(options.get("repo_path", "ha-config")).strip()
-    path = Path(value)
-    if not value or value == "." or path.is_absolute() or ".." in path.parts:
-        raise RuntimeError("Invalid repo_path. Use a relative folder inside /data, for example ha-config.")
-
-    repo_dir = (DATA_DIR / path).resolve()
-    data_dir = DATA_DIR.resolve()
-    if repo_dir == data_dir or data_dir not in repo_dir.parents:
-        raise RuntimeError("Invalid repo_path. Use a relative folder inside /data, for example ha-config.")
-    return repo_dir
+    return git_ops.repo_checkout_path(options, DATA_DIR)
 
 
 def ensure_repo(options, reset_to_origin=True):
-    repo_dir = repo_checkout_path(options)
-    repo_url = options.get("repo_url", "").strip()
-    if not repo_url:
-        raise RuntimeError("repo_url is empty")
-
-    env = git_env(options)
-
-    if not repo_dir.exists():
-        repo_dir.parent.mkdir(parents=True, exist_ok=True)
-        clone = run_command(["git", "clone", repo_url, str(repo_dir)], env=env)
-        if clone.returncode != 0:
-            raise RuntimeError(f"git clone failed:\n{clone.stderr.strip()}")
-
-    clean_repo_untracked(repo_dir)
-
-    fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
-    if fetch.returncode != 0:
-        raise RuntimeError(f"git fetch failed:\n{fetch.stderr.strip()}")
-
-    branch = options.get("repo_branch", "main")
-    remote_ref = f"refs/remotes/origin/{branch}"
-    remote_exists = git_ref_exists(repo_dir, remote_ref)
-
-    if not reset_to_origin and git_ref_exists(repo_dir, f"refs/heads/{branch}"):
-        checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)
-        if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
-    elif remote_exists:
-        checkout = run_command(["git", "checkout", "-B", branch, remote_ref], env=env, cwd=repo_dir)
-        if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
-    else:
-        if git_ref_exists(repo_dir, "HEAD"):
-            checkout = run_command(["git", "checkout", "-B", branch], env=env, cwd=repo_dir)
-        else:
-            checkout = run_command(["git", "checkout", "--orphan", branch], env=env, cwd=repo_dir)
-        if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
-
-    if not reset_to_origin:
-        return repo_dir
-
-    if remote_exists:
-        reset = run_command(["git", "reset", "--hard", f"origin/{branch}"], env=env, cwd=repo_dir)
-        if reset.returncode != 0:
-            raise RuntimeError(f"git reset to origin/{branch} failed:\n{reset.stderr.strip()}")
-
-    clean_repo_untracked(repo_dir)
-
-    return repo_dir
+    return git_ops.ensure_repo(options, DATA_DIR, git_env, run_command, reset_to_origin)
 
 
 def clean_repo_untracked(repo_dir):
-    clean = run_command(["git", "clean", "-ffdx"], cwd=repo_dir)
-    if clean.returncode != 0:
-        raise RuntimeError(f"git clean failed:\n{clean.stderr.strip()}")
+    return git_ops.clean_repo_untracked(repo_dir, run_command)
 
 
 def git_commit(repo_dir, ref):
-    result = run_command(["git", "rev-parse", ref], cwd=repo_dir)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"git rev-parse {ref} failed")
-    return result.stdout.strip()
+    return git_ops.git_commit(repo_dir, ref, run_command)
 
 
 def git_ref_exists(repo_dir, ref):
-    result = run_command(["git", "rev-parse", "--verify", "--quiet", ref], cwd=repo_dir)
-    return result.returncode == 0
+    return git_ops.git_ref_exists(repo_dir, ref, run_command)
 
 
 def git_remote_head(repo_dir, env, branch):
-    result = run_command(["git", "ls-remote", "--heads", "origin", branch], env=env, cwd=repo_dir)
-    if result.returncode != 0:
-        raise RuntimeError(f"git ls-remote failed:\n{result.stderr.strip()}")
-    output = result.stdout.strip()
-    if not output:
-        return None
-    return output.split()[0]
+    return git_ops.git_remote_head(repo_dir, env, branch, run_command)
 
 
 def git_head_or_unborn(repo_dir):
-    try:
-        return git_commit(repo_dir, "HEAD")
-    except RuntimeError:
-        return "unborn"
+    return git_ops.git_head_or_unborn(repo_dir, run_command)
 
 
 def git_conflict_paths(repo_dir):
-    result = run_command(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_dir)
-    if result.returncode != 0:
-        return []
-    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return git_ops.git_conflict_paths(repo_dir, run_command)
 
 
 def git_pull_rebase(repo_dir, env, branch):
-    remote_head = git_remote_head(repo_dir, env, branch)
-    if not remote_head:
-        return None
-    pull = run_command(["git", "pull", "--rebase", "origin", branch], env=env, cwd=repo_dir)
-    if pull.returncode != 0:
-        conflicts = git_conflict_paths(repo_dir)
-        if conflicts:
-            write_state({"conflicts": conflicts})
-        raise RuntimeError(f"git pull --rebase failed:\n{pull.stderr.strip() or pull.stdout.strip()}")
-    return remote_head
+    return git_ops.git_pull_rebase(repo_dir, env, branch, run_command, lambda conflicts: write_state({"conflicts": conflicts}))
 
 
 def stage_all(repo_dir):
-    add = run_command(["git", "add", "-A"], cwd=repo_dir)
-    if add.returncode != 0:
-        raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+    return git_ops.stage_all(repo_dir, run_command)
 
 
 def commit_if_needed(repo_dir, message):
-    status = git_status_porcelain(repo_dir)
-    if not status:
-        return None
-    commit = run_command(
-        [
-            "git",
-            "-c",
-            "user.name=HA Ops",
-            "-c",
-            "user.email=ha-ops@local",
-            "commit",
-            "-m",
-            message,
-        ],
-        cwd=repo_dir,
-    )
-    if commit.returncode != 0:
-        raise RuntimeError(f"git commit failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
-    return git_commit(repo_dir, "HEAD")
+    return git_ops.commit_if_needed(repo_dir, message, run_command, git_status_porcelain)
 
 
 def push_branch(repo_dir, env, branch):
-    push = run_command(["git", "push", "-u", "origin", branch], env=env, cwd=repo_dir)
-    if push.returncode != 0:
-        raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
+    return git_ops.push_branch(repo_dir, env, branch, run_command)
 
 
 def selected_addon_slugs():
-    state = read_state()
-    return sorted(str(slug) for slug in state.get("managed_addons", []) if slug)
+    return manifest_logic.selected_addon_slugs(read_state)
 
 
 def set_selected_addon_slugs(slugs):
-    cleaned = sorted(set(str(slug) for slug in slugs if slug))
-    write_state({"managed_addons": cleaned})
-    return cleaned
+    return manifest_logic.set_selected_addon_slugs(slugs, write_state)
 
 
 def default_homeassistant_manifest(options):
-    return {
-        "version": 1,
-        "targets": [
-            {
-                "id": "homeassistant",
-                "type": "homeassistant",
-                "source": options.get("apply_path", "homeassistant"),
-                "delete": False,
-                "allow_protected_storage": False,
-                "stop_core_before_sync_if_storage": True,
-                "restart_after_sync": options.get("restart_after_apply", True),
-            }
-        ],
-    }
+    return manifest_logic.default_homeassistant_manifest(options)
 
 
 def default_addon_target(slug):
-    return {
-        "id": f"addon-{slug}",
-        "type": "addon",
-        "source": f"addons/{slug}",
-        "addon_slug": slug,
-        "delete": False,
-        "restore_delete": True,
-        "restart_after_sync": True,
-        "optional": True,
-    }
+    return manifest_logic.default_addon_target(slug)
 
 
 def addon_target_slug(target, addons=None):
-    exact = target.get("addon_slug")
-    if exact:
-        return exact
-    if addons is None:
-        return None
-    try:
-        return resolve_addon_slug(target, addons)
-    except RuntimeError:
-        return None
+    return manifest_logic.addon_target_slug(target, addons)
 
 
 def selected_addon_target(slug, template=None):
-    target = dict(template or default_addon_target(slug))
-    target["type"] = "addon"
-    target["addon_slug"] = slug
-    target.pop("addon_slug_suffix", None)
-    target.pop("addon_name_contains", None)
-    target.setdefault("id", f"addon-{slug}")
-    target.setdefault("source", f"addons/{slug}")
-    target.setdefault("delete", False)
-    target.setdefault("restore_delete", True)
-    target.setdefault("restart_after_sync", True)
-    target.setdefault("optional", True)
-    return target
+    return manifest_logic.selected_addon_target(slug, template)
 
 
 def manifest_with_selected_addons(manifest, addons=None):
-    selected = selected_addon_slugs()
-    targets = []
-    addon_templates = {}
-
-    for target in manifest.get("targets", []):
-        if target.get("type") != "addon":
-            targets.append(target)
-            continue
-        slug = addon_target_slug(target, addons)
-        if slug:
-            addon_templates[slug] = target
-
-    for slug in selected:
-        targets.append(selected_addon_target(slug, addon_templates.get(slug)))
-
-    effective = dict(manifest)
-    effective["targets"] = targets
-    return effective
+    return manifest_logic.manifest_with_selected_addons(manifest, selected_addon_slugs(), addons)
 
 
 def default_manifest(options):
-    return manifest_with_selected_addons(default_homeassistant_manifest(options))
+    return manifest_logic.default_manifest(options, selected_addon_slugs())
 
 
 def load_manifest(repo_dir, options, addons=None):
-    manifest_path = repo_dir / options.get("manifest_path", "ha-ops.json")
-    if not manifest_path.exists():
-        return manifest_with_selected_addons(default_homeassistant_manifest(options), addons), manifest_path
-
-    return manifest_with_selected_addons(load_json(manifest_path, {}), addons), manifest_path
+    return manifest_logic.load_manifest(repo_dir, options, selected_addon_slugs(), load_json, addons)
 
 
 def resolve_addon_slug(target, addons):
-    exact = target.get("addon_slug")
-    if exact:
-        for addon in addons:
-            if addon.get("slug") == exact:
-                return exact
-        if target.get("optional"):
-            return None
-        raise RuntimeError(f"Configured add-on slug was not found: {exact}")
-
-    suffix = target.get("addon_slug_suffix")
-    if suffix:
-        matches = [addon for addon in addons if addon.get("slug", "").endswith(suffix)]
-        if len(matches) == 1:
-            return matches[0]["slug"]
-        if not matches and target.get("optional"):
-            return None
-        raise RuntimeError(f"Expected one add-on slug ending with '{suffix}', found {len(matches)}")
-
-    name_contains = target.get("addon_name_contains")
-    if name_contains:
-        matches = [
-            addon
-            for addon in addons
-            if name_contains.lower() in addon.get("name", "").lower()
-        ]
-        if len(matches) == 1:
-            return matches[0]["slug"]
-        if not matches and target.get("optional"):
-            return None
-        raise RuntimeError(f"Expected one add-on name containing '{name_contains}', found {len(matches)}")
-
-    raise RuntimeError(f"Add-on target '{target.get('id')}' is missing resolver fields")
+    return manifest_logic.resolve_addon_slug(target, addons)
 
 
 def addon_by_slug(addons, slug):
-    for addon in addons:
-        if addon.get("slug") == slug:
-            return addon
-    return {}
+    return manifest_logic.addon_by_slug(addons, slug)
 
 
 def path_from_metadata(value):
-    if not isinstance(value, str) or not value.strip():
-        return None
-    path = Path(value.strip())
-    if path.is_absolute():
-        return path
-    return None
+    return manifest_logic.path_from_metadata(value)
 
 
 def addon_config_path_candidates(target, slug, addon):
-    candidates = []
-    for source in (target, addon):
-        for key in ("live_path", "config_path", "configuration_path", "addon_config_path", "data_path"):
-            path = path_from_metadata(source.get(key))
-            if path:
-                candidates.append(path)
-
-    candidates.append(ADDON_CONFIGS_DIR / slug)
-
-    if addon_is_zigbee2mqtt(addon or {"slug": slug}):
-        candidates.append(CONFIG_DIR / "zigbee2mqtt")
-        candidates.append(Path("/share/zigbee2mqtt"))
-
-    unique = []
-    seen = set()
-    for path in candidates:
-        key = str(path)
-        if key not in seen:
-            unique.append(path)
-            seen.add(key)
-    return unique
+    return manifest_logic.addon_config_path_candidates(
+        target,
+        slug,
+        addon,
+        ADDON_CONFIGS_DIR,
+        CONFIG_DIR,
+        addon_is_zigbee2mqtt,
+    )
 
 
 def resolve_addon_live_path(target, slug, addons):
-    addon = addon_by_slug(addons, slug)
-    candidates = addon_config_path_candidates(target, slug, addon)
-    for path in candidates:
-        if path.exists():
-            return path
-    return candidates[0]
+    return manifest_logic.resolve_addon_live_path(
+        target,
+        slug,
+        addons,
+        ADDON_CONFIGS_DIR,
+        CONFIG_DIR,
+        addon_is_zigbee2mqtt,
+    )
 
 
 def resolve_targets(repo_dir, manifest, addons, require_source=True):
     options = load_options()
-    targets = []
-    for target in manifest.get("targets", []):
-        target_id = str(target.get("id") or "")
-        validate_target_id(target_id)
-        target_type = target.get("type")
-        source = repo_source_path(repo_dir, target.get("source", ""), target_id)
-        optional = bool(target.get("optional", False))
-
-        if require_source and not source.exists():
-            if optional:
-                continue
-            raise RuntimeError(f"Source path does not exist for target '{target.get('id')}': {source}")
-        resolved = dict(target)
-        resolved["source_path"] = str(source)
-        resolved["restart_after_sync"] = bool(
-            target.get("restart_after_sync", options.get("restart_after_apply", True))
-        )
-
-        if target_type == "homeassistant":
-            resolved["resolved_slug"] = None
-            resolved["live_path"] = str(CONFIG_DIR)
-        elif target_type == "addon":
-            slug = resolve_addon_slug(target, addons)
-            if slug is None:
-                continue
-            resolved["resolved_slug"] = slug
-            resolved["live_path"] = str(resolve_addon_live_path(target, slug, addons))
-        else:
-            raise RuntimeError(f"Unsupported target type: {target_type}")
-
-        targets.append(resolved)
-
-    return targets
+    return manifest_logic.resolve_targets(
+        repo_dir,
+        manifest,
+        addons,
+        options,
+        CONFIG_DIR,
+        ADDON_CONFIGS_DIR,
+        addon_is_zigbee2mqtt,
+        require_source,
+    )
 
 
 def validate_target_id(target_id):
-    if not target_id or Path(target_id).name != target_id:
-        raise RuntimeError(f"Invalid target id: {target_id}")
+    return manifest_logic.validate_target_id(target_id)
 
 
 def repo_source_path(repo_dir, source, target_id):
-    source_value = source or ""
-    source_path = (repo_dir / source_value).resolve()
-    repo_root = repo_dir.resolve()
-    if source_path != repo_root and repo_root not in source_path.parents:
-        raise RuntimeError(f"Source path escapes repository for target '{target_id}': {source_value}")
-    return source_path
+    return manifest_logic.repo_source_path(repo_dir, source, target_id)
 
 
 def has_managed_content(path):
@@ -1150,7 +724,7 @@ def apply_homeassistant_config(src, dest, target, details=None):
     if not src.exists() or not has_managed_content(src):
         if details is not None:
             add_detail(details, f"Skipping {target['id']} because Git has no Home Assistant config yet.")
-        return
+        return []
 
     copied = 0
     for pattern in HOMEASSISTANT_EXPORT_ROOT_PATTERNS:
@@ -1175,7 +749,7 @@ def apply_homeassistant_config(src, dest, target, details=None):
     copied_count, skipped_protected = sync_storage_allowlist(
         src,
         dest,
-        allow_protected=bool(target.get("allow_protected_storage", False)),
+        allow_protected=target_model.allow_protected_storage(target),
     )
     if copied:
         if details is not None:
@@ -1189,6 +763,7 @@ def apply_homeassistant_config(src, dest, target, details=None):
     if skipped_protected:
         if details is not None:
             add_detail(details, f"Skipped protected .storage file(s): {', '.join(skipped_protected)}.")
+    return skipped_protected
 
 
 def sync_homeassistant_path_allowlist(src, dest, paths):
@@ -1418,15 +993,15 @@ def stop_addon_for_sync(slug):
 
 
 def target_apply_delete(target):
-    return bool(target.get("delete", False))
+    return target_model.apply_delete(target)
 
 
 def target_save_delete(target):
-    return bool(target.get("save_delete", True))
+    return target_model.save_delete(target)
 
 
 def target_restore_delete(target):
-    return bool(target.get("restore_delete", target.get("delete", True)))
+    return target_model.restore_delete(target)
 
 
 def apply_targets(resolved_targets, details):
@@ -1440,7 +1015,7 @@ def apply_targets(resolved_targets, details):
 
         if target["type"] == "homeassistant":
             homeassistant_target = target
-            allow_protected_storage = bool(target.get("allow_protected_storage", False))
+            allow_protected_storage = target_model.allow_protected_storage(target)
             if target.get("stop_core_before_sync_if_storage", False) and source_has_applicable_storage(source_path, allow_protected_storage) and not core_stopped:
                 add_detail(details, "Stopping Home Assistant Core before syncing .storage.")
                 core_stop()
@@ -1520,12 +1095,7 @@ def sync_to_preview(target, preview_path):
 
     if target["type"] == "homeassistant":
         if source_path.exists() and has_managed_content(source_path):
-            apply_homeassistant_config(source_path, preview_path, target)
-            _copied, skipped_protected = sync_storage_allowlist(
-                source_path,
-                preview_path,
-                allow_protected=bool(target.get("allow_protected_storage", False)),
-            )
+            skipped_protected = apply_homeassistant_config(source_path, preview_path, target)
         else:
             skipped_protected = []
     else:
@@ -1626,10 +1196,7 @@ def enforce_apply_limits(options, preview):
 
 
 def git_status_porcelain(repo_dir):
-    result = run_command(["git", "status", "--porcelain"], cwd=repo_dir)
-    if result.returncode != 0:
-        raise RuntimeError(f"git status failed:\n{result.stderr.strip()}")
-    return result.stdout.strip()
+    return git_ops.git_status_porcelain(repo_dir, run_command)
 
 
 def stage_homeassistant_storage_allowlist(repo_dir, options, details):
@@ -2004,10 +1571,7 @@ def start_rollback(release_name):
 
 
 def safe_repo_relative_path(value):
-    path = Path(value)
-    if not value or path.is_absolute() or ".." in path.parts:
-        raise RuntimeError("Invalid conflict path")
-    return str(path)
+    return git_ops.safe_repo_relative_path(value)
 
 
 def resolve_git_conflict(path, choice):
@@ -2094,170 +1658,33 @@ def addon_is_zigbee2mqtt(addon):
 
 
 def render_addons():
-    selected = set(selected_addon_slugs())
-    try:
-        addons = sorted(get_installed_addons(), key=lambda addon: addon_display_name(addon).lower())
-    except Exception as exc:
-        return f"<p>Add-on discovery unavailable: {html.escape(str(exc))}</p>"
-
-    if not addons:
-        return "<p>No installed add-ons found.</p>"
-
-    rows = []
-    for addon in addons:
-        slug = addon_slug_value(addon)
-        if not slug:
-            continue
-        checked = "checked" if slug in selected else ""
-        name = html.escape(addon_display_name(addon))
-        hint = "Zigbee2MQTT candidate" if addon_is_zigbee2mqtt(addon) else ""
-        rows.append(
-            "<label class='check-row'>"
-            f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
-            f"<span>{name}</span>"
-            f"<small>{html.escape(hint)}</small>"
-            "</label>"
-        )
-
-    return (
-        "<form method='post' action='addons' data-async-form='true'>"
-        "<div class='check-list'>"
-        f"{''.join(rows)}"
-        "</div>"
-        "<div class='actions'><button type='submit' class='secondary'>Save Add-on Selection</button></div>"
-        "</form>"
+    return ui.render_addons(
+        selected_addon_slugs(),
+        get_installed_addons,
+        addon_slug_value,
+        addon_display_name,
+        addon_is_zigbee2mqtt,
     )
 
 
 def render_conflicts(conflicts):
-    if not conflicts:
-        return "<p>No unresolved Git conflicts.</p>"
-    rows = []
-    for path in conflicts:
-        escaped = html.escape(path)
-        rows.append(
-            "<tr>"
-            f"<td><code>{escaped}</code></td>"
-            "<td class='actions'>"
-            "<form method='post' action='resolve-conflict' data-async-form='true'>"
-            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
-            "<input type='hidden' name='choice' value='ha'>"
-            "<button type='submit' class='secondary'>Use HA Version</button>"
-            "</form>"
-            "<form method='post' action='resolve-conflict' data-async-form='true'>"
-            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
-            "<input type='hidden' name='choice' value='git'>"
-            "<button type='submit' class='secondary'>Use Git Version</button>"
-            "</form>"
-            "</td>"
-            "</tr>"
-        )
-    return (
-        "<table><thead><tr><th>File</th><th>Action</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    return ui.render_conflicts(conflicts)
 
 
 def render_targets(items):
-    if not items:
-        return "<p>No target preview yet. Run an apply after configuring the repository.</p>"
-
-    rows = []
-    for item in items:
-        target = html.escape(str(item.get("id")))
-        target_type = html.escape(str(item.get("type")))
-        source = html.escape(str(item.get("source") or item.get("source_path")))
-        live_path = html.escape(str(item.get("live_path", "")))
-        addon = html.escape(str(item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""))
-        protected_storage = "yes" if item.get("allow_protected_storage") else "no"
-        rows.append(
-            "<tr>"
-            f"<td><code>{target}</code></td>"
-            f"<td>{target_type}</td>"
-            f"<td><code>{source}</code></td>"
-            f"<td><code>{addon}</code></td>"
-            f"<td><code>{live_path}</code></td>"
-            f"<td>{protected_storage}</td>"
-            "</tr>"
-        )
-
-    return (
-        "<table><thead><tr><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th><th>Protected Storage</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    return ui.render_targets(items)
 
 
 def render_releases(releases):
-    if not releases:
-        return "<p>No local release snapshots yet.</p>"
-
-    rows = []
-    for release in releases[:12]:
-        name = html.escape(release["name"])
-        created_at = html.escape(str(release.get("created_at")))
-        backup_slug = html.escape(str(release.get("backup_slug")))
-        rows.append(
-            "<tr>"
-            f"<td><code>{name}</code></td>"
-            f"<td>{created_at}</td>"
-            f"<td><code>{backup_slug}</code></td>"
-            "<td>"
-            f"<form method='post' action='rollback' data-async-form='true'>"
-            f"<input type='hidden' name='release' value='{name}'>"
-            "<button type='submit' class='secondary'>Rollback</button>"
-            "</form>"
-            "</td>"
-            "</tr>"
-        )
-
-    return (
-        "<table><thead><tr><th>Release</th><th>Created</th><th>HA Backup</th><th>Action</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-    )
+    return ui.render_releases(releases)
 
 
 def targets_allow_protected_storage(items):
-    return any(bool(item.get("allow_protected_storage")) for item in items or [])
+    return ui.targets_allow_protected_storage(items)
 
 
 def render_git_auth(options):
-    mode = git_auth_mode(options)
-    public_key = html.escape(load_generated_public_key())
-    repo_url = options.get("repo_url", "")
-    uses_ssh = repo_url.startswith("git@") or repo_url.startswith("ssh://")
-
-    if mode == "manual":
-        status = "<p>Using the private key from <code>git_ssh_key</code> in add-on configuration.</p>"
-        key_block = ""
-    elif mode == "generated":
-        status = "<p>Using the deploy key generated and stored inside HA Ops.</p>"
-        key_block = (
-            "<p>Add this public key to GitHub as a Deploy Key with write access for <code>ha-config</code>.</p>"
-            f"<pre>{public_key}</pre>"
-        )
-    else:
-        status = "<p>No SSH key is configured yet.</p>"
-        key_block = ""
-
-    hint = ""
-    if uses_ssh and mode == "none":
-        hint = "<p>Click <strong>Generate Deploy Key</strong>, then paste the public key into GitHub Deploy Keys.</p>"
-    elif not uses_ssh:
-        hint = "<p>Your repository URL is not SSH-based, so a deploy key may not be needed.</p>"
-
-    action = (
-        "<form method='post' action='generate-key' data-async-form='true'>"
-        "<button type='submit' class='secondary'>Generate Deploy Key</button>"
-        "</form>"
-    )
-    if mode == "generated":
-        action = (
-            "<form method='post' action='generate-key' data-async-form='true'>"
-            "<button type='submit' class='secondary'>Regenerate Deploy Key</button>"
-            "</form>"
-        )
-
-    return f"{status}{hint}<div class='actions'>{action}</div>{key_block}"
+    return ui.render_git_auth(options, git_auth_mode, load_generated_public_key)
 
 
 def render_page():
@@ -2268,24 +1695,9 @@ def render_page():
     manifest_preview = current_manifest_preview()
     target_state = state.get("last_targets") or manifest_preview
     last_status = state.get("last_status", "idle")
-    status = html.escape(last_status)
-    message = html.escape(state.get("last_message", ""))
-    last_run = html.escape(str(state.get("last_run_at")))
-    last_release = html.escape(str(state.get("last_release")))
-    last_backup_slug = html.escape(str(state.get("last_backup_slug")))
-    latest_backup = html.escape(backup_status.get("message", "Backup status unavailable."))
-    repo_url = html.escape(options.get("repo_url", ""))
-    branch = html.escape(options.get("repo_branch", "main"))
-    manifest_path = html.escape(options.get("manifest_path", "ha-ops.json"))
-    auth_mode = html.escape(git_auth_mode(options))
     details = "\n".join(state.get("last_details", []))
-    conflicts = state.get("conflicts", [])
     details_placeholder = "Running..." if last_status == "running" else "No details yet."
-    details_html = html.escape(details or details_placeholder)
     diff_text = state.get("last_diff", "")
-    diff_generated_at = html.escape(str(state.get("last_diff_generated_at")))
-    diff_html = html.escape(diff_text or "No apply preview yet.")
-    preview_deletions = html.escape(str(state.get("last_preview_deletions")))
     action_disabled = "disabled" if last_status == "running" else ""
     confirm_messages = []
     if not option_bool(options, "require_fresh_backup", True):
@@ -2296,357 +1708,34 @@ def render_page():
     if confirm_messages:
         confirm_message = " ".join(confirm_messages) + " Continue?"
         apply_confirm = f"data-confirm='{html.escape(confirm_message, quote=True)}'"
-    version = html.escape(addon_version())
 
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HA Ops</title>
-  <style>
-    :root {{
-      color-scheme: light dark;
-      --ha-bg: var(--primary-background-color, #f6f8fb);
-      --ha-card-bg: var(--card-background-color, #ffffff);
-      --ha-text: var(--primary-text-color, #111827);
-      --ha-muted: var(--secondary-text-color, #6b7280);
-      --ha-border: var(--divider-color, rgba(0, 0, 0, 0.12));
-      --ha-primary: var(--primary-color, #03a9f4);
-      --ha-primary-contrast: var(--text-primary-color, #ffffff);
-      --ha-error: var(--error-color, #db4437);
-      --ha-success: var(--success-color, #43a047);
-      --ha-info: var(--info-color, #039be5);
-      --ha-radius: var(--ha-card-border-radius, 12px);
-      --ha-shadow: var(--ha-card-box-shadow, none);
-      --ha-font: var(--paper-font-common-base_-_font-family, system-ui, sans-serif);
-      --ha-code-bg: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
-    }}
-    * {{
-      box-sizing: border-box;
-    }}
-    body {{
-      margin: 0;
-      font-family: var(--ha-font);
-      color: var(--ha-text);
-      background: var(--ha-bg);
-    }}
-    main {{
-      max-width: 1180px;
-      margin: 0 auto;
-      padding: 16px;
-    }}
-    .grid {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 16px;
-    }}
-    .card {{
-      background: var(--ha-card-bg);
-      border: 1px solid var(--ha-border);
-      border-radius: var(--ha-radius);
-      padding: 20px;
-      box-shadow: var(--ha-shadow);
-    }}
-    h1, h2 {{
-      margin: 0 0 14px;
-      color: var(--ha-text);
-    }}
-    h1 {{
-      font-size: 2rem;
-    }}
-    h2 {{
-      font-size: 1.1rem;
-    }}
-    p, li {{
-      color: var(--ha-muted);
-      line-height: 1.55;
-    }}
-    dl {{
-      display: grid;
-      grid-template-columns: 150px 1fr;
-      gap: 10px 14px;
-      margin: 18px 0 0;
-    }}
-    dt {{
-      color: var(--ha-muted);
-    }}
-    dd {{
-      margin: 0;
-      word-break: break-word;
-    }}
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      padding: 6px 12px;
-      border-radius: 999px;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      background: color-mix(in srgb, var(--ha-success) 14%, transparent);
-      color: var(--ha-success);
-      border: 1px solid color-mix(in srgb, var(--ha-success) 30%, transparent);
-    }}
-    .badge.error {{
-      background: color-mix(in srgb, var(--ha-error) 14%, transparent);
-      color: var(--ha-error);
-      border-color: color-mix(in srgb, var(--ha-error) 30%, transparent);
-    }}
-    .badge.running {{
-      background: color-mix(in srgb, var(--ha-info) 14%, transparent);
-      color: var(--ha-info);
-      border-color: color-mix(in srgb, var(--ha-info) 30%, transparent);
-    }}
-    .actions {{
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-top: 22px;
-    }}
-    .check-list {{
-      display: grid;
-      gap: 10px;
-      margin-top: 14px;
-    }}
-    .check-row {{
-      display: grid;
-      grid-template-columns: auto 1fr;
-      gap: 8px 12px;
-      align-items: center;
-      padding: 10px 0;
-      border-bottom: 1px solid var(--ha-border);
-    }}
-    .check-row small {{
-      grid-column: 2;
-      color: var(--ha-muted);
-    }}
-    button {{
-      border: 1px solid color-mix(in srgb, var(--ha-primary) 35%, transparent);
-      border-radius: 999px;
-      background: var(--ha-primary);
-      color: var(--ha-primary-contrast);
-      font-size: 0.96rem;
-      padding: 10px 16px;
-      cursor: pointer;
-      font-weight: 600;
-    }}
-    button:disabled {{
-      opacity: 0.6;
-      cursor: default;
-    }}
-    button.secondary {{
-      background: var(--ha-card-bg);
-      color: var(--ha-text);
-      border-color: var(--ha-border);
-    }}
-    pre {{
-      margin: 0;
-      background: var(--ha-code-bg);
-      border: 1px solid var(--ha-border);
-      border-radius: calc(var(--ha-radius) - 2px);
-      padding: 14px;
-      overflow: auto;
-      white-space: pre-wrap;
-      line-height: 1.45;
-      color: var(--ha-text);
-    }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.94rem;
-    }}
-    th, td {{
-      text-align: left;
-      padding: 12px 10px;
-      border-bottom: 1px solid var(--ha-border);
-      vertical-align: top;
-    }}
-    th {{
-      color: var(--ha-muted);
-      font-weight: 600;
-    }}
-    code {{
-      font-family: ui-monospace, monospace;
-      font-size: 0.92em;
-      color: var(--ha-text);
-    }}
-    .wide {{
-      margin-top: 18px;
-    }}
-    .client-status {{
-      margin-top: 14px;
-      min-height: 1.4em;
-      color: var(--ha-muted);
-    }}
-    footer {{
-      margin-top: 18px;
-      color: var(--ha-muted);
-      font-size: 0.86rem;
-      text-align: center;
-    }}
-    @media (max-width: 640px) {{
-      main {{
-        padding: 12px;
-      }}
-      .card {{
-        padding: 16px;
-      }}
-      dl {{
-        grid-template-columns: 1fr;
-      }}
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <div class="grid">
-      <section class="card">
-        <h1>HA Ops</h1>
-        <p>Git-backed config deployer for Home Assistant, Mosquitto, and Zigbee2MQTT.</p>
-        <div class="badge {'error' if last_status == 'error' else 'running' if last_status == 'running' else ''}">{status}</div>
-        <dl>
-          <dt>Repo URL</dt>
-          <dd><code>{repo_url or "(not configured)"}</code></dd>
-          <dt>Branch</dt>
-          <dd><code>{branch}</code></dd>
-          <dt>Manifest</dt>
-          <dd><code>{manifest_path}</code></dd>
-          <dt>Git auth</dt>
-          <dd><code>{auth_mode}</code></dd>
-          <dt>Last run</dt>
-          <dd>{last_run}</dd>
-          <dt>Release snapshot</dt>
-          <dd><code>{last_release}</code></dd>
-          <dt>HA backup</dt>
-          <dd><code>{last_backup_slug}</code></dd>
-          <dt>Latest system backup</dt>
-          <dd>{latest_backup}</dd>
-          <dt>Preview deletions</dt>
-          <dd><code>{preview_deletions}</code></dd>
-        </dl>
-        <p>{message}</p>
-        <p id="client-status" class="client-status"></p>
-        <div class="actions">
-          <form method="post" action="save" data-async-form="true">
-            <button type="submit" {action_disabled}>Save HA to Git</button>
-          </form>
-          <form method="post" action="preview" data-async-form="true">
-            <button type="submit" class="secondary" {action_disabled}>Preview Git to HA</button>
-          </form>
-          <form method="post" action="apply" data-async-form="true" {apply_confirm}>
-            <button type="submit" class="secondary" {action_disabled}>Apply Git to HA</button>
-          </form>
-        </div>
-      </section>
-      <section class="card">
-        <h2>Last Run Details</h2>
-        <pre>{details_html}</pre>
-      </section>
-    </div>
-
-    <section class="card wide">
-      <h2>Apply Preview</h2>
-      <p>Generated at {diff_generated_at}</p>
-      <pre>{diff_html}</pre>
-    </section>
-
-    <section class="card wide">
-      <h2>Git Conflicts</h2>
-      {render_conflicts(conflicts)}
-    </section>
-
-    <section class="card wide">
-      <h2>Git Access</h2>
-      {render_git_auth(options)}
-    </section>
-
-    <section class="card wide">
-      <h2>Managed Targets</h2>
-      {render_targets(target_state)}
-    </section>
-
-    <section class="card wide">
-      <h2>Managed Add-ons</h2>
-      {render_addons()}
-    </section>
-
-    <section class="card wide">
-      <h2>Release Snapshots</h2>
-      {render_releases(releases)}
-    </section>
-    <footer>HA Ops {version}</footer>
-  </main>
-  <script>
-    (() => {{
-      const clientStatus = document.getElementById("client-status");
-
-      function setClientStatus(message) {{
-        if (clientStatus) {{
-          clientStatus.textContent = message || "";
-        }}
-      }}
-
-      async function submitAsyncForm(form) {{
-        const confirmation = form.getAttribute("data-confirm");
-        if (confirmation && !window.confirm(confirmation)) {{
-          return;
-        }}
-        const button = form.querySelector("button[type='submit']");
-        const originalText = button ? button.textContent : "";
-        if (button) {{
-          button.disabled = true;
-          button.textContent = "Working...";
-        }}
-        setClientStatus("Working...");
-
-        try {{
-          const response = await fetch(form.getAttribute("action"), {{
-            method: "POST",
-            headers: {{
-              "Accept": "application/json",
-              "X-Requested-With": "fetch"
-            }},
-            body: new URLSearchParams(new FormData(form))
-          }});
-
-          let payload = {{}};
-          try {{
-            payload = await response.json();
-          }} catch (_error) {{
-            payload = {{}};
-          }}
-
-          if (!response.ok || payload.ok === false) {{
-            setClientStatus(payload.message || "Request failed.");
-            window.setTimeout(() => window.location.reload(), 600);
-          }} else {{
-            setClientStatus(payload.message || "Done. Refreshing...");
-            window.setTimeout(() => window.location.reload(), 350);
-          }}
-        }} catch (error) {{
-          setClientStatus(error?.message || "Network error.");
-        }} finally {{
-          if (button) {{
-            button.disabled = false;
-            button.textContent = originalText;
-          }}
-        }}
-      }}
-
-      for (const form of document.querySelectorAll("form[data-async-form='true']")) {{
-        form.addEventListener("submit", (event) => {{
-          event.preventDefault();
-          submitAsyncForm(form);
-        }});
-      }}
-
-      const badge = document.querySelector(".badge");
-      if (badge && badge.textContent.trim().toLowerCase() === "running") {{
-        window.setTimeout(() => window.location.reload(), 3000);
-      }}
-    }})();
-  </script>
-</body>
-</html>"""
+    return ui.render_page(
+        {
+            "status": html.escape(last_status),
+            "badge_class": "error" if last_status == "error" else "running" if last_status == "running" else "",
+            "message": html.escape(state.get("last_message", "")),
+            "last_run": html.escape(str(state.get("last_run_at"))),
+            "last_release": html.escape(str(state.get("last_release"))),
+            "last_backup_slug": html.escape(str(state.get("last_backup_slug"))),
+            "latest_backup": html.escape(backup_status.get("message", "Backup status unavailable.")),
+            "repo_url": html.escape(options.get("repo_url", "")),
+            "branch": html.escape(options.get("repo_branch", "main")),
+            "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
+            "auth_mode": html.escape(git_auth_mode(options)),
+            "details_html": html.escape(details or details_placeholder),
+            "diff_generated_at": html.escape(str(state.get("last_diff_generated_at"))),
+            "diff_html": html.escape(diff_text or "No apply preview yet."),
+            "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
+            "action_disabled": action_disabled,
+            "apply_confirm": apply_confirm,
+            "conflicts_html": render_conflicts(state.get("conflicts", [])),
+            "git_auth_html": render_git_auth(options),
+            "targets_html": render_targets(target_state),
+            "addons_html": render_addons(),
+            "releases_html": render_releases(releases),
+            "version": html.escape(addon_version()),
+        }
+    )
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -729,6 +729,217 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "error")
             self.assertIn("Resolve Git conflicts", state["last_message"])
 
+    def test_selected_addon_delete_true_preview_counts_live_only_deletion(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            (live / "database.db").write_text("live-only\n")
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": True,
+                    }
+                ]
+            )
+
+            self.assertEqual(preview["deletions"], 1)
+            self.assertIn("database.db", preview["diff"])
+
+    def test_selected_addon_delete_false_preview_preserves_live_only_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            (live / "database.db").write_text("live-only\n")
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+
+            self.assertEqual(preview["deletions"], 0)
+            preview_file = server.WORK_DIR / "apply-preview" / "addon-local_zigbee2mqtt" / "database.db"
+            self.assertEqual(preview_file.read_text(), "live-only\n")
+
+    def test_save_delete_delete_and_restore_delete_are_independent(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            live.mkdir()
+            (live / "configuration.yaml").write_text("live\n")
+            source = root / "repo" / "addons" / "local_zigbee2mqtt"
+            source.mkdir(parents=True)
+            (source / "repo-only.txt").write_text("keep\n")
+
+            target = {
+                "id": "addon-local_zigbee2mqtt",
+                "type": "addon",
+                "resolved_slug": "local_zigbee2mqtt",
+                "source_path": str(source),
+                "live_path": str(live),
+                "delete": True,
+                "save_delete": False,
+                "restore_delete": False,
+            }
+
+            server.export_targets([target], [])
+            self.assertTrue((source / "repo-only.txt").exists())
+            release = server.create_release_snapshot([target], "abc123", None)
+            metadata = json.loads((server.RELEASES_DIR / release / "release.json").read_text())
+            self.assertFalse(metadata["targets"][0]["delete"])
+            self.assertTrue(server.target_apply_delete(target))
+            self.assertFalse(server.target_save_delete(target))
+            self.assertFalse(server.target_restore_delete(target))
+
+    def test_allow_protected_storage_true_applies_protected_storage(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.config_entries").write_text("live\n")
+            (source / ".storage" / "core.config_entries").write_text("git\n")
+
+            skipped = server.apply_homeassistant_config(
+                source,
+                live,
+                {"id": "homeassistant", "allow_protected_storage": True},
+            )
+
+            self.assertEqual(skipped, [])
+            self.assertEqual((live / ".storage" / "core.config_entries").read_text(), "git\n")
+
+    def test_allow_protected_storage_false_applies_safe_storage_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.config_entries").write_text("live\n")
+            (source / ".storage" / "core.config_entries").write_text("git\n")
+            (source / ".storage" / "input_boolean").write_text("safe\n")
+
+            skipped = server.apply_homeassistant_config(
+                source,
+                live,
+                {"id": "homeassistant", "allow_protected_storage": False},
+            )
+
+            self.assertEqual(skipped, ["core.config_entries"])
+            self.assertEqual((live / ".storage" / "core.config_entries").read_text(), "live\n")
+            self.assertEqual((live / ".storage" / "input_boolean").read_text(), "safe\n")
+
+    def test_apply_failure_restores_release_snapshot_and_starts_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, file_text="git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "restart_after_apply": True,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server.core_restart = lambda: events.append("restart")
+
+            self.assertTrue(server.run_preview_job())
+
+            def fail_check():
+                events.append("check")
+                raise RuntimeError("bad config")
+
+            server.do_core_check = fail_check
+
+            self.assertFalse(server.run_apply_job())
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "live\n")
+            self.assertEqual(events, ["check", "stop", "start"])
+
+    def test_render_page_survives_unavailable_backup_api(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.backup_manager_info = lambda: (_ for _ in ()).throw(RuntimeError("no supervisor"))
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+            self.assertIn("Backup status unavailable", page)
+
+    def test_manifest_source_symlink_escape_is_rejected(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo.mkdir()
+            outside = root / "outside"
+            outside.mkdir()
+            (repo / "escape").symlink_to(outside, target_is_directory=True)
+
+            with self.assertRaises(RuntimeError):
+                server.repo_source_path(repo, "escape", "homeassistant")
+
+    def test_pending_conflicts_block_preview_and_save(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"conflicts": ["homeassistant/configuration.yaml"]})
+
+            self.assertFalse(server.run_preview_job())
+            self.assertIn("Resolve Git conflicts", server.read_state()["last_message"])
+
+            self.assertFalse(server.run_save_job())
+            self.assertIn("Resolve Git conflicts", server.read_state()["last_message"])
+
 
 if __name__ == "__main__":
     unittest.main()
