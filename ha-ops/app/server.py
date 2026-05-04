@@ -1,11 +1,8 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
-import fnmatch
-import hashlib
 import html
 import json
 import os
-import shutil
 import socket
 import subprocess
 import sys
@@ -19,9 +16,11 @@ if str(APP_DIR) not in sys.path:
 
 import state as state_store
 import supervisor
+import sync as sync_logic
 import ui
 import backups as backup_policy
 import git_ops
+import jobs as job_logic
 import manifest as manifest_logic
 import targets as target_model
 
@@ -584,232 +583,96 @@ def repo_source_path(repo_dir, source, target_id):
     return manifest_logic.repo_source_path(repo_dir, source, target_id)
 
 
-def has_managed_content(path):
-    if path.is_file():
-        return path.name != ".gitkeep"
+def sync_deps():
+    return {
+        "add_detail": add_detail,
+        "addon_action": addon_action,
+        "clean_dir_names": EXPORT_CLEAN_DIR_NAMES,
+        "clean_file_patterns": EXPORT_CLEAN_FILE_PATTERNS,
+        "clean_paths": EXPORT_CLEAN_PATHS,
+        "core_restart": core_restart,
+        "core_start": core_start,
+        "core_stop": core_stop,
+        "do_core_check": do_core_check,
+        "export_excludes": EXPORT_EXCLUDES,
+        "ha_dirs": HOMEASSISTANT_EXPORT_DIRS,
+        "ha_root_excludes": HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
+        "ha_root_patterns": HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
+        "protected_storage_files": PROTECTED_STORAGE_FILES,
+        "restart_or_start_addon": restart_or_start_addon,
+        "run_command": run_command,
+        "stop_addon_for_sync": stop_addon_for_sync,
+        "storage_allowlist": STORAGE_EXPORT_ALLOWLIST,
+        "work_dir": WORK_DIR,
+        "zigbee2mqtt_paths": ZIGBEE2MQTT_CONFIG_PATHS,
+    }
 
-    for child in path.rglob("*"):
-        if child.is_file() and child.name != ".gitkeep":
-            return True
-        if child.is_symlink() and child.name != ".gitkeep":
-            return True
-    return False
+
+def has_managed_content(path):
+    return sync_logic.has_managed_content(path)
 
 
 def ensure_dir(path):
-    path.mkdir(parents=True, exist_ok=True)
+    return sync_logic.ensure_dir(path)
 
 
 def sync_tree(src, dest, delete=True, excludes=None):
-    ensure_dir(dest)
-    command = ["rsync", "-a", "--checksum"]
-    if delete:
-        command.append("--delete")
-    for pattern in excludes or []:
-        command.append(f"--exclude={pattern}")
-    command.extend([f"{src}/", f"{dest}/"])
-    result = run_command(command)
-    if result.returncode != 0:
-        raise RuntimeError(f"Sync failed from {src} to {dest}:\n{result.stderr.strip()}")
+    return sync_logic.sync_tree(src, dest, delete, excludes, run_command)
 
 
 def export_tree(src, dest, delete=True):
-    ensure_dir(dest)
-    command = ["rsync", "-a", "--checksum"]
-    if delete:
-        command.append("--delete")
-    for pattern in EXPORT_EXCLUDES:
-        command.append(f"--exclude={pattern}")
-    command.extend([f"{src}/", f"{dest}/"])
-    result = run_command(command)
-    if result.returncode != 0:
-        raise RuntimeError(f"Copy failed from {src} to {dest}:\n{result.stderr.strip()}")
+    return sync_logic.export_tree(src, dest, delete, EXPORT_EXCLUDES, run_command)
 
 
 def safe_remove_path(path):
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
-        path.unlink()
+    return sync_logic.safe_remove_path(path)
 
 
 def clean_export_destination(dest):
-    ensure_dir(dest)
-    removed = set()
-
-    for pattern in EXPORT_CLEAN_PATHS:
-        matches = list(dest.glob(pattern)) if any(char in pattern for char in "*?[") else [dest / pattern]
-        for path in matches:
-            if path.exists() or path.is_symlink():
-                safe_remove_path(path)
-                removed.add(str(path.relative_to(dest)))
-
-    for path in list(dest.rglob("*")):
-        relative = str(path.relative_to(dest))
-        if path.is_dir() and path.name in EXPORT_CLEAN_DIR_NAMES:
-            safe_remove_path(path)
-            removed.add(relative)
-            continue
-        if path.is_file() and any(fnmatch.fnmatch(path.name, pattern) for pattern in EXPORT_CLEAN_FILE_PATTERNS):
-            safe_remove_path(path)
-            removed.add(relative)
-
-    return len(removed)
+    return sync_logic.clean_export_destination(
+        dest,
+        EXPORT_CLEAN_PATHS,
+        EXPORT_CLEAN_DIR_NAMES,
+        EXPORT_CLEAN_FILE_PATTERNS,
+    )
 
 
 def export_storage_allowlist(src, dest):
-    src_storage = src / ".storage"
-    if not src_storage.exists():
-        return 0
-
-    dest_storage = dest / ".storage"
-    ensure_dir(dest_storage)
-    copied = 0
-    for name in STORAGE_EXPORT_ALLOWLIST:
-        src_path = src_storage / name
-        if not src_path.exists():
-            continue
-        dest_path = dest_storage / name
-        ensure_dir(dest_path.parent)
-        shutil.copy2(src_path, dest_path)
-        copied += 1
-    return copied
+    return sync_logic.export_storage_allowlist(src, dest, STORAGE_EXPORT_ALLOWLIST)
 
 
 def copy_homeassistant_path_allowlist(src, dest, paths):
-    copied = 0
-    for name in paths:
-        src_path = src / name
-        if not src_path.exists():
-            continue
-        copy_export_path(src_path, dest / name)
-        copied += 1
-    return copied
+    return sync_logic.copy_homeassistant_path_allowlist(src, dest, paths, EXPORT_EXCLUDES, run_command)
 
 
 def copy_export_path(src, dest):
-    ensure_dir(dest.parent)
-    if src.is_dir():
-        sync_tree(src, dest, delete=True, excludes=EXPORT_EXCLUDES)
-    else:
-        shutil.copy2(src, dest)
+    return sync_logic.copy_export_path(src, dest, EXPORT_EXCLUDES, run_command)
 
 
 def export_homeassistant_config(src, dest, target=None):
-    clear_tree(dest)
-    copied = 0
-
-    for pattern in HOMEASSISTANT_EXPORT_ROOT_PATTERNS:
-        for src_path in sorted(src.glob(pattern)):
-            if not src_path.is_file() or src_path.name in HOMEASSISTANT_EXPORT_ROOT_EXCLUDES:
-                continue
-            copy_export_path(src_path, dest / src_path.name)
-            copied += 1
-
-    for name in HOMEASSISTANT_EXPORT_DIRS:
-        src_path = src / name
-        if not src_path.exists():
-            continue
-        copy_export_path(src_path, dest / name)
-        copied += 1
-
-    zigbee2mqtt_count = 0
-    if target and target.get("include_zigbee2mqtt_legacy"):
-        zigbee2mqtt_count = copy_homeassistant_path_allowlist(src, dest, ZIGBEE2MQTT_CONFIG_PATHS)
-    storage_count = export_storage_allowlist(src, dest)
-    return copied, zigbee2mqtt_count, storage_count
+    return sync_logic.export_homeassistant_config(src, dest, target, sync_deps())
 
 
 def apply_homeassistant_config(src, dest, target, details=None):
-    if not src.exists() or not has_managed_content(src):
-        if details is not None:
-            add_detail(details, f"Skipping {target['id']} because Git has no Home Assistant config yet.")
-        return []
-
-    copied = 0
-    for pattern in HOMEASSISTANT_EXPORT_ROOT_PATTERNS:
-        for src_path in sorted(src.glob(pattern)):
-            if not src_path.is_file() or src_path.name in HOMEASSISTANT_EXPORT_ROOT_EXCLUDES:
-                continue
-            dest_path = dest / src_path.name
-            ensure_dir(dest_path.parent)
-            shutil.copy2(src_path, dest_path)
-            copied += 1
-
-    for name in HOMEASSISTANT_EXPORT_DIRS:
-        src_path = src / name
-        if not src_path.exists():
-            continue
-        sync_homeassistant_path_allowlist(src, dest, [name])
-        copied += 1
-
-    zigbee2mqtt_count = 0
-    if target.get("include_zigbee2mqtt_legacy"):
-        zigbee2mqtt_count = sync_homeassistant_path_allowlist(src, dest, ZIGBEE2MQTT_CONFIG_PATHS)
-    copied_count, skipped_protected = sync_storage_allowlist(
-        src,
-        dest,
-        allow_protected=target_model.allow_protected_storage(target),
-    )
-    if copied:
-        if details is not None:
-            add_detail(details, f"Applied {copied} Home Assistant config path(s).")
-    if zigbee2mqtt_count:
-        if details is not None:
-            add_detail(details, f"Applied {zigbee2mqtt_count} Zigbee2MQTT config path(s).")
-    if copied_count:
-        if details is not None:
-            add_detail(details, f"Applied {copied_count} allowlisted .storage config file(s).")
-    if skipped_protected:
-        if details is not None:
-            add_detail(details, f"Skipped protected .storage file(s): {', '.join(skipped_protected)}.")
-    return skipped_protected
+    return sync_logic.apply_homeassistant_config(src, dest, target, sync_deps(), details)
 
 
 def sync_homeassistant_path_allowlist(src, dest, paths):
-    copied = 0
-    for name in paths:
-        src_path = src / name
-        if not src_path.exists():
-            continue
-        dest_path = dest / name
-        if src_path.is_dir():
-            sync_tree(src_path, dest_path, delete=True, excludes=EXPORT_EXCLUDES)
-        else:
-            ensure_dir(dest_path.parent)
-            shutil.copy2(src_path, dest_path)
-        copied += 1
-    return copied
+    return sync_logic.sync_homeassistant_path_allowlist(src, dest, paths, EXPORT_EXCLUDES, run_command)
 
 
 def sync_storage_allowlist(src, dest, allow_protected=False):
-    src_storage = src / ".storage"
-    if not src_storage.exists():
-        return 0, []
-
-    dest_storage = dest / ".storage"
-    ensure_dir(dest_storage)
-    copied = 0
-    skipped_protected = []
-    for name in STORAGE_EXPORT_ALLOWLIST:
-        src_path = src_storage / name
-        if not src_path.exists():
-            continue
-        if name in PROTECTED_STORAGE_FILES and not allow_protected:
-            skipped_protected.append(name)
-            continue
-        dest_path = dest_storage / name
-        ensure_dir(dest_path.parent)
-        shutil.copy2(src_path, dest_path)
-        copied += 1
-    return copied, skipped_protected
+    return sync_logic.sync_storage_allowlist(
+        src,
+        dest,
+        STORAGE_EXPORT_ALLOWLIST,
+        PROTECTED_STORAGE_FILES,
+        allow_protected,
+    )
 
 
 def clear_tree(dest):
-    ensure_dir(dest)
-    empty_dir = WORK_DIR / "empty"
-    ensure_dir(empty_dir)
-    sync_tree(empty_dir, dest, delete=True)
+    return sync_logic.clear_tree(dest, WORK_DIR, run_command)
 
 
 def safe_release_dir(release_name):
@@ -823,15 +686,12 @@ def safe_release_dir(release_name):
 
 
 def source_has_applicable_storage(path, allow_protected=False):
-    storage = path / ".storage"
-    if not storage.exists():
-        return False
-    for name in STORAGE_EXPORT_ALLOWLIST:
-        if name in PROTECTED_STORAGE_FILES and not allow_protected:
-            continue
-        if (storage / name).exists():
-            return True
-    return False
+    return sync_logic.source_has_applicable_storage(
+        path,
+        STORAGE_EXPORT_ALLOWLIST,
+        PROTECTED_STORAGE_FILES,
+        allow_protected,
+    )
 
 
 def create_release_snapshot(resolved_targets, commit, backup_slug):
@@ -1005,175 +865,39 @@ def target_restore_delete(target):
 
 
 def apply_targets(resolved_targets, details):
-    homeassistant_target = None
-    core_stopped = False
-
-    for target in resolved_targets:
-        source_path = Path(target["source_path"])
-        live_path = Path(target["live_path"])
-        addon_was_started = False
-
-        if target["type"] == "homeassistant":
-            homeassistant_target = target
-            allow_protected_storage = target_model.allow_protected_storage(target)
-            if target.get("stop_core_before_sync_if_storage", False) and source_has_applicable_storage(source_path, allow_protected_storage) and not core_stopped:
-                add_detail(details, "Stopping Home Assistant Core before syncing .storage.")
-                core_stop()
-                core_stopped = True
-        elif target["type"] == "addon" and target.get("stop_addon_before_sync", False):
-            slug = target["resolved_slug"]
-            add_detail(details, f"Stopping add-on {slug} before sync.")
-            addon_was_started = stop_addon_for_sync(slug)
-
-        add_detail(details, f"Syncing {target['id']} from {source_path} to {live_path}.")
-        if target["type"] == "homeassistant":
-            apply_homeassistant_config(source_path, live_path, target, details)
-        else:
-            if not source_path.exists() or not has_managed_content(source_path):
-                add_detail(details, f"Skipping {target['id']} because Git has no config for this add-on yet.")
-                continue
-            sync_tree(source_path, live_path, delete=target_apply_delete(target))
-
-        if target["type"] == "addon" and target.get("restart_after_sync", True):
-            slug = target["resolved_slug"]
-            if target.get("stop_addon_before_sync", False):
-                if addon_was_started:
-                    add_detail(details, f"Starting add-on {slug} after sync.")
-                    addon_action(slug, "start")
-            else:
-                add_detail(details, f"Restarting add-on {slug}.")
-                restart_or_start_addon(slug)
-
-    if homeassistant_target is None:
-        return
-
-    add_detail(details, "Running Home Assistant config check.")
-    do_core_check()
-
-    if core_stopped:
-        if homeassistant_target.get("restart_after_sync", True):
-            add_detail(details, "Starting Home Assistant Core after sync.")
-            core_start()
-    else:
-        if homeassistant_target.get("restart_after_sync", True):
-            add_detail(details, "Restarting Home Assistant Core.")
-            core_restart()
+    return sync_logic.apply_targets(resolved_targets, details, sync_deps())
 
 
 def export_targets(resolved_targets, details):
-    for target in resolved_targets:
-        live_path = Path(target["live_path"])
-        source_path = Path(target["source_path"])
-        if not live_path.exists():
-            if target.get("optional", False):
-                add_detail(details, f"Skipping optional target {target['id']} because {live_path} does not exist.")
-                continue
-            raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
-
-        if target["type"] == "homeassistant":
-            add_detail(details, f"Saving config-only {target['id']} from {live_path} to {source_path}.")
-            copied_count, zigbee2mqtt_count, storage_count = export_homeassistant_config(live_path, source_path, target)
-            add_detail(details, f"Saved {copied_count} Home Assistant config path(s).")
-            if zigbee2mqtt_count:
-                add_detail(details, f"Saved {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
-            if storage_count:
-                add_detail(details, f"Saved {storage_count} allowlisted .storage config file(s).")
-        else:
-            add_detail(details, f"Saving {target['id']} from {live_path} to {source_path}.")
-            removed_count = clean_export_destination(source_path)
-            if removed_count:
-                add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} save destination.")
-            export_tree(live_path, source_path, delete=target_save_delete(target))
+    return sync_logic.export_targets(resolved_targets, details, sync_deps())
 
 
 def sync_to_preview(target, preview_path):
-    source_path = Path(target["source_path"])
-    live_path = Path(target["live_path"])
-    clear_tree(preview_path)
-    if live_path.exists():
-        sync_tree(live_path, preview_path, delete=True)
-
-    if target["type"] == "homeassistant":
-        if source_path.exists() and has_managed_content(source_path):
-            skipped_protected = apply_homeassistant_config(source_path, preview_path, target)
-        else:
-            skipped_protected = []
-    else:
-        if source_path.exists() and has_managed_content(source_path):
-            sync_tree(source_path, preview_path, delete=target_apply_delete(target))
-        skipped_protected = []
-    return skipped_protected
+    return sync_logic.sync_to_preview(target, preview_path, sync_deps())
 
 
 def target_diff(target, preview_path):
-    live_path = Path(target["live_path"])
-    if not live_path.exists():
-        return f"Target {target['id']} live path does not exist: {live_path}\n"
-
-    result = run_command(["diff", "-ruN", str(live_path), str(preview_path)])
-    if result.returncode not in (0, 1):
-        raise RuntimeError(f"Diff failed for {target['id']}:\n{result.stderr.strip()}")
-    if not result.stdout.strip():
-        return f"Target {target['id']}: no file changes.\n"
-    return f"## {target['id']}\n{result.stdout.strip()}\n"
+    return sync_logic.target_diff(target, preview_path, run_command)
 
 
 def count_preview_deletions(target, preview_path):
-    live_path = Path(target["live_path"])
-    if not live_path.exists():
-        return 0
-
-    deleted = 0
-    for path in live_path.rglob("*"):
-        if not path.is_file() and not path.is_symlink():
-            continue
-        relative = path.relative_to(live_path)
-        if not (preview_path / relative).exists():
-            deleted += 1
-    return deleted
+    return sync_logic.count_preview_deletions(target, preview_path)
 
 
 def safe_preview_name(value):
-    return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "target"
+    return sync_logic.safe_preview_name(value)
 
 
 def fingerprint_text(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return sync_logic.fingerprint_text(text)
 
 
 def truncate_diff(diff_text):
-    max_chars = 60000
-    if len(diff_text) > max_chars:
-        return diff_text[:max_chars] + "\n\n[Diff truncated. Use git or shell for full output.]"
-    return diff_text
+    return sync_logic.truncate_diff(diff_text)
 
 
 def build_apply_preview(resolved_targets):
-    preview_root = WORK_DIR / "apply-preview"
-    clear_tree(preview_root)
-    chunks = []
-    deletion_count = 0
-    skipped_protected = []
-
-    for target in resolved_targets:
-        preview_path = preview_root / safe_preview_name(str(target["id"]))
-        skipped = sync_to_preview(target, preview_path)
-        if skipped:
-            skipped_protected.extend(skipped)
-            chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
-        deletion_count += count_preview_deletions(target, preview_path)
-        chunks.append(target_diff(target, preview_path))
-
-    diff_text = "\n".join(chunks).strip()
-    if not diff_text:
-        diff_text = "No file changes."
-
-    return {
-        "diff": truncate_diff(diff_text),
-        "fingerprint": fingerprint_text(diff_text),
-        "deletions": deletion_count,
-        "skipped_protected": sorted(set(skipped_protected)),
-    }
+    return sync_logic.build_apply_preview(resolved_targets, sync_deps())
 
 
 def build_apply_diff(resolved_targets):
@@ -1228,326 +952,55 @@ def stage_homeassistant_storage_allowlist(repo_dir, options, details):
     return len(paths)
 
 
+def job_deps():
+    return {
+        "add_detail": add_detail,
+        "apply_targets": apply_targets,
+        "build_apply_preview": build_apply_preview,
+        "commit_if_needed": commit_if_needed,
+        "create_release_snapshot": create_release_snapshot,
+        "enforce_apply_limits": enforce_apply_limits,
+        "ensure_fresh_system_backup": ensure_fresh_system_backup,
+        "ensure_preview_matches_state": ensure_preview_matches_state,
+        "ensure_repo": ensure_repo,
+        "export_targets": export_targets,
+        "get_installed_addons": get_installed_addons,
+        "git_conflict_paths": git_conflict_paths,
+        "git_env": git_env,
+        "git_head_or_unborn": git_head_or_unborn,
+        "git_pull_rebase": git_pull_rebase,
+        "load_manifest": load_manifest,
+        "load_options": load_options,
+        "option_bool": option_bool,
+        "prune_release_snapshots": prune_release_snapshots,
+        "push_branch": push_branch,
+        "read_state": read_state,
+        "release_now": release_now,
+        "repo_checkout_path": repo_checkout_path,
+        "resolve_targets": resolve_targets,
+        "restore_release_snapshot": restore_release_snapshot,
+        "run_lock": RUN_LOCK,
+        "stage_all": stage_all,
+        "stage_homeassistant_storage_allowlist": stage_homeassistant_storage_allowlist,
+        "utc_now": utc_now,
+        "write_state": write_state,
+    }
+
+
 def run_save_job():
-    if not RUN_LOCK.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "save",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
-        return False
-
-    details = []
-    options = load_options()
-    resolved_targets = []
-
-    write_state(
-        {
-            "last_run_at": utc_now(),
-            "last_status": "running",
-            "last_action": "save",
-            "last_message": "Preparing save.",
-            "last_details": details,
-        }
-    )
-
-    try:
-        state = read_state()
-        if state.get("conflicts"):
-            raise RuntimeError("Resolve Git conflicts before running Save HA to Git.")
-
-        repo_dir = ensure_repo(options, reset_to_origin=False)
-        env = git_env(options)
-        branch = options.get("repo_branch", "main")
-        git_pull_rebase(repo_dir, env, branch)
-        commit = git_head_or_unborn(repo_dir)
-        addons = get_installed_addons()
-        manifest, manifest_path = load_manifest(repo_dir, options, addons)
-        resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
-
-        add_detail(details, f"Using branch {branch} at commit {commit}.")
-        add_detail(details, f"Using manifest {manifest_path}.")
-        add_detail(details, "Saving live Home Assistant config to Git.")
-        export_targets(resolved_targets, details)
-        stage_homeassistant_storage_allowlist(repo_dir, options, details)
-        stage_all(repo_dir)
-
-        new_commit = commit_if_needed(repo_dir, f"Save Home Assistant config {release_now()}")
-        if new_commit:
-            add_detail(details, f"Created commit {new_commit}.")
-            try:
-                push_branch(repo_dir, env, branch)
-            except RuntimeError:
-                git_pull_rebase(repo_dir, env, branch)
-                push_branch(repo_dir, env, branch)
-            add_detail(details, f"Pushed to origin/{branch}.")
-        else:
-            add_detail(details, "No live Home Assistant changes to save.")
-
-        write_state({"conflicts": []})
-
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "success",
-                "last_action": "save",
-                "last_message": "Save finished successfully.",
-                "last_details": details,
-                "last_targets": resolved_targets,
-            }
-        )
-        return True
-    except Exception as exc:
-        details.append(str(exc))
-        try:
-            repo_path = repo_checkout_path(options)
-        except RuntimeError:
-            repo_path = None
-        conflicts = git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "error",
-                "last_action": "save",
-                "last_message": str(exc),
-                "last_details": details,
-                "last_targets": resolved_targets,
-                "conflicts": conflicts,
-            }
-        )
-        return False
-    finally:
-        RUN_LOCK.release()
+    return job_logic.run_save_job(job_deps())
 
 
 def run_apply_job():
-    if not RUN_LOCK.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "apply",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
-        return False
-
-    details = []
-    options = load_options()
-    release_name = None
-    backup_slug = None
-    resolved_targets = []
-
-    write_state(
-        {
-            "last_run_at": utc_now(),
-            "last_status": "running",
-            "last_action": "apply",
-            "last_message": "Preparing apply.",
-            "last_details": details,
-        }
-    )
-
-    try:
-        state = read_state()
-        if state.get("conflicts"):
-            raise RuntimeError("Resolve Git conflicts before running Apply Git to HA.")
-
-        repo_dir = ensure_repo(options)
-        commit = git_head_or_unborn(repo_dir)
-        addons = get_installed_addons()
-        manifest, manifest_path = load_manifest(repo_dir, options, addons)
-        resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
-
-        add_detail(details, f"Fetched repository at commit {commit}.")
-        add_detail(details, f"Using manifest {manifest_path}.")
-        add_detail(details, "Rebuilding apply preview for safety checks.")
-        preview = build_apply_preview(resolved_targets)
-        ensure_preview_matches_state(state, commit, preview)
-        enforce_apply_limits(options, preview)
-
-        backup_slug = ensure_fresh_system_backup(options, details)
-
-        if option_bool(options, "create_release_snapshot", True):
-            add_detail(details, "Creating local release snapshot.")
-            release_name = create_release_snapshot(resolved_targets, commit, backup_slug)
-            add_detail(details, f"Created local release snapshot {release_name}.")
-
-        apply_targets(resolved_targets, details)
-        pruned = prune_release_snapshots(options, protected_release=release_name)
-        if pruned:
-            add_detail(details, f"Pruned {len(pruned)} old local release snapshot(s): {', '.join(pruned)}.")
-
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "success",
-                "last_action": "apply",
-                "last_message": "Apply finished successfully.",
-                "last_details": details,
-                "last_release": release_name,
-                "last_backup_slug": backup_slug,
-                "last_targets": resolved_targets,
-                "last_preview_deletions": preview["deletions"],
-            }
-        )
-        return True
-    except Exception as exc:
-        details.append(str(exc))
-        if release_name:
-            try:
-                add_detail(details, f"Restoring local release snapshot {release_name} after failure.")
-                restore_release_snapshot(release_name, details)
-            except Exception as rollback_exc:
-                details.append(f"Rollback from local release failed: {rollback_exc}")
-
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "error",
-                "last_action": "apply",
-                "last_message": str(exc),
-                "last_details": details,
-                "last_release": release_name,
-                "last_backup_slug": backup_slug,
-                "last_targets": resolved_targets,
-            }
-        )
-        return False
-    finally:
-        RUN_LOCK.release()
+    return job_logic.run_apply_job(job_deps())
 
 
 def run_preview_job():
-    if not RUN_LOCK.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
-        return False
-
-    details = []
-    options = load_options()
-    resolved_targets = []
-
-    write_state(
-        {
-            "last_run_at": utc_now(),
-            "last_status": "running",
-            "last_action": "preview",
-            "last_message": "Preparing apply preview.",
-            "last_details": details,
-        }
-    )
-
-    try:
-        state = read_state()
-        if state.get("conflicts"):
-            raise RuntimeError("Resolve Git conflicts before running Preview Git to HA.")
-
-        repo_dir = ensure_repo(options)
-        commit = git_head_or_unborn(repo_dir)
-        addons = get_installed_addons()
-        manifest, manifest_path = load_manifest(repo_dir, options, addons)
-        resolved_targets = resolve_targets(repo_dir, manifest, addons, require_source=False)
-
-        add_detail(details, f"Fetched repository at commit {commit}.")
-        add_detail(details, f"Using manifest {manifest_path}.")
-        add_detail(details, "Building apply preview without changing live config.")
-        preview = build_apply_preview(resolved_targets)
-
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "success",
-                "last_action": "preview",
-                "last_message": "Apply preview finished successfully.",
-                "last_details": details,
-                "last_targets": resolved_targets,
-                "last_diff": preview["diff"],
-                "last_diff_generated_at": utc_now(),
-                "last_preview_commit": commit,
-                "last_preview_fingerprint": preview["fingerprint"],
-                "last_preview_deletions": preview["deletions"],
-            }
-        )
-        return True
-    except Exception as exc:
-        details.append(str(exc))
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "error",
-                "last_action": "preview",
-                "last_message": str(exc),
-                "last_details": details,
-                "last_targets": resolved_targets,
-            }
-        )
-        return False
-    finally:
-        RUN_LOCK.release()
+    return job_logic.run_preview_job(job_deps())
 
 
 def run_rollback_job(release_name):
-    if not RUN_LOCK.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "rollback",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
-        return False
-
-    details = []
-    write_state(
-        {
-            "last_run_at": utc_now(),
-            "last_status": "running",
-            "last_action": "rollback",
-            "last_message": f"Rolling back release {release_name}.",
-            "last_details": details,
-        }
-    )
-
-    try:
-        metadata = restore_release_snapshot(release_name, details)
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "success",
-                "last_action": "rollback",
-                "last_message": f"Rollback to {release_name} finished successfully.",
-                "last_details": details,
-                "last_release": release_name,
-                "last_backup_slug": metadata.get("backup_slug"),
-                "last_targets": metadata.get("targets", []),
-            }
-        )
-        return True
-    except Exception as exc:
-        details.append(str(exc))
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "error",
-                "last_action": "rollback",
-                "last_message": str(exc),
-                "last_details": details,
-            }
-        )
-        return False
-    finally:
-        RUN_LOCK.release()
+    return job_logic.run_rollback_job(release_name, job_deps())
 
 
 def start_apply():
