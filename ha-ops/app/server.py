@@ -818,7 +818,8 @@ def restore_release_snapshot(release_name, details, core_already_stopped=False):
 
         if target.get("existed", True):
             add_detail(details, f"Restoring {target['id']} from release {release_name}.")
-            sync_tree(snapshot_path, live_path, delete=bool(target.get("delete", True)))
+            restore_excludes = EXPORT_EXCLUDES if target_type == "addon" else None
+            sync_tree(snapshot_path, live_path, delete=bool(target.get("delete", True)), excludes=restore_excludes)
         else:
             add_detail(details, f"Clearing {target['id']} because it did not exist in release {release_name}.")
             clear_tree(live_path)

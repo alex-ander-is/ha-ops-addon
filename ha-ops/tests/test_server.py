@@ -1110,6 +1110,40 @@ class ServerTests(unittest.TestCase):
             self.assertTrue((release_dir / "addon-local_zigbee2mqtt" / "configuration.yaml").exists())
             self.assertFalse((release_dir / "addon-local_zigbee2mqtt" / "nested" / "runtime.db").exists())
 
+    def test_addon_rollback_preserves_excluded_runtime_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
+            addon_live.mkdir()
+            (addon_live / "configuration.yaml").write_text("snapshot\n")
+            (addon_live / "nested").mkdir()
+            (addon_live / "nested" / "runtime.db").write_text("runtime\n")
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "addon-local_zigbee2mqtt",
+                        "type": "addon",
+                        "resolved_slug": "local_zigbee2mqtt",
+                        "source_path": str(root / "repo" / "addons" / "local_zigbee2mqtt"),
+                        "live_path": str(addon_live),
+                        "restart_after_sync": False,
+                    }
+                ],
+                "abc123",
+                None,
+            )
+
+            (addon_live / "configuration.yaml").write_text("changed\n")
+            (addon_live / "extra.yaml").write_text("live-only\n")
+            server.restore_release_snapshot(release, [])
+
+            self.assertEqual((addon_live / "configuration.yaml").read_text(), "snapshot\n")
+            self.assertFalse((addon_live / "extra.yaml").exists())
+            self.assertEqual((addon_live / "nested" / "runtime.db").read_text(), "runtime\n")
+
     def test_pending_conflicts_block_preview_and_save(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
