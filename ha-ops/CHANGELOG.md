@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7
+
+- Add safety coverage for AppContext, Git auth, conflict handling, and HTTP handler wiring.
+- Move Git auth, conflict resolution, app context, and web handler logic out of the server entrypoint.
+- Keep `server.py` as a composition layer while preserving existing routes and UI behavior.
+
 ## 0.4.6
 
 - Split server internals into UI, state, supervisor, backups, manifest, Git, sync, jobs, and target modules.

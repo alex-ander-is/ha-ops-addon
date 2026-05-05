@@ -266,7 +266,22 @@ class _ServerModule(ModuleType):
         super().__setattr__(name, value)
 
 
-sys.modules[__name__].__class__ = _ServerModule
+def __getattr__(name):
+    if name in _PATH_ATTRS:
+        return getattr(_CTX, _PATH_ATTRS[name])
+    if name in _VALUE_ATTRS:
+        return getattr(_CTX, _VALUE_ATTRS[name])
+    if name in _PATCHABLE_METHODS:
+        return getattr(_CTX, name)
+    value = _legacy_func(name)
+    if value is not None:
+        return value
+    raise AttributeError(name)
+
+
+_MODULE = sys.modules.get(__name__)
+if _MODULE is not None:
+    _MODULE.__class__ = _ServerModule
 
 Handler = web.create_handler(_CTX)
 
