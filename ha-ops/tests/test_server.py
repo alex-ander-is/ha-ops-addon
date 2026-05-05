@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from email.message import Message
@@ -14,8 +15,10 @@ SERVER_PATH = ROOT / "app" / "server.py"
 
 
 def load_server():
+    sys.modules.pop("server", None)
     spec = importlib.util.spec_from_file_location("server", SERVER_PATH)
     server = importlib.util.module_from_spec(spec)
+    sys.modules["server"] = server
     spec.loader.exec_module(server)
     return server
 
