@@ -1792,6 +1792,17 @@ class ServerTests(unittest.TestCase):
             )
             subprocess.run(["python3", "-c", script], cwd=checkout, check=True, text=True, capture_output=True)
 
+    def test_worktree_imports_server_without_sys_modules_registration(self):
+        script = (
+            "import importlib.util, pathlib; "
+            f"path = pathlib.Path({str(SERVER_PATH)!r}); "
+            "spec = importlib.util.spec_from_file_location('server_worktree_import', path); "
+            "module = importlib.util.module_from_spec(spec); "
+            "spec.loader.exec_module(module); "
+            "assert module.HOST == '0.0.0.0'"
+        )
+        subprocess.run(["python3", "-c", script], check=True, text=True, capture_output=True)
+
     def test_render_page_survives_unavailable_backup_api(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
