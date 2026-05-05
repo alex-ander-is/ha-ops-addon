@@ -1,9 +1,12 @@
 import importlib.util
+import io
 import json
 import subprocess
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
+from types import MethodType
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -113,6 +116,133 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(server.read_state()["last_status"], "success")
             self.assertEqual(server.read_state()["last_message"], "ok")
             self.assertFalse((server.STATE_PATH.parent / f".{server.STATE_PATH.name}.tmp").exists())
+
+    def test_app_context_uses_injected_paths_and_callbacks(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = server.app_context.AppContext(
+                data_dir=root / "data",
+                config_dir=root / "homeassistant",
+                addon_configs_dir=root / "addon_configs",
+                addon_config_path=root / "config.yaml",
+            )
+            ctx.data_dir.mkdir(parents=True)
+            ctx.work_dir.mkdir(parents=True)
+            ctx.config_dir.mkdir(parents=True)
+            ctx.addon_configs_dir.mkdir(parents=True)
+            ctx.write_state({"managed_addons": ["local_zigbee2mqtt"]})
+            calls = []
+
+            def fake_run_command(command, env=None, cwd=None):
+                calls.append((command, cwd))
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            ctx.run_command = fake_run_command
+
+            sync_deps = ctx.sync_deps()
+            release_deps = ctx.release_deps()
+            job_deps = ctx.job_deps()
+
+            self.assertEqual(sync_deps.work_dir, ctx.work_dir)
+            self.assertEqual(release_deps.releases_dir, ctx.releases_dir)
+            self.assertIs(job_deps.run_lock, ctx.run_lock)
+            self.assertEqual(ctx.read_state()["managed_addons"], ["local_zigbee2mqtt"])
+            ctx.stage_all(root / "repo")
+            self.assertEqual(calls[0][0], ["git", "add", "-A"])
+
+    def test_git_auth_module_uses_injected_paths_and_runner(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            key_path = work / "generated_deploy_key"
+            pub_path = work / "generated_deploy_key.pub"
+
+            self.assertEqual(server.git_auth.git_auth_mode({}, key_path, pub_path), "none")
+            self.assertEqual(server.git_auth.git_auth_mode({"git_ssh_key": "KEY"}, key_path, pub_path), "manual")
+
+            env = {}
+            server.git_auth.setup_git_ssh_env(env, work, key_text="PRIVATE")
+            self.assertIn("manual_deploy_key", env["GIT_SSH_COMMAND"])
+            self.assertEqual((work / "manual_deploy_key").read_text(), "PRIVATE")
+
+            pub_path.parent.mkdir(parents=True, exist_ok=True)
+            key_path.write_text("generated-private")
+            pub_path.write_text("generated-public\n")
+            self.assertEqual(server.git_auth.git_auth_mode({}, key_path, pub_path), "generated")
+            self.assertEqual(server.git_auth.load_generated_public_key(pub_path), "generated-public")
+
+            commands = []
+
+            def fake_keygen(command, env=None, cwd=None):
+                commands.append(command)
+                (work / "generated_deploy_key.new").write_text("new-private")
+                (work / "generated_deploy_key.new.pub").write_text("new-public\n")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            public_key = server.git_auth.generate_deploy_key(work, key_path, pub_path, fake_keygen, lambda message: None)
+
+            self.assertEqual(public_key, "new-public")
+            self.assertEqual(key_path.read_text(), "new-private")
+            self.assertEqual(commands[0][0], "ssh-keygen")
+
+    def test_conflict_module_resolves_save_conflict_with_context_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "ha", addon_configs_dir=root / "addons")
+            ctx.data_dir.mkdir(parents=True)
+            ctx.write_state({"conflicts": ["homeassistant/configuration.yaml"], "conflict_type": "save_unknown_base"})
+
+            message = server.conflicts.resolve_git_conflict(ctx, "homeassistant/configuration.yaml", "git")
+            state = ctx.read_state()
+
+            self.assertIn("Run Save HA to Git again", message)
+            self.assertEqual(state["conflicts"], [])
+            self.assertEqual(state["save_conflict_resolutions"], {"homeassistant/configuration.yaml": "git"})
+
+    def test_web_handler_uses_context_for_health_and_post_actions(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.calls = []
+
+            def run_save_job(self):
+                self.calls.append("save")
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+
+        def invoke(method, path, body=b"", headers=None):
+            request = handler.__new__(handler)
+            request.path = path
+            request.rfile = io.BytesIO(body)
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            for key, value in (headers or {}).items():
+                request.headers[key] = value
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+            getattr(request, method)()
+            return request
+
+        get_request = invoke("do_GET", "/health")
+        self.assertEqual(get_request.responses[-1], 200)
+        self.assertEqual(json.loads(get_request.wfile.getvalue().decode()), {"ok": True})
+
+        post_request = invoke(
+            "do_POST",
+            "/save",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Save HA to Git started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save"])
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
