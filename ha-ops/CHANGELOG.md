@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.8
+
+- Explain Git conflict choices in the UI.
+- Show conflict details before choosing between HA and Git versions.
+
 ## 0.4.7
 
 - Add safety coverage for AppContext, Git auth, conflict handling, and HTTP handler wiring.
