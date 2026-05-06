@@ -20,6 +20,7 @@ class JobContext:
     git_has_unpushed_commits: Any
     git_head_or_unborn: Any
     git_pull_rebase: Any
+    git_status_porcelain: Any
     load_manifest: Any
     load_options: Any
     option_bool: Any
@@ -57,6 +58,36 @@ def write_pending_conflicts(ctx, action, message, details=None, targets=None):
             "last_targets": targets or [],
         }
     )
+
+
+def save_change_lines(status):
+    labels = {
+        "?": "Untracked",
+        "A": "Added",
+        "C": "Copied",
+        "D": "Deleted",
+        "M": "Modified",
+        "R": "Renamed",
+        "T": "Type changed",
+        "U": "Unmerged",
+    }
+    lines = []
+    for raw_line in status.splitlines():
+        if not raw_line:
+            continue
+        code = raw_line[:2]
+        path = raw_line[3:].strip() if len(raw_line) > 3 else raw_line.strip()
+        status_code = code[0] if code[0] != " " else code[1]
+        label = labels.get(status_code, "Changed")
+        lines.append(f"- {label}: {path}")
+    return lines
+
+
+def add_save_change_details(ctx, details, status):
+    lines = save_change_lines(status)
+    if not lines:
+        return
+    ctx.add_detail(details, "\n".join([f"Git changes prepared for commit ({len(lines)}):", *lines]))
 
 
 def run_save_job(ctx):
@@ -134,6 +165,7 @@ def run_save_job(ctx):
         ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
         ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
         ctx.stage_all(repo_dir)
+        add_save_change_details(ctx, details, ctx.git_status_porcelain(repo_dir))
 
         new_commit = ctx.commit_if_needed(repo_dir, f"Save Home Assistant config {ctx.release_now()}")
         if new_commit:

@@ -423,6 +423,7 @@ class AppContext:
             git_has_unpushed_commits=self.git_has_unpushed_commits,
             git_head_or_unborn=self.git_head_or_unborn,
             git_pull_rebase=self.git_pull_rebase,
+            git_status_porcelain=self.git_status_porcelain,
             load_manifest=self.load_manifest,
             load_options=self.load_options,
             option_bool=self.option_bool,

@@ -398,6 +398,9 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             self.assertTrue(server.run_save_job())
+            details = "\n".join(server.read_state()["last_details"])
+            self.assertIn("Git changes prepared for commit (1):", details)
+            self.assertIn("- Added: homeassistant/configuration.yaml", details)
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
                 check=True,

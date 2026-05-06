@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.16
+
+- Show the Git file change list prepared by Save HA to Git before commit and push.
+
 ## 0.4.15
 
 - Export `core.config_entries` as a redacted managed projection instead of raw `.storage`.
