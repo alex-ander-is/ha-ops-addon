@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.18
+
+- Keep the add-on logo while restoring the Home Assistant installed apps update indicator.
+
 ## 0.4.17
 
 - Show Save export candidate files before the unknown-base conflict gate and keep them visible after resolving Save conflicts.
