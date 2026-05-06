@@ -195,6 +195,8 @@ def render_page(ctx):
                 if has_conflicts
                 else "error"
                 if last_status == "error"
+                else "interrupted"
+                if last_status == "interrupted"
                 else "running"
                 if last_status == "running"
                 else ""

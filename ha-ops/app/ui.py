@@ -308,6 +308,7 @@ def render_page(data):
       --ha-error: var(--error-color, #db4437);
       --ha-success: var(--success-color, #43a047);
       --ha-info: var(--info-color, #039be5);
+      --ha-warning: var(--warning-color, #f9ab00);
       --ha-radius: var(--ha-card-border-radius, 12px);
       --ha-shadow: var(--ha-card-box-shadow, none);
       --ha-font: var(--paper-font-common-base_-_font-family, system-ui, sans-serif);
@@ -391,6 +392,11 @@ def render_page(data):
       background: color-mix(in srgb, var(--ha-info) 14%, transparent);
       color: var(--ha-info);
       border-color: color-mix(in srgb, var(--ha-info) 30%, transparent);
+    }}
+    .badge.interrupted {{
+      background: color-mix(in srgb, var(--ha-warning) 14%, transparent);
+      color: var(--ha-warning);
+      border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
     }}
     .actions {{
       display: flex;

@@ -279,6 +279,8 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
         ctx.add_detail(details, f"Applied {copied_count} allowlisted .storage config file(s).")
     if managed_result["updated"] and details is not None:
         ctx.add_detail(details, f"Applied {managed_result['updated']} managed .storage projection update(s).")
+    if managed_result.get("missing") and details is not None:
+        ctx.add_detail(details, "Skipped managed core.config_entries projection because live .storage/core.config_entries is missing.")
     if skipped_protected and details is not None:
         ctx.add_detail(details, f"Skipped protected .storage file(s): {', '.join(skipped_protected)}.")
     return skipped_protected
@@ -554,7 +556,7 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
             if is_protected:
                 changes.changed_protected_storage = True
 
-    if storage_managed.source_has_managed_projection(src):
+    if storage_managed.can_apply_core_config_entries_projection(src, dest):
         changes.changed_storage = True
         changes.changed_protected_storage = True
 

@@ -138,7 +138,7 @@ class ServerTests(unittest.TestCase):
             server._CTX.repair_startup_state()
 
             state = server.read_state()
-            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["last_status"], "interrupted")
             self.assertEqual(state["last_message"], "Previous action was interrupted by HA Ops restart.")
             self.assertIn("interrupted", state["last_details"][-1])
 
@@ -1748,6 +1748,55 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(entries["workday-id"]["data"], {"keep": "live"})
             self.assertEqual(entries["google-id"]["data"]["token"]["access_token"], "live-token")
             self.assertEqual(entries["google-id"]["options"]["calendar_access"], "read_write")
+
+    def test_managed_config_entries_projection_skips_missing_live_raw_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (source / ".storage_managed").mkdir(parents=True)
+            (source / ".storage_managed" / "core.config_entries.json").write_text(
+                json.dumps({"version": 1, "source": "core.config_entries", "entries": []})
+            )
+            details = []
+
+            skipped = server._CTX.apply_homeassistant_config(source, live, {"id": "homeassistant"}, details)
+
+            self.assertEqual(skipped, [])
+            self.assertFalse((live / ".storage" / "core.config_entries").exists())
+            self.assertIn(
+                "Skipped managed core.config_entries projection because live .storage/core.config_entries is missing.",
+                details,
+            )
+
+    def test_apply_preview_skips_missing_live_config_entries_raw_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (source / ".storage_managed").mkdir(parents=True)
+            (source / ".storage_managed" / "core.config_entries.json").write_text(
+                json.dumps({"version": 1, "source": "core.config_entries", "entries": []})
+            )
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+
+            self.assertEqual(preview["deletions"], 0)
+            self.assertIn("no file changes", preview["diff"].lower())
 
     def test_homeassistant_apply_rejects_git_source_symlink(self):
         server = load_server()

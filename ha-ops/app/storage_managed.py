@@ -120,9 +120,9 @@ def apply_core_config_entries_projection(src_config_dir, dest_config_dir):
     projection_path = Path(src_config_dir) / MANAGED_DIR / CORE_CONFIG_ENTRIES_PROJECTION
     raw_path = Path(dest_config_dir) / ".storage" / CORE_CONFIG_ENTRIES_RAW
     if not projection_path.exists():
-        return {"updated": 0, "skipped": 0}
+        return {"updated": 0, "skipped": 0, "missing": 0}
     if not raw_path.exists():
-        raise RuntimeError("Cannot apply managed core.config_entries: live .storage/core.config_entries is missing.")
+        return {"updated": 0, "skipped": 0, "missing": 1}
 
     projection = load_json(projection_path)
     raw = load_json(raw_path)
@@ -150,8 +150,14 @@ def apply_core_config_entries_projection(src_config_dir, dest_config_dir):
 
     if updated:
         write_json(raw_path, raw)
-    return {"updated": updated, "skipped": skipped}
+    return {"updated": updated, "skipped": skipped, "missing": 0}
 
 
 def source_has_managed_projection(path):
     return (Path(path) / MANAGED_DIR / CORE_CONFIG_ENTRIES_PROJECTION).exists()
+
+
+def can_apply_core_config_entries_projection(src_config_dir, dest_config_dir):
+    return source_has_managed_projection(src_config_dir) and (
+        Path(dest_config_dir) / ".storage" / CORE_CONFIG_ENTRIES_RAW
+    ).exists()

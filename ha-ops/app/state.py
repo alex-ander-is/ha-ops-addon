@@ -82,7 +82,7 @@ def repair_startup_state(path, now):
     current.update(
         {
             "last_run_at": now,
-            "last_status": "error",
+            "last_status": "interrupted",
             "last_message": "Previous action was interrupted by HA Ops restart.",
             "last_details": details,
         }

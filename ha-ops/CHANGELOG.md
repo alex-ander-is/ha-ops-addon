@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.29
+
+- Skip managed core.config_entries projections when the live raw .storage file is missing.
+- Show interrupted startup actions as interrupted instead of error.
+
 ## 0.4.28
 
 - Show Git-to-HA preview target progress in the UI while preview is running.
