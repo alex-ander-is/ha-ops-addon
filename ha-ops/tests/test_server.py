@@ -222,6 +222,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Use Git Version", content)
         self.assertIn("table-scroll", content)
         self.assertIn("conflict-diff", content)
+        self.assertIn("diff-wrap-toggle", content)
+        self.assertIn("Wrap lines", content)
         self.assertIn("diff-del", content)
         self.assertIn("diff-add", content)
 

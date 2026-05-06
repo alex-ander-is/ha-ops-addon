@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.10
+
+- Add an optional line wrapping toggle for conflict diff blocks.
+
 ## 0.4.9
 
 - Add colored conflict diff highlighting.

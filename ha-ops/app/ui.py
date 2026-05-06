@@ -16,7 +16,17 @@ def render_conflict_detail(detail):
         elif line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
             class_name = "diff-marker"
         lines.append(f"<span class='diff-line {class_name}'>{html.escape(line)}</span>")
-    return "<div class='conflict-diff' role='region' aria-label='Conflict diff'>" + "".join(lines) + "</div>"
+    return (
+        "<div class='conflict-diff' role='region' aria-label='Conflict diff'>"
+        "<label class='diff-wrap-control'>"
+        "<input type='checkbox' class='diff-wrap-toggle'>"
+        "<span>Wrap lines</span>"
+        "</label>"
+        "<div class='diff-lines'>"
+        f"{''.join(lines)}"
+        "</div>"
+        "</div>"
+    )
 
 
 def render_addons(selected, get_installed_addons, addon_slug_value, addon_display_name, addon_is_zigbee2mqtt):
@@ -403,6 +413,23 @@ def render_page(data):
       font-size: 0.92rem;
       line-height: 1.45;
     }}
+    .diff-wrap-control {{
+      position: sticky;
+      left: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      color: var(--ha-muted);
+      background: var(--ha-code-bg);
+      border-bottom: 1px solid var(--ha-border);
+      font-family: inherit;
+      font-size: 0.86rem;
+      z-index: 1;
+    }}
+    .diff-lines {{
+      min-width: max-content;
+    }}
     .diff-line {{
       display: block;
       min-width: max-content;
@@ -410,10 +437,21 @@ def render_page(data):
       white-space: pre;
       color: var(--ha-text);
     }}
-    .diff-line:first-child {{
+    .conflict-diff.wrap-lines {{
+      overflow-x: hidden;
+    }}
+    .conflict-diff.wrap-lines .diff-lines {{
+      min-width: 0;
+    }}
+    .conflict-diff.wrap-lines .diff-line {{
+      min-width: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }}
+    .diff-lines .diff-line:first-child {{
       padding-top: 10px;
     }}
-    .diff-line:last-child {{
+    .diff-lines .diff-line:last-child {{
       padding-bottom: 10px;
     }}
     .diff-add {{
@@ -593,6 +631,15 @@ def render_page(data):
         form.addEventListener("submit", (event) => {{
           event.preventDefault();
           submitAsyncForm(form);
+        }});
+      }}
+
+      for (const toggle of document.querySelectorAll(".diff-wrap-toggle")) {{
+        toggle.addEventListener("change", () => {{
+          const diff = toggle.closest(".conflict-diff");
+          if (diff) {{
+            diff.classList.toggle("wrap-lines", toggle.checked);
+          }}
         }});
       }}
 
