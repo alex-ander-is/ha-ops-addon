@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.30
+
+- Use the Home Assistant add-on config mount at /config as the default live config path.
+
 ## 0.4.29
 
 - Skip managed core.config_entries projections when the live raw .storage file is missing.

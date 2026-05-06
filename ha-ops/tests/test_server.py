@@ -176,6 +176,13 @@ class ServerTests(unittest.TestCase):
             ctx.stage_all(root / "repo")
             self.assertEqual(calls[0][0], ["git", "add", "-A"])
 
+    def test_default_app_context_uses_home_assistant_config_mount(self):
+        server = load_server()
+
+        ctx = server.app_context.AppContext()
+
+        self.assertEqual(ctx.config_dir, Path("/config"))
+
     def test_git_auth_module_uses_injected_paths_and_runner(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

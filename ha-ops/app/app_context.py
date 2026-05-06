@@ -18,7 +18,7 @@ class AppContext:
     def __init__(
         self,
         data_dir=Path("/data"),
-        config_dir=Path("/homeassistant"),
+        config_dir=Path("/config"),
         addon_configs_dir=Path("/addon_configs"),
         addon_config_path=Path("/app/config.yaml"),
         host="0.0.0.0",
