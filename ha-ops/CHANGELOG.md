@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.15
+
+- Export `core.config_entries` as a redacted managed projection instead of raw `.storage`.
+- Apply managed config entry projections by merging only allowlisted safe fields into existing entries.
+
 ## 0.4.14
 
 - Add HA Ops add-on icon and logo assets.

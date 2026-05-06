@@ -31,7 +31,6 @@ EXPORT_EXCLUDES = [
 STORAGE_EXPORT_ALLOWLIST = [
     "core.area_registry",
     "core.config",
-    "core.config_entries",
     "core.device_registry",
     "core.entity_registry",
     "core.floor_registry",

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import storage_managed
 import targets as target_model
 
 
@@ -188,10 +189,11 @@ def clean_homeassistant_export_destination(dest, target, ctx):
             clear_managed_destination_path(dest / name, ctx.export_excludes, ctx.work_dir, ctx.run_command)
 
     dest_storage = dest / ".storage"
-    for name in ctx.storage_allowlist:
+    for name in [*ctx.storage_allowlist, storage_managed.CORE_CONFIG_ENTRIES_RAW]:
         dest_path = dest_storage / name
         if dest_path.exists() or dest_path.is_symlink():
             safe_remove_path(dest_path)
+    clear_managed_destination_path(dest / storage_managed.MANAGED_DIR, ctx.export_excludes, ctx.work_dir, ctx.run_command)
 
 
 def export_homeassistant_config(src, dest, target, ctx):
@@ -222,7 +224,8 @@ def export_homeassistant_config(src, dest, target, ctx):
             ctx.run_command,
         )
     storage_count = export_storage_allowlist(src, dest, ctx.storage_allowlist)
-    return copied, zigbee2mqtt_count, storage_count
+    managed_storage_count = storage_managed.export_core_config_entries_projection(src, dest)
+    return copied, zigbee2mqtt_count, storage_count, managed_storage_count
 
 
 def apply_homeassistant_config(src, dest, target, ctx, details=None):
@@ -266,12 +269,15 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
         ctx.protected_storage_files,
         allow_protected=target_model.allow_protected_storage(target),
     )
+    managed_result = storage_managed.apply_core_config_entries_projection(src, dest)
     if copied and details is not None:
         ctx.add_detail(details, f"Applied {copied} Home Assistant config path(s).")
     if zigbee2mqtt_count and details is not None:
         ctx.add_detail(details, f"Applied {zigbee2mqtt_count} Zigbee2MQTT config path(s).")
     if copied_count and details is not None:
         ctx.add_detail(details, f"Applied {copied_count} allowlisted .storage config file(s).")
+    if managed_result["updated"] and details is not None:
+        ctx.add_detail(details, f"Applied {managed_result['updated']} managed .storage projection update(s).")
     if skipped_protected and details is not None:
         ctx.add_detail(details, f"Skipped protected .storage file(s): {', '.join(skipped_protected)}.")
     return skipped_protected
@@ -547,6 +553,10 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
             if is_protected:
                 changes.changed_protected_storage = True
 
+    if storage_managed.source_has_managed_projection(src):
+        changes.changed_storage = True
+        changes.changed_protected_storage = True
+
     return changes
 
 
@@ -647,12 +657,16 @@ def build_save_export(resolved_targets, details, ctx):
         export_path = export_root / target["id"]
         if target["type"] == "homeassistant":
             ctx.add_detail(details, f"Exporting config-only {target['id']} from {live_path} to a temporary tree.")
-            copied_count, zigbee2mqtt_count, storage_count = export_homeassistant_config(live_path, export_path, target, ctx)
+            copied_count, zigbee2mqtt_count, storage_count, managed_storage_count = export_homeassistant_config(
+                live_path, export_path, target, ctx
+            )
             ctx.add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
             if zigbee2mqtt_count:
                 ctx.add_detail(details, f"Exported {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
             if storage_count:
                 ctx.add_detail(details, f"Exported {storage_count} allowlisted .storage config file(s).")
+            if managed_storage_count:
+                ctx.add_detail(details, f"Exported {managed_storage_count} managed .storage projection(s).")
         else:
             ctx.add_detail(details, f"Exporting {target['id']} from {live_path} to a temporary tree.")
             export_target_to_path(target, export_path, ctx)

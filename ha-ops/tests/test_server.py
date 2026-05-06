@@ -313,8 +313,8 @@ class ServerTests(unittest.TestCase):
             source = root / "repo" / "homeassistant"
             (live / ".storage").mkdir(parents=True)
             (source / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.config_entries").write_text("live\n")
-            (source / ".storage" / "core.config_entries").write_text("git\n")
+            (live / ".storage" / "core.device_registry").write_text("live\n")
+            (source / ".storage" / "core.device_registry").write_text("git\n")
             (source / ".storage" / "input_boolean").write_text("input\n")
 
             preview = server.build_apply_preview(
@@ -329,9 +329,9 @@ class ServerTests(unittest.TestCase):
                 ]
             )
             preview_storage = server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage"
-            self.assertEqual((preview_storage / "core.config_entries").read_text(), "live\n")
+            self.assertEqual((preview_storage / "core.device_registry").read_text(), "live\n")
             self.assertEqual((preview_storage / "input_boolean").read_text(), "input\n")
-            self.assertIn("core.config_entries", preview["skipped_protected"])
+            self.assertIn("core.device_registry", preview["skipped_protected"])
 
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
@@ -583,7 +583,7 @@ class ServerTests(unittest.TestCase):
             self.assertFalse((repo / "homeassistant" / "packages" / "new.yaml").exists())
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
 
-    def test_save_exports_protected_storage_allowlist_even_when_ignored(self):
+    def test_save_exports_managed_config_entries_projection_when_storage_ignored(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -599,7 +599,36 @@ class ServerTests(unittest.TestCase):
             self.git(["push", "-u", "origin", "main"], seed)
 
             (server.CONFIG_DIR / ".storage").mkdir()
-            (server.CONFIG_DIR / ".storage" / "core.config_entries").write_text("protected\n")
+            (server.CONFIG_DIR / ".storage" / "core.config_entries").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "data": {
+                            "entries": [
+                                {
+                                    "domain": "workday",
+                                    "entry_id": "workday-id",
+                                    "source": "user",
+                                    "title": "Workday",
+                                    "unique_id": None,
+                                    "data": {},
+                                    "options": {"country": "CZ", "workdays": ["mon", "tue"]},
+                                    "modified_at": "runtime",
+                                },
+                                {
+                                    "domain": "google",
+                                    "entry_id": "google-id",
+                                    "source": "user",
+                                    "title": "alex@example.com",
+                                    "unique_id": "alex@example.com",
+                                    "data": {"token": {"access_token": "secret"}},
+                                    "options": {"calendar_access": "read_write"},
+                                },
+                            ]
+                        },
+                    }
+                )
+            )
             (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("safe\n")
             (server.CONFIG_DIR / ".storage" / "auth").write_text("secret\n")
             server.OPTIONS_PATH.write_text(
@@ -616,14 +645,23 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_job())
-            self.assertEqual(self.remote_file(remote, "homeassistant/.storage/core.config_entries"), "protected\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/.storage/input_boolean"), "safe\n")
+            projection = json.loads(self.remote_file(remote, "homeassistant/.storage_managed/core.config_entries.json"))
+            self.assertEqual(projection["source"], "core.config_entries")
+            workday = next(entry for entry in projection["entries"] if entry["domain"] == "workday")
+            google = next(entry for entry in projection["entries"] if entry["domain"] == "google")
+            self.assertEqual(workday["apply"], "update")
+            self.assertEqual(workday["options"], {"country": "CZ", "workdays": ["mon", "tue"]})
+            self.assertEqual(google["apply"], "ignore")
+            self.assertEqual(google["data"], {})
+            self.assertNotIn("secret", json.dumps(projection))
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
                 check=True,
                 text=True,
                 capture_output=True,
             )
+            self.assertNotIn("homeassistant/.storage/core.config_entries", result.stdout)
             self.assertNotIn("homeassistant/.storage/auth", result.stdout)
 
     def test_save_homeassistant_preserves_git_only_files_outside_managed_paths(self):
@@ -1531,8 +1569,8 @@ class ServerTests(unittest.TestCase):
             source = root / "repo" / "homeassistant"
             (live / ".storage").mkdir(parents=True)
             (source / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.config_entries").write_text("live\n")
-            (source / ".storage" / "core.config_entries").write_text("git\n")
+            (live / ".storage" / "core.device_registry").write_text("live\n")
+            (source / ".storage" / "core.device_registry").write_text("git\n")
 
             skipped = server.apply_homeassistant_config(
                 source,
@@ -1541,7 +1579,7 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertEqual(skipped, [])
-            self.assertEqual((live / ".storage" / "core.config_entries").read_text(), "git\n")
+            self.assertEqual((live / ".storage" / "core.device_registry").read_text(), "git\n")
 
     def test_allow_protected_storage_false_applies_safe_storage_only(self):
         server = load_server()
@@ -1552,8 +1590,8 @@ class ServerTests(unittest.TestCase):
             source = root / "repo" / "homeassistant"
             (live / ".storage").mkdir(parents=True)
             (source / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.config_entries").write_text("live\n")
-            (source / ".storage" / "core.config_entries").write_text("git\n")
+            (live / ".storage" / "core.device_registry").write_text("live\n")
+            (source / ".storage" / "core.device_registry").write_text("git\n")
             (source / ".storage" / "input_boolean").write_text("safe\n")
 
             skipped = server.apply_homeassistant_config(
@@ -1562,9 +1600,84 @@ class ServerTests(unittest.TestCase):
                 {"id": "homeassistant", "allow_protected_storage": False},
             )
 
-            self.assertEqual(skipped, ["core.config_entries"])
-            self.assertEqual((live / ".storage" / "core.config_entries").read_text(), "live\n")
+            self.assertEqual(skipped, ["core.device_registry"])
+            self.assertEqual((live / ".storage" / "core.device_registry").read_text(), "live\n")
             self.assertEqual((live / ".storage" / "input_boolean").read_text(), "safe\n")
+
+    def test_managed_config_entries_projection_updates_safe_fields_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage_managed").mkdir(parents=True)
+            raw = {
+                "version": 1,
+                "data": {
+                    "entries": [
+                        {
+                            "domain": "workday",
+                            "entry_id": "workday-id",
+                            "source": "user",
+                            "title": "Workday",
+                            "unique_id": None,
+                            "data": {"keep": "live"},
+                            "options": {"country": "US", "language": "en"},
+                            "modified_at": "runtime",
+                        },
+                        {
+                            "domain": "google",
+                            "entry_id": "google-id",
+                            "source": "user",
+                            "title": "Google",
+                            "unique_id": "alex@example.com",
+                            "data": {"token": {"access_token": "live-token"}},
+                            "options": {"calendar_access": "read_write"},
+                        },
+                    ]
+                },
+            }
+            projection = {
+                "version": 1,
+                "source": "core.config_entries",
+                "entries": [
+                    {
+                        "domain": "workday",
+                        "entry_id": "workday-id",
+                        "source": "user",
+                        "title": "Workday",
+                        "unique_id": None,
+                        "apply": "update",
+                        "data": {},
+                        "options": {"country": "CZ"},
+                    },
+                    {
+                        "domain": "google",
+                        "entry_id": "google-id",
+                        "source": "user",
+                        "title": "Google",
+                        "unique_id": "alex@example.com",
+                        "apply": "update",
+                        "data": {"token": {"access_token": "git-token"}},
+                        "options": {"calendar_access": "read_only"},
+                    },
+                ],
+            }
+            (live / ".storage" / "core.config_entries").write_text(json.dumps(raw))
+            (source / ".storage_managed" / "core.config_entries.json").write_text(json.dumps(projection))
+
+            skipped = server.apply_homeassistant_config(source, live, {"id": "homeassistant"})
+
+            updated = json.loads((live / ".storage" / "core.config_entries").read_text())
+            entries = {entry["entry_id"]: entry for entry in updated["data"]["entries"]}
+            self.assertEqual(skipped, [])
+            self.assertEqual(entries["workday-id"]["options"]["country"], "CZ")
+            self.assertEqual(entries["workday-id"]["options"]["language"], "en")
+            self.assertEqual(entries["workday-id"]["data"], {"keep": "live"})
+            self.assertEqual(entries["google-id"]["data"]["token"]["access_token"], "live-token")
+            self.assertEqual(entries["google-id"]["options"]["calendar_access"], "read_write")
 
     def test_homeassistant_apply_rejects_git_source_symlink(self):
         server = load_server()
