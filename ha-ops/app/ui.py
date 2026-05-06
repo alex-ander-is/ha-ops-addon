@@ -449,6 +449,9 @@ def render_page(data):
       line-height: 1.45;
       color: var(--ha-text);
     }}
+    pre + pre {{
+      margin-top: 14px;
+    }}
     .table-scroll {{
       max-width: 100%;
       overflow-x: auto;

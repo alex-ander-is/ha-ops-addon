@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.24
+
+- Add spacing between stacked preview fields in the ingress UI.
+
 ## 0.4.23
 
 - Align add-on presentation assets with Home Assistant expectations: keep a 128x128 app icon and use a landscape logo.
