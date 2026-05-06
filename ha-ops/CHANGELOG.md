@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.14
+
+- Add HA Ops add-on icon and logo assets.
+
 ## 0.4.13
 
 - Store unresolved Git conflicts as a `conflicts` state instead of a generic error state.
