@@ -773,6 +773,88 @@ def save_export_candidate_paths(target, export_path):
     return paths
 
 
+def source_prefixed_path(target, relative):
+    source_prefix = Path(target.get("source") or Path(target.get("source_path", target.get("id", ""))).name)
+    return (source_prefix / relative).as_posix()
+
+
+def source_prefix(target):
+    return Path(target.get("source") or Path(target.get("source_path", target.get("id", ""))).name)
+
+
+def live_tree_candidate_paths(live_path, source_prefix, excludes):
+    paths = []
+    if not live_path.exists():
+        return paths
+    if live_path.is_file():
+        if not is_excluded_path(live_path, live_path.parent, excludes):
+            paths.append(source_prefix.as_posix())
+        return paths
+    for path in sorted(live_path.rglob("*")):
+        if not path.is_file() or is_excluded_path(path, live_path, excludes):
+            continue
+        paths.append((source_prefix / path.relative_to(live_path)).as_posix())
+    return paths
+
+
+def homeassistant_save_candidate_paths(target, ctx):
+    live_path = Path(target["live_path"])
+    paths = []
+
+    for pattern in ctx.ha_root_patterns:
+        for path in sorted(live_path.glob(pattern)):
+            if path.is_file() and path.name not in ctx.ha_root_excludes:
+                paths.append(source_prefixed_path(target, path.name))
+
+    for name in ctx.ha_dirs:
+        paths.extend(live_tree_candidate_paths(live_path / name, source_prefix(target) / name, ctx.export_excludes))
+
+    if target.get("include_zigbee2mqtt_legacy"):
+        for name in ctx.zigbee2mqtt_paths:
+            paths.extend(live_tree_candidate_paths(live_path / name, source_prefix(target) / name, ctx.export_excludes))
+
+    src_storage = live_path / ".storage"
+    for name in ctx.storage_allowlist:
+        if (src_storage / name).is_file():
+            paths.append(source_prefixed_path(target, Path(".storage") / name))
+
+    if (src_storage / storage_managed.CORE_CONFIG_ENTRIES_RAW).is_file():
+        paths.append(source_prefixed_path(target, Path(storage_managed.MANAGED_DIR) / storage_managed.CORE_CONFIG_ENTRIES_PROJECTION))
+
+    return sorted(set(paths))
+
+
+def save_candidate_paths(resolved_targets, ctx):
+    paths = []
+    for target in resolved_targets:
+        if not target.get("live_path"):
+            continue
+        live_path = Path(target["live_path"])
+        if not live_path.exists():
+            continue
+        if target["type"] == "homeassistant":
+            paths.extend(homeassistant_save_candidate_paths(target, ctx))
+        else:
+            paths.extend(live_tree_candidate_paths(live_path, source_prefix(target), ctx.export_excludes))
+    return sorted(set(paths))
+
+
+def format_save_candidate_tree(paths, limit=500):
+    paths = list(paths)
+    if not paths:
+        return "No Save candidates found."
+    visible = paths[:limit]
+    lines = [f"Save candidates ({len(paths)} file(s)):"]
+    lines.extend(f"- {path}" for path in visible)
+    if len(paths) > limit:
+        lines.append(f"... {len(paths) - limit} more file(s)")
+    return "\n".join(lines)
+
+
+def save_candidate_tree(resolved_targets, ctx):
+    return format_save_candidate_tree(save_candidate_paths(resolved_targets, ctx))
+
+
 def add_save_export_candidate_details(target, export_path, details, ctx):
     paths = save_export_candidate_paths(target, export_path)
     if not paths:

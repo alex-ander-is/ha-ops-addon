@@ -22,15 +22,22 @@ def current_manifest_preview(ctx):
             manifest, _ = ctx.load_manifest(repo_dir, options, addons)
         else:
             manifest = ctx.default_manifest(options)
+        try:
+            targets = ctx.resolve_targets(repo_dir, manifest, addons or [], require_source=False)
+        except Exception:
+            targets = manifest.get("targets", [])
         previews = []
-        for target in manifest.get("targets", []):
+        for target in targets:
             previews.append(
                 {
                     "id": target.get("id"),
                     "type": target.get("type"),
                     "source": target.get("source"),
+                    "source_path": target.get("source_path"),
+                    "live_path": target.get("live_path"),
                     "addon_slug": target.get("addon_slug"),
                     "addon_slug_suffix": target.get("addon_slug_suffix"),
+                    "resolved_slug": target.get("resolved_slug"),
                     "allow_protected_storage": target.get("allow_protected_storage", False),
                 }
             )
@@ -158,6 +165,10 @@ def render_page(ctx):
     releases = ctx.list_releases()
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview
+    try:
+        save_candidates = ctx.save_candidate_tree(manifest_preview)
+    except Exception as exc:
+        save_candidates = f"Save candidates unavailable: {exc}"
     last_status = state.get("last_status", "idle")
     has_conflicts = bool(state.get("conflicts"))
     display_status = "conflicts" if has_conflicts else last_status
@@ -199,6 +210,7 @@ def render_page(ctx):
             "details_html": html.escape(details or details_placeholder),
             "diff_generated_at": html.escape(str(state.get("last_diff_generated_at"))),
             "diff_html": html.escape(diff_text or "No apply preview yet."),
+            "save_candidates_html": html.escape(save_candidates),
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "apply_confirm": apply_confirm,

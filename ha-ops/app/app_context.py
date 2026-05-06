@@ -292,6 +292,9 @@ class AppContext:
     def export_targets(self, resolved_targets, details):
         return sync_logic.export_targets(resolved_targets, details, self.sync_deps())
 
+    def save_candidate_tree(self, resolved_targets):
+        return sync_logic.save_candidate_tree(resolved_targets, self.sync_deps())
+
     def build_apply_preview(self, resolved_targets):
         return sync_logic.build_apply_preview(resolved_targets, self.sync_deps())
 

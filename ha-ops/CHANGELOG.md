@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.19
+
+- Add a persistent Save Candidates section that shows live config files eligible for Save HA to Git.
+
 ## 0.4.18
 
 - Keep the add-on logo while restoring the Home Assistant installed apps update indicator.

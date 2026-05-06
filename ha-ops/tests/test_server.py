@@ -1981,6 +1981,40 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("Backup status unavailable", page)
 
+    def test_render_page_shows_live_save_candidates(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            repo = server.DATA_DIR / "ha-config"
+            self.git(["clone", str(remote), str(repo)], root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "secrets.yaml").write_text("secret\n")
+            (server.CONFIG_DIR / "home-assistant_v2.db").write_text("runtime\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "lights.yaml").write_text("light:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+            self.assertIn("Save Candidates", page)
+            self.assertIn("Save candidates (2 file(s)):", page)
+            self.assertIn("- homeassistant/configuration.yaml", page)
+            self.assertIn("- homeassistant/packages/lights.yaml", page)
+            self.assertNotIn("secrets.yaml", page)
+            self.assertNotIn("home-assistant_v2.db", page)
+
     def test_manifest_source_symlink_escape_is_rejected(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

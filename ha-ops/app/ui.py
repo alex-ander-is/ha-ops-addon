@@ -638,6 +638,11 @@ def render_page(data):
     </section>
 
     <section class="card wide">
+      <h2>Save Candidates</h2>
+      <pre>{data['save_candidates_html']}</pre>
+    </section>
+
+    <section class="card wide">
       <h2>Git Conflicts</h2>
       {data['conflicts_html']}
     </section>
