@@ -744,7 +744,7 @@ def save_preview_status_lines(repo_dir, preview_repo):
 def save_preview_diff(repo_dir, preview_repo, run_command):
     result = run_command(["diff", "-ruN", "-x", ".git", str(repo_dir), str(preview_repo)])
     if result.returncode == 0:
-        return "No Save changes."
+        return ""
     if result.returncode == 1:
         return truncate_diff(result.stdout.strip())
     raise RuntimeError(f"Save preview diff failed:\n{result.stderr.strip() or result.stdout.strip()}")

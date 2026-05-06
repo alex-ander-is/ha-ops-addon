@@ -171,6 +171,11 @@ def render_page(ctx):
     details = "\n".join(state.get("last_details", []))
     details_placeholder = "Running..." if last_status == "running" else "No details yet."
     diff_text = state.get("last_diff", "")
+    save_preview_text = state.get("last_save_preview") or "No save preview yet."
+    save_diff_text = state.get("last_save_diff") or ""
+    save_details = save_preview_text
+    if save_diff_text and save_diff_text != save_preview_text:
+        save_details = f"{save_preview_text}\n\n{save_diff_text}"
     action_disabled = "disabled" if last_status == "running" else ""
     confirm_messages = []
     if not ctx.option_bool(options, "require_fresh_backup", True):
@@ -207,8 +212,7 @@ def render_page(ctx):
             "diff_generated_at": html.escape(str(state.get("last_diff_generated_at"))),
             "diff_html": html.escape(diff_text or "No apply preview yet."),
             "save_diff_generated_at": html.escape(str(state.get("last_save_diff_generated_at"))),
-            "save_preview_html": html.escape(state.get("last_save_preview") or "No save preview yet."),
-            "save_diff_html": html.escape(state.get("last_save_diff") or "No save preview diff yet."),
+            "save_details_html": html.escape(save_details),
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "apply_confirm": apply_confirm,

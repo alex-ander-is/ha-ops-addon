@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.25
+
+- Render Save Preview as a single field and avoid duplicate "No Save changes" blocks.
+
 ## 0.4.24
 
 - Add spacing between stacked preview fields in the ingress UI.

@@ -645,8 +645,7 @@ def render_page(data):
     <section class="card wide">
       <h2>Save Preview</h2>
       <p>Generated at {data['save_diff_generated_at']}</p>
-      <pre>{data['save_preview_html']}</pre>
-      <pre>{data['save_diff_html']}</pre>
+      <pre>{data['save_details_html']}</pre>
     </section>
 
     <section class="card wide">
