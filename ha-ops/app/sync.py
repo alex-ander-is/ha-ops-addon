@@ -670,6 +670,7 @@ def build_save_export(resolved_targets, details, ctx):
         else:
             ctx.add_detail(details, f"Exporting {target['id']} from {live_path} to a temporary tree.")
             export_target_to_path(target, export_path, ctx)
+        add_save_export_candidate_details(target, export_path, details, ctx)
 
     return export_root
 
@@ -737,6 +738,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
         export_target_to_path(target, preview_path, ctx)
         if not preview_path.exists():
             continue
+        add_save_export_candidate_details(target, preview_path, details, ctx)
 
         for exported_path in sorted(preview_path.rglob("*")):
             if not exported_path.is_file():
@@ -754,6 +756,28 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
     if conflicts:
         ctx.add_detail(details, f"Found {len(conflicts)} unknown-base Save conflict(s).")
     return conflicts
+
+
+def save_export_candidate_paths(target, export_path):
+    export_path = Path(export_path)
+    source_prefix = Path(target.get("source") or Path(target["source_path"]).name)
+    if not export_path.exists():
+        return []
+
+    paths = []
+    for exported_path in sorted(export_path.rglob("*")):
+        if not exported_path.is_file():
+            continue
+        relative = exported_path.relative_to(export_path)
+        paths.append((source_prefix / relative).as_posix())
+    return paths
+
+
+def add_save_export_candidate_details(target, export_path, details, ctx):
+    paths = save_export_candidate_paths(target, export_path)
+    if not paths:
+        return
+    ctx.add_detail(details, "\n".join([f"Save export candidates for {target['id']} ({len(paths)}):", *[f"- {path}" for path in paths]]))
 
 
 def restore_save_git_resolutions(repo_dir, resolutions, details, ctx):

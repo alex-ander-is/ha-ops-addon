@@ -434,6 +434,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "conflicts")
             self.assertEqual(state["conflict_type"], "save_unknown_base")
             self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
+            details = "\n".join(state["last_details"])
+            self.assertIn("Save export candidates for homeassistant (1):", details)
+            self.assertIn("- homeassistant/configuration.yaml", details)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
             page = server.render_page()
             self.assertIn('<div class="badge conflicts">conflicts</div>', page)
@@ -467,6 +470,7 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(server.run_save_job())
             message = server.resolve_git_conflict("homeassistant/configuration.yaml", "git")
             self.assertIn("Run Save HA to Git again", message)
+            self.assertIn("Save export candidates for homeassistant (1):", "\n".join(server.read_state()["last_details"]))
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.17
+
+- Show Save export candidate files before the unknown-base conflict gate and keep them visible after resolving Save conflicts.
+
 ## 0.4.16
 
 - Show the Git file change list prepared by Save HA to Git before commit and push.

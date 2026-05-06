@@ -22,6 +22,7 @@ def resolve_save_unknown_base_conflict(ctx, path, choice):
                 "save_conflict_resolutions": resolutions,
                 "last_status": "conflicts",
                 "last_message": f"Resolved {safe_path}. {len(remaining)} Save conflict(s) remain.",
+                "last_details": state.get("last_details", []),
             }
         )
         return f"Resolved {safe_path}. {len(remaining)} Save conflict(s) remain."
@@ -33,6 +34,7 @@ def resolve_save_unknown_base_conflict(ctx, path, choice):
             "save_conflict_resolutions": resolutions,
             "last_status": "idle",
             "last_message": "Save conflicts resolved. Run Save HA to Git again.",
+            "last_details": state.get("last_details", []),
         }
     )
     return "All Save conflicts resolved. Run Save HA to Git again."
