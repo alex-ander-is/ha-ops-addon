@@ -1,6 +1,24 @@
 import html
 
 
+def render_conflict_detail(detail):
+    lines = []
+    for line in detail.splitlines() or [""]:
+        class_name = "diff-context"
+        if line.startswith("@@"):
+            class_name = "diff-hunk"
+        elif line.startswith("+++") or line.startswith("---"):
+            class_name = "diff-file"
+        elif line.startswith("+"):
+            class_name = "diff-add"
+        elif line.startswith("-"):
+            class_name = "diff-del"
+        elif line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+            class_name = "diff-marker"
+        lines.append(f"<span class='diff-line {class_name}'>{html.escape(line)}</span>")
+    return "<div class='conflict-diff' role='region' aria-label='Conflict diff'>" + "".join(lines) + "</div>"
+
+
 def render_addons(selected, get_installed_addons, addon_slug_value, addon_display_name, addon_is_zigbee2mqtt):
     selected = set(selected)
     try:
@@ -69,7 +87,7 @@ def render_conflicts(conflicts):
         if detail:
             rows.append(
                 "<tr class='conflict-detail'>"
-                f"<td colspan='2'><pre>{html.escape(detail)}</pre></td>"
+                f"<td colspan='2'>{render_conflict_detail(detail)}</td>"
                 "</tr>"
             )
     return (
@@ -77,8 +95,10 @@ def render_conflicts(conflicts):
         "Home Assistant and the repository, and there is no trusted common base. Choose "
         "<strong>Use HA Version</strong> to save the live Home Assistant file to Git, or choose "
         "<strong>Use Git Version</strong> to keep the repository file unchanged.</p>"
-        "<table><thead><tr><th>File</th><th>Action</th></tr></thead>"
+        "<div class='table-scroll'>"
+        "<table class='conflicts-table'><thead><tr><th>File</th><th>Action</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
     )
 
 
@@ -289,6 +309,9 @@ def render_page(data):
       flex-wrap: wrap;
       margin-top: 22px;
     }}
+    td.actions {{
+      margin-top: 0;
+    }}
     .check-list {{
       display: grid;
       gap: 10px;
@@ -333,13 +356,22 @@ def render_page(data):
       padding: 14px;
       overflow: auto;
       white-space: pre-wrap;
+      overflow-wrap: anywhere;
       line-height: 1.45;
       color: var(--ha-text);
+    }}
+    .table-scroll {{
+      max-width: 100%;
+      overflow-x: auto;
     }}
     table {{
       width: 100%;
       border-collapse: collapse;
       font-size: 0.94rem;
+      table-layout: fixed;
+    }}
+    .conflicts-table th:last-child, .conflicts-table td:last-child {{
+      width: 430px;
     }}
     th, td {{
       text-align: left;
@@ -355,6 +387,44 @@ def render_page(data):
       font-family: ui-monospace, monospace;
       font-size: 0.92em;
       color: var(--ha-text);
+      overflow-wrap: anywhere;
+    }}
+    .conflict-detail td {{
+      padding-top: 4px;
+      background: color-mix(in srgb, var(--ha-code-bg) 52%, transparent);
+    }}
+    .conflict-diff {{
+      max-width: 100%;
+      overflow-x: auto;
+      border: 1px solid var(--ha-border);
+      border-radius: calc(var(--ha-radius) - 2px);
+      background: var(--ha-code-bg);
+      font-family: ui-monospace, monospace;
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }}
+    .diff-line {{
+      display: block;
+      min-width: max-content;
+      padding: 0 12px;
+      white-space: pre;
+      color: var(--ha-text);
+    }}
+    .diff-line:first-child {{
+      padding-top: 10px;
+    }}
+    .diff-line:last-child {{
+      padding-bottom: 10px;
+    }}
+    .diff-add {{
+      background: color-mix(in srgb, var(--ha-success) 17%, transparent);
+    }}
+    .diff-del {{
+      background: color-mix(in srgb, var(--ha-error) 16%, transparent);
+    }}
+    .diff-hunk, .diff-file, .diff-marker {{
+      color: var(--ha-muted);
+      background: color-mix(in srgb, var(--ha-muted) 10%, transparent);
     }}
     .wide {{
       margin-top: 18px;

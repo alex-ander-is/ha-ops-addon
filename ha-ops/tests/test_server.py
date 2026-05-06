@@ -208,11 +208,22 @@ class ServerTests(unittest.TestCase):
     def test_conflict_ui_explains_version_choices(self):
         server = load_server()
 
-        content = server.ui.render_conflicts(["homeassistant/.storage/core.config_entries"])
+        content = server.ui.render_conflicts(
+            [
+                {
+                    "path": "homeassistant/.storage/core.config_entries",
+                    "detail": "--- Git\n+++ HA\n@@ -1 +1 @@\n-old\n+new",
+                }
+            ]
+        )
 
         self.assertIn("there is no trusted common base", content)
         self.assertIn("Use HA Version", content)
         self.assertIn("Use Git Version", content)
+        self.assertIn("table-scroll", content)
+        self.assertIn("conflict-diff", content)
+        self.assertIn("diff-del", content)
+        self.assertIn("diff-add", content)
 
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()

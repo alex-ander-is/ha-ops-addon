@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.9
+
+- Add colored conflict diff highlighting.
+- Keep long conflict lines inside horizontally scrollable diff blocks.
+
 ## 0.4.8
 
 - Explain Git conflict choices in the UI.
