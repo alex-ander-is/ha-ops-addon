@@ -61,6 +61,10 @@ def render_conflicts(conflicts):
             "</tr>"
         )
     return (
+        "<p class='muted'>HA Ops stopped before changing Git because these files differ between live "
+        "Home Assistant and the repository, and there is no trusted common base. Choose "
+        "<strong>Use HA Version</strong> to save the live Home Assistant file to Git, or choose "
+        "<strong>Use Git Version</strong> to keep the repository file unchanged.</p>"
         "<table><thead><tr><th>File</th><th>Action</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )

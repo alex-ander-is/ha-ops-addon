@@ -205,6 +205,15 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["conflicts"], [])
             self.assertEqual(state["save_conflict_resolutions"], {"homeassistant/configuration.yaml": "git"})
 
+    def test_conflict_ui_explains_version_choices(self):
+        server = load_server()
+
+        content = server.ui.render_conflicts(["homeassistant/.storage/core.config_entries"])
+
+        self.assertIn("there is no trusted common base", content)
+        self.assertIn("Use HA Version", content)
+        self.assertIn("Use Git Version", content)
+
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()
 
