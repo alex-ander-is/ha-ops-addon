@@ -416,6 +416,11 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["conflict_type"], "save_unknown_base")
             self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+            page = server.render_page()
+            self.assertIn("Git: homeassistant/configuration.yaml", page)
+            self.assertIn("HA: homeassistant/configuration.yaml", page)
+            self.assertIn("-git", page)
+            self.assertIn("+ha", page)
 
     def test_save_unknown_base_use_git_keeps_git_version(self):
         server = load_server()
@@ -1331,6 +1336,19 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
             self.assertEqual(server.read_state()["conflicts"], [])
             self.assertEqual(calls["count"], 2)
+
+    def test_rebase_conflict_ui_shows_conflict_markers(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            self.make_rebase_conflict(server, root)
+
+            page = server.render_page()
+
+            self.assertIn("&lt;&lt;&lt;&lt;&lt;&lt;&lt;", page)
+            self.assertIn("=======", page)
+            self.assertIn("&gt;&gt;&gt;&gt;&gt;&gt;&gt;", page)
 
     def test_backup_gate_blocks_when_backup_is_missing_and_creation_disabled(self):
         server = load_server()

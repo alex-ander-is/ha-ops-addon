@@ -41,7 +41,13 @@ def render_conflicts(conflicts):
     if not conflicts:
         return "<p>No unresolved Git conflicts.</p>"
     rows = []
-    for path in conflicts:
+    for item in conflicts:
+        if isinstance(item, dict):
+            path = item.get("path", "")
+            detail = item.get("detail", "")
+        else:
+            path = item
+            detail = ""
         escaped = html.escape(path)
         rows.append(
             "<tr>"
@@ -60,6 +66,12 @@ def render_conflicts(conflicts):
             "</td>"
             "</tr>"
         )
+        if detail:
+            rows.append(
+                "<tr class='conflict-detail'>"
+                f"<td colspan='2'><pre>{html.escape(detail)}</pre></td>"
+                "</tr>"
+            )
     return (
         "<p class='muted'>HA Ops stopped before changing Git because these files differ between live "
         "Home Assistant and the repository, and there is no trusted common base. Choose "

@@ -1,10 +1,12 @@
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import html
 import json
 import threading
 
 import conflicts as conflict_logic
+import git_ops
 import ui
 
 
@@ -57,6 +59,98 @@ def render_addons(ctx):
     )
 
 
+def truncate_conflict_detail(text):
+    max_chars = 30000
+    if len(text) > max_chars:
+        return text[:max_chars] + "\n\n[Conflict detail truncated.]"
+    return text
+
+
+def file_text(path):
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"Unable to read conflict file: {exc}"
+
+
+def file_diff(ctx, left_label, left_path, right_label, right_path):
+    left_path = Path(left_path)
+    right_path = Path(right_path)
+    if not left_path.exists():
+        return f"Diff unavailable: {left_label} file is missing: {left_path}"
+    if not right_path.exists():
+        return f"Diff unavailable: {right_label} file is missing: {right_path}"
+
+    result = ctx.run_command(["diff", "-u", "-L", left_label, "-L", right_label, str(left_path), str(right_path)])
+    if result.returncode == 0:
+        return "No differences found."
+    if result.returncode == 1:
+        return truncate_conflict_detail(result.stdout.strip())
+    return f"Diff unavailable:\n{(result.stderr or result.stdout).strip()}"
+
+
+def save_conflict_detail(ctx, repo_dir, targets, path):
+    safe_path = git_ops.safe_repo_relative_path(path)
+    repo_file = Path(repo_dir) / safe_path
+    for target in targets or []:
+        source_path = Path(target.get("source_path", ""))
+        target_id = str(target.get("id", ""))
+        if not source_path or not target_id:
+            continue
+        try:
+            source_root = source_path.relative_to(repo_dir).as_posix()
+        except ValueError:
+            continue
+        if not safe_path.startswith(f"{source_root}/"):
+            continue
+        relative = Path(safe_path).relative_to(source_root)
+        preview_file = ctx.work_dir / "save-preview" / target_id / relative
+        return file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
+    return f"Diff unavailable: no managed target found for {safe_path}."
+
+
+def load_conflict_targets(ctx, options, state, repo_dir):
+    targets = state.get("last_targets") or []
+    if targets:
+        return targets
+    try:
+        try:
+            addons = ctx.get_installed_addons()
+        except Exception:
+            addons = None
+        manifest, _ = ctx.load_manifest(repo_dir, options, addons)
+        return ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+    except Exception:
+        return []
+
+
+def conflict_items(ctx, state, options):
+    paths = state.get("conflicts", [])
+    if not paths:
+        return []
+
+    try:
+        repo_dir = ctx.repo_checkout_path(options)
+    except Exception:
+        return paths
+
+    items = []
+    conflict_type = state.get("conflict_type")
+    targets = load_conflict_targets(ctx, options, state, repo_dir) if conflict_type == "save_unknown_base" else []
+    for path in paths:
+        try:
+            safe_path = git_ops.safe_repo_relative_path(path)
+            if conflict_type == "save_unknown_base":
+                detail = save_conflict_detail(ctx, repo_dir, targets, safe_path)
+            else:
+                detail = truncate_conflict_detail(file_text(Path(repo_dir) / safe_path).strip())
+        except Exception as exc:
+            safe_path = str(path)
+            detail = f"Conflict detail unavailable: {exc}"
+        items.append({"path": safe_path, "detail": detail})
+    return items
+
+
 def render_page(ctx):
     options = ctx.load_options()
     state = ctx.read_state()
@@ -98,7 +192,7 @@ def render_page(ctx):
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "apply_confirm": apply_confirm,
-            "conflicts_html": ui.render_conflicts(state.get("conflicts", [])),
+            "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options)),
             "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
             "targets_html": ui.render_targets(target_state),
             "addons_html": render_addons(ctx),
