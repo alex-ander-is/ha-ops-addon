@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.13
+
+- Store unresolved Git conflicts as a `conflicts` state instead of a generic error state.
+
 ## 0.4.12
 
 - Show `CONFLICTS` instead of `ERROR` when unresolved Git conflicts require user choice.

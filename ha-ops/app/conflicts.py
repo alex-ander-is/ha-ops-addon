@@ -20,7 +20,7 @@ def resolve_save_unknown_base_conflict(ctx, path, choice):
                 "conflicts": remaining,
                 "conflict_type": "save_unknown_base",
                 "save_conflict_resolutions": resolutions,
-                "last_status": "error",
+                "last_status": "conflicts",
                 "last_message": f"Resolved {safe_path}. {len(remaining)} Save conflict(s) remain.",
             }
         )
@@ -93,7 +93,7 @@ def resolve_git_conflict(ctx, path, choice):
 
         conflicts = ctx.git_conflict_paths(repo_dir)
         if conflicts:
-            ctx.write_state({"conflicts": conflicts, "conflict_type": "git_rebase"})
+            ctx.write_state({"conflicts": conflicts, "conflict_type": "git_rebase", "last_status": "conflicts"})
             return f"Resolved {safe_path}. {len(conflicts)} conflict(s) remain."
 
     env = ctx.git_env(options)

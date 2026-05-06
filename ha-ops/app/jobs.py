@@ -40,6 +40,25 @@ class JobContext:
     write_state: Any
 
 
+def conflict_status_message(state, default_message="Resolve Git conflicts before continuing."):
+    if state.get("conflict_type") == "save_unknown_base":
+        return "Resolve unknown-base Save conflicts before running Save HA to Git."
+    return default_message
+
+
+def write_pending_conflicts(ctx, action, message, details=None, targets=None):
+    ctx.write_state(
+        {
+            "last_run_at": ctx.utc_now(),
+            "last_status": "conflicts",
+            "last_action": action,
+            "last_message": message,
+            "last_details": details or [],
+            "last_targets": targets or [],
+        }
+    )
+
+
 def run_save_job(ctx):
     run_lock = ctx.run_lock
     write_state = ctx.write_state
@@ -76,9 +95,8 @@ def run_save_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("conflicts"):
-            if state.get("conflict_type") == "save_unknown_base":
-                raise RuntimeError("Resolve unknown-base Save conflicts before running Save HA to Git.")
-            raise RuntimeError("Resolve Git conflicts before running Save HA to Git.")
+            write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
+            return False
 
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
         env = ctx.git_env(options)
@@ -98,7 +116,7 @@ def run_save_job(ctx):
             write_state(
                 {
                     "last_run_at": utc_now(),
-                    "last_status": "error",
+                    "last_status": "conflicts",
                     "last_action": "save",
                     "last_message": message,
                     "last_details": details,
@@ -158,10 +176,11 @@ def run_save_job(ctx):
         except RuntimeError:
             repo_path = None
         conflicts = ctx.git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
+        status = "conflicts" if conflicts else "error"
         write_state(
             {
                 "last_run_at": utc_now(),
-                "last_status": "error",
+                "last_status": status,
                 "last_action": "save",
                 "last_message": str(exc),
                 "last_details": details,
@@ -210,7 +229,14 @@ def run_apply_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("conflicts"):
-            raise RuntimeError("Resolve Git conflicts before running Apply Git to HA.")
+            write_pending_conflicts(
+                ctx,
+                "apply",
+                conflict_status_message(state, "Resolve Git conflicts before running Apply Git to HA."),
+                details,
+                resolved_targets,
+            )
+            return False
 
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)
@@ -312,7 +338,14 @@ def run_preview_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("conflicts"):
-            raise RuntimeError("Resolve Git conflicts before running Preview Git to HA.")
+            write_pending_conflicts(
+                ctx,
+                "preview",
+                conflict_status_message(state, "Resolve Git conflicts before running Preview Git to HA."),
+                details,
+                resolved_targets,
+            )
+            return False
 
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)

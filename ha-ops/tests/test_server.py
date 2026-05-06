@@ -428,6 +428,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(server.run_save_job())
             state = server.read_state()
+            self.assertEqual(state["last_status"], "conflicts")
             self.assertEqual(state["conflict_type"], "save_unknown_base")
             self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
@@ -1393,7 +1394,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(server.run_apply_job())
             state = server.read_state()
-            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["last_status"], "conflicts")
             self.assertIn("Resolve Git conflicts", state["last_message"])
 
     def test_selected_addon_delete_true_preview_counts_managed_live_only_deletion(self):
@@ -1999,10 +2000,14 @@ class ServerTests(unittest.TestCase):
             server.write_state({"conflicts": ["homeassistant/configuration.yaml"]})
 
             self.assertFalse(server.run_preview_job())
-            self.assertIn("Resolve Git conflicts", server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "conflicts")
+            self.assertIn("Resolve Git conflicts", state["last_message"])
 
             self.assertFalse(server.run_save_job())
-            self.assertIn("Resolve Git conflicts", server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "conflicts")
+            self.assertIn("Resolve Git conflicts", state["last_message"])
 
 
 if __name__ == "__main__":
