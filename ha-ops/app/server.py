@@ -197,9 +197,9 @@ def _legacy_func(name):
     if name == "release_created_at":
         return lambda path: release_logic.release_created_at(path, _CTX.release_deps())
     if name == "sync_to_preview":
-        return lambda target, preview_path: sync_logic.sync_to_preview(target, preview_path, _CTX.sync_deps())
+        return lambda target, preview_path: sync_logic.sync_to_preview(target, Path(target["live_path"]), preview_path, _CTX.sync_deps())
     if name == "target_diff":
-        return lambda target, preview_path: sync_logic.target_diff(target, preview_path, _CTX.run_command)
+        return lambda target, preview_path: sync_logic.target_diff(target, Path(target["live_path"]), preview_path, _CTX.run_command)
     if name == "build_apply_diff":
         return lambda resolved_targets: _CTX.build_apply_preview(resolved_targets)["diff"]
     if name == "start_apply":

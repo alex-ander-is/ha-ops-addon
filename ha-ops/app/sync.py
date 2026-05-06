@@ -858,13 +858,23 @@ def restore_save_git_resolutions(repo_dir, resolutions, details, ctx):
     return len(git_paths)
 
 
-def sync_to_preview(target, preview_path, ctx):
-    source_path = Path(target["source_path"])
+def build_preview_baseline(target, baseline_path, ctx):
     live_path = Path(target["live_path"])
+    clear_tree(baseline_path, ctx.work_dir, ctx.run_command)
+    if not live_path.exists():
+        return
+    if target["type"] == "homeassistant":
+        ctx.log(f"Preview {target['id']}: exporting live Home Assistant config from {live_path}")
+        export_homeassistant_config(live_path, baseline_path, target, ctx)
+    else:
+        ctx.log(f"Preview {target['id']}: exporting live add-on config from {live_path}")
+        export_target_to_path(target, baseline_path, ctx)
+
+
+def sync_to_preview(target, baseline_path, preview_path, ctx):
+    source_path = Path(target["source_path"])
     clear_tree(preview_path, ctx.work_dir, ctx.run_command)
-    if live_path.exists():
-        ctx.log(f"Preview {target['id']}: copying live tree from {live_path}")
-        sync_tree(live_path, preview_path, True, None, ctx.run_command)
+    sync_tree(baseline_path, preview_path, True, None, ctx.run_command)
 
     if target["type"] == "homeassistant":
         if source_path.exists() and has_managed_content(source_path):
@@ -882,12 +892,8 @@ def sync_to_preview(target, preview_path, ctx):
     return skipped_protected
 
 
-def target_diff(target, preview_path, run_command):
-    live_path = Path(target["live_path"])
-    if not live_path.exists():
-        return f"Target {target['id']} live path does not exist: {live_path}\n"
-
-    result = run_command(["diff", "-ruN", "-x", ".git", str(live_path), str(preview_path)])
+def target_diff(target, baseline_path, preview_path, run_command):
+    result = run_command(["diff", "-ruN", "-x", ".git", str(baseline_path), str(preview_path)])
     if result.returncode not in (0, 1):
         raise RuntimeError(f"Diff failed for {target['id']}:\n{result.stderr.strip()}")
     if not result.stdout.strip():
@@ -895,16 +901,16 @@ def target_diff(target, preview_path, run_command):
     return f"## {target['id']}\n{result.stdout.strip()}\n"
 
 
-def count_preview_deletions(target, preview_path):
-    live_path = Path(target["live_path"])
-    if not live_path.exists():
+def count_preview_deletions(baseline_path, preview_path):
+    baseline_path = Path(baseline_path)
+    if not baseline_path.exists():
         return 0
 
     deleted = 0
-    for path in live_path.rglob("*"):
+    for path in baseline_path.rglob("*"):
         if not path.is_file() and not path.is_symlink():
             continue
-        relative = path.relative_to(live_path)
+        relative = path.relative_to(baseline_path)
         if not (preview_path / relative).exists():
             deleted += 1
     return deleted
@@ -927,22 +933,26 @@ def truncate_diff(diff_text):
 
 def build_apply_preview(resolved_targets, ctx):
     preview_root = ctx.work_dir / "apply-preview"
+    baseline_root = ctx.work_dir / "apply-preview-baseline"
     clear_tree(preview_root, ctx.work_dir, ctx.run_command)
+    clear_tree(baseline_root, ctx.work_dir, ctx.run_command)
     chunks = []
     deletion_count = 0
     skipped_protected = []
 
     for target in resolved_targets:
         ctx.log(f"Preview {target['id']}: start")
+        baseline_path = baseline_root / safe_preview_name(str(target["id"]))
         preview_path = preview_root / safe_preview_name(str(target["id"]))
-        skipped = sync_to_preview(target, preview_path, ctx)
+        build_preview_baseline(target, baseline_path, ctx)
+        skipped = sync_to_preview(target, baseline_path, preview_path, ctx)
         if skipped:
             skipped_protected.extend(skipped)
             chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
         ctx.log(f"Preview {target['id']}: counting deletions")
-        deletion_count += count_preview_deletions(target, preview_path)
+        deletion_count += count_preview_deletions(baseline_path, preview_path)
         ctx.log(f"Preview {target['id']}: building diff")
-        chunks.append(target_diff(target, preview_path, ctx.run_command))
+        chunks.append(target_diff(target, baseline_path, preview_path, ctx.run_command))
         ctx.log(f"Preview {target['id']}: done")
 
     diff_text = "\n".join(chunks).strip()

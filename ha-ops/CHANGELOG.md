@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.27
+
+- Build Git-to-HA previews from managed config baselines instead of copying and diffing the full live trees.
+
 ## 0.4.26
 
 - Add startup exception logging and per-target apply preview progress logs.

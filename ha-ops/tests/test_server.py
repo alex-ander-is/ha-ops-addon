@@ -1485,7 +1485,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(preview["deletions"], 1)
             self.assertIn("extra.yaml", preview["diff"])
             preview_file = server.WORK_DIR / "apply-preview" / "addon-local_zigbee2mqtt" / "database.db"
-            self.assertEqual(preview_file.read_text(), "live-only\n")
+            self.assertFalse(preview_file.exists())
+            self.assertNotIn("database.db", preview["diff"])
 
     def test_selected_addon_delete_false_preview_preserves_live_only_file(self):
         server = load_server()
@@ -1515,7 +1516,8 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(preview["deletions"], 0)
             preview_file = server.WORK_DIR / "apply-preview" / "addon-local_zigbee2mqtt" / "database.db"
-            self.assertEqual(preview_file.read_text(), "live-only\n")
+            self.assertFalse(preview_file.exists())
+            self.assertNotIn("database.db", preview["diff"])
 
     def test_save_delete_delete_and_restore_delete_are_independent(self):
         server = load_server()
