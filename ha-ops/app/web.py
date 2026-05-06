@@ -165,10 +165,6 @@ def render_page(ctx):
     releases = ctx.list_releases()
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview
-    try:
-        save_candidates = ctx.save_candidate_tree(manifest_preview)
-    except Exception as exc:
-        save_candidates = f"Save candidates unavailable: {exc}"
     last_status = state.get("last_status", "idle")
     has_conflicts = bool(state.get("conflicts"))
     display_status = "conflicts" if has_conflicts else last_status
@@ -210,7 +206,9 @@ def render_page(ctx):
             "details_html": html.escape(details or details_placeholder),
             "diff_generated_at": html.escape(str(state.get("last_diff_generated_at"))),
             "diff_html": html.escape(diff_text or "No apply preview yet."),
-            "save_candidates_html": html.escape(save_candidates),
+            "save_diff_generated_at": html.escape(str(state.get("last_save_diff_generated_at"))),
+            "save_preview_html": html.escape(state.get("last_save_preview") or "No save preview yet."),
+            "save_diff_html": html.escape(state.get("last_save_diff") or "No save preview diff yet."),
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "apply_confirm": apply_confirm,
@@ -315,6 +313,14 @@ def create_handler(ctx):
                 start_background(ctx.run_preview_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Git to HA preview started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/save-preview":
+                start_background(ctx.run_save_preview_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "HA to Git preview started. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return

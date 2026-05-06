@@ -205,6 +205,8 @@ def _legacy_func(name):
         return lambda: web.start_background(_CTX.run_apply_job)
     if name == "start_preview":
         return lambda: web.start_background(_CTX.run_preview_job)
+    if name == "start_save_preview":
+        return lambda: web.start_background(_CTX.run_save_preview_job)
     if name == "start_save":
         return lambda: web.start_background(_CTX.run_save_job)
     if name == "start_rollback":

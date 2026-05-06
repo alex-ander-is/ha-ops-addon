@@ -614,6 +614,9 @@ def render_page(data):
         <p>{data['message']}</p>
         <p id="client-status" class="client-status"></p>
         <div class="actions">
+          <form method="post" action="save-preview" data-async-form="true">
+            <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
+          </form>
           <form method="post" action="save" data-async-form="true">
             <button type="submit" {data['action_disabled']}>Save HA to Git</button>
           </form>
@@ -638,8 +641,10 @@ def render_page(data):
     </section>
 
     <section class="card wide">
-      <h2>Save Candidates</h2>
-      <pre>{data['save_candidates_html']}</pre>
+      <h2>Save Preview</h2>
+      <p>Generated at {data['save_diff_generated_at']}</p>
+      <pre>{data['save_preview_html']}</pre>
+      <pre>{data['save_diff_html']}</pre>
     </section>
 
     <section class="card wide">

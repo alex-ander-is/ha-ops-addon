@@ -704,6 +704,66 @@ def export_targets(resolved_targets, details, ctx):
     apply_save_export(resolved_targets, export_root, details, ctx)
 
 
+def repo_relative_target(target, repo_dir, preview_repo):
+    updated = dict(target)
+    try:
+        relative = Path(target["source_path"]).relative_to(repo_dir)
+    except ValueError:
+        relative = Path(target.get("source") or target["id"])
+    updated["source_path"] = str(Path(preview_repo) / relative)
+    return updated
+
+
+def save_preview_status_lines(repo_dir, preview_repo):
+    repo_dir = Path(repo_dir)
+    preview_repo = Path(preview_repo)
+
+    def files(root):
+        found = {}
+        if not root.exists():
+            return found
+        for path in root.rglob("*"):
+            if ".git" in path.relative_to(root).parts or not path.is_file():
+                continue
+            found[path.relative_to(root).as_posix()] = path
+        return found
+
+    before = files(repo_dir)
+    after = files(preview_repo)
+    lines = []
+    for path in sorted(set(before) | set(after)):
+        if path not in before:
+            lines.append(f"- Added: {path}")
+        elif path not in after:
+            lines.append(f"- Deleted: {path}")
+        elif before[path].read_bytes() != after[path].read_bytes():
+            lines.append(f"- Modified: {path}")
+    return lines
+
+
+def save_preview_diff(repo_dir, preview_repo, run_command):
+    result = run_command(["diff", "-ruN", "-x", ".git", str(repo_dir), str(preview_repo)])
+    if result.returncode == 0:
+        return "No Save changes."
+    if result.returncode == 1:
+        return truncate_diff(result.stdout.strip())
+    raise RuntimeError(f"Save preview diff failed:\n{result.stderr.strip() or result.stdout.strip()}")
+
+
+def build_save_preview(resolved_targets, repo_dir, details, ctx):
+    export_root = build_save_export(resolved_targets, details, ctx)
+    preview_repo = ctx.work_dir / "save-to-git-preview"
+    clear_tree(preview_repo, ctx.work_dir, ctx.run_command)
+    sync_tree(repo_dir, preview_repo, True, [".git/"], ctx.run_command)
+
+    preview_targets = [repo_relative_target(target, repo_dir, preview_repo) for target in resolved_targets]
+    apply_save_export(preview_targets, export_root, details, ctx)
+
+    status_lines = save_preview_status_lines(repo_dir, preview_repo)
+    summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
+    return {"summary": summary, "diff": save_preview_diff(repo_dir, preview_repo, ctx.run_command)}
+
+
 def export_target_to_path(target, dest, ctx):
     live_path = Path(target["live_path"])
     if target["type"] == "homeassistant":
@@ -771,88 +831,6 @@ def save_export_candidate_paths(target, export_path):
         relative = exported_path.relative_to(export_path)
         paths.append((source_prefix / relative).as_posix())
     return paths
-
-
-def source_prefixed_path(target, relative):
-    source_prefix = Path(target.get("source") or Path(target.get("source_path", target.get("id", ""))).name)
-    return (source_prefix / relative).as_posix()
-
-
-def source_prefix(target):
-    return Path(target.get("source") or Path(target.get("source_path", target.get("id", ""))).name)
-
-
-def live_tree_candidate_paths(live_path, source_prefix, excludes):
-    paths = []
-    if not live_path.exists():
-        return paths
-    if live_path.is_file():
-        if not is_excluded_path(live_path, live_path.parent, excludes):
-            paths.append(source_prefix.as_posix())
-        return paths
-    for path in sorted(live_path.rglob("*")):
-        if not path.is_file() or is_excluded_path(path, live_path, excludes):
-            continue
-        paths.append((source_prefix / path.relative_to(live_path)).as_posix())
-    return paths
-
-
-def homeassistant_save_candidate_paths(target, ctx):
-    live_path = Path(target["live_path"])
-    paths = []
-
-    for pattern in ctx.ha_root_patterns:
-        for path in sorted(live_path.glob(pattern)):
-            if path.is_file() and path.name not in ctx.ha_root_excludes:
-                paths.append(source_prefixed_path(target, path.name))
-
-    for name in ctx.ha_dirs:
-        paths.extend(live_tree_candidate_paths(live_path / name, source_prefix(target) / name, ctx.export_excludes))
-
-    if target.get("include_zigbee2mqtt_legacy"):
-        for name in ctx.zigbee2mqtt_paths:
-            paths.extend(live_tree_candidate_paths(live_path / name, source_prefix(target) / name, ctx.export_excludes))
-
-    src_storage = live_path / ".storage"
-    for name in ctx.storage_allowlist:
-        if (src_storage / name).is_file():
-            paths.append(source_prefixed_path(target, Path(".storage") / name))
-
-    if (src_storage / storage_managed.CORE_CONFIG_ENTRIES_RAW).is_file():
-        paths.append(source_prefixed_path(target, Path(storage_managed.MANAGED_DIR) / storage_managed.CORE_CONFIG_ENTRIES_PROJECTION))
-
-    return sorted(set(paths))
-
-
-def save_candidate_paths(resolved_targets, ctx):
-    paths = []
-    for target in resolved_targets:
-        if not target.get("live_path"):
-            continue
-        live_path = Path(target["live_path"])
-        if not live_path.exists():
-            continue
-        if target["type"] == "homeassistant":
-            paths.extend(homeassistant_save_candidate_paths(target, ctx))
-        else:
-            paths.extend(live_tree_candidate_paths(live_path, source_prefix(target), ctx.export_excludes))
-    return sorted(set(paths))
-
-
-def format_save_candidate_tree(paths, limit=500):
-    paths = list(paths)
-    if not paths:
-        return "No Save candidates found."
-    visible = paths[:limit]
-    lines = [f"Save candidates ({len(paths)} file(s)):"]
-    lines.extend(f"- {path}" for path in visible)
-    if len(paths) > limit:
-        lines.append(f"... {len(paths) - limit} more file(s)")
-    return "\n".join(lines)
-
-
-def save_candidate_tree(resolved_targets, ctx):
-    return format_save_candidate_tree(save_candidate_paths(resolved_targets, ctx))
 
 
 def add_save_export_candidate_details(target, export_path, details, ctx):

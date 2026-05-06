@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.20
+
+- Replace the always-rendered Save Candidates block with an explicit Preview HA to Git action.
+- Preview HA to Git builds the Save result in a temporary tree and shows changes without commit or push.
+
 ## 0.4.19
 
 - Add a persistent Save Candidates section that shows live config files eligible for Save HA to Git.

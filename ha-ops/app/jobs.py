@@ -7,6 +7,7 @@ class JobContext:
     add_detail: Any
     apply_targets: Any
     build_apply_preview: Any
+    build_save_preview: Any
     commit_if_needed: Any
     create_release_snapshot: Any
     enforce_apply_limits: Any
@@ -218,6 +219,93 @@ def run_save_job(ctx):
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "conflicts": conflicts,
+            }
+        )
+        return False
+    finally:
+        run_lock.release()
+
+
+def run_save_preview_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not run_lock.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "save_preview",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    options = ctx.load_options()
+    resolved_targets = []
+
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "save_preview",
+            "last_message": "Preparing save preview.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        if state.get("conflicts"):
+            write_pending_conflicts(
+                ctx,
+                "save_preview",
+                conflict_status_message(state, "Resolve Git conflicts before running Preview HA to Git."),
+                details,
+                resolved_targets,
+            )
+            return False
+
+        repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
+        env = ctx.git_env(options)
+        branch = options.get("repo_branch", "main")
+        ctx.git_pull_rebase(repo_dir, env, branch)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+
+        ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
+        ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        ctx.add_detail(details, "Building save preview without committing or pushing.")
+        preview = ctx.build_save_preview(resolved_targets, repo_dir, details)
+
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "save_preview",
+                "last_message": "Save preview finished successfully.",
+                "last_details": details,
+                "last_targets": resolved_targets,
+                "last_save_preview": preview["summary"],
+                "last_save_diff": preview["diff"],
+                "last_save_diff_generated_at": utc_now(),
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "save_preview",
+                "last_message": str(exc),
+                "last_details": details,
+                "last_targets": resolved_targets,
             }
         )
         return False

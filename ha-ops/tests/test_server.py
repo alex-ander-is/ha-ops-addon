@@ -239,6 +239,9 @@ class ServerTests(unittest.TestCase):
             def run_save_job(self):
                 self.calls.append("save")
 
+            def run_save_preview_job(self):
+                self.calls.append("save-preview")
+
         ctx = FakeContext()
         handler = server.web.create_handler(ctx)
 
@@ -270,6 +273,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Save HA to Git started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save"])
+
+        post_request = invoke(
+            "do_POST",
+            "/save-preview",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("HA to Git preview started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview"])
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
@@ -1981,14 +1993,12 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("Backup status unavailable", page)
 
-    def test_render_page_shows_live_save_candidates(self):
+    def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
             remote = self.seed_remote(root)
-            repo = server.DATA_DIR / "ha-config"
-            self.git(["clone", str(remote), str(repo)], root)
             (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
             (server.CONFIG_DIR / "secrets.yaml").write_text("secret\n")
             (server.CONFIG_DIR / "home-assistant_v2.db").write_text("runtime\n")
@@ -2006,14 +2016,22 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
+            self.assertTrue(server.run_save_preview_job())
             page = server.render_page()
+            state = server.read_state()
+            repo = server.DATA_DIR / "ha-config"
 
-            self.assertIn("Save Candidates", page)
-            self.assertIn("Save candidates (2 file(s)):", page)
+            self.assertIn("Save Preview", page)
+            self.assertIn("Save preview changes (2):", page)
+            self.assertIn("- Modified: homeassistant/configuration.yaml", page)
+            self.assertIn("- Added: homeassistant/packages/lights.yaml", page)
             self.assertIn("- homeassistant/configuration.yaml", page)
             self.assertIn("- homeassistant/packages/lights.yaml", page)
             self.assertNotIn("secrets.yaml", page)
             self.assertNotIn("home-assistant_v2.db", page)
+            self.assertIn("last_save_diff", state)
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
+            self.assertEqual(self.repo_status(repo), "")
 
     def test_manifest_source_symlink_escape_is_rejected(self):
         server = load_server()

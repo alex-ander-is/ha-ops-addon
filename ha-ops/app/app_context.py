@@ -292,8 +292,8 @@ class AppContext:
     def export_targets(self, resolved_targets, details):
         return sync_logic.export_targets(resolved_targets, details, self.sync_deps())
 
-    def save_candidate_tree(self, resolved_targets):
-        return sync_logic.save_candidate_tree(resolved_targets, self.sync_deps())
+    def build_save_preview(self, resolved_targets, repo_dir, details):
+        return sync_logic.build_save_preview(resolved_targets, repo_dir, details, self.sync_deps())
 
     def build_apply_preview(self, resolved_targets):
         return sync_logic.build_apply_preview(resolved_targets, self.sync_deps())
@@ -413,6 +413,7 @@ class AppContext:
             add_detail=self.add_detail,
             apply_targets=self.apply_targets,
             build_apply_preview=self.build_apply_preview,
+            build_save_preview=self.build_save_preview,
             commit_if_needed=self.commit_if_needed,
             create_release_snapshot=self.create_release_snapshot,
             enforce_apply_limits=self.enforce_apply_limits,
@@ -455,6 +456,9 @@ class AppContext:
 
     def run_preview_job(self):
         return job_logic.run_preview_job(self.job_deps())
+
+    def run_save_preview_job(self):
+        return job_logic.run_save_preview_job(self.job_deps())
 
     def run_rollback_job(self, release_name):
         return job_logic.run_rollback_job(release_name, self.job_deps())
