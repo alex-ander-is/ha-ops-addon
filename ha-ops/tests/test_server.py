@@ -121,6 +121,27 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(server.read_state()["last_message"], "ok")
             self.assertFalse((server.STATE_PATH.parent / f".{server.STATE_PATH.name}.tmp").exists())
 
+    def test_startup_repairs_stale_running_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "last_message": "Building apply preview without changing live config.",
+                    "last_details": ["Building apply preview without changing live config."],
+                }
+            )
+
+            server._CTX.repair_startup_state()
+
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["last_message"], "Previous action was interrupted by HA Ops restart.")
+            self.assertIn("interrupted", state["last_details"][-1])
+
     def test_app_context_uses_injected_paths_and_callbacks(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -306,6 +327,33 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(preview["deletions"], 0)
             self.assertIn("no file changes", preview["diff"].lower())
             self.assertEqual((live / "configuration.yaml").read_text(), "homeassistant:\n")
+
+    def test_apply_preview_progress_is_written_to_state_details(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            (live / "configuration.yaml").write_text("homeassistant:\n")
+            source = root / "repo" / "homeassistant"
+            details = []
+
+            server._CTX.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ],
+                details,
+            )
+
+            state_details = server.read_state()["last_details"]
+            self.assertIn("Preview homeassistant: start", details)
+            self.assertIn("Preview homeassistant: building diff", state_details)
 
     def test_missing_git_source_does_not_delete_live_config(self):
         server = load_server()

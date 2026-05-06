@@ -62,6 +62,9 @@ class AppContext:
     def write_state(self, updates):
         return state_store.write_state(self.state_path, updates)
 
+    def repair_startup_state(self):
+        return state_store.repair_startup_state(self.state_path, self.utc_now())
+
     def run_command(self, command, env=None, cwd=None):
         return subprocess.run(
             command,
@@ -295,8 +298,8 @@ class AppContext:
     def build_save_preview(self, resolved_targets, repo_dir, details):
         return sync_logic.build_save_preview(resolved_targets, repo_dir, details, self.sync_deps())
 
-    def build_apply_preview(self, resolved_targets):
-        return sync_logic.build_apply_preview(resolved_targets, self.sync_deps())
+    def build_apply_preview(self, resolved_targets, details=None):
+        return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details)
 
     def save_unknown_base_conflicts(self, resolved_targets, repo_dir, resolutions, details):
         return sync_logic.save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, self.sync_deps())

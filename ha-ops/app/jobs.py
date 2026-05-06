@@ -367,7 +367,7 @@ def run_apply_job(ctx):
         ctx.add_detail(details, f"Fetched repository at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
-        preview = ctx.build_apply_preview(resolved_targets)
+        preview = ctx.build_apply_preview(resolved_targets, details)
         ctx.ensure_preview_matches_state(state, commit, preview)
         ctx.enforce_apply_limits(options, preview)
 
@@ -476,7 +476,7 @@ def run_preview_job(ctx):
         ctx.add_detail(details, f"Fetched repository at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Building apply preview without changing live config.")
-        preview = ctx.build_apply_preview(resolved_targets)
+        preview = ctx.build_apply_preview(resolved_targets, details)
 
         write_state(
             {

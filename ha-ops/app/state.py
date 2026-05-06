@@ -70,3 +70,21 @@ def write_state(path, updates):
         temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
         os.replace(temp_path, path)
         return current
+
+
+def repair_startup_state(path, now):
+    current = read_state(path)
+    if current.get("last_status") != "running":
+        return write_state(path, current)
+
+    details = list(current.get("last_details") or [])
+    details.append("HA Ops restarted while an action was running. The action was interrupted.")
+    current.update(
+        {
+            "last_run_at": now,
+            "last_status": "error",
+            "last_message": "Previous action was interrupted by HA Ops restart.",
+            "last_details": details,
+        }
+    )
+    return write_state(path, current)

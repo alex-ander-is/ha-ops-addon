@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.28
+
+- Show Git-to-HA preview target progress in the UI while preview is running.
+- Mark stale running actions as interrupted after HA Ops restarts.
+
 ## 0.4.27
 
 - Build Git-to-HA previews from managed config baselines instead of copying and diffing the full live trees.

@@ -931,7 +931,13 @@ def truncate_diff(diff_text):
     return diff_text
 
 
-def build_apply_preview(resolved_targets, ctx):
+def preview_progress(ctx, details, message):
+    ctx.log(message)
+    if details is not None:
+        ctx.add_detail(details, message)
+
+
+def build_apply_preview(resolved_targets, ctx, details=None):
     preview_root = ctx.work_dir / "apply-preview"
     baseline_root = ctx.work_dir / "apply-preview-baseline"
     clear_tree(preview_root, ctx.work_dir, ctx.run_command)
@@ -941,7 +947,7 @@ def build_apply_preview(resolved_targets, ctx):
     skipped_protected = []
 
     for target in resolved_targets:
-        ctx.log(f"Preview {target['id']}: start")
+        preview_progress(ctx, details, f"Preview {target['id']}: start")
         baseline_path = baseline_root / safe_preview_name(str(target["id"]))
         preview_path = preview_root / safe_preview_name(str(target["id"]))
         build_preview_baseline(target, baseline_path, ctx)
@@ -949,11 +955,11 @@ def build_apply_preview(resolved_targets, ctx):
         if skipped:
             skipped_protected.extend(skipped)
             chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
-        ctx.log(f"Preview {target['id']}: counting deletions")
+        preview_progress(ctx, details, f"Preview {target['id']}: counting deletions")
         deletion_count += count_preview_deletions(baseline_path, preview_path)
-        ctx.log(f"Preview {target['id']}: building diff")
+        preview_progress(ctx, details, f"Preview {target['id']}: building diff")
         chunks.append(target_diff(target, baseline_path, preview_path, ctx.run_command))
-        ctx.log(f"Preview {target['id']}: done")
+        preview_progress(ctx, details, f"Preview {target['id']}: done")
 
     diff_text = "\n".join(chunks).strip()
     if not diff_text:
