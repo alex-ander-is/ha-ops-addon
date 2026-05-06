@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.12
+
+- Show `CONFLICTS` instead of `ERROR` when unresolved Git conflicts require user choice.
+
 ## 0.4.11
 
 - Highlight changed fragments inside modified conflict diff lines.

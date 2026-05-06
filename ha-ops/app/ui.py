@@ -388,6 +388,11 @@ def render_page(data):
       color: var(--ha-info);
       border-color: color-mix(in srgb, var(--ha-info) 30%, transparent);
     }}
+    .badge.conflicts {{
+      background: color-mix(in srgb, var(--ha-info) 14%, transparent);
+      color: var(--ha-info);
+      border-color: color-mix(in srgb, var(--ha-info) 30%, transparent);
+    }}
     .actions {{
       display: flex;
       gap: 12px;

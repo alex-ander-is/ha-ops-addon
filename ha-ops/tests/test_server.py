@@ -432,6 +432,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
             page = server.render_page()
+            self.assertIn('<div class="badge conflicts">conflicts</div>', page)
+            self.assertNotIn('<div class="badge error">error</div>', page)
             self.assertIn("Git: homeassistant/configuration.yaml", page)
             self.assertIn("HA: homeassistant/configuration.yaml", page)
             self.assertIn("diff-changed", page)

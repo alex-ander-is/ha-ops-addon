@@ -159,6 +159,8 @@ def render_page(ctx):
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview
     last_status = state.get("last_status", "idle")
+    has_conflicts = bool(state.get("conflicts"))
+    display_status = "conflicts" if has_conflicts else last_status
     details = "\n".join(state.get("last_details", []))
     details_placeholder = "Running..." if last_status == "running" else "No details yet."
     diff_text = state.get("last_diff", "")
@@ -175,8 +177,16 @@ def render_page(ctx):
 
     return ui.render_page(
         {
-            "status": html.escape(last_status),
-            "badge_class": "error" if last_status == "error" else "running" if last_status == "running" else "",
+            "status": html.escape(display_status),
+            "badge_class": (
+                "conflicts"
+                if has_conflicts
+                else "error"
+                if last_status == "error"
+                else "running"
+                if last_status == "running"
+                else ""
+            ),
             "message": html.escape(state.get("last_message", "")),
             "last_run": html.escape(str(state.get("last_run_at"))),
             "last_release": html.escape(str(state.get("last_release"))),
