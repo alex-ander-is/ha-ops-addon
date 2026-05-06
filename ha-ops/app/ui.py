@@ -131,11 +131,10 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
         )
 
     return (
-        "<form method='post' action='addons' data-async-form='true'>"
+        "<form method='post' action='addons' data-auto-submit='change'>"
         "<div class='check-list'>"
         f"{''.join(rows)}"
         "</div>"
-        "<div class='actions'><button type='submit' class='secondary'>Save Add-on Selection</button></div>"
         "</form>"
     )
 
@@ -735,6 +734,14 @@ def render_page(data):
           event.preventDefault();
           submitAsyncForm(form);
         }});
+      }}
+
+      for (const form of document.querySelectorAll("form[data-auto-submit='change']")) {{
+        for (const input of form.querySelectorAll("input, select")) {{
+          input.addEventListener("change", () => {{
+            submitAsyncForm(form);
+          }});
+        }}
       }}
 
       for (const toggle of document.querySelectorAll(".diff-wrap-toggle")) {{

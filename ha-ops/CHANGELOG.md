@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.21
+
+- Make managed add-on checkboxes save immediately and remove the separate Save Add-on Selection button.
+
 ## 0.4.20
 
 - Replace the always-rendered Save Candidates block with an explicit Preview HA to Git action.

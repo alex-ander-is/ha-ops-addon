@@ -337,7 +337,7 @@ def create_handler(ctx):
                 selected = body.get("addon", [])
                 ctx.set_selected_addon_slugs(selected)
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Managed add-on selection saved. Refreshing..."})
+                    self.send_json({"ok": True, "message": "Managed add-ons updated. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return

@@ -1993,6 +1993,19 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("Backup status unavailable", page)
 
+    def test_managed_addons_auto_submit_without_save_button(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
+
+            page = server.render_page()
+
+            self.assertIn("data-auto-submit='change'", page)
+            self.assertIn("name='addon'", page)
+            self.assertNotIn("Save Add-on Selection", page)
+
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
