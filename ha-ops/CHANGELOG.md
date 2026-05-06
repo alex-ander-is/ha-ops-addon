@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.22
+
+- Restore the add-on app icon for Home Assistant apps/add-ons lists.
+
 ## 0.4.21
 
 - Make managed add-on checkboxes save immediately and remove the separate Save Add-on Selection button.
