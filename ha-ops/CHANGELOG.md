@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.23
+
+- Align add-on presentation assets with Home Assistant expectations: keep a 128x128 app icon and use a landscape logo.
+- Document that update indicators come from Supervisor version state, not from add-on image assets.
+
 ## 0.4.22
 
 - Restore the add-on app icon for Home Assistant apps/add-ons lists.
@@ -19,7 +24,7 @@
 
 ## 0.4.18
 
-- Keep the add-on logo while restoring the Home Assistant installed apps update indicator.
+- Removed the add-on app icon while keeping the logo.
 
 ## 0.4.17
 

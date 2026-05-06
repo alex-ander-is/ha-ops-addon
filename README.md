@@ -18,6 +18,12 @@ See [`ha-ops/README.md`](./ha-ops/README.md) for setup and behavior.
 
 Add this repository URL in the Home Assistant add-on store, then install `HA Ops`.
 
+## Presentation Assets
+
+- `ha-ops/icon.png` is the Home Assistant app/add-on list icon.
+- `ha-ops/logo.png` is the add-on presentation logo.
+- Home Assistant update indicators come from Supervisor version state, not from these image files.
+
 For local HAOS development, clone this repository into:
 
 ```text
