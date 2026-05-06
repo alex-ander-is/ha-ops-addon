@@ -1,21 +1,96 @@
 import html
 
 
+def diff_line_class(line):
+    if line.startswith("@@"):
+        return "diff-hunk"
+    if line.startswith("+++") or line.startswith("---"):
+        return "diff-file"
+    if line.startswith("+"):
+        return "diff-add"
+    if line.startswith("-"):
+        return "diff-del"
+    if line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
+        return "diff-marker"
+    return "diff-context"
+
+
+def changed_ranges(old_text, new_text):
+    prefix_len = 0
+    max_prefix = min(len(old_text), len(new_text))
+    while prefix_len < max_prefix and old_text[prefix_len] == new_text[prefix_len]:
+        prefix_len += 1
+
+    suffix_len = 0
+    max_suffix = min(len(old_text), len(new_text)) - prefix_len
+    while (
+        suffix_len < max_suffix
+        and old_text[len(old_text) - suffix_len - 1] == new_text[len(new_text) - suffix_len - 1]
+    ):
+        suffix_len += 1
+
+    return (
+        (prefix_len, len(old_text) - suffix_len),
+        (prefix_len, len(new_text) - suffix_len),
+    )
+
+
+def render_changed_text(text, changed_range):
+    start, end = changed_range
+    if start >= end:
+        return html.escape(text)
+    return (
+        html.escape(text[:start])
+        + "<span class='diff-changed'>"
+        + html.escape(text[start:end])
+        + "</span>"
+        + html.escape(text[end:])
+    )
+
+
+def render_diff_line(line, changed_range=None):
+    class_name = diff_line_class(line)
+    if changed_range and class_name in {"diff-add", "diff-del"}:
+        content = html.escape(line[:1]) + render_changed_text(line[1:], changed_range)
+    else:
+        content = html.escape(line)
+    return f"<span class='diff-line {class_name}'>{content}</span>"
+
+
+def render_diff_block(lines, start):
+    removed = []
+    added = []
+    index = start
+    while index < len(lines) and lines[index].startswith("-") and not lines[index].startswith("---"):
+        removed.append(lines[index])
+        index += 1
+    while index < len(lines) and lines[index].startswith("+") and not lines[index].startswith("+++"):
+        added.append(lines[index])
+        index += 1
+
+    rendered = []
+    pairs = min(len(removed), len(added))
+    for pair_index in range(pairs):
+        old_range, new_range = changed_ranges(removed[pair_index][1:], added[pair_index][1:])
+        rendered.append(render_diff_line(removed[pair_index], old_range))
+        rendered.append(render_diff_line(added[pair_index], new_range))
+    rendered.extend(render_diff_line(line) for line in removed[pairs:])
+    rendered.extend(render_diff_line(line) for line in added[pairs:])
+    return rendered, index
+
+
 def render_conflict_detail(detail):
     lines = []
-    for line in detail.splitlines() or [""]:
-        class_name = "diff-context"
-        if line.startswith("@@"):
-            class_name = "diff-hunk"
-        elif line.startswith("+++") or line.startswith("---"):
-            class_name = "diff-file"
-        elif line.startswith("+"):
-            class_name = "diff-add"
-        elif line.startswith("-"):
-            class_name = "diff-del"
-        elif line.startswith(("<<<<<<<", "=======", ">>>>>>>")):
-            class_name = "diff-marker"
-        lines.append(f"<span class='diff-line {class_name}'>{html.escape(line)}</span>")
+    raw_lines = detail.splitlines() or [""]
+    index = 0
+    while index < len(raw_lines):
+        line = raw_lines[index]
+        if line.startswith("-") and not line.startswith("---"):
+            rendered, index = render_diff_block(raw_lines, index)
+            lines.extend(rendered)
+            continue
+        lines.append(render_diff_line(line))
+        index += 1
     return (
         "<div class='conflict-diff' role='region' aria-label='Conflict diff'>"
         "<label class='diff-wrap-control'>"
@@ -459,6 +534,19 @@ def render_page(data):
     }}
     .diff-del {{
       background: color-mix(in srgb, var(--ha-error) 16%, transparent);
+    }}
+    .diff-changed {{
+      border-radius: 3px;
+      padding: 0 1px;
+      font-weight: 700;
+    }}
+    .diff-add .diff-changed {{
+      background: color-mix(in srgb, var(--ha-success) 42%, transparent);
+      box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--ha-success) 70%, transparent);
+    }}
+    .diff-del .diff-changed {{
+      background: color-mix(in srgb, var(--ha-error) 38%, transparent);
+      box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--ha-error) 65%, transparent);
     }}
     .diff-hunk, .diff-file, .diff-marker {{
       color: var(--ha-muted);

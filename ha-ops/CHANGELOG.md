@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.11
+
+- Highlight changed fragments inside modified conflict diff lines.
+
 ## 0.4.10
 
 - Add an optional line wrapping toggle for conflict diff blocks.

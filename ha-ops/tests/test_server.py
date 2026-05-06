@@ -212,7 +212,7 @@ class ServerTests(unittest.TestCase):
             [
                 {
                     "path": "homeassistant/.storage/core.config_entries",
-                    "detail": "--- Git\n+++ HA\n@@ -1 +1 @@\n-old\n+new",
+                    "detail": "--- Git\n+++ HA\n@@ -1 +1 @@\n-version: 0.4.10\n+version: 0.4.11",
                 }
             ]
         )
@@ -226,6 +226,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Wrap lines", content)
         self.assertIn("diff-del", content)
         self.assertIn("diff-add", content)
+        self.assertIn("diff-changed", content)
+        self.assertIn("0.4.1", content)
 
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()
@@ -432,8 +434,9 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
             self.assertIn("Git: homeassistant/configuration.yaml", page)
             self.assertIn("HA: homeassistant/configuration.yaml", page)
-            self.assertIn("-git", page)
-            self.assertIn("+ha", page)
+            self.assertIn("diff-changed", page)
+            self.assertIn("git", page)
+            self.assertIn("ha", page)
 
     def test_save_unknown_base_use_git_keeps_git_version(self):
         server = load_server()
