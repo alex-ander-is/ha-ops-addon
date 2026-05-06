@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.26
+
+- Add startup exception logging and per-target apply preview progress logs.
+
 ## 0.4.25
 
 - Render Save Preview as a single field and avoid duplicate "No Save changes" blocks.

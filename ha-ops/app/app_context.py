@@ -323,6 +323,7 @@ class AppContext:
             ha_dirs=policies.HOMEASSISTANT_EXPORT_DIRS,
             ha_root_excludes=policies.HOMEASSISTANT_EXPORT_ROOT_EXCLUDES,
             ha_root_patterns=policies.HOMEASSISTANT_EXPORT_ROOT_PATTERNS,
+            log=self.log,
             protected_storage_files=policies.PROTECTED_STORAGE_FILES,
             restart_or_start_addon=self.restart_or_start_addon,
             run_command=self.run_command,

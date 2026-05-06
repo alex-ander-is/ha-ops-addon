@@ -2,6 +2,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import ModuleType
 import sys
+import traceback
 
 APP_DIR = Path(__file__).resolve().parent
 if str(APP_DIR) not in sys.path:
@@ -289,10 +290,15 @@ Handler = web.create_handler(_CTX)
 
 
 def main():
-    _CTX.releases_dir.mkdir(parents=True, exist_ok=True)
-    _CTX.write_state(_CTX.read_state())
-    httpd = ThreadingHTTPServer((_CTX.host, _CTX.port), web.create_handler(_CTX))
-    httpd.serve_forever()
+    try:
+        _CTX.log(f"Starting HA Ops { _CTX.addon_version() } on {_CTX.host}:{_CTX.port}")
+        _CTX.releases_dir.mkdir(parents=True, exist_ok=True)
+        _CTX.write_state(_CTX.read_state())
+        httpd = ThreadingHTTPServer((_CTX.host, _CTX.port), web.create_handler(_CTX))
+        httpd.serve_forever()
+    except Exception:
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":

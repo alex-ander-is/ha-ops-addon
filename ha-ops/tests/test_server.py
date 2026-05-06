@@ -37,6 +37,7 @@ class ServerTests(unittest.TestCase):
         server.RELEASES_DIR.mkdir(parents=True)
         server.CONFIG_DIR.mkdir(parents=True)
         server.ADDON_CONFIGS_DIR.mkdir(parents=True)
+        server.log = lambda message: None
 
     def git(self, args, cwd):
         return subprocess.run(["git"] + args, cwd=cwd, check=True, text=True, capture_output=True)

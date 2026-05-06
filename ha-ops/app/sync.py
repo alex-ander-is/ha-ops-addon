@@ -25,6 +25,7 @@ class SyncContext:
     ha_dirs: list
     ha_root_excludes: set
     ha_root_patterns: list
+    log: Callable[..., Any]
     protected_storage_files: set
     restart_or_start_addon: Callable[..., Any]
     run_command: Callable[..., Any]
@@ -862,17 +863,20 @@ def sync_to_preview(target, preview_path, ctx):
     live_path = Path(target["live_path"])
     clear_tree(preview_path, ctx.work_dir, ctx.run_command)
     if live_path.exists():
+        ctx.log(f"Preview {target['id']}: copying live tree from {live_path}")
         sync_tree(live_path, preview_path, True, None, ctx.run_command)
 
     if target["type"] == "homeassistant":
         if source_path.exists() and has_managed_content(source_path):
             reject_source_symlinks(target, ctx)
+            ctx.log(f"Preview {target['id']}: applying Git Home Assistant config from {source_path}")
             skipped_protected = apply_homeassistant_config(source_path, preview_path, target, ctx)
         else:
             skipped_protected = []
     else:
         if source_path.exists() and has_managed_content(source_path):
             reject_source_symlinks(target, ctx)
+            ctx.log(f"Preview {target['id']}: applying Git add-on config from {source_path}")
             sync_tree(source_path, preview_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
         skipped_protected = []
     return skipped_protected
@@ -883,7 +887,7 @@ def target_diff(target, preview_path, run_command):
     if not live_path.exists():
         return f"Target {target['id']} live path does not exist: {live_path}\n"
 
-    result = run_command(["diff", "-ruN", str(live_path), str(preview_path)])
+    result = run_command(["diff", "-ruN", "-x", ".git", str(live_path), str(preview_path)])
     if result.returncode not in (0, 1):
         raise RuntimeError(f"Diff failed for {target['id']}:\n{result.stderr.strip()}")
     if not result.stdout.strip():
@@ -929,13 +933,17 @@ def build_apply_preview(resolved_targets, ctx):
     skipped_protected = []
 
     for target in resolved_targets:
+        ctx.log(f"Preview {target['id']}: start")
         preview_path = preview_root / safe_preview_name(str(target["id"]))
         skipped = sync_to_preview(target, preview_path, ctx)
         if skipped:
             skipped_protected.extend(skipped)
             chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
+        ctx.log(f"Preview {target['id']}: counting deletions")
         deletion_count += count_preview_deletions(target, preview_path)
+        ctx.log(f"Preview {target['id']}: building diff")
         chunks.append(target_diff(target, preview_path, ctx.run_command))
+        ctx.log(f"Preview {target['id']}: done")
 
     diff_text = "\n".join(chunks).strip()
     if not diff_text:
