@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.34
+
+- Display Last Run and preview generation timestamps in the Home Assistant local timezone.
+- Render Save Preview diffs with the same colored line and inline-change highlighting as conflict diffs.
+
 ## 0.4.33
 
 - Clear transient Last Run Details, Apply Preview, and Save Preview content when the UI is refreshed or left.

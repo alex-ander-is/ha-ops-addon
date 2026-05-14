@@ -2,6 +2,7 @@ import json
 import os
 import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import policies
 
@@ -24,6 +25,25 @@ def utc_now():
 
 def release_now():
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+
+def format_time(value, time_zone_name=None):
+    if value in (None, ""):
+        return ""
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return str(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if time_zone_name:
+        try:
+            parsed = parsed.astimezone(ZoneInfo(time_zone_name))
+        except ZoneInfoNotFoundError:
+            parsed = parsed.astimezone()
+    else:
+        parsed = parsed.astimezone()
+    return parsed.replace(microsecond=0).isoformat()
 
 
 def load_json(path, default):

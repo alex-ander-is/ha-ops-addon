@@ -550,6 +550,9 @@ def render_page(data):
     .diff-lines .diff-line:last-child {{
       padding-bottom: 10px;
     }}
+    .preview-summary {{
+      margin: 0 0 12px;
+    }}
     .diff-add {{
       background: color-mix(in srgb, var(--ha-success) 17%, transparent);
     }}
@@ -653,13 +656,13 @@ def render_page(data):
     <section class="card wide">
       <h2>Apply Preview</h2>
       <p>Generated at <span data-transient="apply-generated">{data['diff_generated_at']}</span></p>
-      <pre data-transient="apply-preview">{data['diff_html']}</pre>
+      <div data-transient="apply-preview">{data['diff_html']}</div>
     </section>
 
     <section class="card wide">
       <h2>Save Preview</h2>
       <p>Generated at <span data-transient="save-generated">{data['save_diff_generated_at']}</span></p>
-      <pre data-transient="save-preview">{data['save_details_html']}</pre>
+      <div data-transient="save-preview">{data['save_details_html']}</div>
     </section>
 
     <section class="card wide">

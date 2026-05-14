@@ -173,9 +173,11 @@ def render_page(ctx):
     diff_text = state.get("last_diff", "")
     save_preview_text = state.get("last_save_preview") or "No save preview yet."
     save_diff_text = state.get("last_save_diff") or ""
-    save_details = save_preview_text
+    save_details_html = html.escape(save_preview_text)
     if save_diff_text and save_diff_text != save_preview_text:
-        save_details = f"{save_preview_text}\n\n{save_diff_text}"
+        save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
+    elif save_diff_text:
+        save_details_html = ui.render_conflict_detail(save_diff_text)
     action_disabled = "disabled" if last_status == "running" else ""
     storage_approval_pending = bool(
         state.get("last_preview_storage_changes")
@@ -209,7 +211,7 @@ def render_page(ctx):
                 else ""
             ),
             "message": html.escape(state.get("last_message", "")),
-            "last_run": html.escape(str(state.get("last_run_at"))),
+            "last_run": html.escape(ctx.format_time(state.get("last_run_at"), options)),
             "last_release": html.escape(str(state.get("last_release"))),
             "last_backup_slug": html.escape(str(state.get("last_backup_slug"))),
             "latest_backup": html.escape(backup_status.get("message", "Backup status unavailable.")),
@@ -218,10 +220,10 @@ def render_page(ctx):
             "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
             "auth_mode": html.escape(ctx.git_auth_mode(options)),
             "details_html": html.escape(details or details_placeholder),
-            "diff_generated_at": html.escape(str(state.get("last_diff_generated_at"))),
-            "diff_html": html.escape(diff_text or "No apply preview yet."),
-            "save_diff_generated_at": html.escape(str(state.get("last_save_diff_generated_at"))),
-            "save_details_html": html.escape(save_details),
+            "diff_generated_at": html.escape(ctx.format_time(state.get("last_diff_generated_at"), options)),
+            "diff_html": ui.render_conflict_detail(diff_text) if diff_text else html.escape("No apply preview yet."),
+            "save_diff_generated_at": html.escape(ctx.format_time(state.get("last_save_diff_generated_at"), options)),
+            "save_details_html": save_details_html,
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "apply_action": apply_action,

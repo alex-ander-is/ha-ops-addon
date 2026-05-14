@@ -155,6 +155,29 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["last_preview_storage_changes"])
             self.assertEqual(state["last_preview_approved_fingerprint"], "fingerprint")
 
+    def test_render_page_formats_state_times_in_home_assistant_timezone(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            (server.CONFIG_DIR / ".storage").mkdir()
+            (server.CONFIG_DIR / ".storage" / "core.config").write_text(
+                json.dumps({"data": {"time_zone": "Europe/Prague"}})
+            )
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_run_at": "2026-05-14T19:52:16+00:00",
+                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("2026-05-14T21:52:16+02:00", page)
+            self.assertNotIn("2026-05-14T19:52:16+00:00", page)
+
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2306,6 +2329,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("- Added: homeassistant/packages/lights.yaml", page)
             self.assertIn("- homeassistant/configuration.yaml", page)
             self.assertIn("- homeassistant/packages/lights.yaml", page)
+            self.assertIn("diff-del", page)
+            self.assertIn("diff-add", page)
+            self.assertIn("diff-changed", page)
             self.assertNotIn("secrets.yaml", page)
             self.assertNotIn("home-assistant_v2.db", page)
             self.assertIn("last_save_diff", state)

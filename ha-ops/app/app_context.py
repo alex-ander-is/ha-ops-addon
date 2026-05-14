@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from pathlib import Path
@@ -43,6 +44,26 @@ class AppContext:
 
     def release_now(self):
         return state_store.release_now()
+
+    def local_time_zone(self, options=None):
+        options = options if options is not None else self.load_options()
+        configured = options.get("time_zone") or options.get("timezone")
+        if configured:
+            return configured
+
+        core_config = self.config_dir / ".storage" / "core.config"
+        if core_config.exists():
+            try:
+                data = self.load_json(core_config, {}).get("data", {})
+                if data.get("time_zone"):
+                    return data["time_zone"]
+            except Exception:
+                pass
+
+        return os.environ.get("TZ")
+
+    def format_time(self, value, options=None):
+        return state_store.format_time(value, self.local_time_zone(options))
 
     def load_json(self, path, default):
         return state_store.load_json(path, default)
