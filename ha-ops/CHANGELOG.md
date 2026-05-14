@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.31
+
+- Restore the Home Assistant live config path to /homeassistant when addon_config is also mounted at /config.
+
 ## 0.4.30
 
 - Use the Home Assistant add-on config mount at /config as the default live config path.

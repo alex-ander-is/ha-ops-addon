@@ -181,7 +181,8 @@ class ServerTests(unittest.TestCase):
 
         ctx = server.app_context.AppContext()
 
-        self.assertEqual(ctx.config_dir, Path("/config"))
+        self.assertEqual(ctx.config_dir, Path("/homeassistant"))
+        self.assertEqual(ctx.options_path, Path("/data/options.json"))
 
     def test_git_auth_module_uses_injected_paths_and_runner(self):
         server = load_server()
