@@ -8,6 +8,15 @@ import policies
 
 STATE_LOCK = threading.Lock()
 
+DISPLAY_CLEAR_UPDATES = {
+    "last_details": [],
+    "last_diff": "",
+    "last_diff_generated_at": None,
+    "last_save_preview": "",
+    "last_save_diff": "",
+    "last_save_diff_generated_at": None,
+}
+
 
 def utc_now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -75,19 +84,21 @@ def write_state(path, updates):
         return current
 
 
+def clear_display_state(path):
+    return write_state(path, dict(DISPLAY_CLEAR_UPDATES))
+
+
 def repair_startup_state(path, now):
     current = read_state(path)
+    current.update(DISPLAY_CLEAR_UPDATES)
     if current.get("last_status") != "running":
         return write_state(path, current)
 
-    details = list(current.get("last_details") or [])
-    details.append("HA Ops restarted while an action was running. The action was interrupted.")
     current.update(
         {
             "last_run_at": now,
             "last_status": "interrupted",
             "last_message": "Previous action was interrupted by HA Ops restart.",
-            "last_details": details,
         }
     )
     return write_state(path, current)

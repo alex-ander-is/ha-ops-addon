@@ -121,6 +121,40 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(server.read_state()["last_message"], "ok")
             self.assertFalse((server.STATE_PATH.parent / f".{server.STATE_PATH.name}.tmp").exists())
 
+    def test_clear_display_state_keeps_apply_safety_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_details": ["detail"],
+                    "last_diff": "diff",
+                    "last_diff_generated_at": "now",
+                    "last_save_preview": "summary",
+                    "last_save_diff": "save diff",
+                    "last_save_diff_generated_at": "now",
+                    "last_preview_commit": "abc",
+                    "last_preview_fingerprint": "fingerprint",
+                    "last_preview_storage_changes": True,
+                    "last_preview_approved_fingerprint": "fingerprint",
+                }
+            )
+
+            server.clear_display_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_details"], [])
+            self.assertEqual(state["last_diff"], "")
+            self.assertIsNone(state["last_diff_generated_at"])
+            self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_save_diff"], "")
+            self.assertIsNone(state["last_save_diff_generated_at"])
+            self.assertEqual(state["last_preview_commit"], "abc")
+            self.assertEqual(state["last_preview_fingerprint"], "fingerprint")
+            self.assertTrue(state["last_preview_storage_changes"])
+            self.assertEqual(state["last_preview_approved_fingerprint"], "fingerprint")
+
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -132,6 +166,7 @@ class ServerTests(unittest.TestCase):
                     "last_status": "running",
                     "last_message": "Building apply preview without changing live config.",
                     "last_details": ["Building apply preview without changing live config."],
+                    "last_diff": "old diff",
                 }
             )
 
@@ -140,7 +175,32 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertEqual(state["last_status"], "interrupted")
             self.assertEqual(state["last_message"], "Previous action was interrupted by HA Ops restart.")
-            self.assertIn("interrupted", state["last_details"][-1])
+            self.assertEqual(state["last_details"], [])
+            self.assertEqual(state["last_diff"], "")
+
+    def test_startup_clears_transient_display_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "success",
+                    "last_details": ["old detail"],
+                    "last_diff": "old diff",
+                    "last_save_preview": "old save",
+                    "last_preview_fingerprint": "keep",
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_status"], "success")
+            self.assertEqual(state["last_details"], [])
+            self.assertEqual(state["last_diff"], "")
+            self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_preview_fingerprint"], "keep")
 
     def test_app_context_uses_injected_paths_and_callbacks(self):
         server = load_server()
@@ -303,6 +363,9 @@ class ServerTests(unittest.TestCase):
             def run_save_preview_job(self):
                 self.calls.append("save-preview")
 
+            def clear_display_state(self):
+                self.calls.append("clear-display")
+
         ctx = FakeContext()
         handler = server.web.create_handler(ctx)
 
@@ -343,6 +406,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("HA to Git preview started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save", "save-preview"])
+
+        post_request = invoke(
+            "do_POST",
+            "/clear-display-state",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Display state cleared", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "clear-display"])
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()

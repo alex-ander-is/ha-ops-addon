@@ -62,6 +62,9 @@ class AppContext:
     def write_state(self, updates):
         return state_store.write_state(self.state_path, updates)
 
+    def clear_display_state(self):
+        return state_store.clear_display_state(self.state_path)
+
     def repair_startup_state(self):
         return state_store.repair_startup_state(self.state_path, self.utc_now())
 

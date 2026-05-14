@@ -316,6 +316,15 @@ def create_handler(ctx):
                 self.send_html(render_page(ctx))
                 return
 
+            if parsed.path == "/clear-display-state":
+                ctx.clear_display_state()
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Display state cleared."})
+                else:
+                    self.send_response(204)
+                    self.end_headers()
+                return
+
             if parsed.path == "/apply":
                 start_background(ctx.run_apply_job)
                 if self.wants_json():

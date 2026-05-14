@@ -646,20 +646,20 @@ def render_page(data):
       </section>
       <section class="card">
         <h2>Last Run Details</h2>
-        <pre>{data['details_html']}</pre>
+        <pre data-transient="details">{data['details_html']}</pre>
       </section>
     </div>
 
     <section class="card wide">
       <h2>Apply Preview</h2>
-      <p>Generated at {data['diff_generated_at']}</p>
-      <pre>{data['diff_html']}</pre>
+      <p>Generated at <span data-transient="apply-generated">{data['diff_generated_at']}</span></p>
+      <pre data-transient="apply-preview">{data['diff_html']}</pre>
     </section>
 
     <section class="card wide">
       <h2>Save Preview</h2>
-      <p>Generated at {data['save_diff_generated_at']}</p>
-      <pre>{data['save_details_html']}</pre>
+      <p>Generated at <span data-transient="save-generated">{data['save_diff_generated_at']}</span></p>
+      <pre data-transient="save-preview">{data['save_details_html']}</pre>
     </section>
 
     <section class="card wide">
@@ -698,6 +698,109 @@ def render_page(data):
         }}
       }}
 
+      function isRunning() {{
+        const badge = document.querySelector(".badge");
+        return badge && badge.textContent.trim().toLowerCase() === "running";
+      }}
+
+      function clearTransientDisplay() {{
+        const details = document.querySelector("[data-transient='details']");
+        const applyPreview = document.querySelector("[data-transient='apply-preview']");
+        const savePreview = document.querySelector("[data-transient='save-preview']");
+        const applyGenerated = document.querySelector("[data-transient='apply-generated']");
+        const saveGenerated = document.querySelector("[data-transient='save-generated']");
+        if (details) {{
+          details.textContent = "No details yet.";
+        }}
+        if (applyPreview) {{
+          applyPreview.textContent = "No apply preview yet.";
+        }}
+        if (savePreview) {{
+          savePreview.textContent = "No save preview yet.";
+        }}
+        if (applyGenerated) {{
+          applyGenerated.textContent = "";
+        }}
+        if (saveGenerated) {{
+          saveGenerated.textContent = "";
+        }}
+      }}
+
+      function clearDisplayState() {{
+        if (navigator.sendBeacon) {{
+          navigator.sendBeacon("clear-display-state", new Blob([""], {{
+            type: "application/x-www-form-urlencoded"
+          }}));
+          return;
+        }}
+        fetch("clear-display-state", {{
+          method: "POST",
+          keepalive: true,
+          headers: {{
+            "Accept": "application/json",
+            "X-Requested-With": "fetch"
+          }}
+        }}).catch(() => {{}});
+      }}
+
+      function markInternalReload() {{
+        try {{
+          sessionStorage.setItem("haOpsInternalReload", "1");
+        }} catch (_error) {{}}
+      }}
+
+      function consumeInternalReload() {{
+        try {{
+          const value = sessionStorage.getItem("haOpsInternalReload") === "1";
+          sessionStorage.removeItem("haOpsInternalReload");
+          return value;
+        }} catch (_error) {{
+          return false;
+        }}
+      }}
+
+      function reloadSoon(delay) {{
+        window.setTimeout(() => {{
+          markInternalReload();
+          window.location.reload();
+        }}, delay);
+      }}
+
+      function navigationType() {{
+        const entries = performance.getEntriesByType
+          ? performance.getEntriesByType("navigation")
+          : [];
+        if (entries && entries[0] && entries[0].type) {{
+          return entries[0].type;
+        }}
+        if (performance.navigation && performance.navigation.type === 1) {{
+          return "reload";
+        }}
+        if (performance.navigation && performance.navigation.type === 2) {{
+          return "back_forward";
+        }}
+        return "navigate";
+      }}
+
+      window.addEventListener("pageshow", (event) => {{
+        const internalReload = consumeInternalReload();
+        const type = navigationType();
+        if (!internalReload && (event.persisted || type === "reload" || type === "back_forward")) {{
+          clearTransientDisplay();
+          clearDisplayState();
+        }}
+      }});
+
+      window.addEventListener("pagehide", () => {{
+        let internalReload = false;
+        try {{
+          internalReload = sessionStorage.getItem("haOpsInternalReload") === "1";
+        }} catch (_error) {{}}
+        if (!internalReload && !isRunning()) {{
+          clearDisplayState();
+        }}
+      }});
+
       async function submitAsyncForm(form) {{
         const confirmation = form.getAttribute("data-confirm");
         if (confirmation && !window.confirm(confirmation)) {{
@@ -710,6 +813,8 @@ def render_page(data):
           button.textContent = "Working...";
         }}
         setClientStatus("Working...");
+        clearTransientDisplay();
+        clearDisplayState();
 
         try {{
           const response = await fetch(form.getAttribute("action"), {{
@@ -730,10 +835,10 @@ def render_page(data):
 
           if (!response.ok || payload.ok === false) {{
             setClientStatus(payload.message || "Request failed.");
-            window.setTimeout(() => window.location.reload(), 600);
+            reloadSoon(600);
           }} else {{
             setClientStatus(payload.message || "Done. Refreshing...");
-            window.setTimeout(() => window.location.reload(), 350);
+            reloadSoon(350);
           }}
         }} catch (error) {{
           setClientStatus(error?.message || "Network error.");
@@ -769,9 +874,8 @@ def render_page(data):
         }});
       }}
 
-      const badge = document.querySelector(".badge");
-      if (badge && badge.textContent.trim().toLowerCase() === "running") {{
-        window.setTimeout(() => window.location.reload(), 3000);
+      if (isRunning()) {{
+        reloadSoon(3000);
       }}
     }})();
   </script>

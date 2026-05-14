@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.33
+
+- Clear transient Last Run Details, Apply Preview, and Save Preview content when the UI is refreshed or left.
+- Preserve apply safety state such as preview fingerprints and storage approvals while clearing only displayed text.
+
 ## 0.4.32
 
 - Show full Git-to-HA previews for allowlisted .storage files, including protected registries.
