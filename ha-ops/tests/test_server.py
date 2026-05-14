@@ -226,6 +226,25 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview"], "")
             self.assertEqual(state["last_preview_fingerprint"], "keep")
 
+    def test_startup_clears_empty_error_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "error",
+                    "last_message": "",
+                    "last_details": [],
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_status"], "idle")
+            self.assertEqual(state["last_message"], "No runs yet.")
+
     def test_app_context_uses_injected_paths_and_callbacks(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2307,6 +2326,30 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
             self.assertIn("Backup status unavailable", page)
+
+    def test_render_page_suppresses_recovered_backup_gate_error(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.latest_system_backup_status = lambda options: {
+                "stale": False,
+                "message": "Automatic backup at 2026-05-14T01:15:00+00:00 (19 hour(s) ago, 1 location(s)).",
+            }
+            server.write_state(
+                {
+                    "last_status": "error",
+                    "last_action": "apply",
+                    "last_message": "No fresh system backup found within 24 hour(s): No system Home Assistant backups found.",
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertNotIn(">error<", page)
+            self.assertNotIn("No fresh system backup found", page)
+            self.assertIn("Fresh system backup is now available", page)
 
     def test_managed_addons_auto_submit_without_save_button(self):
         server = load_server()

@@ -162,6 +162,20 @@ def render_page(ctx):
     options = ctx.load_options()
     state = ctx.read_state()
     backup_status = ctx.latest_system_backup_status(options)
+    if (
+        state.get("last_status") == "error"
+        and state.get("last_action") == "apply"
+        and str(state.get("last_message", "")).startswith("No fresh system backup found")
+        and not backup_status.get("stale", True)
+    ):
+        state = dict(state)
+        state.update(
+            {
+                "last_status": "idle",
+                "last_action": None,
+                "last_message": "Fresh system backup is now available. Run an action when ready.",
+            }
+        )
     releases = ctx.list_releases()
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview

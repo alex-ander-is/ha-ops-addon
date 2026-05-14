@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.36
+
+- Suppress stale backup-gate errors on the main page once a fresh Home Assistant backup is visible.
+- Reset empty persisted error states on startup instead of showing an unexplained error badge.
+
 ## 0.4.35
 
 - Split action buttons into HA-to-Git and Git-to-HA rows, with Save and Apply as primary actions.

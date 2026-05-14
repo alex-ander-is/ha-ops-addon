@@ -108,9 +108,21 @@ def clear_display_state(path):
     return write_state(path, dict(DISPLAY_CLEAR_UPDATES))
 
 
+def has_error_context(state):
+    return bool(state.get("last_message") or state.get("last_details") or state.get("conflicts"))
+
+
 def repair_startup_state(path, now):
     current = read_state(path)
     current.update(DISPLAY_CLEAR_UPDATES)
+    if current.get("last_status") == "error" and not has_error_context(current):
+        current.update(
+            {
+                "last_status": "idle",
+                "last_action": None,
+                "last_message": "No runs yet.",
+            }
+        )
     if current.get("last_status") != "running":
         return write_state(path, current)
 
