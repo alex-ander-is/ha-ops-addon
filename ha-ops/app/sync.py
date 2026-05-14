@@ -564,7 +564,7 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
             if is_protected:
                 changes.changed_protected_storage = True
 
-    if storage_managed.can_apply_core_config_entries_projection(src, dest):
+    if storage_managed.core_config_entries_projection_would_update(src, dest):
         changes.changed_storage = True
         changes.changed_protected_storage = True
 

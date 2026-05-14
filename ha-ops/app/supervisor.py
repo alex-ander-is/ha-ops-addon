@@ -97,7 +97,7 @@ def core_reload_yaml(call_supervisor):
 def do_core_check(call_supervisor):
     payload = call_supervisor("POST", "/core/check")
     data = payload.get("data", {})
-    if payload.get("result") == "ok" and data.get("result") == "valid":
+    if payload.get("result") == "ok" and data.get("result", "valid") == "valid":
         return
     raise RuntimeError(f"Home Assistant config check failed: {payload}")
 

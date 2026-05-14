@@ -122,6 +122,14 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(server.read_state()["last_message"], "ok")
             self.assertFalse((server.STATE_PATH.parent / f".{server.STATE_PATH.name}.tmp").exists())
 
+    def test_core_check_accepts_current_supervisor_success_payload(self):
+        server = load_server()
+
+        server.supervisor.do_core_check(lambda method, path: {"result": "ok", "data": {}})
+
+        with self.assertRaisesRegex(RuntimeError, "config check failed"):
+            server.supervisor.do_core_check(lambda method, path: {"result": "error", "data": {}})
+
     def test_clear_display_state_keeps_apply_safety_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1979,6 +1987,70 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(entries["workday-id"]["data"], {"keep": "live"})
             self.assertEqual(entries["google-id"]["data"]["token"]["access_token"], "live-token")
             self.assertEqual(entries["google-id"]["options"]["calendar_access"], "read_write")
+
+    def test_noop_managed_config_entries_projection_does_not_stop_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage_managed").mkdir(parents=True)
+            raw = {
+                "version": 1,
+                "data": {
+                    "entries": [
+                        {
+                            "domain": "workday",
+                            "entry_id": "workday-id",
+                            "source": "user",
+                            "title": "Workday",
+                            "unique_id": None,
+                            "data": {},
+                            "options": {"country": "CZ"},
+                        }
+                    ]
+                },
+            }
+            projection = {
+                "version": 1,
+                "source": "core.config_entries",
+                "entries": [
+                    {
+                        "domain": "workday",
+                        "entry_id": "workday-id",
+                        "source": "user",
+                        "title": "Workday",
+                        "unique_id": None,
+                        "apply": "update",
+                        "data": {},
+                        "options": {"country": "CZ"},
+                    }
+                ],
+            }
+            (live / ".storage" / "core.config_entries").write_text(json.dumps(raw))
+            (source / ".storage_managed" / "core.config_entries.json").write_text(json.dumps(projection))
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server.do_core_check = lambda: events.append("check")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, [])
 
     def test_managed_config_entries_projection_skips_missing_live_raw_file(self):
         server = load_server()

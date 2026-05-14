@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.37
+
+- Accept the current Supervisor config-check success response so Apply can continue to Core start.
+- Avoid stopping Home Assistant Core for no-op managed `core.config_entries` projections.
+
 ## 0.4.36
 
 - Suppress stale backup-gate errors on the main page once a fresh Home Assistant backup is visible.

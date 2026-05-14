@@ -116,7 +116,7 @@ def merge_fields(target, section, values, allowed):
     return changed
 
 
-def apply_core_config_entries_projection(src_config_dir, dest_config_dir):
+def merge_core_config_entries_projection(src_config_dir, dest_config_dir, write=False):
     projection_path = Path(src_config_dir) / MANAGED_DIR / CORE_CONFIG_ENTRIES_PROJECTION
     raw_path = Path(dest_config_dir) / ".storage" / CORE_CONFIG_ENTRIES_RAW
     if not projection_path.exists():
@@ -148,9 +148,17 @@ def apply_core_config_entries_projection(src_config_dir, dest_config_dir):
         if changed:
             updated += 1
 
-    if updated:
+    if updated and write:
         write_json(raw_path, raw)
     return {"updated": updated, "skipped": skipped, "missing": 0}
+
+
+def apply_core_config_entries_projection(src_config_dir, dest_config_dir):
+    return merge_core_config_entries_projection(src_config_dir, dest_config_dir, write=True)
+
+
+def core_config_entries_projection_would_update(src_config_dir, dest_config_dir):
+    return merge_core_config_entries_projection(src_config_dir, dest_config_dir, write=False)["updated"] > 0
 
 
 def source_has_managed_projection(path):
