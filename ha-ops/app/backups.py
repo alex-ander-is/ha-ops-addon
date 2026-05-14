@@ -22,8 +22,11 @@ def backup_locations(backup):
     locations = backup.get("locations")
     if isinstance(locations, list):
         return len(locations)
-    location = backup.get("location")
-    if location:
+    if isinstance(locations, dict):
+        return len(locations)
+    if isinstance(locations, int):
+        return max(0, locations)
+    if "location" in backup:
         return 1
     return None
 
@@ -35,7 +38,8 @@ def backup_has_location(backup):
 
 def is_system_backup(backup):
     backup_type = str(backup.get("type", "")).lower()
-    return backup_type in {"full", "automatic", "auto"}
+    content = backup.get("content") or {}
+    return backup_type in {"full", "automatic", "auto"} or bool(content.get("homeassistant"))
 
 
 def backup_age_hours(backup_date):

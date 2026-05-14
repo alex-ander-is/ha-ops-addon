@@ -408,12 +408,18 @@ def render_page(data):
     }}
     .actions {{
       display: flex;
+      flex-direction: column;
+      gap: 12px;
+      margin-top: 22px;
+    }}
+    .action-row {{
+      display: flex;
       gap: 12px;
       flex-wrap: wrap;
-      margin-top: 22px;
     }}
     td.actions {{
       margin-top: 0;
+      flex-direction: row;
     }}
     .check-list {{
       display: grid;
@@ -633,18 +639,22 @@ def render_page(data):
         <p>{data['message']}</p>
         <p id="client-status" class="client-status"></p>
         <div class="actions">
-          <form method="post" action="save-preview" data-async-form="true">
-            <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
-          </form>
-          <form method="post" action="save" data-async-form="true">
-            <button type="submit" {data['action_disabled']}>Save HA to Git</button>
-          </form>
-          <form method="post" action="preview" data-async-form="true">
-            <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
-          </form>
-          <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
-            <button type="submit" class="secondary" {data['action_disabled']}>{data['apply_button_text']}</button>
-          </form>
+          <div class="action-row">
+            <form method="post" action="save-preview" data-async-form="true">
+              <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
+            </form>
+            <form method="post" action="save" data-async-form="true">
+              <button type="submit" {data['action_disabled']}>Save HA to Git</button>
+            </form>
+          </div>
+          <div class="action-row">
+            <form method="post" action="preview" data-async-form="true">
+              <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
+            </form>
+            <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
+              <button type="submit" {data['action_disabled']}>{data['apply_button_text']}</button>
+            </form>
+          </div>
         </div>
       </section>
       <section class="card">

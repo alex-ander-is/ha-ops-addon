@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.35
+
+- Split action buttons into HA-to-Git and Git-to-HA rows, with Save and Apply as primary actions.
+- Accept recent Home Assistant automatic backups stored in a local or configured location when enforcing the fresh backup gate.
+
 ## 0.4.34
 
 - Display Last Run and preview generation timestamps in the Home Assistant local timezone.

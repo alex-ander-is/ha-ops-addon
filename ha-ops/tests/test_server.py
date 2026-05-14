@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from types import MethodType
@@ -1630,6 +1631,31 @@ class ServerTests(unittest.TestCase):
                     [],
                 )
 
+    def test_latest_backup_accepts_homeassistant_automatic_backup_with_local_location(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            backup_date = (datetime.now(timezone.utc) - timedelta(hours=19)).replace(microsecond=0).isoformat()
+            server.backup_manager_info = lambda: {
+                "backups": [
+                    {
+                        "slug": "automatic",
+                        "name": "Automatic backup",
+                        "date": backup_date,
+                        "type": "partial",
+                        "content": {"homeassistant": True},
+                        "location": None,
+                    }
+                ]
+            }
+
+            status = server.latest_system_backup_status({"backup_max_age_hours": 24, "backup_require_location": True})
+
+            self.assertFalse(status["stale"])
+            self.assertEqual(status["backup"]["slug"], "automatic")
+            self.assertIn("1 location", status["message"])
+
     def test_pending_conflicts_block_apply(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2294,6 +2320,26 @@ class ServerTests(unittest.TestCase):
             self.assertIn("data-auto-submit='change'", page)
             self.assertIn("name='addon'", page)
             self.assertNotIn("Save Add-on Selection", page)
+
+    def test_primary_actions_are_grouped_by_direction(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+            ha_to_git = page.index('action="save-preview"')
+            save = page.index('action="save"')
+            git_to_ha = page.index('action="preview"')
+            apply = page.index('action="apply"')
+            self.assertLess(ha_to_git, save)
+            self.assertLess(save, git_to_ha)
+            self.assertLess(git_to_ha, apply)
+            self.assertIn('<div class="action-row">', page)
+            self.assertIn('<button type="submit" >Save HA to Git</button>', page)
+            self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
 
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()
