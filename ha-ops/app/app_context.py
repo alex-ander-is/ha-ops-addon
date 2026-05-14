@@ -405,6 +405,26 @@ class AppContext:
         if state.get("last_preview_fingerprint") != preview["fingerprint"]:
             raise RuntimeError("Run Preview Git to HA again. The live diff changed since the last preview.")
 
+    def ensure_storage_apply_approved(self, state, preview):
+        if not preview.get("storage_changes"):
+            return
+        if state.get("last_preview_approved_fingerprint") == preview["fingerprint"]:
+            return
+        paths = preview.get("storage_change_paths") or []
+        suffix = f" Changed .storage path(s): {', '.join(paths[:10])}." if paths else ""
+        raise RuntimeError(f"Approve Git to HA before applying .storage changes.{suffix}")
+
+    def approve_storage_apply_targets(self, resolved_targets):
+        approved = []
+        for target in resolved_targets:
+            if target.get("type") == "homeassistant":
+                updated = dict(target)
+                updated["allow_protected_storage"] = True
+                approved.append(updated)
+            else:
+                approved.append(target)
+        return approved
+
     def enforce_apply_limits(self, options, preview):
         max_deletions = self.option_int(options, "max_apply_deletions", policies.DEFAULT_MAX_APPLY_DELETIONS, minimum=0)
         if preview["deletions"] > max_deletions:
@@ -423,6 +443,7 @@ class AppContext:
             enforce_apply_limits=self.enforce_apply_limits,
             ensure_fresh_system_backup=self.ensure_fresh_system_backup,
             ensure_preview_matches_state=self.ensure_preview_matches_state,
+            ensure_storage_apply_approved=self.ensure_storage_apply_approved,
             ensure_repo=self.ensure_repo,
             export_targets=self.export_targets,
             get_installed_addons=self.get_installed_addons,
@@ -443,6 +464,7 @@ class AppContext:
             reset_repo_worktree=self.reset_repo_worktree,
             restore_save_git_resolutions=self.restore_save_git_resolutions,
             resolve_targets=self.resolve_targets,
+            approve_storage_apply_targets=self.approve_storage_apply_targets,
             restore_release_snapshot=self.restore_release_snapshot,
             run_lock=self.run_lock,
             save_unknown_base_conflicts=self.save_unknown_base_conflicts,

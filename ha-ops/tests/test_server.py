@@ -259,6 +259,37 @@ class ServerTests(unittest.TestCase):
         self.assertIn("diff-changed", content)
         self.assertIn("0.4.1", content)
 
+    def test_save_conflict_ui_can_approve_all_as_ha_version(self):
+        server = load_server()
+
+        content = server.ui.render_conflicts(
+            [{"path": "homeassistant/.storage/core.device_registry", "detail": "--- Git\n+++ HA\n"}],
+            conflict_type="save_unknown_base",
+        )
+
+        self.assertIn("Approve HA to Git", content)
+        self.assertIn("approve-save-conflicts", content)
+
+    def test_save_conflict_approve_all_records_ha_resolutions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "ha", addon_configs_dir=root / "addons")
+            ctx.write_state(
+                {
+                    "conflicts": ["homeassistant/.storage/core.device_registry"],
+                    "conflict_type": "save_unknown_base",
+                    "save_conflict_resolutions": {},
+                }
+            )
+
+            message = server.conflicts.approve_save_unknown_base_conflicts(ctx)
+            state = ctx.read_state()
+
+            self.assertIn("Approved 1 Save conflict", message)
+            self.assertEqual(state["conflicts"], [])
+            self.assertEqual(state["save_conflict_resolutions"], {"homeassistant/.storage/core.device_registry": "ha"})
+
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()
 
@@ -373,7 +404,7 @@ class ServerTests(unittest.TestCase):
             server.apply_homeassistant_config(root / "missing", live, {"id": "homeassistant"})
             self.assertEqual((live / "configuration.yaml").read_text(), "homeassistant:\n")
 
-    def test_protected_storage_skipped_unless_enabled(self):
+    def test_apply_preview_shows_protected_storage_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -398,9 +429,11 @@ class ServerTests(unittest.TestCase):
                 ]
             )
             preview_storage = server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage"
-            self.assertEqual((preview_storage / "core.device_registry").read_text(), "live\n")
+            self.assertEqual((preview_storage / "core.device_registry").read_text(), "git\n")
             self.assertEqual((preview_storage / "input_boolean").read_text(), "input\n")
-            self.assertIn("core.device_registry", preview["skipped_protected"])
+            self.assertEqual(preview["skipped_protected"], [])
+            self.assertTrue(preview["storage_changes"])
+            self.assertIn("homeassistant/.storage/core.device_registry", preview["storage_change_paths"])
 
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
@@ -813,6 +846,9 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
 
             self.assertTrue(server.run_preview_job())
             self.assertTrue(server.run_apply_job())
@@ -1682,6 +1718,53 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((live / ".storage" / "core.device_registry").read_text(), "live\n")
             self.assertEqual((live / ".storage" / "input_boolean").read_text(), "safe\n")
 
+    def test_apply_blocks_storage_changes_until_approved(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job())
+            state = server.read_state()
+            self.assertTrue(state["last_preview_storage_changes"])
+            self.assertIn("Approve Git to HA", server.render_page())
+
+            self.assertFalse(server.run_apply_job())
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
+            self.assertIn("Approve Git to HA", server.read_state()["last_message"])
+
+            server.write_state({"last_preview_approved_fingerprint": state["last_preview_fingerprint"]})
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "git-storage\n")
+
     def test_managed_config_entries_projection_updates_safe_fields_only(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1901,6 +1984,7 @@ class ServerTests(unittest.TestCase):
             server.core_restart = lambda: events.append("restart")
 
             self.assertTrue(server.run_preview_job())
+            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
 
             def fail_check():
                 events.append("check")
@@ -1951,6 +2035,7 @@ class ServerTests(unittest.TestCase):
             server.core_restart = lambda: events.append("restart")
 
             self.assertTrue(server.run_preview_job())
+            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
 
             def fail_check():
                 events.append("check")
@@ -2056,6 +2141,7 @@ class ServerTests(unittest.TestCase):
             server.core_start = start_or_fail_once
 
             self.assertTrue(server.run_preview_job())
+            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
             self.assertFalse(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
             self.assertEqual(events, ["stop", "check", "start", "start"])

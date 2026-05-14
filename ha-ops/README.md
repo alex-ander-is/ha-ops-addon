@@ -18,7 +18,8 @@ HA Ops manages Home Assistant config with a single Git branch.
 
 ## Save Policy
 
-Home Assistant export is config-only.
+Home Assistant is the source of truth for `Save HA to Git`. Export is config-only:
+HA Ops writes allowlisted live config, including allowlisted `.storage`, to Git.
 
 Saved:
 
@@ -31,6 +32,7 @@ Saved:
 - `themes/`
 - `ui_lovelace_minimalist/`
 - selected allowlisted `.storage` config files, including protected registry and instance files
+- safe managed projections such as `.storage_managed/core.config_entries.json`
 - selected add-on config folders
 
 Preserved:
@@ -39,7 +41,9 @@ Preserved:
 
 Note:
 
-- Save exports the full `.storage` allowlist. Protected files such as `core.config_entries`, device and entity registries, and `person` are saved to Git by design.
+- Save exports the full `.storage` allowlist. Protected files such as device and entity registries and `person` are saved to Git by design.
+- Sensitive raw `.storage` files such as auth, sessions, tokens, secrets, and raw `core.config_entries` are not saved. `core.config_entries` is represented only by the managed projection.
+- If fresh HA config conflicts with the Git checkout and there is no trusted common base, HA Ops stops, shows a per-file diff, and lets the user approve overwriting Git with the live HA version.
 
 Skipped:
 
@@ -59,7 +63,10 @@ Skipped:
 - Selected add-on runtime files such as databases and logs are ignored on apply, even when present in Git.
 - Empty Git source is a no-op.
 - Home Assistant directories that exist in Git are applied as overlays.
-- Selected `.storage` files are applied as an overlay, except protected files unless `allow_protected_storage` is explicitly set.
+- `Preview Git to HA` always shows the full diff for allowlisted `.storage`, including protected registry and instance files.
+- `Apply Git to HA` requires explicit approval whenever the preview contains any `.storage` change, even if there is no Git conflict.
+- After approval, the matching preview can be applied once and protected allowlisted `.storage` files are written from Git to HA.
+- YAML-only and other non-`.storage` changes do not require this extra approval when the preview matches.
 - Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
 - Apply requires a fresh system backup visible in Home Assistant Backups and stored in a configured backup location by default.
 - Apply must match the last `Preview Git to HA` commit and diff fingerprint.
@@ -115,4 +122,4 @@ For a private GitHub repository:
 4. Add the shown public key to GitHub Deploy Keys.
 5. Leave `git_ssh_key` empty to use the generated key.
 
-Set `allow_protected_storage: true` in an optional manifest only when intentionally applying protected `.storage` files such as `core.config_entries`.
+Raw `core.config_entries` is not applied from Git. HA Ops applies only the safe managed projection for supported fields.

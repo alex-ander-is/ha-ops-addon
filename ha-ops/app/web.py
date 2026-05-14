@@ -177,6 +177,13 @@ def render_page(ctx):
     if save_diff_text and save_diff_text != save_preview_text:
         save_details = f"{save_preview_text}\n\n{save_diff_text}"
     action_disabled = "disabled" if last_status == "running" else ""
+    storage_approval_pending = bool(
+        state.get("last_preview_storage_changes")
+        and state.get("last_preview_fingerprint")
+        and state.get("last_preview_approved_fingerprint") != state.get("last_preview_fingerprint")
+    )
+    apply_action = "approve-apply" if storage_approval_pending else "apply"
+    apply_button_text = "Approve Git to HA" if storage_approval_pending else "Apply Git to HA"
     confirm_messages = []
     if not ctx.option_bool(options, "require_fresh_backup", True):
         confirm_messages.append("Fresh system backup checks are disabled.")
@@ -217,8 +224,10 @@ def render_page(ctx):
             "save_details_html": html.escape(save_details),
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
+            "apply_action": apply_action,
+            "apply_button_text": apply_button_text,
             "apply_confirm": apply_confirm,
-            "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options)),
+            "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options), state.get("conflict_type")),
             "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
             "targets_html": ui.render_targets(target_state),
             "addons_html": render_addons(ctx),
@@ -315,6 +324,24 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
+            if parsed.path == "/approve-apply":
+                state = ctx.read_state()
+                fingerprint = state.get("last_preview_fingerprint")
+                if not fingerprint or not state.get("last_preview_storage_changes"):
+                    message = "Run Preview Git to HA with .storage changes before approval."
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": message}, status=400)
+                    else:
+                        self.send_html(render_page(ctx), status=400)
+                    return
+                ctx.write_state({"last_preview_approved_fingerprint": fingerprint})
+                start_background(ctx.run_apply_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Approved Git to HA. Applying..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
             if parsed.path == "/preview":
                 start_background(ctx.run_preview_job)
                 if self.wants_json():
@@ -338,6 +365,31 @@ def create_handler(ctx):
                 else:
                     self.send_html(render_page(ctx))
                 return
+
+            if parsed.path == "/approve-save-conflicts":
+                try:
+                    message = conflict_logic.approve_save_unknown_base_conflicts(ctx)
+                    start_background(ctx.run_save_job)
+                    if self.wants_json():
+                        self.send_json({"ok": True, "message": f"{message} Saving..."})
+                    else:
+                        self.send_html(render_page(ctx))
+                    return
+                except Exception as exc:
+                    ctx.write_state(
+                        {
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "error",
+                            "last_action": "approve_save_conflicts",
+                            "last_message": str(exc),
+                            "last_details": [str(exc)],
+                        }
+                    )
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": str(exc)}, status=500)
+                    else:
+                        self.send_html(render_page(ctx), status=500)
+                    return
 
             if parsed.path == "/addons":
                 selected = body.get("addon", [])

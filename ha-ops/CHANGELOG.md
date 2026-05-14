@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.32
+
+- Show full Git-to-HA previews for allowlisted .storage files, including protected registries.
+- Require explicit approval before applying any Git-to-HA .storage change.
+- Add one-click approval for Save HA to Git conflicts where live Home Assistant should overwrite Git.
+
 ## 0.4.31
 
 - Restore the Home Assistant live config path to /homeassistant when addon_config is also mounted at /config.

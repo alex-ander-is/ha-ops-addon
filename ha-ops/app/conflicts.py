@@ -40,6 +40,31 @@ def resolve_save_unknown_base_conflict(ctx, path, choice):
     return "All Save conflicts resolved. Run Save HA to Git again."
 
 
+def approve_save_unknown_base_conflicts(ctx):
+    state = ctx.read_state()
+    if state.get("conflict_type") != "save_unknown_base":
+        raise RuntimeError("No Save conflicts are pending approval")
+    conflicts = list(state.get("conflicts", []))
+    if not conflicts:
+        raise RuntimeError("No Save conflicts are pending approval")
+
+    resolutions = dict(state.get("save_conflict_resolutions", {}))
+    for path in conflicts:
+        resolutions[git_ops.safe_repo_relative_path(path)] = "ha"
+
+    ctx.write_state(
+        {
+            "conflicts": [],
+            "conflict_type": None,
+            "save_conflict_resolutions": resolutions,
+            "last_status": "idle",
+            "last_message": "Approved Save conflicts. Saving HA to Git.",
+            "last_details": state.get("last_details", []),
+        }
+    )
+    return f"Approved {len(conflicts)} Save conflict(s)."
+
+
 def finish_git_conflict_resolution(ctx, repo_dir, env, branch):
     if ctx.git_rebase_in_progress(repo_dir):
         env["GIT_EDITOR"] = "true"

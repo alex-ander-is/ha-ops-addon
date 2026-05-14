@@ -13,6 +13,7 @@ class JobContext:
     enforce_apply_limits: Any
     ensure_fresh_system_backup: Any
     ensure_preview_matches_state: Any
+    ensure_storage_apply_approved: Any
     ensure_repo: Any
     export_targets: Any
     get_installed_addons: Any
@@ -33,6 +34,7 @@ class JobContext:
     reset_repo_worktree: Any
     restore_save_git_resolutions: Any
     resolve_targets: Any
+    approve_storage_apply_targets: Any
     restore_release_snapshot: Any
     run_lock: Any
     save_unknown_base_conflicts: Any
@@ -369,7 +371,11 @@ def run_apply_job(ctx):
         ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
         preview = ctx.build_apply_preview(resolved_targets, details)
         ctx.ensure_preview_matches_state(state, commit, preview)
+        ctx.ensure_storage_apply_approved(state, preview)
         ctx.enforce_apply_limits(options, preview)
+        if preview.get("storage_changes"):
+            resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
+            ctx.add_detail(details, "Approved .storage changes for Git to HA apply.")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
 
@@ -477,13 +483,18 @@ def run_preview_job(ctx):
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Building apply preview without changing live config.")
         preview = ctx.build_apply_preview(resolved_targets, details)
+        message = "Apply preview finished successfully."
+        if preview.get("storage_changes"):
+            paths = preview.get("storage_change_paths") or []
+            ctx.add_detail(details, f"Approval required for {len(paths)} .storage change(s) before Apply Git to HA.")
+            message = "Apply preview contains .storage changes. Approve Git to HA before applying."
 
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "preview",
-                "last_message": "Apply preview finished successfully.",
+                "last_message": message,
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "last_diff": preview["diff"],
@@ -491,6 +502,9 @@ def run_preview_job(ctx):
                 "last_preview_commit": commit,
                 "last_preview_fingerprint": preview["fingerprint"],
                 "last_preview_deletions": preview["deletions"],
+                "last_preview_storage_changes": preview.get("storage_changes", False),
+                "last_preview_storage_paths": preview.get("storage_change_paths", []),
+                "last_preview_approved_fingerprint": None,
             }
         )
         return True

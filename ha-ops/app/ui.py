@@ -139,9 +139,16 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
     )
 
 
-def render_conflicts(conflicts):
+def render_conflicts(conflicts, conflict_type=None):
     if not conflicts:
         return "<p>No unresolved Git conflicts.</p>"
+    approve_all = ""
+    if conflict_type == "save_unknown_base":
+        approve_all = (
+            "<form method='post' action='approve-save-conflicts' data-async-form='true'>"
+            "<button type='submit'>Approve HA to Git</button>"
+            "</form>"
+        )
     rows = []
     for item in conflicts:
         if isinstance(item, dict):
@@ -179,6 +186,7 @@ def render_conflicts(conflicts):
         "Home Assistant and the repository, and there is no trusted common base. Choose "
         "<strong>Use HA Version</strong> to save the live Home Assistant file to Git, or choose "
         "<strong>Use Git Version</strong> to keep the repository file unchanged.</p>"
+        f"{approve_all}"
         "<div class='table-scroll'>"
         "<table class='conflicts-table'><thead><tr><th>File</th><th>Action</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
@@ -631,8 +639,8 @@ def render_page(data):
           <form method="post" action="preview" data-async-form="true">
             <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
           </form>
-          <form method="post" action="apply" data-async-form="true" {data['apply_confirm']}>
-            <button type="submit" class="secondary" {data['action_disabled']}>Apply Git to HA</button>
+          <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
+            <button type="submit" class="secondary" {data['action_disabled']}>{data['apply_button_text']}</button>
           </form>
         </div>
       </section>

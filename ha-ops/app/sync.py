@@ -286,6 +286,14 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
     return skipped_protected
 
 
+def with_protected_storage_allowed(target):
+    if target_model.allow_protected_storage(target):
+        return target
+    updated = dict(target)
+    updated["allow_protected_storage"] = True
+    return updated
+
+
 def sync_homeassistant_path_allowlist(src, dest, paths, export_excludes, run_command, delete=True):
     copied = 0
     for name in paths:
@@ -882,7 +890,12 @@ def sync_to_preview(target, baseline_path, preview_path, ctx):
         if source_path.exists() and has_managed_content(source_path):
             reject_source_symlinks(target, ctx)
             ctx.log(f"Preview {target['id']}: applying Git Home Assistant config from {source_path}")
-            skipped_protected = apply_homeassistant_config(source_path, preview_path, target, ctx)
+            skipped_protected = apply_homeassistant_config(
+                source_path,
+                preview_path,
+                with_protected_storage_allowed(target),
+                ctx,
+            )
         else:
             skipped_protected = []
     else:
@@ -918,6 +931,34 @@ def count_preview_deletions(baseline_path, preview_path):
     return deleted
 
 
+def managed_storage_change_paths(baseline_path, preview_path):
+    paths = set()
+    for dirname in (".storage", storage_managed.MANAGED_DIR):
+        left_root = Path(baseline_path) / dirname
+        right_root = Path(preview_path) / dirname
+        relatives = set()
+        for root in (left_root, right_root):
+            if not root.exists():
+                continue
+            for path in root.rglob("*"):
+                if path.is_file() or path.is_symlink():
+                    relatives.add(path.relative_to(root))
+        for relative in relatives:
+            left = left_root / relative
+            right = right_root / relative
+            display = f"{dirname}/{relative.as_posix()}"
+            if not left.exists() or not right.exists():
+                paths.add(display)
+                continue
+            if left.is_symlink() or right.is_symlink():
+                if not (left.is_symlink() and right.is_symlink() and left.readlink() == right.readlink()):
+                    paths.add(display)
+                continue
+            if left.read_bytes() != right.read_bytes():
+                paths.add(display)
+    return sorted(paths)
+
+
 def safe_preview_name(value):
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "target"
 
@@ -947,6 +988,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     chunks = []
     deletion_count = 0
     skipped_protected = []
+    storage_change_paths = []
 
     for target in resolved_targets:
         preview_progress(ctx, details, f"Preview {target['id']}: start")
@@ -957,6 +999,10 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         if skipped:
             skipped_protected.extend(skipped)
             chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
+        if target["type"] == "homeassistant":
+            storage_change_paths.extend(
+                [f"{target['id']}/{path}" for path in managed_storage_change_paths(baseline_path, preview_path)]
+            )
         preview_progress(ctx, details, f"Preview {target['id']}: counting deletions")
         deletion_count += count_preview_deletions(baseline_path, preview_path)
         preview_progress(ctx, details, f"Preview {target['id']}: building diff")
@@ -972,4 +1018,6 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         "fingerprint": fingerprint_text(diff_text),
         "deletions": deletion_count,
         "skipped_protected": sorted(set(skipped_protected)),
+        "storage_changes": bool(storage_change_paths),
+        "storage_change_paths": sorted(set(storage_change_paths)),
     }
