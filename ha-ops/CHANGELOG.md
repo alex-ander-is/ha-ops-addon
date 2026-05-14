@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.38
+
+- Clear stale `Home Assistant config check failed: {'result': 'ok', 'data': {}}` errors left by earlier versions.
+
 ## 0.4.37
 
 - Accept the current Supervisor config-check success response so Apply can continue to Core start.

@@ -112,15 +112,20 @@ def has_error_context(state):
     return bool(state.get("last_message") or state.get("last_details") or state.get("conflicts"))
 
 
+def is_recovered_stale_error(state):
+    message = str(state.get("last_message", ""))
+    return message == "Home Assistant config check failed: {'result': 'ok', 'data': {}}"
+
+
 def repair_startup_state(path, now):
     current = read_state(path)
     current.update(DISPLAY_CLEAR_UPDATES)
-    if current.get("last_status") == "error" and not has_error_context(current):
+    if current.get("last_status") == "error" and (not has_error_context(current) or is_recovered_stale_error(current)):
         current.update(
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "No runs yet.",
+                "last_message": "Previous stale error was cleared. Run an action when ready.",
             }
         )
     if current.get("last_status") != "running":

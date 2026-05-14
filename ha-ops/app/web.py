@@ -176,6 +176,19 @@ def render_page(ctx):
                 "last_message": "Fresh system backup is now available. Run an action when ready.",
             }
         )
+    elif (
+        state.get("last_status") == "error"
+        and state.get("last_action") == "apply"
+        and str(state.get("last_message", "")) == "Home Assistant config check failed: {'result': 'ok', 'data': {}}"
+    ):
+        state = dict(state)
+        state.update(
+            {
+                "last_status": "idle",
+                "last_action": None,
+                "last_message": "Previous stale config-check error was cleared. Run an action when ready.",
+            }
+        )
     releases = ctx.list_releases()
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview
