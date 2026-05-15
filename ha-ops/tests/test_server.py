@@ -951,6 +951,14 @@ class ServerTests(unittest.TestCase):
                 )
             )
             server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "save_conflict_resolutions": {
+                        "homeassistant/old.yaml": "ha",
+                        "homeassistant/packages/stale.yaml": "ha",
+                    }
+                }
+            )
 
             self.assertTrue(server.run_save_job())
             result = subprocess.run(
