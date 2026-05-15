@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- Move the Home Assistant organizer toggle into the main action card so it is visible without scrolling.
+
 ## 0.5.1
 
 - Add the Home Assistant organizer UI toggle.

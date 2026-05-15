@@ -653,6 +653,7 @@ def render_page(data):
         </dl>
         <p>{data['message']}</p>
         <p id="client-status" class="client-status"></p>
+        {data['organizer_html']}
         <div class="actions">
           <div class="action-row">
             <form method="post" action="save-preview" data-async-form="true">
@@ -702,7 +703,6 @@ def render_page(data):
 
     <section class="card wide">
       <h2>Managed Targets</h2>
-      {data['organizer_html']}
       {data['targets_html']}
     </section>
 

@@ -2634,6 +2634,22 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Save HA to Git</button>', page)
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
 
+    def test_homeassistant_organizer_toggle_is_in_main_action_card(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+            toggle = page.index("homeassistant-organizer")
+            actions = page.index('<div class="actions">')
+            managed_targets = page.index("<h2>Managed Targets</h2>")
+            self.assertLess(toggle, actions)
+            self.assertLess(toggle, managed_targets)
+            self.assertIn("Split automations, scripts, and scenes by area in Git", page)
+
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
