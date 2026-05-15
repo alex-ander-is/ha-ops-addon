@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Add opt-in Home Assistant organizer for UI-managed automations, scripts, and scenes.
+- Store organized Git views under `.ha-ops/areas` and compose them back to Home Assistant heap files on Apply.
+- Keep organizer migration explicit with target-level opt-in.
+- Add organizer integrity checks, routing fallbacks, and Save/Apply safety coverage.
+
 ## 0.4.38
 
 - Clear stale `Home Assistant config check failed: {'result': 'ok', 'data': {}}` errors left by earlier versions.
