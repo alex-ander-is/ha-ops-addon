@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 import storage_managed
 import targets as target_model
+import organizer
 
 
 @dataclass(frozen=True)
@@ -195,6 +196,8 @@ def clean_homeassistant_export_destination(dest, target, ctx):
         if dest_path.exists() or dest_path.is_symlink():
             safe_remove_path(dest_path)
     clear_managed_destination_path(dest / storage_managed.MANAGED_DIR, ctx.export_excludes, ctx.work_dir, ctx.run_command)
+    if target and homeassistant_organizer_enabled(target):
+        organizer.clean_organized_root(dest, organizer_options(target))
 
 
 def export_homeassistant_config(src, dest, target, ctx):
@@ -229,7 +232,53 @@ def export_homeassistant_config(src, dest, target, ctx):
     return copied, zigbee2mqtt_count, storage_count, managed_storage_count
 
 
+def organizer_options(target):
+    if not target or "organizer" not in target:
+        return None
+    value = target.get("organizer")
+    if value is False:
+        return None
+    if value is True:
+        return {}
+    if not isinstance(value, dict):
+        return None
+    enabled = value.get("enabled", False)
+    if not enabled:
+        return None
+    options = dict(value)
+    options.pop("enabled", None)
+    return options
+
+
+def homeassistant_organizer_enabled(target):
+    return organizer_options(target) is not None
+
+
+def organize_homeassistant_export(path, target, details, ctx):
+    options = organizer_options(target)
+    if options is None or not organizer.has_heap_files(path):
+        return None
+    summary = organizer.split_live_heaps_to_git(path, path, options=options)
+    total = sum(summary[kind]["output_count"] for kind in ("automations", "scripts", "scenes"))
+    if total and details is not None:
+        ctx.add_detail(details, f"Organized {total} Home Assistant automation/script/scene item(s) for Git.")
+    return summary
+
+
+def materialize_homeassistant_source(src, target, ctx):
+    options = organizer_options(target)
+    if options is None or not organizer.has_organized_view(src, options):
+        return Path(src)
+
+    temp = ctx.work_dir / "organizer-materialized" / safe_preview_name(target.get("id") or "homeassistant")
+    clear_tree(temp, ctx.work_dir, ctx.run_command)
+    sync_tree(Path(src), temp, True, None, ctx.run_command)
+    organizer.compose_git_view_to_live(temp, temp, options=options)
+    return temp
+
+
 def apply_homeassistant_config(src, dest, target, ctx, details=None):
+    src = materialize_homeassistant_source(src, target, ctx)
     if not src.exists() or not has_managed_content(src):
         if details is not None:
             ctx.add_detail(details, f"Skipping {target['id']} because Git has no Home Assistant config yet.")
@@ -454,6 +503,10 @@ def homeassistant_source_symlinks(src, target, ctx):
     for name in managed_dirs:
         found.extend(collect_symlinks_under(src / name, src, ctx.export_excludes))
 
+    options = organizer_options(target)
+    if options is not None:
+        found.extend(collect_symlinks_under(organizer.organized_root(src, options), src, ctx.export_excludes))
+
     src_storage = src / ".storage"
     for name in ctx.storage_allowlist:
         src_path = src_storage / name
@@ -512,6 +565,7 @@ def destination_tree_has_managed_extra(src, dest, excludes):
 
 
 def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
+    src = materialize_homeassistant_source(src, target, ctx)
     changes = ChangeSet()
     if not src.exists() or not has_managed_content(src):
         return changes
@@ -671,6 +725,7 @@ def build_save_export(resolved_targets, details, ctx):
             copied_count, zigbee2mqtt_count, storage_count, managed_storage_count = export_homeassistant_config(
                 live_path, export_path, target, ctx
             )
+            organize_homeassistant_export(export_path, target, details, ctx)
             ctx.add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
             if zigbee2mqtt_count:
                 ctx.add_detail(details, f"Exported {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
@@ -696,6 +751,8 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
         if target["type"] == "homeassistant":
             ctx.add_detail(details, f"Saving config-only {target['id']} to {source_path}.")
             clean_homeassistant_export_destination(source_path, target, ctx)
+            if homeassistant_organizer_enabled(target):
+                organizer.clean_organized_root(source_path, organizer_options(target))
             sync_tree(export_path, source_path, False, None, ctx.run_command)
         else:
             ctx.add_detail(details, f"Saving {target['id']} to {source_path}.")
@@ -779,6 +836,7 @@ def export_target_to_path(target, dest, ctx):
     live_path = Path(target["live_path"])
     if target["type"] == "homeassistant":
         export_homeassistant_config(live_path, dest, target, ctx)
+        organize_homeassistant_export(dest, target, None, ctx)
         return
     clean_export_destination(
         dest,
@@ -824,9 +882,96 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
             if file_differs(exported_path, source_file):
                 conflicts.append(repo_relative)
 
+        conflicts.extend(
+            save_deleted_source_conflicts(
+                target,
+                live_path,
+                source_path,
+                preview_path,
+                repo_dir,
+                resolutions,
+                ctx,
+            )
+        )
+
     if conflicts:
         ctx.add_detail(details, f"Found {len(conflicts)} unknown-base Save conflict(s).")
+    return sorted(set(conflicts))
+
+
+def save_deleted_source_conflicts(target, live_path, source_path, preview_path, repo_dir, resolutions, ctx):
+    conflicts = []
+    for relative in managed_save_source_files(target, source_path, ctx):
+        if (preview_path / relative).exists():
+            continue
+        source_file = source_path / relative
+        repo_relative = source_file.relative_to(repo_dir).as_posix()
+        if resolutions.get(repo_relative) in {"ha", "git"}:
+            continue
+        live_file = live_path / relative
+        if not live_file.exists() or file_differs(live_file, source_file):
+            conflicts.append(repo_relative)
     return conflicts
+
+
+def managed_save_source_files(target, source_path, ctx):
+    source_path = Path(source_path)
+    if target.get("type") == "homeassistant":
+        return homeassistant_managed_save_source_files(target, source_path, ctx)
+    if target_model.save_delete(target):
+        return source_tree_files(source_path, ctx.export_excludes)
+    return []
+
+
+def source_tree_files(root, excludes=None):
+    root = Path(root)
+    if not root.exists():
+        return []
+    files = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or (excludes and is_excluded_path(path, root, excludes)):
+            continue
+        files.append(path.relative_to(root))
+    return files
+
+
+def add_managed_files_under(files, root, relative_root, excludes=None):
+    path = root / relative_root
+    if not path.exists():
+        return
+    if path.is_file():
+        files.add(relative_root)
+        return
+    for relative in source_tree_files(path, excludes):
+        files.add(relative_root / relative)
+
+
+def homeassistant_managed_save_source_files(target, source_path, ctx):
+    files = set()
+
+    for pattern in ctx.ha_root_patterns:
+        for path in sorted(source_path.glob(pattern)):
+            if path.is_file() and path.name not in ctx.ha_root_excludes:
+                files.add(path.relative_to(source_path))
+
+    for name in ctx.ha_dirs:
+        add_managed_files_under(files, source_path, Path(name), ctx.export_excludes)
+
+    if target and target.get("include_zigbee2mqtt_legacy"):
+        for name in ctx.zigbee2mqtt_paths:
+            add_managed_files_under(files, source_path, Path(name), ctx.export_excludes)
+
+    for name in ctx.storage_allowlist:
+        path = Path(".storage") / name
+        if (source_path / path).is_file():
+            files.add(path)
+
+    add_managed_files_under(files, source_path, Path(storage_managed.MANAGED_DIR), ctx.export_excludes)
+
+    if target and homeassistant_organizer_enabled(target):
+        add_managed_files_under(files, source_path, Path(organizer.organized_root_name(organizer_options(target))), ctx.export_excludes)
+
+    return sorted(files)
 
 
 def save_export_candidate_paths(target, export_path):

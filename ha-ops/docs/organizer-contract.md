@@ -1,7 +1,7 @@
 # Home Assistant Organizer Contract
 
-Status: planned. This document is a contract for future implementation, not an
-implemented feature.
+Status: implemented contract. The implementation must keep matching this
+document.
 
 ## Goal
 
@@ -33,6 +33,27 @@ homeassistant/.ha-ops/areas/
 The `.ha-ops/areas` tree is HA Ops managed metadata. It is not a Home Assistant
 include tree and must not be applied to live Home Assistant as ordinary config.
 
+## Activation
+
+Organizer behavior is part of the Home Assistant target contract. The default
+activation mode must be explicit in code and documentation:
+
+- Organizer is opt-in. Save must leave heap files in Git until the target enables
+  organizer explicitly.
+- Changing the default activation mode is a migration change and must be called
+  out in the changelog.
+
+Supported target forms:
+
+```json
+{"organizer": true}
+{"organizer": {"enabled": true}}
+{"organizer": {"enabled": true, "organized_root": ".ha-ops/areas"}}
+```
+
+Missing `organizer`, `organizer: false`, and `organizer: {"enabled": false}` are
+disabled for that target.
+
 ## Sync Model
 
 `Save HA to Git` must:
@@ -51,6 +72,31 @@ include tree and must not be applied to live Home Assistant as ordinary config.
 3. Write only the heap files to live Home Assistant.
 4. Refuse to apply if integrity checks show loss, duplication, or malformed
    data.
+
+## Precedence
+
+If Git contains both live heap files and the organized `.ha-ops/areas` view for
+the same target, the organized view is authoritative for Apply. The heap files
+are compatibility input only and must not override the organized view.
+
+If Git contains no organized view, Apply uses the heap files directly.
+
+Save may remove heap files from Git after writing the organized view, unless the
+organizer options explicitly request keeping heap files.
+
+## Conflict Model
+
+Organizer conflicts are logical item conflicts, not raw `.ha-ops/areas` path
+conflicts. The identity rules below define the conflict keys:
+
+- automation `id`
+- script YAML mapping key
+- scene `id`, or `name` when `id` is absent
+
+Unknown-base Save conflict detection must not treat a missing virtual
+`.ha-ops/areas/<area>/*.yaml` file as a missing live Home Assistant file. When
+possible, it should compare the composed heap representation and report
+conflicts by item identity.
 
 ## Routing Order
 
@@ -111,6 +157,11 @@ and compose operation must verify:
 - item payloads round-trip without semantic loss
 - `_mixed` and `unknown` are explicit buckets, not silent guesses
 - malformed split files fail before writing live Home Assistant heap files
+
+Routing is advisory. Integrity checks are authoritative. A bad routing guess may
+move an item to the wrong area file, but it must never cause item loss,
+duplication, or direct application of the organized view as Home Assistant
+config.
 
 ## Required Test Fixture Shape
 
