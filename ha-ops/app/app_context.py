@@ -257,11 +257,28 @@ class AppContext:
     def set_selected_addon_slugs(self, slugs):
         return manifest_logic.set_selected_addon_slugs(slugs, self.write_state)
 
+    def homeassistant_organizer_preference(self):
+        return manifest_logic.homeassistant_organizer_preference(self.read_state)
+
+    def set_homeassistant_organizer_enabled(self, enabled):
+        return manifest_logic.set_homeassistant_organizer_enabled(enabled, self.write_state)
+
     def load_manifest(self, repo_dir, options, addons=None):
-        return manifest_logic.load_manifest(repo_dir, options, self.selected_addon_slugs(), self.load_json, addons)
+        return manifest_logic.load_manifest(
+            repo_dir,
+            options,
+            self.selected_addon_slugs(),
+            self.load_json,
+            addons,
+            self.homeassistant_organizer_preference(),
+        )
 
     def default_manifest(self, options):
-        return manifest_logic.default_manifest(options, self.selected_addon_slugs())
+        return manifest_logic.default_manifest(
+            options,
+            self.selected_addon_slugs(),
+            self.homeassistant_organizer_preference(),
+        )
 
     def resolve_targets(self, repo_dir, manifest, addons, require_source=True):
         options = self.load_options()

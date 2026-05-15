@@ -86,6 +86,7 @@ _MANIFEST_EXPORTS = {
     "default_homeassistant_manifest",
     "default_addon_target",
     "addon_target_slug",
+    "organizer_target_enabled",
     "selected_addon_target",
     "resolve_addon_slug",
     "addon_by_slug",
@@ -151,7 +152,7 @@ def _legacy_func(name):
         return lambda repo_dir, env, branch: git_ops.git_remote_head(repo_dir, env, branch, _CTX.run_command)
     if name == "manifest_with_selected_addons":
         return lambda manifest, addons=None: manifest_logic.manifest_with_selected_addons(
-            manifest, _CTX.selected_addon_slugs(), addons
+            manifest, _CTX.selected_addon_slugs(), addons, _CTX.homeassistant_organizer_preference()
         )
     if name == "addon_config_path_candidates":
         return lambda target, slug, addon: manifest_logic.addon_config_path_candidates(

@@ -7,6 +7,7 @@ import threading
 
 import conflicts as conflict_logic
 import git_ops
+import manifest as manifest_logic
 import ui
 
 
@@ -39,6 +40,7 @@ def current_manifest_preview(ctx):
                     "addon_slug_suffix": target.get("addon_slug_suffix"),
                     "resolved_slug": target.get("resolved_slug"),
                     "allow_protected_storage": target.get("allow_protected_storage", False),
+                    "organizer_enabled": manifest_logic.organizer_target_enabled(target),
                 }
             )
         return previews
@@ -192,6 +194,10 @@ def render_page(ctx):
     releases = ctx.list_releases()
     manifest_preview = current_manifest_preview(ctx)
     target_state = state.get("last_targets") or manifest_preview
+    homeassistant_organizer_enabled = any(
+        target.get("type") == "homeassistant" and target.get("organizer_enabled")
+        for target in manifest_preview
+    )
     last_status = state.get("last_status", "idle")
     has_conflicts = bool(state.get("conflicts"))
     display_status = "conflicts" if has_conflicts else last_status
@@ -259,6 +265,7 @@ def render_page(ctx):
             "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options), state.get("conflict_type")),
             "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
             "targets_html": ui.render_targets(target_state),
+            "organizer_html": ui.render_homeassistant_organizer(homeassistant_organizer_enabled),
             "addons_html": render_addons(ctx),
             "releases_html": ui.render_releases(releases),
             "version": html.escape(ctx.addon_version()),
@@ -434,6 +441,16 @@ def create_handler(ctx):
                 ctx.set_selected_addon_slugs(selected)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Managed add-ons updated. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/homeassistant-organizer":
+                enabled = "homeassistant_organizer" in body
+                ctx.set_homeassistant_organizer_enabled(enabled)
+                if self.wants_json():
+                    message = "Home Assistant Git layout updated. Refreshing..."
+                    self.send_json({"ok": True, "message": message})
                 else:
                     self.send_html(render_page(ctx))
                 return

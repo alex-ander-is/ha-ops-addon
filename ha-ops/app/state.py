@@ -83,6 +83,7 @@ def default_state():
         "last_preview_storage_paths": [],
         "last_preview_approved_fingerprint": None,
         "managed_addons": [],
+        "homeassistant_organizer_enabled": None,
         "conflicts": [],
         "conflict_type": None,
         "save_conflict_resolutions": {},

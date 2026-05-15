@@ -437,6 +437,9 @@ class ServerTests(unittest.TestCase):
             def clear_display_state(self):
                 self.calls.append("clear-display")
 
+            def set_homeassistant_organizer_enabled(self, enabled):
+                self.calls.append(("organizer", enabled))
+
         ctx = FakeContext()
         handler = server.web.create_handler(ctx)
 
@@ -448,6 +451,8 @@ class ServerTests(unittest.TestCase):
             request.headers = Message()
             for key, value in (headers or {}).items():
                 request.headers[key] = value
+            if body and "Content-Length" not in request.headers:
+                request.headers["Content-Length"] = str(len(body))
             request.responses = []
             request.response_headers = []
             request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
@@ -486,6 +491,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Display state cleared", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save", "save-preview", "clear-display"])
+
+        post_request = invoke(
+            "do_POST",
+            "/homeassistant-organizer",
+            body=b"homeassistant_organizer=1",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Home Assistant Git layout updated", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "clear-display", ("organizer", True)])
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
@@ -591,6 +606,63 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(targets[1]["source"], "addons/local_zigbee2mqtt")
             self.assertFalse(targets[1]["delete"])
 
+    def test_default_manifest_uses_homeassistant_organizer_ui_preference(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            manifest = server.default_manifest({"apply_path": "homeassistant"})
+            self.assertNotIn("organizer", manifest["targets"][0])
+
+            server.set_homeassistant_organizer_enabled(True)
+            manifest = server.default_manifest({"apply_path": "homeassistant"})
+            self.assertEqual(manifest["targets"][0]["organizer"], {"enabled": True})
+
+            server.set_homeassistant_organizer_enabled(False)
+            manifest = server.default_manifest({"apply_path": "homeassistant"})
+            self.assertFalse(manifest["targets"][0]["organizer"])
+
+    def test_loaded_manifest_keeps_organizer_until_ui_preference_is_set(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "ha-ops.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "targets": [
+                            {
+                                "id": "homeassistant",
+                                "type": "homeassistant",
+                                "source": "homeassistant",
+                                "organizer": {"enabled": True, "organized_root": ".custom"},
+                            }
+                        ],
+                    }
+                )
+            )
+
+            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
+            self.assertEqual(
+                manifest["targets"][0]["organizer"],
+                {"enabled": True, "organized_root": ".custom"},
+            )
+
+            server.set_homeassistant_organizer_enabled(False)
+            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
+            self.assertFalse(manifest["targets"][0]["organizer"])
+
+            server.set_homeassistant_organizer_enabled(True)
+            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
+            self.assertEqual(
+                manifest["targets"][0]["organizer"],
+                {"enabled": True, "organized_root": ".custom"},
+            )
+
     def test_policy_booleans_are_centralized_for_manifest_and_targets(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -653,6 +725,63 @@ class ServerTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertIn("homeassistant/configuration.yaml", result.stdout)
+
+    def test_save_ha_to_git_uses_homeassistant_organizer_ui_toggle(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
+            (server.CONFIG_DIR / "scripts.yaml").write_text("{}\n")
+            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.area_registry").write_text(
+                json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}})
+            )
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "automation.live_auto",
+                                    "unique_id": "live_auto",
+                                    "area_id": "home",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.set_homeassistant_organizer_enabled(True)
+
+            self.assertTrue(server.run_save_job())
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn("homeassistant/.ha-ops/areas/home/automations.yaml", result.stdout)
+            self.assertNotIn("homeassistant/automations.yaml", result.stdout)
 
     def test_save_unknown_base_blocks_same_file_difference(self):
         server = load_server()

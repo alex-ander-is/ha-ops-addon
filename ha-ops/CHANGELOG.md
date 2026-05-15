@@ -4,7 +4,7 @@
 
 - Add opt-in Home Assistant organizer for UI-managed automations, scripts, and scenes.
 - Store organized Git views under `.ha-ops/areas` and compose them back to Home Assistant heap files on Apply.
-- Keep organizer migration explicit with target-level opt-in.
+- Keep organizer migration explicit with a Home Assistant UI toggle.
 - Add organizer integrity checks, routing fallbacks, and Save/Apply safety coverage.
 
 ## 0.4.38

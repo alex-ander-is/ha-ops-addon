@@ -139,6 +139,21 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
     )
 
 
+def render_homeassistant_organizer(enabled):
+    checked = "checked" if enabled else ""
+    return (
+        "<form method='post' action='homeassistant-organizer' data-auto-submit='change'>"
+        "<div class='check-list'>"
+        "<label class='check-row'>"
+        f"<input type='checkbox' name='homeassistant_organizer' value='1' {checked}>"
+        "<span>Split automations, scripts, and scenes by area in Git</span>"
+        "<small>Home Assistant keeps using its normal YAML files.</small>"
+        "</label>"
+        "</div>"
+        "</form>"
+    )
+
+
 def render_conflicts(conflicts, conflict_type=None):
     if not conflicts:
         return "<p>No unresolved Git conflicts.</p>"
@@ -687,6 +702,7 @@ def render_page(data):
 
     <section class="card wide">
       <h2>Managed Targets</h2>
+      {data['organizer_html']}
       {data['targets_html']}
     </section>
 
