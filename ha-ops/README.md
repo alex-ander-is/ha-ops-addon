@@ -16,6 +16,13 @@ HA Ops manages Home Assistant config with a single Git branch.
 - `ha-ops.json` is optional; when it is missing, HA Ops uses a built-in default manifest.
 - There is no user-facing `export` branch.
 
+## Planned Organizer Contract
+
+HA Ops has a planned contract for a virtual split of Home Assistant UI-managed
+automations, scripts, and scenes. Live Home Assistant keeps the normal heap
+files, while Git may expose an area-first view under
+`homeassistant/.ha-ops/areas/<area>/`. See `docs/organizer-contract.md`.
+
 ## Save Policy
 
 Home Assistant is the source of truth for `Save HA to Git`. Export is config-only:
