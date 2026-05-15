@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Add the Home Assistant organizer UI toggle.
+- Stop Git-to-HA when a split organizer view exists in Git but the organizer toggle is off.
+- Allow HA-to-Git with the organizer toggle off to convert Git back to heap YAML files.
+
 ## 0.5.0
 
 - Add opt-in Home Assistant organizer for UI-managed automations, scripts, and scenes.

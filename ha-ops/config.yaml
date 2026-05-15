@@ -1,6 +1,6 @@
 name: "HA Ops"
 description: "Git-backed Home Assistant config operator with preview, backups, and rollback"
-version: "0.5.0"
+version: "0.5.1"
 slug: "ha_ops"
 init: false
 startup: services

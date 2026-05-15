@@ -220,6 +220,62 @@ class SyncOrganizerTests(unittest.TestCase):
             self.assertFalse((source / "automations.yaml").exists())
             self.assertTrue((source / ".ha-ops" / "areas" / "home" / "automations.yaml").exists())
 
+    def test_apply_rejects_split_git_view_when_organizer_is_disabled(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            live = root / "live"
+            work = root / "work"
+            live.mkdir(parents=True)
+            work.mkdir()
+            write_yaml_text(source / ".ha-ops" / "areas" / "home" / "automations.yaml", "- id: live_auto\n")
+            write_json(
+                source / ".ha-ops" / "areas" / "organizer-index.json",
+                {
+                    "version": 1,
+                    "kinds": {
+                        "automations": {"input_count": 1, "output_count": 1},
+                        "scripts": {"input_count": 0, "output_count": 0},
+                        "scenes": {"input_count": 0, "output_count": 0},
+                    },
+                },
+            )
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "organizer view exists in Git"):
+                sync.materialize_homeassistant_source(source, target, self.context(sync, work))
+
+    def test_save_with_organizer_disabled_converts_git_back_to_heap_view(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            export_root = root / "export"
+            work = root / "work"
+            source.mkdir(parents=True)
+            export_path = export_root / "homeassistant"
+            work.mkdir()
+            write_yaml_text(source / ".ha-ops" / "areas" / "home" / "automations.yaml", "- id: old_split\n")
+            write_yaml_text(export_path / "automations.yaml", "- id: live_auto\n")
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(source),
+            }
+
+            sync.apply_save_export([target], export_root, [], self.context(sync, work))
+
+            self.assertFalse((source / ".ha-ops" / "areas").exists())
+            self.assertEqual((source / "automations.yaml").read_text(), "- id: live_auto\n")
+
     def test_save_unknown_base_conflicts_reports_git_only_managed_homeassistant_file_deletion(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:

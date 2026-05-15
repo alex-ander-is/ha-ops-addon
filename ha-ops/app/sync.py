@@ -250,8 +250,29 @@ def organizer_options(target):
     return options
 
 
+def organizer_cleanup_options(target):
+    value = target.get("organizer") if target else None
+    if isinstance(value, dict):
+        options = dict(value)
+        options.pop("enabled", None)
+        return options
+    return organizer_options(target) or {}
+
+
 def homeassistant_organizer_enabled(target):
     return organizer_options(target) is not None
+
+
+def ensure_organized_view_is_enabled(src, target):
+    if not target or target.get("type") != "homeassistant" or organizer_options(target) is not None:
+        return
+    options = organizer_cleanup_options(target)
+    if organizer.has_organized_view(src, options):
+        root_name = organizer.organized_root_name(options)
+        raise RuntimeError(
+            f"Home Assistant organizer view exists in Git at {root_name}, but the organizer is disabled. "
+            "Enable the Home Assistant Git layout toggle or save HA to Git with the toggle off to convert Git back to heap YAML files."
+        )
 
 
 def organize_homeassistant_export(path, target, details, ctx):
@@ -267,6 +288,7 @@ def organize_homeassistant_export(path, target, details, ctx):
 
 def materialize_homeassistant_source(src, target, ctx):
     options = organizer_options(target)
+    ensure_organized_view_is_enabled(src, target)
     if options is None or not organizer.has_organized_view(src, options):
         return Path(src)
 
@@ -751,8 +773,7 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
         if target["type"] == "homeassistant":
             ctx.add_detail(details, f"Saving config-only {target['id']} to {source_path}.")
             clean_homeassistant_export_destination(source_path, target, ctx)
-            if homeassistant_organizer_enabled(target):
-                organizer.clean_organized_root(source_path, organizer_options(target))
+            organizer.clean_organized_root(source_path, organizer_cleanup_options(target))
             sync_tree(export_path, source_path, False, None, ctx.run_command)
         else:
             ctx.add_detail(details, f"Saving {target['id']} to {source_path}.")
