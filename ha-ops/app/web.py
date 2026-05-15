@@ -264,9 +264,15 @@ def render_page(ctx):
             "apply_confirm": apply_confirm,
             "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options), state.get("conflict_type")),
             "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
-            "targets_html": ui.render_targets(target_state),
+            "targets_html": ui.render_targets(
+                target_state,
+                ctx.selected_addon_slugs(),
+                ctx.get_installed_addons,
+                addon_slug_value,
+                addon_display_name,
+                ctx.addon_is_zigbee2mqtt,
+            ),
             "organizer_html": ui.render_homeassistant_organizer(homeassistant_organizer_enabled),
-            "addons_html": render_addons(ctx),
             "releases_html": ui.render_releases(releases),
             "version": html.escape(ctx.addon_version()),
         }

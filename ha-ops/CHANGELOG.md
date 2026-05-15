@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.3
+
+- Merge managed add-on selection into the targets table.
+- Hide the protected-storage implementation detail from the main targets table.
+
 ## 0.5.2
 
 - Move the Home Assistant organizer toggle into the main action card so it is visible without scrolling.

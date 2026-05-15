@@ -2601,7 +2601,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("Home Assistant config check failed", page)
             self.assertIn("Previous stale config-check error was cleared", page)
 
-    def test_managed_addons_auto_submit_without_save_button(self):
+    def test_managed_addons_are_selected_in_targets_table(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2612,6 +2612,11 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("data-auto-submit='change'", page)
             self.assertIn("name='addon'", page)
+            self.assertIn("<h2>Managed Targets</h2>", page)
+            self.assertIn("<th>Managed</th>", page)
+            self.assertIn("Zigbee2MQTT (local_zigbee2mqtt)", page)
+            self.assertNotIn("<h2>Managed Add-ons</h2>", page)
+            self.assertNotIn("Protected Storage", page)
             self.assertNotIn("Save Add-on Selection", page)
 
     def test_primary_actions_are_grouped_by_direction(self):

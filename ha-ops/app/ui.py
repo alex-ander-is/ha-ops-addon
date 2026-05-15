@@ -209,32 +209,101 @@ def render_conflicts(conflicts, conflict_type=None):
     )
 
 
-def render_targets(items):
-    if not items:
-        return "<p>No target preview yet. Run an apply after configuring the repository.</p>"
+def target_addon_slug(item):
+    return item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""
+
+
+def render_target_row(item, checkbox, label=None, hint=""):
+    target = html.escape(str(label or item.get("id")))
+    target_type = html.escape(str(item.get("type")))
+    source = html.escape(str(item.get("source") or item.get("source_path") or ""))
+    live_path = html.escape(str(item.get("live_path", "")))
+    addon = html.escape(str(target_addon_slug(item)))
+    hint_html = f"<small>{html.escape(hint)}</small>" if hint else ""
+    return (
+        "<tr>"
+        f"<td>{checkbox}</td>"
+        f"<td><code>{target}</code>{hint_html}</td>"
+        f"<td>{target_type}</td>"
+        f"<td><code>{source}</code></td>"
+        f"<td><code>{addon}</code></td>"
+        f"<td><code>{live_path}</code></td>"
+        "</tr>"
+    )
+
+
+def render_targets(
+    items,
+    selected_addons=None,
+    get_installed_addons=None,
+    addon_slug_value=None,
+    addon_display_name=None,
+    addon_is_zigbee2mqtt=None,
+):
+    selected_addons = set(selected_addons or [])
+    items = items or []
 
     rows = []
+    addon_targets = {}
     for item in items:
-        target = html.escape(str(item.get("id")))
-        target_type = html.escape(str(item.get("type")))
-        source = html.escape(str(item.get("source") or item.get("source_path")))
-        live_path = html.escape(str(item.get("live_path", "")))
-        addon = html.escape(str(item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""))
-        protected_storage = "yes" if item.get("allow_protected_storage") else "no"
-        rows.append(
-            "<tr>"
-            f"<td><code>{target}</code></td>"
-            f"<td>{target_type}</td>"
-            f"<td><code>{source}</code></td>"
-            f"<td><code>{addon}</code></td>"
-            f"<td><code>{live_path}</code></td>"
-            f"<td>{protected_storage}</td>"
-            "</tr>"
-        )
+        if item.get("type") == "addon":
+            slug = target_addon_slug(item)
+            if slug:
+                addon_targets[slug] = item
+            continue
+        checkbox = "<input type='checkbox' checked disabled>"
+        rows.append(render_target_row(item, checkbox))
+
+    addon_error = ""
+    if get_installed_addons:
+        try:
+            addons = sorted(get_installed_addons(), key=lambda addon: addon_display_name(addon).lower())
+        except Exception as exc:
+            addons = []
+            addon_error = f"<p>Add-on discovery unavailable: {html.escape(str(exc))}</p>"
+        seen = set()
+        for addon in addons:
+            slug = addon_slug_value(addon)
+            if not slug:
+                continue
+            seen.add(slug)
+            item = addon_targets.get(
+                slug,
+                {
+                    "id": f"addon-{slug}",
+                    "type": "addon",
+                    "source": f"addons/{slug}",
+                    "addon_slug": slug,
+                    "allow_protected_storage": False,
+                },
+            )
+            checked = "checked" if slug in selected_addons else ""
+            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
+            hint = "Zigbee2MQTT candidate" if addon_is_zigbee2mqtt(addon) else ""
+            rows.append(render_target_row(item, checkbox, addon_display_name(addon), hint))
+
+        for slug, item in sorted(addon_targets.items()):
+            if slug in seen:
+                continue
+            checked = "checked" if slug in selected_addons else ""
+            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
+            rows.append(render_target_row(item, checkbox, item.get("id")))
+    else:
+        for item in items:
+            if item.get("type") != "addon":
+                continue
+            checkbox = "<input type='checkbox' checked disabled>"
+            rows.append(render_target_row(item, checkbox))
+
+    if not rows:
+        return "<p>No target preview yet. Run an apply after configuring the repository.</p>"
 
     return (
-        "<table><thead><tr><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th><th>Protected Storage</th></tr></thead>"
+        f"{addon_error}"
+        "<form method='post' action='addons' data-auto-submit='change'>"
+        "<table><thead><tr><th>Managed</th><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
+        "</form>"
     )
 
 
@@ -704,11 +773,6 @@ def render_page(data):
     <section class="card wide">
       <h2>Managed Targets</h2>
       {data['targets_html']}
-    </section>
-
-    <section class="card wide">
-      <h2>Managed Add-ons</h2>
-      {data['addons_html']}
     </section>
 
     <section class="card wide">
