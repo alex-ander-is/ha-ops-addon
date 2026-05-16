@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.5
+
+- Show full conflict details without truncating long diffs.
+
 ## 0.5.4
 
 - Use dot-prefixed organizer service buckets `.unknown` and `.mixed`.

@@ -68,10 +68,7 @@ def render_addons(ctx):
     )
 
 
-def truncate_conflict_detail(text):
-    max_chars = 30000
-    if len(text) > max_chars:
-        return text[:max_chars] + "\n\n[Conflict detail truncated.]"
+def full_conflict_detail(text):
     return text
 
 
@@ -94,7 +91,7 @@ def file_diff(ctx, left_label, left_path, right_label, right_path):
     if result.returncode == 0:
         return "No differences found."
     if result.returncode == 1:
-        return truncate_conflict_detail(result.stdout.strip())
+        return full_conflict_detail(result.stdout.strip())
     return f"Diff unavailable:\n{(result.stderr or result.stdout).strip()}"
 
 
@@ -152,7 +149,7 @@ def conflict_items(ctx, state, options):
             if conflict_type == "save_unknown_base":
                 detail = save_conflict_detail(ctx, repo_dir, targets, safe_path)
             else:
-                detail = truncate_conflict_detail(file_text(Path(repo_dir) / safe_path).strip())
+                detail = full_conflict_detail(file_text(Path(repo_dir) / safe_path).strip())
         except Exception as exc:
             safe_path = str(path)
             detail = f"Conflict detail unavailable: {exc}"

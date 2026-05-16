@@ -401,6 +401,13 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Approve HA to Git", content)
         self.assertIn("approve-save-conflicts", content)
 
+    def test_conflict_detail_is_not_truncated(self):
+        server = load_server()
+
+        detail = "x" * 40000
+
+        self.assertEqual(server.web.full_conflict_detail(detail), detail)
+
     def test_save_conflict_approve_all_records_ha_resolutions(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
