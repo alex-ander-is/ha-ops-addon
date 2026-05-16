@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.0
+
+- Add a two-step deleted_devices cleanup flow with preview and approved deletion from the live Home Assistant device registry.
+
 ## 0.5.7
 
 - Keep the HA Ops two-column layout active on medium-wide screens and prevent diff content from escaping page padding.

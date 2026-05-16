@@ -9,6 +9,7 @@ import git_ops
 import jobs as job_logic
 import manifest as manifest_logic
 import policies
+import registry_cleanup
 import releases as release_logic
 import state as state_store
 import supervisor
@@ -87,7 +88,75 @@ class AppContext:
         return state_store.clear_display_state(self.state_path)
 
     def repair_startup_state(self):
+        state = self.read_state()
+        if (
+            state.get("last_status") == "running"
+            and state.get("last_action") == "deleted_devices_delete"
+            and state.get("deleted_devices_rollback_path")
+        ):
+            return self.repair_interrupted_deleted_devices_cleanup(state)
         return state_store.repair_startup_state(self.state_path, self.utc_now())
+
+    def repair_interrupted_deleted_devices_cleanup(self, state):
+        details = list(state.get("last_details") or [])
+        rollback_path = state.get("deleted_devices_rollback_path")
+        restored = False
+        try:
+            self.restore_deleted_devices_rollback(rollback_path)
+            restored = True
+            details.append("Restored deleted_devices rollback snapshot after HA Ops restart.")
+            self.core_start()
+            details.append("Started Home Assistant Core after restoring deleted_devices rollback snapshot.")
+            self.discard_deleted_devices_rollback(rollback_path)
+            preview = self.build_deleted_devices_preview()
+            return self.write_state(
+                {
+                    "last_run_at": self.utc_now(),
+                    "last_status": "interrupted",
+                    "last_action": "deleted_devices_delete",
+                    "last_message": "Interrupted deleted_devices cleanup was reverted on startup.",
+                    "last_details": details,
+                    "last_deleted_devices_preview": preview["summary"],
+                    "last_deleted_devices_count": preview["count"],
+                    "last_deleted_devices_fingerprint": preview["fingerprint"],
+                    "last_deleted_devices_generated_at": self.utc_now(),
+                    "deleted_devices_pending_confirmation": False,
+                    "deleted_devices_rollback_path": None,
+                    "deleted_devices_rollback_fingerprint": None,
+                    "deleted_devices_applied_fingerprint": None,
+                }
+            )
+        except Exception as exc:
+            details.append(f"Startup deleted_devices recovery failed: {exc}")
+            try:
+                self.core_start()
+                details.append("Started Home Assistant Core after failed deleted_devices startup recovery.")
+            except Exception as start_exc:
+                details.append(f"Failed to start Home Assistant Core after failed deleted_devices startup recovery: {start_exc}")
+            updates = {
+                "last_run_at": self.utc_now(),
+                "last_status": "error",
+                "last_action": "deleted_devices_delete",
+                "last_message": "Interrupted deleted_devices cleanup needs manual recovery.",
+                "last_details": details,
+                "deleted_devices_pending_confirmation": bool(rollback_path and not restored),
+            }
+            if restored:
+                try:
+                    preview = self.build_deleted_devices_preview()
+                    updates.update(
+                        {
+                            "last_deleted_devices_preview": preview["summary"],
+                            "last_deleted_devices_count": preview["count"],
+                            "last_deleted_devices_fingerprint": preview["fingerprint"],
+                            "last_deleted_devices_generated_at": self.utc_now(),
+                            "deleted_devices_pending_confirmation": False,
+                            "deleted_devices_applied_fingerprint": None,
+                        }
+                    )
+                except Exception:
+                    pass
+            return self.write_state(updates)
 
     def run_command(self, command, env=None, cwd=None):
         return subprocess.run(
@@ -348,6 +417,24 @@ class AppContext:
     def restore_save_git_resolutions(self, repo_dir, resolutions, details):
         return sync_logic.restore_save_git_resolutions(repo_dir, resolutions, details, self.sync_deps())
 
+    def build_deleted_devices_preview(self):
+        return registry_cleanup.build_deleted_devices_preview(self.config_dir)
+
+    def device_registry_fingerprint(self):
+        return registry_cleanup.device_registry_fingerprint(self.config_dir)
+
+    def clear_deleted_devices(self, expected_fingerprint):
+        return registry_cleanup.clear_deleted_devices(self.config_dir, expected_fingerprint)
+
+    def create_deleted_devices_rollback(self, expected_fingerprint):
+        return registry_cleanup.create_deleted_devices_rollback(self.config_dir, self.work_dir, expected_fingerprint)
+
+    def restore_deleted_devices_rollback(self, rollback_path):
+        return registry_cleanup.restore_deleted_devices_rollback(self.config_dir, rollback_path)
+
+    def discard_deleted_devices_rollback(self, rollback_path):
+        return registry_cleanup.discard_deleted_devices_rollback(rollback_path)
+
     def clear_tree(self, dest):
         return sync_logic.clear_tree(dest, self.work_dir, self.run_command)
 
@@ -479,8 +566,15 @@ class AppContext:
             apply_targets=self.apply_targets,
             build_apply_preview=self.build_apply_preview,
             build_save_preview=self.build_save_preview,
+            build_deleted_devices_preview=self.build_deleted_devices_preview,
+            clear_deleted_devices=self.clear_deleted_devices,
             commit_if_needed=self.commit_if_needed,
+            core_start=self.core_start,
+            core_stop=self.core_stop,
             create_release_snapshot=self.create_release_snapshot,
+            create_deleted_devices_rollback=self.create_deleted_devices_rollback,
+            device_registry_fingerprint=self.device_registry_fingerprint,
+            discard_deleted_devices_rollback=self.discard_deleted_devices_rollback,
             enforce_apply_limits=self.enforce_apply_limits,
             ensure_fresh_system_backup=self.ensure_fresh_system_backup,
             ensure_preview_matches_state=self.ensure_preview_matches_state,
@@ -506,6 +600,7 @@ class AppContext:
             restore_save_git_resolutions=self.restore_save_git_resolutions,
             resolve_targets=self.resolve_targets,
             approve_storage_apply_targets=self.approve_storage_apply_targets,
+            restore_deleted_devices_rollback=self.restore_deleted_devices_rollback,
             restore_release_snapshot=self.restore_release_snapshot,
             run_lock=self.run_lock,
             save_unknown_base_conflicts=self.save_unknown_base_conflicts,
@@ -526,6 +621,18 @@ class AppContext:
 
     def run_save_preview_job(self):
         return job_logic.run_save_preview_job(self.job_deps())
+
+    def run_deleted_devices_preview_job(self):
+        return job_logic.run_deleted_devices_preview_job(self.job_deps())
+
+    def run_deleted_devices_delete_job(self):
+        return job_logic.run_deleted_devices_delete_job(self.job_deps())
+
+    def run_deleted_devices_confirm_job(self):
+        return job_logic.run_deleted_devices_confirm_job(self.job_deps())
+
+    def run_deleted_devices_revert_job(self):
+        return job_logic.run_deleted_devices_revert_job(self.job_deps())
 
     def run_rollback_job(self, release_name):
         return job_logic.run_rollback_job(release_name, self.job_deps())

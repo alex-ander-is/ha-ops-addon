@@ -772,6 +772,22 @@ def render_page(data):
               <button type="submit" {data['action_disabled']}>{data['apply_button_text']}</button>
             </form>
           </div>
+          <div class="action-row">
+            <form method="post" action="deleted-devices-preview" data-async-form="true">
+              <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
+            </form>
+            <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm="Stop Home Assistant Core and remove all deleted_devices from core.device_registry?">
+              <button type="submit" {data['deletion_disabled']}>Approve Deletion</button>
+            </form>
+          </div>
+          <div class="action-row">
+            <form method="post" action="deleted-devices-confirm" data-async-form="true">
+              <button type="submit" class="secondary" {data['confirm_deletion_disabled']}>Confirm Changes</button>
+            </form>
+            <form method="post" action="deleted-devices-revert" data-async-form="true" data-confirm="Stop Home Assistant Core and revert deleted_devices cleanup?">
+              <button type="submit" {data['confirm_deletion_disabled']}>Revert Changes</button>
+            </form>
+          </div>
         </div>
       </section>
       <section class="card details-card">
@@ -790,6 +806,12 @@ def render_page(data):
       <h2>Save Preview</h2>
       <p>Generated at <span data-transient="save-generated">{data['save_diff_generated_at']}</span></p>
       <div data-transient="save-preview">{data['save_details_html']}</div>
+    </section>
+
+    <section class="card wide">
+      <h2>Deletion of deleted_devices Preview</h2>
+      <p>Generated at <span data-transient="deleted-devices-generated">{data['deleted_devices_generated_at']}</span></p>
+      <pre data-transient="deleted-devices-preview">{data['deleted_devices_preview_html']}</pre>
     </section>
 
     <section class="card wide">
@@ -834,8 +856,10 @@ def render_page(data):
         const details = document.querySelector("[data-transient='details']");
         const applyPreview = document.querySelector("[data-transient='apply-preview']");
         const savePreview = document.querySelector("[data-transient='save-preview']");
+        const deletedDevicesPreview = document.querySelector("[data-transient='deleted-devices-preview']");
         const applyGenerated = document.querySelector("[data-transient='apply-generated']");
         const saveGenerated = document.querySelector("[data-transient='save-generated']");
+        const deletedDevicesGenerated = document.querySelector("[data-transient='deleted-devices-generated']");
         if (details) {{
           details.textContent = "No details yet.";
         }}
@@ -845,11 +869,17 @@ def render_page(data):
         if (savePreview) {{
           savePreview.textContent = "No save preview yet.";
         }}
+        if (deletedDevicesPreview) {{
+          deletedDevicesPreview.textContent = "No deleted_devices preview yet.";
+        }}
         if (applyGenerated) {{
           applyGenerated.textContent = "";
         }}
         if (saveGenerated) {{
           saveGenerated.textContent = "";
+        }}
+        if (deletedDevicesGenerated) {{
+          deletedDevicesGenerated.textContent = "";
         }}
       }}
 
@@ -961,8 +991,11 @@ def render_page(data):
           button.textContent = "Working...";
         }}
         setClientStatus("Working...");
-        clearTransientDisplay();
-        clearDisplayState();
+        const preserveDisplayState = form.getAttribute("data-preserve-display-state") === "true";
+        if (!preserveDisplayState) {{
+          clearTransientDisplay();
+          clearDisplayState();
+        }}
 
         try {{
           const response = await fetch(form.getAttribute("action"), {{

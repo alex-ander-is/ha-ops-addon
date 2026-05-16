@@ -203,12 +203,15 @@ def render_page(ctx):
     diff_text = state.get("last_diff", "")
     save_preview_text = state.get("last_save_preview") or "No save preview yet."
     save_diff_text = state.get("last_save_diff") or ""
+    deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     save_details_html = html.escape(save_preview_text)
     if save_diff_text and save_diff_text != save_preview_text:
         save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
     elif save_diff_text:
         save_details_html = ui.render_conflict_detail(save_diff_text)
-    action_disabled = "disabled" if last_status == "running" else ""
+    run_disabled = "disabled" if last_status == "running" else ""
+    deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
+    action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     storage_approval_pending = bool(
         state.get("last_preview_storage_changes")
         and state.get("last_preview_fingerprint")
@@ -216,6 +219,16 @@ def render_page(ctx):
     )
     apply_action = "approve-apply" if storage_approval_pending else "apply"
     apply_button_text = "Approve Git to HA" if storage_approval_pending else "Apply Git to HA"
+    deleted_devices_count = int(state.get("last_deleted_devices_count") or 0)
+    deletion_ready = bool(
+        deleted_devices_count > 0
+        and state.get("last_deleted_devices_preview")
+        and state.get("last_deleted_devices_generated_at")
+        and state.get("last_deleted_devices_fingerprint")
+    )
+    check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
+    confirm_deletion_disabled = "disabled" if run_disabled or not deleted_devices_pending_confirmation else ""
     confirm_messages = []
     if not ctx.option_bool(options, "require_fresh_backup", True):
         confirm_messages.append("Fresh system backup checks are disabled.")
@@ -254,8 +267,15 @@ def render_page(ctx):
             "diff_html": ui.render_conflict_detail(diff_text) if diff_text else html.escape("No apply preview yet."),
             "save_diff_generated_at": html.escape(ctx.format_time(state.get("last_save_diff_generated_at"), options)),
             "save_details_html": save_details_html,
+            "deleted_devices_generated_at": html.escape(
+                ctx.format_time(state.get("last_deleted_devices_generated_at"), options)
+            ),
+            "deleted_devices_preview_html": html.escape(deleted_devices_preview_text),
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
+            "check_deleted_devices_disabled": check_deleted_devices_disabled,
+            "deletion_disabled": deletion_disabled,
+            "confirm_deletion_disabled": confirm_deletion_disabled,
             "apply_action": apply_action,
             "apply_button_text": apply_button_text,
             "apply_confirm": apply_confirm,
@@ -410,6 +430,38 @@ def create_handler(ctx):
                 start_background(ctx.run_save_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Save HA to Git started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/deleted-devices-preview":
+                start_background(ctx.run_deleted_devices_preview_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "deleted_devices check started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/deleted-devices-delete":
+                start_background(ctx.run_deleted_devices_delete_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "deleted_devices deletion started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/deleted-devices-confirm":
+                start_background(ctx.run_deleted_devices_confirm_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "deleted_devices cleanup confirmation started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/deleted-devices-revert":
+                start_background(ctx.run_deleted_devices_revert_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "deleted_devices cleanup revert started. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return

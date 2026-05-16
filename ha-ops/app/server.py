@@ -57,6 +57,7 @@ _PATCHABLE_METHODS = {
     "backup_manager_info",
     "latest_system_backup_status",
     "ensure_fresh_system_backup",
+    "device_registry_fingerprint",
     "git_env",
     "git_pull_rebase",
     "stage_all",
@@ -211,6 +212,14 @@ def _legacy_func(name):
         return lambda: web.start_background(_CTX.run_save_preview_job)
     if name == "start_save":
         return lambda: web.start_background(_CTX.run_save_job)
+    if name == "start_deleted_devices_preview":
+        return lambda: web.start_background(_CTX.run_deleted_devices_preview_job)
+    if name == "start_deleted_devices_delete":
+        return lambda: web.start_background(_CTX.run_deleted_devices_delete_job)
+    if name == "start_deleted_devices_confirm":
+        return lambda: web.start_background(_CTX.run_deleted_devices_confirm_job)
+    if name == "start_deleted_devices_revert":
+        return lambda: web.start_background(_CTX.run_deleted_devices_revert_job)
     if name == "start_rollback":
         return lambda release_name: web.start_background(_CTX.run_rollback_job, release_name)
     if name == "resolve_save_unknown_base_conflict":
