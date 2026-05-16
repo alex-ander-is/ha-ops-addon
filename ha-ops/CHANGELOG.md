@@ -1,5 +1,11 @@
 # Changelog
 
+Released sections are immutable. Put every new change into a new version section.
+
+## 0.5.6
+
+- Let the HA Ops page use the full browser width and keep Last Run Details scrollable beside the controls.
+
 ## 0.5.5
 
 - Show full conflict details without truncating long diffs.

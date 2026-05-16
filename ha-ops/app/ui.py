@@ -416,14 +416,15 @@ def render_page(data):
       background: var(--ha-bg);
     }}
     main {{
-      max-width: 1180px;
-      margin: 0 auto;
+      width: 100%;
+      max-width: none;
       padding: 16px;
     }}
-    .grid {{
+    .top-grid {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      grid-template-columns: 800px minmax(800px, 1fr);
       gap: 16px;
+      align-items: start;
     }}
     .card {{
       background: var(--ha-card-bg);
@@ -431,6 +432,19 @@ def render_page(data):
       border-radius: var(--ha-radius);
       padding: 20px;
       box-shadow: var(--ha-shadow);
+    }}
+    .details-card {{
+      display: flex;
+      flex-direction: column;
+      height: var(--details-card-height, auto);
+      min-height: 0;
+      overflow: hidden;
+    }}
+    .details-card pre {{
+      flex: 1 1 auto;
+      min-height: 0;
+      white-space: pre;
+      overflow-wrap: normal;
     }}
     h1, h2 {{
       margin: 0 0 14px;
@@ -680,7 +694,19 @@ def render_page(data):
       font-size: 0.86rem;
       text-align: center;
     }}
-    @media (max-width: 640px) {{
+    @media (max-width: 1647px) {{
+      .top-grid {{
+        grid-template-columns: minmax(0, 1fr);
+      }}
+      .details-card {{
+        height: auto;
+        overflow: visible;
+      }}
+      .details-card pre {{
+        flex: none;
+      }}
+    }}
+    @media (max-width: 800px) {{
       main {{
         padding: 12px;
       }}
@@ -695,8 +721,8 @@ def render_page(data):
 </head>
 <body>
   <main>
-    <div class="grid">
-      <section class="card">
+    <div class="top-grid">
+      <section class="card control-card">
         <h1>HA Ops</h1>
         <p>Git-backed config deployer for Home Assistant, Mosquitto, and Zigbee2MQTT.</p>
         <div class="badge {data['badge_class']}">{data['status']}</div>
@@ -742,7 +768,7 @@ def render_page(data):
           </div>
         </div>
       </section>
-      <section class="card">
+      <section class="card details-card">
         <h2>Last Run Details</h2>
         <pre data-transient="details">{data['details_html']}</pre>
       </section>
@@ -784,6 +810,8 @@ def render_page(data):
   <script>
     (() => {{
       const clientStatus = document.getElementById("client-status");
+      const controlCard = document.querySelector(".control-card");
+      const detailsCard = document.querySelector(".details-card");
 
       function setClientStatus(message) {{
         if (clientStatus) {{
@@ -817,6 +845,27 @@ def render_page(data):
         if (saveGenerated) {{
           saveGenerated.textContent = "";
         }}
+      }}
+
+      function syncDetailsHeight() {{
+        if (!controlCard || !detailsCard) {{
+          return;
+        }}
+        const controlRect = controlCard.getBoundingClientRect();
+        const detailsRect = detailsCard.getBoundingClientRect();
+        const sameRow = Math.abs(controlRect.top - detailsRect.top) < 2;
+        if (sameRow) {{
+          detailsCard.style.setProperty("--details-card-height", `${{controlRect.height}}px`);
+        }} else {{
+          detailsCard.style.removeProperty("--details-card-height");
+        }}
+      }}
+
+      if (controlCard && detailsCard) {{
+        const resizeObserver = new ResizeObserver(syncDetailsHeight);
+        resizeObserver.observe(controlCard);
+        window.addEventListener("resize", syncDetailsHeight);
+        requestAnimationFrame(syncDetailsHeight);
       }}
 
       function clearDisplayState() {{
