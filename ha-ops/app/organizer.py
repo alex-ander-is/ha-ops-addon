@@ -12,6 +12,8 @@ except ModuleNotFoundError:  # pragma: no cover
 
 DEFAULT_ORGANIZED_ROOT = ".ha-ops/areas"
 INDEX_NAME = "organizer-index.json"
+UNKNOWN_BUCKET = ".unknown"
+MIXED_BUCKET = ".mixed"
 HEAP_FILES = {
     "automations": "automations.yaml",
     "scripts": "scripts.yaml",
@@ -158,9 +160,9 @@ def clean_organized_root(root, options=None):
 def normalize_area(value):
     value = str(value or "").strip()
     if not value:
-        return "unknown"
+        return UNKNOWN_BUCKET
     value = re.sub(r"[^A-Za-z0-9]+", "_", value.lower()).strip("_")
-    return value or "unknown"
+    return value or UNKNOWN_BUCKET
 
 
 def normalize_text(value):
@@ -218,7 +220,7 @@ def collect_references(value):
 
 
 def area_from_candidates(candidates):
-    clean = [normalize_area(value) for value in candidates if normalize_area(value) != "unknown"]
+    clean = [normalize_area(value) for value in candidates if normalize_area(value) != UNKNOWN_BUCKET]
     if not clean:
         return None
     counts = Counter(clean)
@@ -226,7 +228,7 @@ def area_from_candidates(candidates):
         return clean[0]
     top = counts.most_common()
     if len(top) > 1 and top[0][1] == top[1][1]:
-        return "_mixed"
+        return MIXED_BUCKET
     return top[0][0]
 
 
@@ -332,7 +334,7 @@ def route_item(kind, identity, item, registry, options, text_values):
     if area:
         return area
 
-    return "unknown"
+    return UNKNOWN_BUCKET
 
 
 def automation_identity(item, index):

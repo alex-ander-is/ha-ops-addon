@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4
+
+- Use dot-prefixed organizer service buckets `.unknown` and `.mixed`.
+- Keep real Home Assistant areas such as `Unknown` separate from service buckets.
+- Document stable entity-reference conversion for automation, script, and scene YAML.
+
 ## 0.5.3
 
 - Merge managed add-on selection into the targets table.

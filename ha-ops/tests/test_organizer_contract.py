@@ -391,10 +391,10 @@ class OrganizerContractTests(unittest.TestCase):
             self.assertIn("auto_device", ids(read_yaml(areas / "hallway" / "automations.yaml")))
             self.assertIn("auto_entity", ids(read_yaml(areas / "kids_room" / "automations.yaml")))
             self.assertIn("auto_called_script", ids(read_yaml(areas / "kitchen" / "automations.yaml")))
-            self.assertIn("auto_mixed", ids(read_yaml(areas / "_mixed" / "automations.yaml")))
-            self.assertIn("auto_unknown", ids(read_yaml(areas / "unknown" / "automations.yaml")))
+            self.assertIn("auto_mixed", ids(read_yaml(areas / ".mixed" / "automations.yaml")))
+            self.assertIn("auto_unknown", ids(read_yaml(areas / ".unknown" / "automations.yaml")))
             self.assertIn("office_prefix_script", script_keys(read_yaml(areas / "office" / "scripts.yaml")))
-            self.assertIn("unknown_script", script_keys(read_yaml(areas / "unknown" / "scripts.yaml")))
+            self.assertIn("unknown_script", script_keys(read_yaml(areas / ".unknown" / "scripts.yaml")))
 
     def test_split_routes_scenes_by_ui_area_and_entity_map_keys(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -426,8 +426,54 @@ class OrganizerContractTests(unittest.TestCase):
 
             ORGANIZER.split_live_heaps_to_git(live, git, options=self.options())
 
-            self.assertIn("auto_service_only", ids(read_yaml(area_file(git, "unknown", "automations.yaml"))))
+            self.assertIn("auto_service_only", ids(read_yaml(area_file(git, ".unknown", "automations.yaml"))))
             self.assertFalse(area_file(git, "office", "automations.yaml").exists())
+
+    def test_real_unknown_area_does_not_conflict_with_unknown_bucket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = seed_live_homeassistant(root)
+            git = root / "git" / "homeassistant"
+            write_json(
+                live / ".storage" / "core.area_registry",
+                {
+                    "version": 1,
+                    "data": {
+                        "areas": [
+                            {"id": "unknown_area", "name": "Unknown"},
+                        ]
+                    },
+                },
+            )
+            write_json(
+                live / ".storage" / "core.entity_registry",
+                {
+                    "version": 1,
+                    "data": {
+                        "entities": [
+                            {
+                                "entity_id": "automation.real_unknown_area",
+                                "unique_id": "real_unknown_area",
+                                "area_id": "unknown_area",
+                            },
+                        ]
+                    },
+                },
+            )
+            write_yaml(
+                live / "automations.yaml",
+                [
+                    {"id": "real_unknown_area", "alias": "Real Unknown Area", "trigger": [], "action": []},
+                    {"id": "unroutable", "alias": "Unroutable", "trigger": [], "action": []},
+                ],
+            )
+            write_yaml(live / "scripts.yaml", {})
+            write_yaml(live / "scenes.yaml", [])
+
+            ORGANIZER.split_live_heaps_to_git(live, git, options=self.options())
+
+            self.assertIn("real_unknown_area", ids(read_yaml(area_file(git, "unknown", "automations.yaml"))))
+            self.assertIn("unroutable", ids(read_yaml(area_file(git, ".unknown", "automations.yaml"))))
 
     def test_compose_rebuilds_live_heaps_without_loss(self):
         with tempfile.TemporaryDirectory() as tmp:

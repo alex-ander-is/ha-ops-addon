@@ -24,7 +24,11 @@ homeassistant/.ha-ops/areas/
     automations.yaml
     scripts.yaml
     scenes.yaml
-  unknown/
+  .unknown/
+    automations.yaml
+    scripts.yaml
+    scenes.yaml
+  .mixed/
     automations.yaml
     scripts.yaml
     scenes.yaml
@@ -114,9 +118,13 @@ Required routing order:
 5. Referenced `device_id` resolved through `core.device_registry`.
 6. Referenced `entity_id` resolved through `core.entity_registry` and then
    optionally through `core.device_registry`.
-7. `_mixed` if multiple areas are equally plausible and no deterministic owner
+7. `.mixed` if multiple areas are equally plausible and no deterministic owner
    exists.
-8. `unknown` if no owner can be found.
+8. `.unknown` if no owner can be found.
+
+Service buckets are dot-prefixed and reserved. Real Home Assistant areas must
+not use dot-prefixed organizer directory names. This avoids collisions with
+valid area names such as `Unknown`, which route to `unknown/`.
 
 The owner of an automation or script is the automation or script entity area
 when UI area exists. Trigger/action devices are references, not owners.
@@ -155,7 +163,7 @@ and compose operation must verify:
 - no item disappears into an unreferenced file
 - no item is duplicated across areas
 - item payloads round-trip without semantic loss
-- `_mixed` and `unknown` are explicit buckets, not silent guesses
+- `.mixed` and `.unknown` are explicit buckets, not silent guesses
 - malformed split files fail before writing live Home Assistant heap files
 
 Routing is advisory. Integrity checks are authoritative. A bad routing guess may
@@ -179,7 +187,7 @@ configuration. Fixtures must include:
 - automation routed by `device_id`
 - automation routed by referenced `entity_id`
 - automation routed through called `script.*`
-- cross-area automation that must become `_mixed`
-- item with no route that must become `unknown`
+- cross-area automation that must become `.mixed`
+- item with no route that must become `.unknown`
 - empty scenes file
 - non-empty scene fixture for compose and integrity checks

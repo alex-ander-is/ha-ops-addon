@@ -24,6 +24,48 @@ files, while enabled Git targets expose an area-first view under
 `homeassistant/.ha-ops/areas/<area>/`. See `docs/organizer-contract.md` for
 activation, precedence, conflict semantics, and safety invariants.
 
+## Stable Entity References
+
+When editing Home Assistant automations, scripts, and scenes in Git, keep them
+independent of Home Assistant registry UUIDs. This applies to both the organizer
+split view under `homeassistant/.ha-ops/areas/<area>/` and the heap files
+`homeassistant/automations.yaml`, `homeassistant/scripts.yaml`, and
+`homeassistant/scenes.yaml` when those files are present. Convert opaque
+`entity_id` registry ids to real stable `entity_id` values, remove `device_id`
+usage, and prefer state, numeric state, MQTT, or service actions. See
+`docs/stable-entity-references.md`.
+
+Organizer service buckets are dot-prefixed: `.unknown` for unrouted items and
+`.mixed` for equally plausible area routes. Real areas, including an area named
+`Unknown`, use normal non-dot directory names.
+
+Suggested request for agents:
+
+```text
+In ha-config, convert Home Assistant automations/scripts/scenes to stable
+entity-based references: remove device_id usage, replace opaque registry
+entity_id values with real entity_id values, and convert device triggers/actions
+to entity, numeric_state, MQTT, or service calls. Do not edit HA Ops code.
+Also report ghost entities and safe entity renames caused by replacement
+suffixes like _2.
+```
+
+Example conversion:
+
+```yaml
+# before
+- type: smoke
+  device_id: a534a78722f26cbd6d566ad9ac76c09b
+  entity_id: 4de6e617bbc328a0d5888158d1d459d3
+  domain: binary_sensor
+  trigger: device
+
+# after
+- trigger: state
+  entity_id: binary_sensor.living_room_smoke_smoke
+  to: "on"
+```
+
 ## Save Policy
 
 Home Assistant is the source of truth for `Save HA to Git`. Export is config-only:
