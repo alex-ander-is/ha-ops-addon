@@ -414,6 +414,7 @@ def render_page(data):
       font-family: var(--ha-font);
       color: var(--ha-text);
       background: var(--ha-bg);
+      overflow-x: hidden;
     }}
     main {{
       width: 100%;
@@ -422,7 +423,7 @@ def render_page(data):
     }}
     .top-grid {{
       display: grid;
-      grid-template-columns: 800px minmax(800px, 1fr);
+      grid-template-columns: 800px minmax(500px, 1fr);
       gap: 16px;
       align-items: start;
     }}
@@ -432,6 +433,7 @@ def render_page(data):
       border-radius: var(--ha-radius);
       padding: 20px;
       box-shadow: var(--ha-shadow);
+      min-width: 0;
     }}
     .details-card {{
       display: flex;
@@ -573,6 +575,7 @@ def render_page(data):
     .table-scroll {{
       max-width: 100%;
       overflow-x: auto;
+      min-width: 0;
     }}
     table {{
       width: 100%;
@@ -602,9 +605,11 @@ def render_page(data):
     .conflict-detail td {{
       padding-top: 4px;
       background: color-mix(in srgb, var(--ha-code-bg) 52%, transparent);
+      min-width: 0;
     }}
     .conflict-diff {{
       max-width: 100%;
+      min-width: 0;
       overflow-x: auto;
       border: 1px solid var(--ha-border);
       border-radius: calc(var(--ha-radius) - 2px);
@@ -682,6 +687,7 @@ def render_page(data):
     }}
     .wide {{
       margin-top: 18px;
+      min-width: 0;
     }}
     .client-status {{
       margin-top: 14px;
@@ -694,7 +700,7 @@ def render_page(data):
       font-size: 0.86rem;
       text-align: center;
     }}
-    @media (max-width: 1647px) {{
+    @media (max-width: 1347px) {{
       .top-grid {{
         grid-template-columns: minmax(0, 1fr);
       }}

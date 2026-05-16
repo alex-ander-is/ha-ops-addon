@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.5.7
+
+- Keep the HA Ops two-column layout active on medium-wide screens and prevent diff content from escaping page padding.
+
 ## 0.5.6
 
 - Let the HA Ops page use the full browser width and keep Last Run Details scrollable beside the controls.
