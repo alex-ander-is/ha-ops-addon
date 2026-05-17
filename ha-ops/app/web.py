@@ -368,17 +368,32 @@ def render_page(ctx):
         )
     deleted_devices_section_html = ""
     if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
-        deleted_devices_preview_html = (
-            ui.render_deleted_devices_table(deleted_devices_rows)
-            if state.get("last_deleted_devices_generated_at")
-            else html.escape(deleted_devices_preview_text)
-        )
-        deleted_devices_section_html = (
-            "<section class='card wide'>"
-            "<h2>Deletion of deleted_devices Preview</h2>"
+        deleted_devices_heading = "Deletion of deleted_devices Preview"
+        deleted_devices_generated_html = (
             "<p>Generated at "
             f"<span data-transient='deleted-devices-generated'>{html.escape(ctx.format_time(state.get('last_deleted_devices_generated_at'), options))}</span>"
             "</p>"
+        )
+        if pending_deleted_devices_decision:
+            deleted_devices_heading = "Pending deleted_devices Diff"
+            deleted_devices_generated_html = ""
+            try:
+                deleted_devices_preview_html = (
+                    "<p class='muted'>Confirm Changes accepts this diff. Revert Changes restores removed lines while keeping any new current entries.</p>"
+                    f"{ui.render_conflict_detail(ctx.deleted_devices_pending_diff(deleted_devices_rollback_path))}"
+                )
+            except Exception as exc:
+                deleted_devices_preview_html = f"<p>Pending diff unavailable: {html.escape(str(exc))}</p>"
+        else:
+            deleted_devices_preview_html = (
+                ui.render_deleted_devices_table(deleted_devices_rows)
+                if state.get("last_deleted_devices_generated_at")
+                else html.escape(deleted_devices_preview_text)
+            )
+        deleted_devices_section_html = (
+            "<section class='card wide'>"
+            f"<h2>{deleted_devices_heading}</h2>"
+            f"{deleted_devices_generated_html}"
             f"<div data-transient='deleted-devices-preview'>{deleted_devices_preview_html}</div>"
             f"{deleted_devices_actions_html}"
             "</section>"

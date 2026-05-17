@@ -3121,7 +3121,8 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertEqual(state["last_deleted_devices_fingerprint"], "after")
             self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
-            self.assertIn("Deletion of deleted_devices Preview", page)
+            self.assertIn("Pending deleted_devices Diff", page)
+            self.assertIn("Pending diff unavailable", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
 
@@ -3190,6 +3191,15 @@ class ServerTests(unittest.TestCase):
             self.assertIn("- removed entries returned: 0", page)
             self.assertIn("Confirm Changes: keep this cleanup.", page)
             self.assertIn("Revert Changes: restore only entries removed by this cleanup.", page)
+            self.assertIn("<h2>Pending deleted_devices Diff</h2>", page)
+            self.assertNotIn("<h2>Deletion of deleted_devices Preview</h2>", page)
+            self.assertIn("Confirm Changes accepts this diff.", page)
+            self.assertIn("deleted_devices before cleanup", page)
+            self.assertIn("deleted_devices now", page)
+            self.assertIn("diff-del", page)
+            self.assertIn("d Button", page)
+            self.assertIn("diff-add", page)
+            self.assertIn("New Delete", page)
 
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()

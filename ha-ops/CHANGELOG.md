@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.6
+
+- Show a colored deleted_devices diff while cleanup is pending so Confirm and Revert have visible consequences.
+
 ## 0.6.5
 
 - Show pending deleted_devices cleanup as a decision state instead of a generic error.

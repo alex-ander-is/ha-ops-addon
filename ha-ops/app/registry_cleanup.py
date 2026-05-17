@@ -1,4 +1,5 @@
 import hashlib
+import difflib
 import json
 import os
 from pathlib import Path
@@ -128,6 +129,26 @@ def deleted_devices_cleanup_status(config_dir, rollback_file):
         "returned": len(returned),
         "added": len(added),
     }
+
+
+def deleted_devices_pending_diff(config_dir, rollback_file):
+    source = Path(rollback_file)
+    if not source.exists():
+        raise RuntimeError("deleted_devices rollback snapshot is missing.")
+    rollback_data = json.loads(source.read_text(encoding="utf-8"))
+    _path, _text, current_data = read_device_registry(config_dir)
+    before_lines = json.dumps(deleted_devices(rollback_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+    current_lines = json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+    diff = list(
+        difflib.unified_diff(
+            before_lines,
+            current_lines,
+            fromfile="deleted_devices before cleanup",
+            tofile="deleted_devices now",
+            lineterm="",
+        )
+    )
+    return "\n".join(diff) if diff else "No deleted_devices difference."
 
 
 def deleted_device_label(device):

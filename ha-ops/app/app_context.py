@@ -444,6 +444,9 @@ class AppContext:
     def deleted_devices_cleanup_status(self, rollback_path):
         return registry_cleanup.deleted_devices_cleanup_status(self.config_dir, rollback_path)
 
+    def deleted_devices_pending_diff(self, rollback_path):
+        return registry_cleanup.deleted_devices_pending_diff(self.config_dir, rollback_path)
+
     def restore_deleted_devices_rollback(self, rollback_path):
         return registry_cleanup.restore_deleted_devices_rollback(self.config_dir, rollback_path)
 
