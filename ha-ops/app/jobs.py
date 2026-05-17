@@ -230,8 +230,10 @@ def run_save_job(ctx):
                 ctx.git_pull_rebase(repo_dir, env, branch)
                 ctx.push_branch(repo_dir, env, branch)
             ctx.add_detail(details, f"Pushed to origin/{branch}.")
+            save_message = "Save finished successfully and pushed to Git."
         else:
             ctx.add_detail(details, "No live Home Assistant changes to save.")
+            save_message = "No live Home Assistant changes to save."
 
         write_state({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
 
@@ -240,7 +242,7 @@ def run_save_job(ctx):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "save",
-                "last_message": "Save finished successfully.",
+                "last_message": save_message,
                 "last_details": details,
                 "last_targets": resolved_targets,
             }

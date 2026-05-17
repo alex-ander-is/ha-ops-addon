@@ -994,7 +994,6 @@ def render_page(data):
         const preserveDisplayState = form.getAttribute("data-preserve-display-state") === "true";
         if (!preserveDisplayState) {{
           clearTransientDisplay();
-          clearDisplayState();
         }}
 
         try {{

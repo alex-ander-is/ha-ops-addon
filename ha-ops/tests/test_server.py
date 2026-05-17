@@ -333,6 +333,17 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<div class="badge success">success</div>', page)
             self.assertIn("Previous transient status was cleared", page)
 
+    def test_async_actions_do_not_clear_persisted_state_before_submit(self):
+        server = load_server()
+
+        page = server.render_page()
+        submit_start = page.index("async function submitAsyncForm")
+        submit_end = page.index("try {", submit_start)
+        submit_setup = page[submit_start:submit_end]
+
+        self.assertIn("clearTransientDisplay();", submit_setup)
+        self.assertNotIn("clearDisplayState();", submit_setup)
+
     def test_startup_clears_empty_error_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -920,9 +931,11 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             self.assertTrue(server.run_save_job())
+            state = server.read_state()
             details = "\n".join(server.read_state()["last_details"])
             self.assertIn("Git changes prepared for commit (1):", details)
             self.assertIn("- Added: homeassistant/configuration.yaml", details)
+            self.assertEqual(state["last_message"], "Save finished successfully and pushed to Git.")
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
                 check=True,
@@ -1102,6 +1115,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job())
             state = server.read_state()
             self.assertEqual(state["conflicts"], [])
+            self.assertEqual(state["last_message"], "No live Home Assistant changes to save.")
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "same\n")
 
     def test_save_export_failure_does_not_dirty_checkout(self):

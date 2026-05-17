@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.8
+
+- Keep action results visible after async Save or Apply actions instead of racing them with display-state cleanup.
+- Report Save outcomes explicitly as pushed changes or no live changes.
+
 ## 0.6.7
 
 - Keep Save and Apply preview diffs complete instead of truncating long output.
