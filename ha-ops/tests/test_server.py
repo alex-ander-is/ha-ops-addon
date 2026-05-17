@@ -281,6 +281,36 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview"], "")
             self.assertEqual(state["last_preview_fingerprint"], "keep")
 
+    def test_refresh_clears_transient_conflicts_from_display_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_status": "conflicts",
+                    "last_message": "Resolve Git conflicts before continuing.",
+                    "conflicts": ["homeassistant/configuration.yaml"],
+                    "conflict_type": "save_unknown_base",
+                    "save_conflict_resolutions": {"homeassistant/configuration.yaml": "git"},
+                }
+            )
+
+            page = server.render_page()
+            self.assertIn('<div class="badge conflicts">conflicts</div>', page)
+            self.assertIn("<h2>Git Conflicts</h2>", page)
+
+            server.clear_display_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["conflicts"], [])
+            self.assertIsNone(state["conflict_type"])
+            self.assertEqual(state["save_conflict_resolutions"], {})
+            self.assertNotIn('<div class="badge conflicts">conflicts</div>', page)
+            self.assertNotIn("<h2>Git Conflicts</h2>", page)
+
     def test_startup_clears_empty_error_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2778,15 +2808,38 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
-            self.assertIn("Approve Deletion", page)
+            self.assertNotIn("Approve Deletion", page)
+            self.assertNotIn("Confirm Changes", page)
+            self.assertNotIn("Revert Changes", page)
 
-    def test_deleted_devices_preview_lists_devices(self):
+    def test_deleted_devices_preview_lists_entities_as_table(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
             storage = server.CONFIG_DIR / ".storage"
             storage.mkdir()
+            (storage / "core.area_registry").write_text(
+                json.dumps({"data": {"areas": [{"id": "bathroom", "name": "Bathroom"}]}})
+            )
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [],
+                            "deleted_entities": [
+                                {
+                                    "device_id": "deleted-1",
+                                    "area_id": "bathroom",
+                                    "entity_id": "sensor.bathroom_presence_illuminance",
+                                    "original_name": "Illuminance",
+                                    "original_device_class": "illuminance",
+                                }
+                            ],
+                        }
+                    }
+                )
+            )
             (storage / "core.device_registry").write_text(
                 json.dumps(
                     {
@@ -2798,7 +2851,7 @@ class ServerTests(unittest.TestCase):
                             "deleted_devices": [
                                 {
                                     "id": "deleted-1",
-                                    "name": "Old Button",
+                                    "name": "Bathroom Presence",
                                     "manufacturer": "Moes",
                                     "model": "Scene remote",
                                     "identifiers": [["mqtt", "old"]],
@@ -2813,8 +2866,27 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
 
             self.assertEqual(state["last_deleted_devices_count"], 1)
-            self.assertIn("Old Button", state["last_deleted_devices_preview"])
-            self.assertIn("identifiers=mqtt:old", state["last_deleted_devices_preview"])
+            self.assertEqual(
+                state["last_deleted_devices_rows"],
+                [
+                    {
+                        "area": "Bathroom",
+                        "entity_id": "sensor.bathroom_presence_illuminance",
+                        "original_name": "Illuminance",
+                        "original_device_class": "illuminance",
+                        "id": "deleted-1",
+                    }
+                ],
+            )
+            page = server.render_page()
+            self.assertIn("<th>Area</th>", page)
+            self.assertIn("<th>Entity ID</th>", page)
+            self.assertIn("sensor.bathroom_presence_illuminance", page)
+            self.assertIn("Illuminance", page)
+            self.assertIn("illuminance", page)
+            self.assertIn("deleted-1", page)
+            self.assertIn("Approve Deletion", page)
+            self.assertNotIn("identifiers=mqtt:old", page)
 
     def test_approve_deleted_devices_clears_array_with_core_stopped(self):
         server = load_server()
@@ -2981,7 +3053,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(state["last_deleted_devices_count"], 1)
             self.assertEqual(state["last_deleted_devices_fingerprint"], "fingerprint")
-            self.assertIn("<button type=\"submit\" >Approve Deletion</button>", page)
+            self.assertIn("Approve Deletion", page)
 
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()
@@ -3010,7 +3082,9 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Check deleted_devices</button>", page)
-            self.assertIn("<button type=\"submit\" disabled>Approve Deletion</button>", page)
+            self.assertNotIn("Approve Deletion", page)
+            self.assertIn("Confirm Changes", page)
+            self.assertIn("Revert Changes", page)
             self.assertFalse(server.run_deleted_devices_preview_job())
             self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
             self.assertFalse(server.run_deleted_devices_delete_job())
@@ -3044,8 +3118,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<button type=\"submit\" disabled>Save HA to Git</button>", page)
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", page)
             self.assertIn("<button type=\"submit\" disabled>Apply Git to HA</button>", page)
-            self.assertIn("<button type=\"submit\" class=\"secondary\" >Confirm Changes</button>", page)
-            self.assertIn("<button type=\"submit\" >Revert Changes</button>", page)
+            self.assertIn("Confirm Changes", page)
+            self.assertIn("Revert Changes", page)
 
     def test_failed_deleted_devices_preview_clears_old_approval(self):
         server = load_server()

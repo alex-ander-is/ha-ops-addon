@@ -204,6 +204,7 @@ def render_page(ctx):
     save_preview_text = state.get("last_save_preview") or "No save preview yet."
     save_diff_text = state.get("last_save_diff") or ""
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
+    deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     save_details_html = html.escape(save_preview_text)
     if save_diff_text and save_diff_text != save_preview_text:
         save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
@@ -229,6 +230,33 @@ def render_page(ctx):
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
     confirm_deletion_disabled = "disabled" if run_disabled or not deleted_devices_pending_confirmation else ""
+    deleted_devices_actions_html = ""
+    if deleted_devices_pending_confirmation:
+        deleted_devices_actions_html = (
+            "<div class='actions deletion-actions'>"
+            "<div class='action-row'>"
+            "<form method='post' action='deleted-devices-confirm' data-async-form='true'>"
+            f"<button type='submit' class='secondary' {confirm_deletion_disabled}>Confirm Changes</button>"
+            "</form>"
+            "<form method='post' action='deleted-devices-revert' data-async-form='true' "
+            "data-confirm='Stop Home Assistant Core and revert deleted_devices cleanup?'>"
+            f"<button type='submit' {confirm_deletion_disabled}>Revert Changes</button>"
+            "</form>"
+            "</div>"
+            "</div>"
+        )
+    elif deletion_ready:
+        deleted_devices_actions_html = (
+            "<div class='actions deletion-actions'>"
+            "<div class='action-row'>"
+            "<form method='post' action='deleted-devices-delete' data-async-form='true' "
+            "data-preserve-display-state='true' "
+            "data-confirm='Stop Home Assistant Core and remove all deleted_devices from core.device_registry?'>"
+            f"<button type='submit' {deletion_disabled}>Approve Deletion</button>"
+            "</form>"
+            "</div>"
+            "</div>"
+        )
     confirm_messages = []
     if not ctx.option_bool(options, "require_fresh_backup", True):
         confirm_messages.append("Fresh system backup checks are disabled.")
@@ -238,6 +266,14 @@ def render_page(ctx):
     if confirm_messages:
         confirm_message = " ".join(confirm_messages) + " Continue?"
         apply_confirm = f"data-confirm='{html.escape(confirm_message, quote=True)}'"
+    conflicts_section_html = ""
+    if has_conflicts:
+        conflicts_section_html = (
+            "<section class='card wide'>"
+            "<h2>Git Conflicts</h2>"
+            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'))}"
+            "</section>"
+        )
 
     return ui.render_page(
         {
@@ -270,7 +306,12 @@ def render_page(ctx):
             "deleted_devices_generated_at": html.escape(
                 ctx.format_time(state.get("last_deleted_devices_generated_at"), options)
             ),
-            "deleted_devices_preview_html": html.escape(deleted_devices_preview_text),
+            "deleted_devices_preview_html": (
+                ui.render_deleted_devices_table(deleted_devices_rows)
+                if state.get("last_deleted_devices_generated_at")
+                else html.escape(deleted_devices_preview_text)
+            ),
+            "deleted_devices_actions_html": deleted_devices_actions_html,
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
@@ -279,7 +320,7 @@ def render_page(ctx):
             "apply_action": apply_action,
             "apply_button_text": apply_button_text,
             "apply_confirm": apply_confirm,
-            "conflicts_html": ui.render_conflicts(conflict_items(ctx, state, options), state.get("conflict_type")),
+            "conflicts_section_html": conflicts_section_html,
             "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
             "targets_html": ui.render_targets(
                 target_state,

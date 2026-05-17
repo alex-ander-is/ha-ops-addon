@@ -209,6 +209,31 @@ def render_conflicts(conflicts, conflict_type=None):
     )
 
 
+def render_deleted_devices_table(rows):
+    if not rows:
+        return "<p>No deleted_devices entries found.</p>"
+    rendered_rows = []
+    for row in rows:
+        rendered_rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(row.get('area') or ''))}</td>"
+            f"<td><code>{html.escape(str(row.get('entity_id') or ''))}</code></td>"
+            f"<td>{html.escape(str(row.get('original_name') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('original_device_class') or ''))}</td>"
+            f"<td><code>{html.escape(str(row.get('id') or ''))}</code></td>"
+            "</tr>"
+        )
+    return (
+        "<div class='table-scroll'>"
+        "<table class='deleted-devices-table'>"
+        "<thead><tr><th>Area</th><th>Entity ID</th><th>Original Name</th>"
+        "<th>Original Device Class</th><th>ID</th></tr></thead>"
+        f"<tbody>{''.join(rendered_rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
 def target_addon_slug(item):
     return item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""
 
@@ -776,17 +801,6 @@ def render_page(data):
             <form method="post" action="deleted-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
             </form>
-            <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm="Stop Home Assistant Core and remove all deleted_devices from core.device_registry?">
-              <button type="submit" {data['deletion_disabled']}>Approve Deletion</button>
-            </form>
-          </div>
-          <div class="action-row">
-            <form method="post" action="deleted-devices-confirm" data-async-form="true">
-              <button type="submit" class="secondary" {data['confirm_deletion_disabled']}>Confirm Changes</button>
-            </form>
-            <form method="post" action="deleted-devices-revert" data-async-form="true" data-confirm="Stop Home Assistant Core and revert deleted_devices cleanup?">
-              <button type="submit" {data['confirm_deletion_disabled']}>Revert Changes</button>
-            </form>
           </div>
         </div>
       </section>
@@ -811,13 +825,11 @@ def render_page(data):
     <section class="card wide">
       <h2>Deletion of deleted_devices Preview</h2>
       <p>Generated at <span data-transient="deleted-devices-generated">{data['deleted_devices_generated_at']}</span></p>
-      <pre data-transient="deleted-devices-preview">{data['deleted_devices_preview_html']}</pre>
+      <div data-transient="deleted-devices-preview">{data['deleted_devices_preview_html']}</div>
+      {data['deleted_devices_actions_html']}
     </section>
 
-    <section class="card wide">
-      <h2>Git Conflicts</h2>
-      {data['conflicts_html']}
-    </section>
+    {data['conflicts_section_html']}
 
     <section class="card wide">
       <h2>Git Access</h2>
@@ -870,7 +882,7 @@ def render_page(data):
           savePreview.textContent = "No save preview yet.";
         }}
         if (deletedDevicesPreview) {{
-          deletedDevicesPreview.textContent = "No deleted_devices preview yet.";
+          deletedDevicesPreview.innerHTML = "No deleted_devices preview yet.";
         }}
         if (applyGenerated) {{
           applyGenerated.textContent = "";

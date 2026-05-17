@@ -16,6 +16,9 @@ DISPLAY_CLEAR_UPDATES = {
     "last_save_preview": "",
     "last_save_diff": "",
     "last_save_diff_generated_at": None,
+    "conflicts": [],
+    "conflict_type": None,
+    "save_conflict_resolutions": {},
 }
 
 
@@ -83,6 +86,7 @@ def default_state():
         "last_preview_storage_paths": [],
         "last_preview_approved_fingerprint": None,
         "last_deleted_devices_preview": "",
+        "last_deleted_devices_rows": [],
         "last_deleted_devices_count": 0,
         "last_deleted_devices_fingerprint": None,
         "last_deleted_devices_generated_at": None,
@@ -114,7 +118,17 @@ def write_state(path, updates):
 
 
 def clear_display_state(path):
-    return write_state(path, dict(DISPLAY_CLEAR_UPDATES))
+    updates = dict(DISPLAY_CLEAR_UPDATES)
+    current = read_state(path)
+    if current.get("last_status") == "conflicts":
+        updates.update(
+            {
+                "last_status": "idle",
+                "last_action": None,
+                "last_message": "Previous transient conflicts were cleared. Run an action when ready.",
+            }
+        )
+    return write_state(path, updates)
 
 
 def has_error_context(state):

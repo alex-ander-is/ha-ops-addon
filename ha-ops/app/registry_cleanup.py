@@ -9,6 +9,14 @@ def device_registry_path(config_dir):
     return Path(config_dir) / ".storage" / "core.device_registry"
 
 
+def entity_registry_path(config_dir):
+    return Path(config_dir) / ".storage" / "core.entity_registry"
+
+
+def area_registry_path(config_dir):
+    return Path(config_dir) / ".storage" / "core.area_registry"
+
+
 def fingerprint_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -19,6 +27,13 @@ def read_device_registry(config_dir):
         raise RuntimeError(f"Home Assistant device registry not found: {path}")
     text = path.read_text(encoding="utf-8")
     return path, text, json.loads(text)
+
+
+def read_optional_registry(path):
+    path = Path(path)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def rollback_dir(work_dir):
@@ -90,6 +105,47 @@ def deleted_device_label(device):
     return " | ".join(pieces) or json.dumps(device, ensure_ascii=False, sort_keys=True)
 
 
+def area_names(config_dir):
+    data = read_optional_registry(area_registry_path(config_dir))
+    areas = data.get("data", {}).get("areas", [])
+    return {area.get("id"): area.get("name") for area in areas if area.get("id")}
+
+
+def entities_by_device(config_dir):
+    data = read_optional_registry(entity_registry_path(config_dir))
+    entities = data.get("data", {}).get("entities", []) + data.get("data", {}).get("deleted_entities", [])
+    grouped = {}
+    for entity in entities:
+        device_id = entity.get("device_id")
+        if not device_id:
+            continue
+        grouped.setdefault(device_id, []).append(entity)
+    return grouped
+
+
+def deleted_device_rows(config_dir, devices):
+    areas = area_names(config_dir)
+    entities = entities_by_device(config_dir)
+    rows = []
+    for device in devices:
+        device_id = device.get("id") or ""
+        device_area = areas.get(device.get("area_id")) or device.get("area_id") or ""
+        related_entities = entities.get(device_id) or [None]
+        for entity in related_entities:
+            entity = entity or {}
+            area_id = entity.get("area_id") or device.get("area_id")
+            rows.append(
+                {
+                    "area": areas.get(area_id) or area_id or device_area,
+                    "entity_id": entity.get("entity_id") or "",
+                    "original_name": entity.get("original_name") or device.get("name") or device.get("name_by_user") or "",
+                    "original_device_class": entity.get("original_device_class") or "",
+                    "id": device_id,
+                }
+            )
+    return rows
+
+
 def build_deleted_devices_preview(config_dir):
     _path, text, data = read_device_registry(config_dir)
     devices = deleted_devices(data)
@@ -102,6 +158,7 @@ def build_deleted_devices_preview(config_dir):
         "count": len(devices),
         "fingerprint": fingerprint_text(text),
         "summary": "\n".join(lines),
+        "rows": deleted_device_rows(config_dir, devices),
     }
 
 

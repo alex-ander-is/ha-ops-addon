@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.1
+
+- Show deleted_devices candidates as an entity-aware table and keep cleanup actions next to the preview.
+- Clear transient conflict UI on manual page refresh while preserving conflicts during internal action reloads.
+
 ## 0.6.0
 
 - Add a two-step deleted_devices cleanup flow with preview and approved deletion from the live Home Assistant device registry.

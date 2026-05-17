@@ -92,6 +92,7 @@ def refresh_deleted_devices_preview_updates(ctx):
     preview = ctx.build_deleted_devices_preview()
     return {
         "last_deleted_devices_preview": preview["summary"],
+        "last_deleted_devices_rows": preview["rows"],
         "last_deleted_devices_count": preview["count"],
         "last_deleted_devices_fingerprint": preview["fingerprint"],
         "last_deleted_devices_generated_at": ctx.utc_now(),
@@ -381,6 +382,7 @@ def run_deleted_devices_preview_job(ctx):
             "last_message": "Checking deleted_devices.",
             "last_details": details,
             "last_deleted_devices_preview": "",
+            "last_deleted_devices_rows": [],
             "last_deleted_devices_count": 0,
             "last_deleted_devices_fingerprint": None,
             "last_deleted_devices_generated_at": None,
@@ -403,6 +405,7 @@ def run_deleted_devices_preview_job(ctx):
                 "last_message": message,
                 "last_details": details,
                 "last_deleted_devices_preview": preview["summary"],
+                "last_deleted_devices_rows": preview["rows"],
                 "last_deleted_devices_count": count,
                 "last_deleted_devices_fingerprint": preview["fingerprint"],
                 "last_deleted_devices_generated_at": utc_now(),
@@ -419,6 +422,7 @@ def run_deleted_devices_preview_job(ctx):
                 "last_message": str(exc),
                 "last_details": details,
                 "last_deleted_devices_preview": "",
+                "last_deleted_devices_rows": [],
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_fingerprint": None,
                 "last_deleted_devices_generated_at": None,
@@ -526,6 +530,7 @@ def run_deleted_devices_delete_job(ctx):
                 "last_details": details,
                 "last_backup_slug": backup_slug,
                 "last_deleted_devices_preview": "No deleted_devices entries found.",
+                "last_deleted_devices_rows": [],
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_fingerprint": result["fingerprint"],
                 "last_deleted_devices_generated_at": utc_now(),
@@ -565,6 +570,7 @@ def run_deleted_devices_delete_job(ctx):
                 **(
                     {
                         "last_deleted_devices_preview": "No deleted_devices entries found.",
+                        "last_deleted_devices_rows": [],
                         "last_deleted_devices_count": 0,
                         "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
                         "last_deleted_devices_generated_at": utc_now(),
@@ -579,6 +585,7 @@ def run_deleted_devices_delete_job(ctx):
                 **(
                     {
                         "last_deleted_devices_preview": "No deleted_devices entries found.",
+                        "last_deleted_devices_rows": [],
                         "last_deleted_devices_count": 0,
                         "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
                         "last_deleted_devices_generated_at": utc_now(),

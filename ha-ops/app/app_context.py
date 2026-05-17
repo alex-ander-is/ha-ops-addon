@@ -117,6 +117,7 @@ class AppContext:
                     "last_message": "Interrupted deleted_devices cleanup was reverted on startup.",
                     "last_details": details,
                     "last_deleted_devices_preview": preview["summary"],
+                    "last_deleted_devices_rows": preview["rows"],
                     "last_deleted_devices_count": preview["count"],
                     "last_deleted_devices_fingerprint": preview["fingerprint"],
                     "last_deleted_devices_generated_at": self.utc_now(),
@@ -147,6 +148,7 @@ class AppContext:
                     updates.update(
                         {
                             "last_deleted_devices_preview": preview["summary"],
+                            "last_deleted_devices_rows": preview["rows"],
                             "last_deleted_devices_count": preview["count"],
                             "last_deleted_devices_fingerprint": preview["fingerprint"],
                             "last_deleted_devices_generated_at": self.utc_now(),
