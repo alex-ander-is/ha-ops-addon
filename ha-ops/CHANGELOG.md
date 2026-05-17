@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.9
+
+- Ignore Home Assistant registry order-only changes in Save Preview and Save commits.
+
 ## 0.6.8
 
 - Keep action results visible after async Save or Apply actions instead of racing them with display-state cleanup.

@@ -1,5 +1,6 @@
 import fnmatch
 import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -486,6 +487,66 @@ def file_differs(src_path, dest_path):
         return True
 
 
+NORMALIZED_STORAGE_FILES = {"core.device_registry", "core.entity_registry"}
+
+
+def stable_json_key(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def normalized_storage_data(name, data):
+    if name == "core.device_registry":
+        devices = data.get("data", {}).get("devices")
+        if isinstance(devices, list):
+            for device in devices:
+                if not isinstance(device, dict):
+                    continue
+                connections = device.get("connections")
+                if isinstance(connections, list):
+                    device["connections"] = sorted(connections, key=stable_json_key)
+            devices.sort(key=lambda item: (str(item.get("id", "")) if isinstance(item, dict) else "", stable_json_key(item)))
+    elif name == "core.entity_registry":
+        entities = data.get("data", {}).get("entities")
+        if isinstance(entities, list):
+            entities.sort(
+                key=lambda item: (
+                    str(item.get("entity_id", "")) if isinstance(item, dict) else "",
+                    str(item.get("id", "")) if isinstance(item, dict) else "",
+                    stable_json_key(item),
+                )
+            )
+    return data
+
+
+def normalized_storage_bytes_from_text(name, text):
+    if name not in NORMALIZED_STORAGE_FILES:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    data = normalized_storage_data(name, data)
+    return stable_json_key(data).encode()
+
+
+def normalized_storage_bytes(path):
+    path = Path(path)
+    try:
+        return normalized_storage_bytes_from_text(path.name, path.read_text())
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def save_file_differs(src_path, dest_path):
+    if not dest_path.exists() or not dest_path.is_file():
+        return True
+    src_normalized = normalized_storage_bytes(src_path)
+    dest_normalized = normalized_storage_bytes(dest_path)
+    if src_normalized is not None and dest_normalized is not None:
+        return src_normalized != dest_normalized
+    return file_differs(src_path, dest_path)
+
+
 def is_excluded_path(path, root, patterns):
     relative = str(path.relative_to(root))
     return any(clean_path_matches(path, relative, pattern) for pattern in patterns)
@@ -803,6 +864,73 @@ def repo_relative_target(target, repo_dir, preview_repo):
     return updated
 
 
+def normalized_save_registry_paths(resolved_targets, repo_dir):
+    paths = []
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        if target.get("type") != "homeassistant":
+            continue
+        try:
+            source_relative = Path(target["source_path"]).relative_to(repo_dir)
+        except ValueError:
+            source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+        for name in sorted(NORMALIZED_STORAGE_FILES):
+            paths.append(source_relative / ".storage" / name)
+    return paths
+
+
+def restore_normalized_equal_save_files(repo_dir, dest_root, resolved_targets, details, ctx):
+    restored = []
+    repo_dir = Path(repo_dir)
+    dest_root = Path(dest_root)
+    for relative in normalized_save_registry_paths(resolved_targets, repo_dir):
+        source_file = repo_dir / relative
+        dest_file = dest_root / relative
+        if not source_file.exists() or not dest_file.exists():
+            continue
+        if file_differs(dest_file, source_file) and not save_file_differs(dest_file, source_file):
+            shutil.copy2(source_file, dest_file)
+            restored.append(relative.as_posix())
+    if restored:
+        ctx.add_detail(details, f"Ignored {len(restored)} registry order-only Save change(s).")
+    return restored
+
+
+def git_head_storage_text(repo_dir, relative, ctx):
+    result = ctx.run_command(["git", "show", f"HEAD:{relative.as_posix()}"], cwd=repo_dir)
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, ctx):
+    restored = []
+    repo_dir = Path(repo_dir)
+    for relative in normalized_save_registry_paths(resolved_targets, repo_dir):
+        path = repo_dir / relative
+        if not path.exists():
+            continue
+        head_text = git_head_storage_text(repo_dir, relative, ctx)
+        if head_text is None:
+            continue
+        head_bytes = normalized_storage_bytes_from_text(relative.name, head_text)
+        worktree_bytes = normalized_storage_bytes(path)
+        if head_bytes is None or worktree_bytes is None or head_bytes != worktree_bytes:
+            continue
+        try:
+            if path.read_text() == head_text:
+                continue
+        except (OSError, UnicodeDecodeError):
+            continue
+        checkout = ctx.run_command(["git", "checkout", "--", relative.as_posix()], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout normalized Save file failed:\n{checkout.stderr.strip()}")
+        restored.append(relative.as_posix())
+    if restored:
+        ctx.add_detail(details, f"Ignored {len(restored)} registry order-only Save change(s).")
+    return restored
+
+
 def save_preview_status_lines(repo_dir, preview_repo):
     repo_dir = Path(repo_dir)
     preview_repo = Path(preview_repo)
@@ -825,7 +953,7 @@ def save_preview_status_lines(repo_dir, preview_repo):
             lines.append(f"- Added: {path}")
         elif path not in after:
             lines.append(f"- Deleted: {path}")
-        elif before[path].read_bytes() != after[path].read_bytes():
+        elif save_file_differs(after[path], before[path]):
             lines.append(f"- Modified: {path}")
     return lines
 
@@ -847,10 +975,12 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx):
 
     preview_targets = [repo_relative_target(target, repo_dir, preview_repo) for target in resolved_targets]
     apply_save_export(preview_targets, export_root, details, ctx)
+    restore_normalized_equal_save_files(repo_dir, preview_repo, resolved_targets, details, ctx)
 
     status_lines = save_preview_status_lines(repo_dir, preview_repo)
     summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
-    return {"summary": summary, "diff": save_preview_diff(repo_dir, preview_repo, ctx.run_command)}
+    diff = save_preview_diff(repo_dir, preview_repo, ctx.run_command) if status_lines else ""
+    return {"summary": summary, "diff": diff}
 
 
 def export_target_to_path(target, dest, ctx):
@@ -900,7 +1030,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
             repo_relative = source_file.relative_to(repo_dir).as_posix()
             if resolutions.get(repo_relative) in {"ha", "git"}:
                 continue
-            if file_differs(exported_path, source_file):
+            if save_file_differs(exported_path, source_file):
                 conflicts.append(repo_relative)
 
         conflicts.extend(
@@ -930,7 +1060,7 @@ def save_deleted_source_conflicts(target, live_path, source_path, preview_path, 
         if resolutions.get(repo_relative) in {"ha", "git"}:
             continue
         live_file = live_path / relative
-        if not live_file.exists() or file_differs(live_file, source_file):
+        if not live_file.exists() or save_file_differs(live_file, source_file):
             conflicts.append(repo_relative)
     return conflicts
 
