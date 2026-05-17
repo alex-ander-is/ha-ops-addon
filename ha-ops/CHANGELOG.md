@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.4
+
+- Hide empty Apply Preview and Save Preview sections until their previews exist.
+- Allow confirming deleted_devices cleanup after harmless device registry changes when deleted_devices remains empty.
+- Merge deleted_devices during Revert so unrelated registry changes and newly added deleted_devices entries are preserved.
+- Log startup state and deleted_devices cleanup actions for troubleshooting.
+
 ## 0.6.3
 
 - Clear stale deleted_devices preview results on manual refresh unless a cleanup is pending confirmation.

@@ -2381,6 +2381,8 @@ class ServerTests(unittest.TestCase):
             events = []
             server.core_stop = lambda: events.append("stop")
             server.core_start = lambda: events.append("start")
+            logs = []
+            server.log = lambda message: logs.append(message)
             server.do_core_check = lambda: events.append("check")
 
             server.apply_targets(
@@ -2830,6 +2832,10 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertNotIn("Apply Preview", page)
+            self.assertNotIn("Save Preview", page)
+            self.assertNotIn("No apply preview yet.", page)
+            self.assertNotIn("No save preview yet.", page)
             self.assertNotIn("Deletion of deleted_devices Preview", page)
             self.assertNotIn("Approve Deletion", page)
             self.assertNotIn("Confirm Changes", page)
@@ -2937,6 +2943,8 @@ class ServerTests(unittest.TestCase):
             events = []
             server.core_stop = lambda: events.append("stop")
             server.core_start = lambda: events.append("start")
+            logs = []
+            server.log = lambda message: logs.append(message)
 
             self.assertTrue(server.run_deleted_devices_preview_job())
             self.assertTrue(server.run_deleted_devices_delete_job())
@@ -3375,7 +3383,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Manual recovery is required", state["last_message"])
             self.assertIn("restore failed", "\n".join(state["last_details"]))
 
-    def test_confirm_deleted_devices_fails_when_registry_changed_after_delete(self):
+    def test_confirm_deleted_devices_allows_unrelated_registry_changes_after_delete(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3403,13 +3411,85 @@ class ServerTests(unittest.TestCase):
             data["data"]["devices"].append({"id": "new-live"})
             registry_path.write_text(json.dumps(data))
 
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            state = server.read_state()
+
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertIn("Confirmed deleted_devices cleanup", state["last_message"])
+            self.assertIn("removed deleted_devices did not return", "\n".join(state["last_details"]))
+
+    def test_confirm_deleted_devices_allows_new_deleted_devices_after_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [],
+                            "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}],
+                        }
+                    }
+                )
+            )
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            data = json.loads(registry_path.read_text())
+            data["data"]["deleted_devices"] = [{"id": "deleted-2", "name": "Returned Button"}]
+            registry_path.write_text(json.dumps(data))
+
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            state = server.read_state()
+            data = json.loads(registry_path.read_text())
+
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertEqual(data["data"]["deleted_devices"], [{"id": "deleted-2", "name": "Returned Button"}])
+            self.assertIn("Confirmed deleted_devices cleanup", state["last_message"])
+            self.assertIn("new deleted_devices", "\n".join(state["last_details"]))
+
+    def test_confirm_deleted_devices_fails_when_removed_entry_returns_after_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [],
+                            "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}],
+                        }
+                    }
+                )
+            )
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            data = json.loads(registry_path.read_text())
+            data["data"]["deleted_devices"] = [{"id": "deleted-1", "name": "Old Button"}]
+            registry_path.write_text(json.dumps(data))
+
             self.assertFalse(server.run_deleted_devices_confirm_job())
             state = server.read_state()
 
             self.assertTrue(state["deleted_devices_pending_confirmation"])
-            self.assertIn("changed after deletion", state["last_message"])
+            self.assertIn("removed by this cleanup returned", state["last_message"])
 
-    def test_revert_deleted_devices_fails_when_registry_changed_after_delete(self):
+    def test_revert_deleted_devices_restores_only_deleted_devices(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3431,19 +3511,34 @@ class ServerTests(unittest.TestCase):
             events = []
             server.core_stop = lambda: events.append("stop")
             server.core_start = lambda: events.append("start")
+            logs = []
+            server.log = lambda message: logs.append(message)
 
             self.assertTrue(server.run_deleted_devices_preview_job())
             self.assertTrue(server.run_deleted_devices_delete_job())
             data = json.loads(registry_path.read_text())
             data["data"]["devices"].append({"id": "new-live"})
+            data["data"]["deleted_devices"] = [{"id": "deleted-2", "name": "New Deleted Button"}]
             registry_path.write_text(json.dumps(data))
 
-            self.assertFalse(server.run_deleted_devices_revert_job())
+            self.assertTrue(server.run_deleted_devices_revert_job())
             state = server.read_state()
+            data = json.loads(registry_path.read_text())
 
-            self.assertEqual(events, ["stop", "start"])
-            self.assertTrue(state["deleted_devices_pending_confirmation"])
-            self.assertIn("changed after deletion", state["last_message"])
+            self.assertEqual(events, ["stop", "start", "stop", "start"])
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertEqual(data["data"]["devices"], [{"id": "new-live"}])
+            self.assertEqual(
+                data["data"]["deleted_devices"],
+                [
+                    {"id": "deleted-2", "name": "New Deleted Button"},
+                    {"id": "deleted-1", "name": "Old Button"},
+                ],
+            )
+            self.assertIn("Reverted deleted_devices cleanup", state["last_message"])
+            self.assertIn("Preserved 1 current deleted_devices", "\n".join(state["last_details"]))
+            self.assertIn("Preserved other current core.device_registry changes", "\n".join(state["last_details"]))
+            self.assertIn("deleted_devices revert: restored deleted_devices", "\n".join(logs))
 
     def test_revert_deleted_devices_start_failure_disables_confirmation_after_restore(self):
         server = load_server()

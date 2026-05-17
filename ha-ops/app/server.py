@@ -304,6 +304,7 @@ def main():
         _CTX.log(f"Starting HA Ops { _CTX.addon_version() } on {_CTX.host}:{_CTX.port}")
         _CTX.releases_dir.mkdir(parents=True, exist_ok=True)
         _CTX.repair_startup_state()
+        _CTX.log_state_summary("Startup state")
         httpd = ThreadingHTTPServer((_CTX.host, _CTX.port), web.create_handler(_CTX))
         httpd.serve_forever()
     except Exception:

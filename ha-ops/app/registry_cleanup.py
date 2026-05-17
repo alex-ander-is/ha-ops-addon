@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import shutil
 from pathlib import Path
 
 
@@ -59,13 +58,24 @@ def restore_deleted_devices_rollback(config_dir, rollback_file):
     source = Path(rollback_file)
     if not source.exists():
         raise RuntimeError("deleted_devices rollback snapshot is missing.")
-    dest = device_registry_path(config_dir)
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    rollback_data = json.loads(source.read_text(encoding="utf-8"))
+    restored_devices = deleted_devices(rollback_data)
+
+    dest, _text, current_data = read_device_registry(config_dir)
+    current_devices = deleted_devices(current_data)
+    merged_devices = merge_deleted_devices(current_devices, restored_devices)
+    current_data.setdefault("data", {})["deleted_devices"] = merged_devices
+
     tmp_path = dest.with_name(f".{dest.name}.tmp")
-    shutil.copyfile(source, tmp_path)
+    tmp_path.write_text(json.dumps(current_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp_path, dest)
     text = dest.read_text(encoding="utf-8")
-    return {"fingerprint": fingerprint_text(text)}
+    return {
+        "fingerprint": fingerprint_text(text),
+        "restored": len(restored_devices),
+        "merged": len(merged_devices),
+        "preserved": len(current_devices),
+    }
 
 
 def discard_deleted_devices_rollback(rollback_file):
@@ -80,6 +90,44 @@ def discard_deleted_devices_rollback(rollback_file):
 
 def deleted_devices(data):
     return data.get("data", {}).get("deleted_devices", [])
+
+
+def deleted_device_key(device):
+    if isinstance(device, dict) and device.get("id"):
+        return ("id", str(device["id"]))
+    return ("json", json.dumps(device, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def merge_deleted_devices(current_devices, restored_devices):
+    merged = list(current_devices)
+    seen = {deleted_device_key(device) for device in merged}
+    for device in restored_devices:
+        key = deleted_device_key(device)
+        if key in seen:
+            continue
+        merged.append(device)
+        seen.add(key)
+    return merged
+
+
+def deleted_devices_cleanup_status(config_dir, rollback_file):
+    source = Path(rollback_file)
+    if not source.exists():
+        raise RuntimeError("deleted_devices rollback snapshot is missing.")
+    rollback_data = json.loads(source.read_text(encoding="utf-8"))
+    removed_devices = deleted_devices(rollback_data)
+    removed_keys = {deleted_device_key(device) for device in removed_devices}
+    _path, text, current_data = read_device_registry(config_dir)
+    current_devices = deleted_devices(current_data)
+    returned = [device for device in current_devices if deleted_device_key(device) in removed_keys]
+    added = [device for device in current_devices if deleted_device_key(device) not in removed_keys]
+    return {
+        "fingerprint": fingerprint_text(text),
+        "removed": len(removed_devices),
+        "current": len(current_devices),
+        "returned": len(returned),
+        "added": len(added),
+    }
 
 
 def deleted_device_label(device):

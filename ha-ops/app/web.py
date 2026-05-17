@@ -201,7 +201,7 @@ def render_page(ctx):
     details = "\n".join(state.get("last_details", []))
     details_placeholder = "Running..." if last_status == "running" else "No details yet."
     diff_text = state.get("last_diff", "")
-    save_preview_text = state.get("last_save_preview") or "No save preview yet."
+    save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
@@ -274,6 +274,28 @@ def render_page(ctx):
             f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'))}"
             "</section>"
         )
+    apply_preview_section_html = ""
+    if state.get("last_diff_generated_at") or diff_text:
+        apply_preview_section_html = (
+            "<section class='card wide'>"
+            "<h2>Apply Preview</h2>"
+            "<p>Generated at "
+            f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
+            "</p>"
+            f"<div data-transient='apply-preview'>{ui.render_conflict_detail(diff_text) if diff_text else ''}</div>"
+            "</section>"
+        )
+    save_preview_section_html = ""
+    if state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text:
+        save_preview_section_html = (
+            "<section class='card wide'>"
+            "<h2>Save Preview</h2>"
+            "<p>Generated at "
+            f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
+            "</p>"
+            f"<div data-transient='save-preview'>{save_details_html}</div>"
+            "</section>"
+        )
     deleted_devices_section_html = ""
     if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
         deleted_devices_preview_html = (
@@ -316,10 +338,8 @@ def render_page(ctx):
             "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
             "auth_mode": html.escape(ctx.git_auth_mode(options)),
             "details_html": html.escape(details or details_placeholder),
-            "diff_generated_at": html.escape(ctx.format_time(state.get("last_diff_generated_at"), options)),
-            "diff_html": ui.render_conflict_detail(diff_text) if diff_text else html.escape("No apply preview yet."),
-            "save_diff_generated_at": html.escape(ctx.format_time(state.get("last_save_diff_generated_at"), options)),
-            "save_details_html": save_details_html,
+            "apply_preview_section_html": apply_preview_section_html,
+            "save_preview_section_html": save_preview_section_html,
             "deleted_devices_section_html": deleted_devices_section_html,
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,

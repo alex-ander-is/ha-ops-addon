@@ -809,17 +809,9 @@ def render_page(data):
       </section>
     </div>
 
-    <section class="card wide">
-      <h2>Apply Preview</h2>
-      <p>Generated at <span data-transient="apply-generated">{data['diff_generated_at']}</span></p>
-      <div data-transient="apply-preview">{data['diff_html']}</div>
-    </section>
+    {data['apply_preview_section_html']}
 
-    <section class="card wide">
-      <h2>Save Preview</h2>
-      <p>Generated at <span data-transient="save-generated">{data['save_diff_generated_at']}</span></p>
-      <div data-transient="save-preview">{data['save_details_html']}</div>
-    </section>
+    {data['save_preview_section_html']}
 
     {data['deleted_devices_section_html']}
 
@@ -870,13 +862,13 @@ def render_page(data):
           details.textContent = "No details yet.";
         }}
         if (applyPreview) {{
-          applyPreview.textContent = "No apply preview yet.";
+          applyPreview.textContent = "";
         }}
         if (savePreview) {{
-          savePreview.textContent = "No save preview yet.";
+          savePreview.textContent = "";
         }}
         if (deletedDevicesPreview) {{
-          deletedDevicesPreview.innerHTML = "No deleted_devices preview yet.";
+          deletedDevicesPreview.innerHTML = "";
         }}
         if (applyGenerated) {{
           applyGenerated.textContent = "";

@@ -15,6 +15,7 @@ class JobContext:
     core_stop: Any
     create_deleted_devices_rollback: Any
     create_release_snapshot: Any
+    deleted_devices_cleanup_status: Any
     device_registry_fingerprint: Any
     discard_deleted_devices_rollback: Any
     enforce_apply_limits: Any
@@ -32,6 +33,7 @@ class JobContext:
     git_status_porcelain: Any
     load_manifest: Any
     load_options: Any
+    log: Any
     option_bool: Any
     prune_release_snapshots: Any
     push_branch: Any
@@ -69,6 +71,13 @@ def write_pending_conflicts(ctx, action, message, details=None, targets=None):
             "last_targets": targets or [],
         }
     )
+
+
+def log_action(ctx, message):
+    try:
+        ctx.log(message)
+    except Exception:
+        pass
 
 
 def pending_deleted_devices_message():
@@ -374,6 +383,7 @@ def run_deleted_devices_preview_job(ctx):
         return False
 
     details = []
+    log_action(ctx, "deleted_devices preview: started")
     write_state(
         {
             "last_run_at": utc_now(),
@@ -396,6 +406,7 @@ def run_deleted_devices_preview_job(ctx):
         ctx.add_detail(details, "Checking Home Assistant deleted_devices.")
         preview = ctx.build_deleted_devices_preview()
         count = preview["count"]
+        log_action(ctx, f"deleted_devices preview: found {count} deleted device(s)")
         message = f"Found {count} deleted_devices entr{'y' if count == 1 else 'ies'}."
         write_state(
             {
@@ -414,6 +425,7 @@ def run_deleted_devices_preview_job(ctx):
         return True
     except Exception as exc:
         details.append(str(exc))
+        log_action(ctx, f"deleted_devices preview: failed: {exc}")
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -458,6 +470,7 @@ def run_deleted_devices_delete_job(ctx):
     rollback = None
     restored_preview = None
     rollback_restore_failed = False
+    log_action(ctx, "deleted_devices delete: started")
     write_state(
         {
             "last_run_at": utc_now(),
@@ -500,6 +513,7 @@ def run_deleted_devices_delete_job(ctx):
         result = ctx.clear_deleted_devices(fingerprint)
         registry_changed = True
         removed = result["removed"]
+        log_action(ctx, f"deleted_devices delete: cleared {removed} deleted device(s)")
         ctx.add_detail(details, f"Removed {removed} deleted_devices entr{'y' if removed == 1 else 'ies'}.")
         ctx.add_detail(details, "Starting Home Assistant Core.")
         try:
@@ -518,8 +532,9 @@ def run_deleted_devices_delete_job(ctx):
                 ctx.discard_deleted_devices_rollback(rollback["path"])
                 details.append("Reverted deleted_devices cleanup because Home Assistant Core failed to start.")
                 registry_changed = False
-            raise
+                raise
         core_stopped = False
+        log_action(ctx, "deleted_devices delete: Core restarted, waiting for confirmation")
 
         write_state(
             {
@@ -543,6 +558,7 @@ def run_deleted_devices_delete_job(ctx):
         return True
     except Exception as exc:
         details.append(str(exc))
+        log_action(ctx, f"deleted_devices delete: failed: {exc}")
         if core_stopped:
             try:
                 ctx.core_start()
@@ -631,6 +647,7 @@ def run_deleted_devices_confirm_job(ctx):
         return False
 
     details = []
+    log_action(ctx, "deleted_devices confirm: started")
     write_state(
         {
             "last_run_at": utc_now(),
@@ -644,14 +661,25 @@ def run_deleted_devices_confirm_job(ctx):
         state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
             raise RuntimeError("No deleted_devices cleanup is pending confirmation.")
-        applied_fingerprint = state.get("deleted_devices_applied_fingerprint")
-        if not applied_fingerprint:
-            raise RuntimeError("deleted_devices applied registry fingerprint is missing.")
-        if ctx.device_registry_fingerprint() != applied_fingerprint:
-            raise RuntimeError("Device registry changed after deletion. Review manually before confirming.")
         rollback_path = state.get("deleted_devices_rollback_path")
-        if rollback_path:
-            ctx.discard_deleted_devices_rollback(rollback_path)
+        if not rollback_path:
+            raise RuntimeError("deleted_devices rollback snapshot is missing.")
+        applied_fingerprint = state.get("deleted_devices_applied_fingerprint")
+        cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
+        if cleanup_status["returned"] > 0:
+            raise RuntimeError("deleted_devices entries removed by this cleanup returned. Review manually before confirming.")
+        if applied_fingerprint and cleanup_status["fingerprint"] != applied_fingerprint:
+            if cleanup_status["added"] > 0:
+                details.append(
+                    f"Device registry contains {cleanup_status['added']} new deleted_devices entr"
+                    f"{'y' if cleanup_status['added'] == 1 else 'ies'}; keeping them."
+                )
+                log_action(ctx, "deleted_devices confirm: new deleted_devices are present and preserved")
+            else:
+                details.append("Device registry changed after deletion, but removed deleted_devices did not return.")
+                log_action(ctx, "deleted_devices confirm: registry fingerprint changed, removed deleted_devices did not return")
+        ctx.discard_deleted_devices_rollback(rollback_path)
+        log_action(ctx, "deleted_devices confirm: confirmed and discarded rollback")
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -668,6 +696,7 @@ def run_deleted_devices_confirm_job(ctx):
         return True
     except Exception as exc:
         details.append(str(exc))
+        log_action(ctx, f"deleted_devices confirm: failed: {exc}")
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -704,6 +733,7 @@ def run_deleted_devices_revert_job(ctx):
     core_stopped = False
     restore_applied = False
     result = None
+    log_action(ctx, "deleted_devices revert: started")
     write_state(
         {
             "last_run_at": utc_now(),
@@ -718,27 +748,26 @@ def run_deleted_devices_revert_job(ctx):
         state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
             raise RuntimeError("No deleted_devices cleanup is pending confirmation.")
-        applied_fingerprint = state.get("deleted_devices_applied_fingerprint")
-        if not applied_fingerprint:
-            raise RuntimeError("deleted_devices applied registry fingerprint is missing.")
-        if ctx.device_registry_fingerprint() != applied_fingerprint:
-            raise RuntimeError("Device registry changed after deletion. Review manually before reverting.")
         rollback_path = state.get("deleted_devices_rollback_path")
         if not rollback_path:
             raise RuntimeError("deleted_devices rollback snapshot is missing.")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
-        ctx.add_detail(details, "Stopping Home Assistant Core before reverting core.device_registry.")
+        ctx.add_detail(details, "Stopping Home Assistant Core before restoring deleted_devices.")
         ctx.core_stop()
         core_stopped = True
         result = ctx.restore_deleted_devices_rollback(rollback_path)
         restore_applied = True
-        ctx.add_detail(details, "Restored deleted_devices rollback snapshot.")
+        ctx.add_detail(details, f"Restored {result.get('restored', 0)} deleted_devices entry(s).")
+        if result.get("preserved", 0) > 0:
+            ctx.add_detail(details, f"Preserved {result.get('preserved', 0)} current deleted_devices entry(s).")
+        ctx.add_detail(details, "Preserved other current core.device_registry changes.")
         ctx.add_detail(details, "Starting Home Assistant Core.")
         ctx.core_start()
         core_stopped = False
         ctx.discard_deleted_devices_rollback(rollback_path)
         preview_updates = refresh_deleted_devices_preview_updates(ctx)
+        log_action(ctx, "deleted_devices revert: restored deleted_devices and restarted Core")
 
         write_state(
             {
@@ -758,6 +787,7 @@ def run_deleted_devices_revert_job(ctx):
         return True
     except Exception as exc:
         details.append(str(exc))
+        log_action(ctx, f"deleted_devices revert: failed: {exc}")
         if core_stopped:
             try:
                 ctx.core_start()

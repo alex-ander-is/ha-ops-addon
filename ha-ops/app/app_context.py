@@ -173,6 +173,16 @@ class AppContext:
     def log(self, message):
         print(f"[ha-ops] {message}", flush=True)
 
+    def log_state_summary(self, prefix="State"):
+        state = self.read_state()
+        pending = "yes" if state.get("deleted_devices_pending_confirmation") else "no"
+        rollback = "yes" if state.get("deleted_devices_rollback_path") else "no"
+        conflicts = len(state.get("conflicts") or [])
+        self.log(
+            f"{prefix}: status={state.get('last_status')} action={state.get('last_action')} "
+            f"pending_deleted_devices={pending} rollback={rollback} conflicts={conflicts}"
+        )
+
     def add_detail(self, details, message):
         details.append(message)
         self.write_state(
@@ -431,6 +441,9 @@ class AppContext:
     def create_deleted_devices_rollback(self, expected_fingerprint):
         return registry_cleanup.create_deleted_devices_rollback(self.config_dir, self.work_dir, expected_fingerprint)
 
+    def deleted_devices_cleanup_status(self, rollback_path):
+        return registry_cleanup.deleted_devices_cleanup_status(self.config_dir, rollback_path)
+
     def restore_deleted_devices_rollback(self, rollback_path):
         return registry_cleanup.restore_deleted_devices_rollback(self.config_dir, rollback_path)
 
@@ -575,6 +588,7 @@ class AppContext:
             core_stop=self.core_stop,
             create_release_snapshot=self.create_release_snapshot,
             create_deleted_devices_rollback=self.create_deleted_devices_rollback,
+            deleted_devices_cleanup_status=self.deleted_devices_cleanup_status,
             device_registry_fingerprint=self.device_registry_fingerprint,
             discard_deleted_devices_rollback=self.discard_deleted_devices_rollback,
             enforce_apply_limits=self.enforce_apply_limits,
@@ -592,6 +606,7 @@ class AppContext:
             git_status_porcelain=self.git_status_porcelain,
             load_manifest=self.load_manifest,
             load_options=self.load_options,
+            log=self.log,
             option_bool=self.option_bool,
             prune_release_snapshots=self.prune_release_snapshots,
             push_branch=self.push_branch,
