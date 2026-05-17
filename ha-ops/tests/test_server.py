@@ -507,6 +507,21 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(server.web.full_conflict_detail(detail), detail)
 
+    def test_save_preview_diff_is_not_truncated(self):
+        server = load_server()
+        diff = "x" * 70000
+
+        def run_command(_args):
+            return subprocess.CompletedProcess(_args, 1, stdout=diff, stderr="")
+
+        self.assertEqual(server.sync_logic.save_preview_diff("/repo", "/preview", run_command), diff)
+        self.assertNotIn("Diff truncated", server.sync_logic.save_preview_diff("/repo", "/preview", run_command))
+
+    def test_sync_code_has_no_diff_truncation_marker(self):
+        sync_source = (ROOT / "app" / "sync.py").read_text()
+
+        self.assertNotIn("Diff truncated", sync_source)
+
     def test_save_conflict_approve_all_records_ha_resolutions(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

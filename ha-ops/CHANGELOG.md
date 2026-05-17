@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.7
+
+- Keep Save and Apply preview diffs complete instead of truncating long output.
+- Document the planned device registry connection-order diff stabilization.
+
 ## 0.6.6
 
 - Show a colored deleted_devices diff while cleanup is pending so Confirm and Revert have visible consequences.

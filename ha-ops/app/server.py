@@ -100,7 +100,6 @@ _SYNC_EXPORTS = {
     "ensure_dir",
     "safe_preview_name",
     "fingerprint_text",
-    "truncate_diff",
     "count_preview_deletions",
 }
 _UI_EXPORTS = {

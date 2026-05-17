@@ -835,7 +835,7 @@ def save_preview_diff(repo_dir, preview_repo, run_command):
     if result.returncode == 0:
         return ""
     if result.returncode == 1:
-        return truncate_diff(result.stdout.strip())
+        return result.stdout.strip()
     raise RuntimeError(f"Save preview diff failed:\n{result.stderr.strip() or result.stdout.strip()}")
 
 
@@ -1133,13 +1133,6 @@ def fingerprint_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def truncate_diff(diff_text):
-    max_chars = 60000
-    if len(diff_text) > max_chars:
-        return diff_text[:max_chars] + "\n\n[Diff truncated. Use git or shell for full output.]"
-    return diff_text
-
-
 def preview_progress(ctx, details, message):
     ctx.log(message)
     if details is not None:
@@ -1180,7 +1173,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         diff_text = "No file changes."
 
     return {
-        "diff": truncate_diff(diff_text),
+        "diff": diff_text,
         "fingerprint": fingerprint_text(diff_text),
         "deletions": deletion_count,
         "skipped_protected": sorted(set(skipped_protected)),
