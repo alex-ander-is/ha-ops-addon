@@ -447,7 +447,7 @@ def render_page(data):
     }}
     .top-grid {{
       display: grid;
-      grid-template-columns: 800px minmax(500px, 1fr);
+      grid-template-columns: 700px minmax(500px, 1fr);
       gap: 16px;
       align-items: start;
     }}
@@ -741,7 +741,7 @@ def render_page(data):
         flex: none;
       }}
     }}
-    @media (max-width: 800px) {{
+    @media (max-width: 700px) {{
       main {{
         padding: 12px;
       }}
