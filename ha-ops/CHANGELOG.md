@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.3
+
+- Clear stale deleted_devices preview results on manual refresh unless a cleanup is pending confirmation.
+
+## 0.6.2
+
+- Clear transient success status on manual page refresh and simplify deleted_devices preview columns.
+
 ## 0.6.1
 
 - Show deleted_devices candidates as an entity-aware table and keep cleanup actions next to the preview.

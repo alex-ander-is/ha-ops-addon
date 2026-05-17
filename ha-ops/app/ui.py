@@ -217,17 +217,16 @@ def render_deleted_devices_table(rows):
         rendered_rows.append(
             "<tr>"
             f"<td>{html.escape(str(row.get('area') or ''))}</td>"
-            f"<td><code>{html.escape(str(row.get('entity_id') or ''))}</code></td>"
+            f"<td><code>{html.escape(str(row.get('id') or ''))}</code></td>"
             f"<td>{html.escape(str(row.get('original_name') or ''))}</td>"
             f"<td>{html.escape(str(row.get('original_device_class') or ''))}</td>"
-            f"<td><code>{html.escape(str(row.get('id') or ''))}</code></td>"
             "</tr>"
         )
     return (
         "<div class='table-scroll'>"
         "<table class='deleted-devices-table'>"
-        "<thead><tr><th>Area</th><th>Entity ID</th><th>Original Name</th>"
-        "<th>Original Device Class</th><th>ID</th></tr></thead>"
+        "<thead><tr><th>Area</th><th>ID</th><th>Original Name</th>"
+        "<th>Original Device Class</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
         "</div>"
@@ -822,12 +821,7 @@ def render_page(data):
       <div data-transient="save-preview">{data['save_details_html']}</div>
     </section>
 
-    <section class="card wide">
-      <h2>Deletion of deleted_devices Preview</h2>
-      <p>Generated at <span data-transient="deleted-devices-generated">{data['deleted_devices_generated_at']}</span></p>
-      <div data-transient="deleted-devices-preview">{data['deleted_devices_preview_html']}</div>
-      {data['deleted_devices_actions_html']}
-    </section>
+    {data['deleted_devices_section_html']}
 
     {data['conflicts_section_html']}
 

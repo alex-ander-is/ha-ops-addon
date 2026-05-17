@@ -311,6 +311,28 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<div class="badge conflicts">conflicts</div>', page)
             self.assertNotIn("<h2>Git Conflicts</h2>", page)
 
+    def test_refresh_clears_transient_success_status(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "success",
+                    "last_action": "save",
+                    "last_message": "Save finished successfully.",
+                }
+            )
+
+            server.clear_display_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["last_status"], "idle")
+            self.assertIsNone(state["last_action"])
+            self.assertNotIn('<div class="badge success">success</div>', page)
+            self.assertIn("Previous transient status was cleared", page)
+
     def test_startup_clears_empty_error_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2808,6 +2830,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertNotIn("Deletion of deleted_devices Preview", page)
             self.assertNotIn("Approve Deletion", page)
             self.assertNotIn("Confirm Changes", page)
             self.assertNotIn("Revert Changes", page)
@@ -2880,8 +2903,9 @@ class ServerTests(unittest.TestCase):
             )
             page = server.render_page()
             self.assertIn("<th>Area</th>", page)
-            self.assertIn("<th>Entity ID</th>", page)
-            self.assertIn("sensor.bathroom_presence_illuminance", page)
+            self.assertIn("<th>ID</th>", page)
+            self.assertNotIn("<th>Entity ID</th>", page)
+            self.assertNotIn("sensor.bathroom_presence_illuminance", page)
             self.assertIn("Illuminance", page)
             self.assertIn("illuminance", page)
             self.assertIn("deleted-1", page)
@@ -3032,7 +3056,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Old Button", state["last_deleted_devices_preview"])
             self.assertIn("start failed", state["last_message"])
 
-    def test_clear_display_state_preserves_deleted_devices_approval(self):
+    def test_refresh_clears_deleted_devices_preview_without_pending_cleanup(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3051,9 +3075,44 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             page = server.render_page()
 
-            self.assertEqual(state["last_deleted_devices_count"], 1)
-            self.assertEqual(state["last_deleted_devices_fingerprint"], "fingerprint")
-            self.assertIn("Approve Deletion", page)
+            self.assertEqual(state["last_deleted_devices_preview"], "")
+            self.assertEqual(state["last_deleted_devices_rows"], [])
+            self.assertEqual(state["last_deleted_devices_count"], 0)
+            self.assertIsNone(state["last_deleted_devices_fingerprint"])
+            self.assertIsNone(state["last_deleted_devices_generated_at"])
+            self.assertNotIn("Deletion of deleted_devices Preview", page)
+            self.assertNotIn("Approve Deletion", page)
+
+    def test_refresh_preserves_deleted_devices_preview_during_pending_cleanup(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_deleted_devices_preview": "No deleted_devices entries found.",
+                    "last_deleted_devices_rows": [],
+                    "last_deleted_devices_count": 0,
+                    "last_deleted_devices_fingerprint": "after",
+                    "last_deleted_devices_generated_at": "2026-05-16T12:00:00+00:00",
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": "/tmp/rollback",
+                    "deleted_devices_rollback_fingerprint": "before",
+                    "deleted_devices_applied_fingerprint": "after",
+                }
+            )
+
+            server.clear_display_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertEqual(state["last_deleted_devices_fingerprint"], "after")
+            self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
+            self.assertIn("Deletion of deleted_devices Preview", page)
+            self.assertIn("Confirm Changes", page)
+            self.assertIn("Revert Changes", page)
 
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()

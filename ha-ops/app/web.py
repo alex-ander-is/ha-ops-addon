@@ -274,6 +274,23 @@ def render_page(ctx):
             f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'))}"
             "</section>"
         )
+    deleted_devices_section_html = ""
+    if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
+        deleted_devices_preview_html = (
+            ui.render_deleted_devices_table(deleted_devices_rows)
+            if state.get("last_deleted_devices_generated_at")
+            else html.escape(deleted_devices_preview_text)
+        )
+        deleted_devices_section_html = (
+            "<section class='card wide'>"
+            "<h2>Deletion of deleted_devices Preview</h2>"
+            "<p>Generated at "
+            f"<span data-transient='deleted-devices-generated'>{html.escape(ctx.format_time(state.get('last_deleted_devices_generated_at'), options))}</span>"
+            "</p>"
+            f"<div data-transient='deleted-devices-preview'>{deleted_devices_preview_html}</div>"
+            f"{deleted_devices_actions_html}"
+            "</section>"
+        )
 
     return ui.render_page(
         {
@@ -303,15 +320,7 @@ def render_page(ctx):
             "diff_html": ui.render_conflict_detail(diff_text) if diff_text else html.escape("No apply preview yet."),
             "save_diff_generated_at": html.escape(ctx.format_time(state.get("last_save_diff_generated_at"), options)),
             "save_details_html": save_details_html,
-            "deleted_devices_generated_at": html.escape(
-                ctx.format_time(state.get("last_deleted_devices_generated_at"), options)
-            ),
-            "deleted_devices_preview_html": (
-                ui.render_deleted_devices_table(deleted_devices_rows)
-                if state.get("last_deleted_devices_generated_at")
-                else html.escape(deleted_devices_preview_text)
-            ),
-            "deleted_devices_actions_html": deleted_devices_actions_html,
+            "deleted_devices_section_html": deleted_devices_section_html,
             "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,

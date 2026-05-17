@@ -120,12 +120,22 @@ def write_state(path, updates):
 def clear_display_state(path):
     updates = dict(DISPLAY_CLEAR_UPDATES)
     current = read_state(path)
-    if current.get("last_status") == "conflicts":
+    if not current.get("deleted_devices_pending_confirmation"):
+        updates.update(
+            {
+                "last_deleted_devices_preview": "",
+                "last_deleted_devices_rows": [],
+                "last_deleted_devices_count": 0,
+                "last_deleted_devices_fingerprint": None,
+                "last_deleted_devices_generated_at": None,
+            }
+        )
+    if current.get("last_status") in {"success", "conflicts"}:
         updates.update(
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Previous transient conflicts were cleared. Run an action when ready.",
+                "last_message": "Previous transient status was cleared. Run an action when ready.",
             }
         )
     return write_state(path, updates)
