@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.5
+
+- Show pending deleted_devices cleanup as a decision state instead of a generic error.
+- Move action messages from the overview card into the Log panel and remove unclear preview deletion metadata from the overview.
+
 ## 0.6.4
 
 - Hide empty Apply Preview and Save Preview sections until their previews exist.

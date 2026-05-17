@@ -2832,6 +2832,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertIn("<h2>Log</h2>", page)
+            self.assertNotIn("<h2>Last Run Details</h2>", page)
+            self.assertNotIn("Preview deletions", page)
             self.assertNotIn("Apply Preview", page)
             self.assertNotIn("Save Preview", page)
             self.assertNotIn("No apply preview yet.", page)
@@ -3122,6 +3125,72 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
 
+    def test_pending_deleted_devices_cleanup_renders_decision_log_not_error(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [],
+                            "deleted_devices": [{"id": "deleted-2", "name": "New Deleted Button"}],
+                        }
+                    }
+                )
+            )
+            rollback_path = root / "work" / "deleted-devices-rollback" / "core.device_registry"
+            rollback_path.parent.mkdir(parents=True)
+            rollback_path.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [],
+                            "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}],
+                        }
+                    }
+                )
+            )
+            server.write_state(
+                {
+                    "last_status": "error",
+                    "last_action": "deleted_devices_revert",
+                    "last_message": "Device registry changed after deletion. Review manually before reverting.",
+                    "last_details": [],
+                    "last_deleted_devices_preview": "No deleted_devices entries found.",
+                    "last_deleted_devices_rows": [],
+                    "last_deleted_devices_count": 0,
+                    "last_deleted_devices_fingerprint": "after",
+                    "last_deleted_devices_generated_at": "2026-05-16T12:00:00+00:00",
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(rollback_path),
+                    "deleted_devices_rollback_fingerprint": "before",
+                    "deleted_devices_applied_fingerprint": "after",
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn('<div class="badge pending">pending decision</div>', page)
+            self.assertNotIn('<div class="badge error">error</div>', page)
+            self.assertIn("<h2>Log</h2>", page)
+            self.assertNotIn("<h2>Last Run Details</h2>", page)
+            self.assertNotIn("Preview deletions", page)
+            self.assertIn("deleted_devices cleanup is waiting for your decision.", page)
+            self.assertIn("Previous action: Revert Changes", page)
+            self.assertIn("Last result: Device registry changed after deletion. Review manually before reverting.", page)
+            self.assertIn("- removed by this cleanup: 1", page)
+            self.assertIn("- currently in deleted_devices: 1", page)
+            self.assertIn("- new deleted_devices after restart: 1", page)
+            self.assertIn("- removed entries returned: 0", page)
+            self.assertIn("Confirm Changes: keep this cleanup.", page)
+            self.assertIn("Revert Changes: restore only entries removed by this cleanup.", page)
+
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3149,7 +3218,7 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Check deleted_devices</button>", page)
-            self.assertNotIn("Approve Deletion", page)
+            self.assertNotIn("action='deleted-devices-delete'", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
             self.assertFalse(server.run_deleted_devices_preview_job())

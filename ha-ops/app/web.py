@@ -157,6 +157,69 @@ def conflict_items(ctx, state, options):
     return items
 
 
+def action_label(action):
+    return {
+        "apply": "Apply Git to HA",
+        "preview": "Preview Git to HA",
+        "save": "Save HA to Git",
+        "save_preview": "Preview HA to Git",
+        "deleted_devices_preview": "Check deleted_devices",
+        "deleted_devices_delete": "Approve Deletion",
+        "deleted_devices_confirm": "Confirm Changes",
+        "deleted_devices_revert": "Revert Changes",
+        "rollback": "Rollback",
+    }.get(action or "", action or "None")
+
+
+def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollback_path):
+    message = str(state.get("last_message") or "")
+    details = [str(item) for item in (state.get("last_details") or []) if str(item)]
+
+    if pending_deleted_devices and rollback_path:
+        lines = [
+            "deleted_devices cleanup is waiting for your decision.",
+            "",
+            f"Previous action: {action_label(state.get('last_action'))}",
+        ]
+        if message:
+            lines.append(f"Last result: {message}")
+        lines.extend(["", "Current state:"])
+        try:
+            cleanup = ctx.deleted_devices_cleanup_status(rollback_path)
+            lines.extend(
+                [
+                    f"- removed by this cleanup: {cleanup['removed']}",
+                    f"- currently in deleted_devices: {cleanup['current']}",
+                    f"- new deleted_devices after restart: {cleanup['added']}",
+                    f"- removed entries returned: {cleanup['returned']}",
+                ]
+            )
+        except Exception as exc:
+            lines.append(f"- rollback status unavailable: {exc}")
+        lines.extend(
+            [
+                "- rollback: available",
+                "",
+                "Confirm Changes: keep this cleanup. Entries removed by this cleanup stay removed. New deleted_devices entries are kept.",
+                "Revert Changes: restore only entries removed by this cleanup. Other registry changes and new deleted_devices entries are kept.",
+            ]
+        )
+        if details:
+            lines.extend(["", "Previous details:", *details])
+        return "\n".join(lines)
+
+    lines = []
+    if message:
+        lines.append(message)
+    if details:
+        if lines:
+            lines.append("")
+        lines.extend(details)
+    if lines:
+        return "\n".join(lines)
+    return "Running..." if last_status == "running" else "No log entries yet."
+
+
 def render_page(ctx):
     options = ctx.load_options()
     state = ctx.read_state()
@@ -197,9 +260,17 @@ def render_page(ctx):
     )
     last_status = state.get("last_status", "idle")
     has_conflicts = bool(state.get("conflicts"))
-    display_status = "conflicts" if has_conflicts else last_status
-    details = "\n".join(state.get("last_details", []))
-    details_placeholder = "Running..." if last_status == "running" else "No details yet."
+    deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
+    deleted_devices_rollback_path = state.get("deleted_devices_rollback_path")
+    pending_deleted_devices_decision = bool(deleted_devices_pending_confirmation and deleted_devices_rollback_path)
+    display_status = "conflicts" if has_conflicts else "pending decision" if pending_deleted_devices_decision else last_status
+    details = log_text_for_state(
+        ctx,
+        state,
+        last_status,
+        deleted_devices_pending_confirmation,
+        deleted_devices_rollback_path,
+    )
     diff_text = state.get("last_diff", "")
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
@@ -211,7 +282,6 @@ def render_page(ctx):
     elif save_diff_text:
         save_details_html = ui.render_conflict_detail(save_diff_text)
     run_disabled = "disabled" if last_status == "running" else ""
-    deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     storage_approval_pending = bool(
         state.get("last_preview_storage_changes")
@@ -320,6 +390,8 @@ def render_page(ctx):
             "badge_class": (
                 "conflicts"
                 if has_conflicts
+                else "pending"
+                if pending_deleted_devices_decision
                 else "error"
                 if last_status == "error"
                 else "interrupted"
@@ -328,7 +400,6 @@ def render_page(ctx):
                 if last_status == "running"
                 else ""
             ),
-            "message": html.escape(state.get("last_message", "")),
             "last_run": html.escape(ctx.format_time(state.get("last_run_at"), options)),
             "last_release": html.escape(str(state.get("last_release"))),
             "last_backup_slug": html.escape(str(state.get("last_backup_slug"))),
@@ -337,11 +408,10 @@ def render_page(ctx):
             "branch": html.escape(options.get("repo_branch", "main")),
             "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
             "auth_mode": html.escape(ctx.git_auth_mode(options)),
-            "details_html": html.escape(details or details_placeholder),
+            "details_html": html.escape(details),
             "apply_preview_section_html": apply_preview_section_html,
             "save_preview_section_html": save_preview_section_html,
             "deleted_devices_section_html": deleted_devices_section_html,
-            "preview_deletions": html.escape(str(state.get("last_preview_deletions"))),
             "action_disabled": action_disabled,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "deletion_disabled": deletion_disabled,

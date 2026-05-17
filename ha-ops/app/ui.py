@@ -530,6 +530,11 @@ def render_page(data):
       color: var(--ha-warning);
       border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
     }}
+    .badge.pending {{
+      background: color-mix(in srgb, var(--ha-warning) 14%, transparent);
+      color: var(--ha-warning);
+      border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
+    }}
     .actions {{
       display: flex;
       flex-direction: column;
@@ -773,10 +778,7 @@ def render_page(data):
           <dd><code>{data['last_backup_slug']}</code></dd>
           <dt>Latest system backup</dt>
           <dd>{data['latest_backup']}</dd>
-          <dt>Preview deletions</dt>
-          <dd><code>{data['preview_deletions']}</code></dd>
         </dl>
-        <p>{data['message']}</p>
         <p id="client-status" class="client-status"></p>
         {data['organizer_html']}
         <div class="actions">
@@ -804,7 +806,7 @@ def render_page(data):
         </div>
       </section>
       <section class="card details-card">
-        <h2>Last Run Details</h2>
+        <h2>Log</h2>
         <pre data-transient="details">{data['details_html']}</pre>
       </section>
     </div>
@@ -859,7 +861,7 @@ def render_page(data):
         const saveGenerated = document.querySelector("[data-transient='save-generated']");
         const deletedDevicesGenerated = document.querySelector("[data-transient='deleted-devices-generated']");
         if (details) {{
-          details.textContent = "No details yet.";
+          details.textContent = "No log entries yet.";
         }}
         if (applyPreview) {{
           applyPreview.textContent = "";
