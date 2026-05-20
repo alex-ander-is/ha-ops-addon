@@ -583,6 +583,30 @@ def normalized_storage_text_from_path(path):
     return normalized
 
 
+def write_normalized_storage_file(src_path, dest_path):
+    text = normalized_storage_text_from_path(src_path)
+    if text is None:
+        return False
+    dest_path = Path(dest_path)
+    ensure_dir(dest_path.parent)
+    dest_path.write_text(text)
+    return True
+
+
+def normalize_storage_file_pair_for_diff(left_path, right_path, dest_root):
+    left_path = Path(left_path)
+    right_path = Path(right_path)
+    if left_path.name not in NORMALIZED_STORAGE_FILES or right_path.name != left_path.name:
+        return None
+    left_dest = Path(dest_root) / "left" / left_path.name
+    right_dest = Path(dest_root) / "right" / right_path.name
+    if not write_normalized_storage_file(left_path, left_dest):
+        return None
+    if not write_normalized_storage_file(right_path, right_dest):
+        return None
+    return left_dest, right_dest
+
+
 def normalized_storage_bytes(path):
     path = Path(path)
     try:
@@ -985,6 +1009,33 @@ def restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, 
     return restored
 
 
+def normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details, ctx):
+    normalized = []
+    repo_dir = Path(repo_dir)
+    for relative in normalized_save_registry_paths(resolved_targets, repo_dir):
+        path = repo_dir / relative
+        if not path.exists():
+            continue
+        head_text = git_head_storage_text(repo_dir, relative, ctx)
+        if head_text is None:
+            continue
+        try:
+            path_text = path.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        current_text = normalized_storage_pretty_text_from_text(relative.name, path_text)
+        head_bytes = normalized_storage_bytes_from_text(relative.name, head_text)
+        current_bytes = normalized_storage_bytes_from_text(relative.name, path_text)
+        if current_text is None or head_bytes is None or current_bytes is None or head_bytes == current_bytes:
+            continue
+        if path_text != current_text:
+            path.write_text(current_text)
+            normalized.append(relative.as_posix())
+    if normalized:
+        ctx.add_detail(details, f"Normalized {len(normalized)} changed registry file(s) for Git.")
+    return normalized
+
+
 def save_preview_status_lines(repo_dir, preview_repo):
     repo_dir = Path(repo_dir)
     preview_repo = Path(preview_repo)
@@ -1027,12 +1078,8 @@ def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
         preview_file = preview_copy / relative
         if not repo_file.exists() or not preview_file.exists():
             continue
-        repo_text = normalized_storage_text_from_path(repo_file)
-        preview_text = normalized_storage_text_from_path(preview_file)
-        if repo_text is None or preview_text is None:
-            continue
-        repo_file.write_text(repo_text)
-        preview_file.write_text(preview_text)
+        write_normalized_storage_file(repo_file, repo_file)
+        write_normalized_storage_file(preview_file, preview_file)
 
 
 def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):

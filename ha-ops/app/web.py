@@ -97,24 +97,12 @@ def file_diff(ctx, left_label, left_path, right_label, right_path):
 
 
 def normalized_save_conflict_file_diff(ctx, left_label, left_path, right_label, right_path):
-    left_path = Path(left_path)
-    right_path = Path(right_path)
-    if left_path.name not in sync_logic.NORMALIZED_STORAGE_FILES:
-        return file_diff(ctx, left_label, left_path, right_label, right_path)
-    left_text = sync_logic.normalized_storage_text_from_path(left_path)
-    right_text = sync_logic.normalized_storage_text_from_path(right_path)
-    if left_text is None or right_text is None:
-        return file_diff(ctx, left_label, left_path, right_label, right_path)
-
     diff_root = ctx.work_dir / "save-conflict-diff"
-    left_copy = diff_root / "git" / left_path.name
-    right_copy = diff_root / "ha" / right_path.name
     ctx.clear_tree(diff_root)
-    left_copy.parent.mkdir(parents=True, exist_ok=True)
-    right_copy.parent.mkdir(parents=True, exist_ok=True)
-    left_copy.write_text(left_text)
-    right_copy.write_text(right_text)
-    return file_diff(ctx, left_label, left_copy, right_label, right_copy)
+    normalized_pair = sync_logic.normalize_storage_file_pair_for_diff(left_path, right_path, diff_root)
+    if normalized_pair is None:
+        return file_diff(ctx, left_label, left_path, right_label, right_path)
+    return file_diff(ctx, left_label, normalized_pair[0], right_label, normalized_pair[1])
 
 
 def save_conflict_detail(ctx, repo_dir, targets, path):

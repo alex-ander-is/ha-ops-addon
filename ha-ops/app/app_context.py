@@ -432,6 +432,9 @@ class AppContext:
     def restore_normalized_equal_save_worktree(self, repo_dir, resolved_targets, details):
         return sync_logic.restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, self.sync_deps())
 
+    def normalize_changed_save_registry_worktree(self, repo_dir, resolved_targets, details):
+        return sync_logic.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details, self.sync_deps())
+
     def build_deleted_devices_preview(self):
         return registry_cleanup.build_deleted_devices_preview(self.config_dir)
 
@@ -620,6 +623,7 @@ class AppContext:
             release_now=self.release_now,
             repo_checkout_path=self.repo_checkout_path,
             reset_repo_worktree=self.reset_repo_worktree,
+            normalize_changed_save_registry_worktree=self.normalize_changed_save_registry_worktree,
             restore_normalized_equal_save_worktree=self.restore_normalized_equal_save_worktree,
             restore_save_git_resolutions=self.restore_save_git_resolutions,
             resolve_targets=self.resolve_targets,

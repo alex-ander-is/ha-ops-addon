@@ -817,6 +817,65 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(restored, ["homeassistant/.storage/core.device_registry"])
             self.assertEqual(self.git(["status", "--porcelain"], repo).stdout.strip(), "")
 
+    def test_save_normalizes_changed_registry_worktree_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            storage = repo / "homeassistant" / ".storage"
+            storage.mkdir(parents=True)
+            committed_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-1",
+                            "connections": [["b", "2"], ["a", "1"]],
+                            "modified_at": "old-noise",
+                            "sw_version": "1",
+                        }
+                    ]
+                }
+            }
+            exported_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-1",
+                            "connections": [["a", "1"], ["b", "2"]],
+                            "modified_at": "new-noise",
+                            "sw_version": "2",
+                        }
+                    ]
+                }
+            }
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps(committed_registry))
+            self.git_commit_all(repo, "base")
+            registry_path.write_text(json.dumps(exported_registry))
+
+            class Ctx:
+                def run_command(self, args, cwd=None):
+                    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+
+                def add_detail(self, details, detail):
+                    details.append(detail)
+
+            normalized = server.sync_logic.normalize_changed_save_registry_worktree(
+                repo,
+                [{"id": "homeassistant", "type": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                [],
+                Ctx(),
+            )
+            saved = json.loads(registry_path.read_text())
+
+            self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
+            self.assertEqual(saved["data"]["devices"][0]["connections"], [["a", "1"], ["b", "2"]])
+            self.assertNotIn("modified_at", saved["data"]["devices"][0])
+            self.assertIn("\n  ", registry_path.read_text())
+
     def test_sync_code_has_no_diff_truncation_marker(self):
         sync_source = (ROOT / "app" / "sync.py").read_text()
 

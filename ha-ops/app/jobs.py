@@ -41,6 +41,7 @@ class JobContext:
     release_now: Any
     repo_checkout_path: Any
     reset_repo_worktree: Any
+    normalize_changed_save_registry_worktree: Any
     restore_normalized_equal_save_worktree: Any
     restore_save_git_resolutions: Any
     resolve_targets: Any
@@ -215,6 +216,7 @@ def run_save_job(ctx):
         checkout_dirty_for_save = True
         ctx.export_targets(resolved_targets, details)
         ctx.restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details)
+        ctx.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details)
         ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
         ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
         ctx.stage_all(repo_dir)

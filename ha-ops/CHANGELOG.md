@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.14
+
+- Save normalized Home Assistant registry files to Git when real registry changes are committed.
+
 ## 0.6.13
 
 - Use the same normalized Home Assistant registry diff in Save conflict details as in Save Preview.
