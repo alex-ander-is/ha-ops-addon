@@ -488,33 +488,67 @@ def file_differs(src_path, dest_path):
 
 
 NORMALIZED_STORAGE_FILES = {"core.device_registry", "core.entity_registry"}
+DEVICE_REGISTRY_COLLECTION_KEYS = {
+    "devices": ("id",),
+    "deleted_devices": ("id",),
+}
+ENTITY_REGISTRY_COLLECTION_KEYS = {
+    "entities": ("id", "entity_id", "unique_id"),
+    "deleted_entities": ("id", "entity_id", "unique_id"),
+}
 
 
 def stable_json_key(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def stable_collection_key(keys, item):
+    if not isinstance(item, dict):
+        return (stable_json_key(item),)
+    return (*[str(item.get(key) or "") for key in keys], stable_json_key(item))
+
+
+def sort_json_list(value):
+    if isinstance(value, list):
+        value.sort(key=stable_json_key)
+
+
+def normalize_device_registry_item(item):
+    if not isinstance(item, dict):
+        return
+    item.pop("modified_at", None)
+    sort_json_list(item.get("connections"))
+    subentries = item.get("config_entries_subentries")
+    if isinstance(subentries, dict):
+        for values in subentries.values():
+            sort_json_list(values)
+
+
+def normalize_entity_registry_item(item):
+    if not isinstance(item, dict):
+        return
+    item.pop("modified_at", None)
+    item.pop("suggested_object_id", None)
+    if item.get("platform") == "mobile_app":
+        item.pop("original_icon", None)
+
+
+def normalize_registry_collection(data, name, keys, item_normalizer):
+    collection = data.get("data", {}).get(name)
+    if not isinstance(collection, list):
+        return
+    for item in collection:
+        item_normalizer(item)
+    collection.sort(key=lambda item: stable_collection_key(keys, item))
+
+
 def normalized_storage_data(name, data):
     if name == "core.device_registry":
-        devices = data.get("data", {}).get("devices")
-        if isinstance(devices, list):
-            for device in devices:
-                if not isinstance(device, dict):
-                    continue
-                connections = device.get("connections")
-                if isinstance(connections, list):
-                    device["connections"] = sorted(connections, key=stable_json_key)
-            devices.sort(key=lambda item: (str(item.get("id", "")) if isinstance(item, dict) else "", stable_json_key(item)))
+        for collection, keys in DEVICE_REGISTRY_COLLECTION_KEYS.items():
+            normalize_registry_collection(data, collection, keys, normalize_device_registry_item)
     elif name == "core.entity_registry":
-        entities = data.get("data", {}).get("entities")
-        if isinstance(entities, list):
-            entities.sort(
-                key=lambda item: (
-                    str(item.get("entity_id", "")) if isinstance(item, dict) else "",
-                    str(item.get("id", "")) if isinstance(item, dict) else "",
-                    stable_json_key(item),
-                )
-            )
+        for collection, keys in ENTITY_REGISTRY_COLLECTION_KEYS.items():
+            normalize_registry_collection(data, collection, keys, normalize_entity_registry_item)
     return data
 
 
@@ -892,7 +926,7 @@ def restore_normalized_equal_save_files(repo_dir, dest_root, resolved_targets, d
             shutil.copy2(source_file, dest_file)
             restored.append(relative.as_posix())
     if restored:
-        ctx.add_detail(details, f"Ignored {len(restored)} registry order-only Save change(s).")
+        ctx.add_detail(details, f"Ignored {len(restored)} registry noise-only Save change(s).")
     return restored
 
 
@@ -927,7 +961,7 @@ def restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, 
             raise RuntimeError(f"git checkout normalized Save file failed:\n{checkout.stderr.strip()}")
         restored.append(relative.as_posix())
     if restored:
-        ctx.add_detail(details, f"Ignored {len(restored)} registry order-only Save change(s).")
+        ctx.add_detail(details, f"Ignored {len(restored)} registry noise-only Save change(s).")
     return restored
 
 

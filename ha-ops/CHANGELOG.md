@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.10
+
+- Ignore additional Home Assistant registry noise-only changes in Save Preview and Save commits while preserving real registry state changes.
+- Explain Release Snapshots before the empty snapshot state.
+
 ## 0.6.9
 
 - Ignore Home Assistant registry order-only changes in Save Preview and Save commits.

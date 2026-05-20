@@ -541,7 +541,11 @@ class ServerTests(unittest.TestCase):
             repo_registry = {
                 "data": {
                     "devices": [
-                        {"id": "device-1", "connections": [["b", "2"], ["a", "1"]]},
+                        {
+                            "id": "device-1",
+                            "connections": [["b", "2"], ["a", "1"]],
+                            "config_entries_subentries": {"entry": [None, "b", "a"]},
+                        },
                         {"id": "device-2", "connections": []},
                     ]
                 }
@@ -550,12 +554,75 @@ class ServerTests(unittest.TestCase):
                 "data": {
                     "devices": [
                         {"id": "device-2", "connections": []},
-                        {"id": "device-1", "connections": [["a", "1"], ["b", "2"]]},
+                        {
+                            "id": "device-1",
+                            "connections": [["a", "1"], ["b", "2"]],
+                            "config_entries_subentries": {"entry": ["a", "b", None]},
+                        },
                     ]
                 }
             }
             (repo_storage / "core.device_registry").write_text(json.dumps(repo_registry))
             (preview_storage / "core.device_registry").write_text(json.dumps(preview_registry))
+
+            self.assertEqual(server.sync_logic.save_preview_status_lines(repo, preview), [])
+
+    def test_save_preview_ignores_registry_volatile_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            preview = root / "preview"
+            repo_storage = repo / "homeassistant" / ".storage"
+            preview_storage = preview / "homeassistant" / ".storage"
+            repo_storage.mkdir(parents=True)
+            preview_storage.mkdir(parents=True)
+            repo_device = {"data": {"devices": [{"id": "device-1", "modified_at": "old"}]}}
+            preview_device = {"data": {"devices": [{"id": "device-1", "modified_at": "new"}]}}
+            repo_entity = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "platform": "mqtt",
+                            "suggested_object_id": "test",
+                            "modified_at": "old",
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "platform": "mobile_app",
+                            "original_icon": "mdi:battery-10",
+                            "modified_at": "old",
+                        },
+                    ]
+                }
+            }
+            preview_entity = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "platform": "mqtt",
+                            "suggested_object_id": "test_2",
+                            "modified_at": "new",
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "platform": "mobile_app",
+                            "original_icon": "mdi:battery-90",
+                            "modified_at": "new",
+                        },
+                    ]
+                }
+            }
+            (repo_storage / "core.device_registry").write_text(json.dumps(repo_device))
+            (preview_storage / "core.device_registry").write_text(json.dumps(preview_device))
+            (repo_storage / "core.entity_registry").write_text(json.dumps(repo_entity))
+            (preview_storage / "core.entity_registry").write_text(json.dumps(preview_entity))
 
             self.assertEqual(server.sync_logic.save_preview_status_lines(repo, preview), [])
 
@@ -569,17 +636,82 @@ class ServerTests(unittest.TestCase):
             preview_storage = preview / "homeassistant" / ".storage"
             repo_storage.mkdir(parents=True)
             preview_storage.mkdir(parents=True)
-            repo_registry = {"data": {"devices": [{"id": "device-1", "connections": [["a", "1"]]}]}}
-            preview_registry = {"data": {"devices": [{"id": "device-1", "connections": [["a", "1"], ["b", "2"]]}]}}
-            (repo_storage / "core.device_registry").write_text(json.dumps(repo_registry))
-            (preview_storage / "core.device_registry").write_text(json.dumps(preview_registry))
+            repo_device = {
+                "data": {
+                    "devices": [{"id": "device-1", "connections": [["a", "1"]], "sw_version": "1"}],
+                    "deleted_devices": [{"id": "deleted-1"}],
+                }
+            }
+            preview_device = {
+                "data": {
+                    "devices": [{"id": "device-1", "connections": [["a", "1"], ["b", "2"]], "sw_version": "2"}],
+                    "deleted_devices": [],
+                }
+            }
+            repo_entity = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "media_player.radio",
+                            "capabilities": {"source_list": ["A", "B"]},
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.test",
+                            "platform": "mqtt",
+                            "disabled_by": "integration",
+                            "options": {},
+                        },
+                        {
+                            "id": "entity-3",
+                            "entity_id": "sensor.icon",
+                            "platform": "mqtt",
+                            "original_icon": "mdi:a",
+                        },
+                    ],
+                    "deleted_entities": [{"id": "deleted-entity-1"}],
+                }
+            }
+            preview_entity = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "media_player.radio",
+                            "capabilities": {"source_list": ["A"]},
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.test",
+                            "platform": "mqtt",
+                            "disabled_by": None,
+                            "options": {"conversation": {"should_expose": False}},
+                        },
+                        {
+                            "id": "entity-3",
+                            "entity_id": "sensor.icon",
+                            "platform": "mqtt",
+                            "original_icon": "mdi:b",
+                        },
+                    ],
+                    "deleted_entities": [],
+                }
+            }
+            (repo_storage / "core.device_registry").write_text(json.dumps(repo_device))
+            (preview_storage / "core.device_registry").write_text(json.dumps(preview_device))
+            (repo_storage / "core.entity_registry").write_text(json.dumps(repo_entity))
+            (preview_storage / "core.entity_registry").write_text(json.dumps(preview_entity))
 
             self.assertEqual(
                 server.sync_logic.save_preview_status_lines(repo, preview),
-                ["- Modified: homeassistant/.storage/core.device_registry"],
+                [
+                    "- Modified: homeassistant/.storage/core.device_registry",
+                    "- Modified: homeassistant/.storage/core.entity_registry",
+                ],
             )
 
-    def test_save_restores_registry_order_only_worktree_changes(self):
+    def test_save_restores_registry_noise_only_worktree_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

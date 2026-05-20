@@ -332,8 +332,9 @@ def render_targets(
 
 
 def render_releases(releases):
+    intro = "<p>Snapshots let HA Ops roll back a Git-to-HA apply to a saved local state.</p>"
     if not releases:
-        return "<p>No local release snapshots yet.</p>"
+        return f"{intro}<p>No local release snapshots yet.</p>"
 
     rows = []
     for release in releases[:12]:
@@ -355,6 +356,7 @@ def render_releases(releases):
         )
 
     return (
+        f"{intro}"
         "<table><thead><tr><th>Release</th><th>Created</th><th>HA Backup</th><th>Action</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
