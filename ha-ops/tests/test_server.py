@@ -1328,6 +1328,73 @@ class ServerTests(unittest.TestCase):
             self.assertIn("git", page)
             self.assertIn("ha", page)
 
+    def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            registry = seed / "homeassistant" / ".storage" / "core.device_registry"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "old-noise",
+                                    "sw_version": "1",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (seed / "homeassistant" / "configuration.yaml").unlink()
+            self.git_commit_all(seed, "registry")
+            self.git(["push", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "new-noise",
+                                    "sw_version": "2",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            page = server.render_page()
+            self.assertIn("Git: homeassistant/.storage/core.device_registry", page)
+            self.assertIn("HA: homeassistant/.storage/core.device_registry", page)
+            self.assertIn("sw_version", page)
+            self.assertIn("diff-changed", page)
+            self.assertNotIn("modified_at", page)
+            self.assertNotIn("old-noise", page)
+            self.assertNotIn("new-noise", page)
+
     def test_save_unknown_base_use_git_keeps_git_version(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

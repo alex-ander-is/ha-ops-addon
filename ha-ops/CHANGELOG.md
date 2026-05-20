@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.13
+
+- Use the same normalized Home Assistant registry diff in Save conflict details as in Save Preview.
+
 ## 0.6.12
 
 - Keep normalized Home Assistant registry Save Preview diffs readable instead of rendering each registry as one long line.

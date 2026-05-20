@@ -8,6 +8,7 @@ import threading
 import conflicts as conflict_logic
 import git_ops
 import manifest as manifest_logic
+import sync as sync_logic
 import ui
 
 
@@ -95,6 +96,27 @@ def file_diff(ctx, left_label, left_path, right_label, right_path):
     return f"Diff unavailable:\n{(result.stderr or result.stdout).strip()}"
 
 
+def normalized_save_conflict_file_diff(ctx, left_label, left_path, right_label, right_path):
+    left_path = Path(left_path)
+    right_path = Path(right_path)
+    if left_path.name not in sync_logic.NORMALIZED_STORAGE_FILES:
+        return file_diff(ctx, left_label, left_path, right_label, right_path)
+    left_text = sync_logic.normalized_storage_text_from_path(left_path)
+    right_text = sync_logic.normalized_storage_text_from_path(right_path)
+    if left_text is None or right_text is None:
+        return file_diff(ctx, left_label, left_path, right_label, right_path)
+
+    diff_root = ctx.work_dir / "save-conflict-diff"
+    left_copy = diff_root / "git" / left_path.name
+    right_copy = diff_root / "ha" / right_path.name
+    ctx.clear_tree(diff_root)
+    left_copy.parent.mkdir(parents=True, exist_ok=True)
+    right_copy.parent.mkdir(parents=True, exist_ok=True)
+    left_copy.write_text(left_text)
+    right_copy.write_text(right_text)
+    return file_diff(ctx, left_label, left_copy, right_label, right_copy)
+
+
 def save_conflict_detail(ctx, repo_dir, targets, path):
     safe_path = git_ops.safe_repo_relative_path(path)
     repo_file = Path(repo_dir) / safe_path
@@ -111,7 +133,7 @@ def save_conflict_detail(ctx, repo_dir, targets, path):
             continue
         relative = Path(safe_path).relative_to(source_root)
         preview_file = ctx.work_dir / "save-preview" / target_id / relative
-        return file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
+        return normalized_save_conflict_file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
     return f"Diff unavailable: no managed target found for {safe_path}."
 
 
