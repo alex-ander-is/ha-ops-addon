@@ -563,6 +563,17 @@ def normalized_storage_bytes_from_text(name, text):
     return stable_json_key(data).encode()
 
 
+def normalized_storage_text_from_path(path):
+    path = Path(path)
+    try:
+        normalized = normalized_storage_bytes_from_text(path.name, path.read_text())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if normalized is None:
+        return None
+    return normalized.decode() + "\n"
+
+
 def normalized_storage_bytes(path):
     path = Path(path)
     try:
@@ -1001,6 +1012,35 @@ def save_preview_diff(repo_dir, preview_repo, run_command):
     raise RuntimeError(f"Save preview diff failed:\n{result.stderr.strip() or result.stdout.strip()}")
 
 
+def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
+    for relative in registry_paths:
+        repo_file = repo_copy / relative
+        preview_file = preview_copy / relative
+        if not repo_file.exists() or not preview_file.exists():
+            continue
+        repo_text = normalized_storage_text_from_path(repo_file)
+        preview_text = normalized_storage_text_from_path(preview_file)
+        if repo_text is None or preview_text is None:
+            continue
+        repo_file.write_text(repo_text)
+        preview_file.write_text(preview_text)
+
+
+def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
+    registry_paths = normalized_save_registry_paths(resolved_targets, repo_dir)
+    if not registry_paths:
+        return save_preview_diff(repo_dir, preview_repo, ctx.run_command)
+
+    diff_root = ctx.work_dir / "save-preview-diff"
+    repo_copy = diff_root / "repo"
+    preview_copy = diff_root / "preview"
+    clear_tree(diff_root, ctx.work_dir, ctx.run_command)
+    sync_tree(repo_dir, repo_copy, True, [".git/"], ctx.run_command)
+    sync_tree(preview_repo, preview_copy, True, [".git/"], ctx.run_command)
+    normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths)
+    return save_preview_diff(repo_copy, preview_copy, ctx.run_command)
+
+
 def build_save_preview(resolved_targets, repo_dir, details, ctx):
     export_root = build_save_export(resolved_targets, details, ctx)
     preview_repo = ctx.work_dir / "save-to-git-preview"
@@ -1013,7 +1053,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx):
 
     status_lines = save_preview_status_lines(repo_dir, preview_repo)
     summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
-    diff = save_preview_diff(repo_dir, preview_repo, ctx.run_command) if status_lines else ""
+    diff = save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx) if status_lines else ""
     return {"summary": summary, "diff": diff}
 
 

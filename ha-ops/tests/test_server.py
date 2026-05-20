@@ -711,6 +711,62 @@ class ServerTests(unittest.TestCase):
                 ],
             )
 
+    def test_save_preview_diff_hides_registry_noise_but_keeps_real_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            preview = root / "preview"
+            repo_storage = repo / "homeassistant" / ".storage"
+            preview_storage = preview / "homeassistant" / ".storage"
+            repo_storage.mkdir(parents=True)
+            preview_storage.mkdir(parents=True)
+            repo_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-1",
+                            "name": "Zigbee2MQTT Bridge",
+                            "modified_at": "old-noise",
+                            "sw_version": "2.10.1",
+                        }
+                    ]
+                }
+            }
+            preview_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-1",
+                            "name": "Zigbee2MQTT Bridge",
+                            "modified_at": "new-noise",
+                            "sw_version": "2.10.2",
+                        }
+                    ]
+                }
+            }
+            (repo_storage / "core.device_registry").write_text(json.dumps(repo_registry))
+            (preview_storage / "core.device_registry").write_text(json.dumps(preview_registry))
+
+            diff = server.sync_logic.save_preview_diff_normalized(
+                repo,
+                preview,
+                [{"id": "homeassistant", "type": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                server.app_context.AppContext(
+                    data_dir=server.DATA_DIR,
+                    config_dir=server.CONFIG_DIR,
+                    addon_configs_dir=server.ADDON_CONFIGS_DIR,
+                ).sync_deps(),
+            )
+
+            self.assertIn("sw_version", diff)
+            self.assertIn("2.10.1", diff)
+            self.assertIn("2.10.2", diff)
+            self.assertNotIn("modified_at", diff)
+            self.assertNotIn("old-noise", diff)
+            self.assertNotIn("new-noise", diff)
+
     def test_save_restores_registry_noise_only_worktree_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
