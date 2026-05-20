@@ -763,6 +763,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("sw_version", diff)
             self.assertIn("2.10.1", diff)
             self.assertIn("2.10.2", diff)
+            self.assertIn('\n-        "sw_version": "2.10.1"', diff)
+            self.assertIn('\n+        "sw_version": "2.10.2"', diff)
             self.assertNotIn("modified_at", diff)
             self.assertNotIn("old-noise", diff)
             self.assertNotIn("new-noise", diff)

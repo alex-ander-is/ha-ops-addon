@@ -563,15 +563,24 @@ def normalized_storage_bytes_from_text(name, text):
     return stable_json_key(data).encode()
 
 
+def normalized_storage_pretty_text_from_text(name, text):
+    if name not in NORMALIZED_STORAGE_FILES:
+        return None
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    data = normalized_storage_data(name, data)
+    return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
 def normalized_storage_text_from_path(path):
     path = Path(path)
     try:
-        normalized = normalized_storage_bytes_from_text(path.name, path.read_text())
+        normalized = normalized_storage_pretty_text_from_text(path.name, path.read_text())
     except (OSError, UnicodeDecodeError):
         return None
-    if normalized is None:
-        return None
-    return normalized.decode() + "\n"
+    return normalized
 
 
 def normalized_storage_bytes(path):

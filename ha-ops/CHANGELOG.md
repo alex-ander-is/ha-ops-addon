@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.12
+
+- Keep normalized Home Assistant registry Save Preview diffs readable instead of rendering each registry as one long line.
+
 ## 0.6.11
 
 - Hide Home Assistant registry noise from Save Preview diff output even when the same registry file has real changes.
