@@ -8,6 +8,7 @@ import threading
 import conflicts as conflict_logic
 import git_ops
 import manifest as manifest_logic
+import state as state_store
 import sync as sync_logic
 import ui
 
@@ -576,6 +577,7 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/preview":
+                ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
                 start_background(ctx.run_preview_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Git to HA preview started. Refreshing..."})
@@ -584,6 +586,7 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/save-preview":
+                ctx.write_state(state_store.SAVE_PREVIEW_CLEAR_UPDATES)
                 start_background(ctx.run_save_preview_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "HA to Git preview started. Refreshing..."})
@@ -600,6 +603,7 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/deleted-devices-preview":
+                ctx.write_state(state_store.DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
                 start_background(ctx.run_deleted_devices_preview_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "deleted_devices check started. Refreshing..."})

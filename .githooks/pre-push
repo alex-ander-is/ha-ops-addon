@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+echo "Running HA Ops tests before push..."
+python3 -m unittest discover -s ha-ops/tests

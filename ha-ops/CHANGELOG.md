@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.16
+
+- Clear stale preview diffs before starting Preview HA to Git, Preview Git to HA, and Check deleted_devices.
+- Add a Git pre-push hook that blocks pushes while the test suite is failing.
+- Keep Save commits from changing registry fields and ordering that are hidden from normalized diffs.
+
 ## 0.6.15
 
 - Hide the redundant Save Preview diff while Save conflicts are pending.

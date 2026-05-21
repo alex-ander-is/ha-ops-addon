@@ -9,13 +9,33 @@ import policies
 
 STATE_LOCK = threading.Lock()
 
+APPLY_PREVIEW_CLEAR_UPDATES = {
+    "last_diff": "",
+    "last_diff_generated_at": None,
+    "last_preview_commit": None,
+    "last_preview_fingerprint": None,
+    "last_preview_deletions": None,
+    "last_preview_storage_changes": False,
+    "last_preview_storage_paths": [],
+    "last_preview_approved_fingerprint": None,
+}
+SAVE_PREVIEW_CLEAR_UPDATES = {
+    "last_save_preview": "",
+    "last_save_diff": "",
+    "last_save_diff_generated_at": None,
+}
+DELETED_DEVICES_PREVIEW_CLEAR_UPDATES = {
+    "last_deleted_devices_preview": "",
+    "last_deleted_devices_rows": [],
+    "last_deleted_devices_count": 0,
+    "last_deleted_devices_fingerprint": None,
+    "last_deleted_devices_generated_at": None,
+}
 DISPLAY_CLEAR_UPDATES = {
     "last_details": [],
     "last_diff": "",
     "last_diff_generated_at": None,
-    "last_save_preview": "",
-    "last_save_diff": "",
-    "last_save_diff_generated_at": None,
+    **SAVE_PREVIEW_CLEAR_UPDATES,
     "conflicts": [],
     "conflict_type": None,
     "save_conflict_resolutions": {},
@@ -121,15 +141,7 @@ def clear_display_state(path):
     updates = dict(DISPLAY_CLEAR_UPDATES)
     current = read_state(path)
     if not current.get("deleted_devices_pending_confirmation"):
-        updates.update(
-            {
-                "last_deleted_devices_preview": "",
-                "last_deleted_devices_rows": [],
-                "last_deleted_devices_count": 0,
-                "last_deleted_devices_fingerprint": None,
-                "last_deleted_devices_generated_at": None,
-            }
-        )
+        updates.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
     if current.get("last_status") in {"success", "conflicts"}:
         updates.update(
             {

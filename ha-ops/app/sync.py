@@ -614,6 +614,44 @@ def registry_item_signature(name, item):
     return stable_json_key(normalized_registry_item(name, item))
 
 
+def restore_field_from_head(merged, head_item, field):
+    if field in head_item:
+        merged[field] = deepcopy(head_item[field])
+    else:
+        merged.pop(field, None)
+
+
+def restore_device_order_hidden_fields(merged, head_item, current_item):
+    head_connections = head_item.get("connections")
+    current_connections = current_item.get("connections")
+    if isinstance(head_connections, list) and isinstance(current_connections, list):
+        if sorted(head_connections, key=stable_json_key) == sorted(current_connections, key=stable_json_key):
+            merged["connections"] = deepcopy(head_connections)
+
+    head_subentries = head_item.get("config_entries_subentries")
+    current_subentries = current_item.get("config_entries_subentries")
+    if isinstance(head_subentries, dict) and isinstance(current_subentries, dict):
+        restored = deepcopy(current_subentries)
+        for key, head_values in head_subentries.items():
+            current_values = current_subentries.get(key)
+            if isinstance(head_values, list) and isinstance(current_values, list):
+                if sorted(head_values, key=stable_json_key) == sorted(current_values, key=stable_json_key):
+                    restored[key] = deepcopy(head_values)
+        merged["config_entries_subentries"] = restored
+
+
+def merge_registry_item_for_commit(name, head_item, current_item):
+    merged = deepcopy(current_item)
+    restore_field_from_head(merged, head_item, "modified_at")
+    if name == "core.device_registry":
+        restore_device_order_hidden_fields(merged, head_item, current_item)
+    elif name == "core.entity_registry":
+        restore_field_from_head(merged, head_item, "suggested_object_id")
+        if current_item.get("platform") == "mobile_app" or head_item.get("platform") == "mobile_app":
+            restore_field_from_head(merged, head_item, "original_icon")
+    return merged
+
+
 def merge_normalized_storage_for_commit(name, head_data, current_data):
     collections = registry_collection_keys(name)
     if not collections:
@@ -648,12 +686,12 @@ def merge_normalized_storage_for_commit(name, head_data, current_data):
             if registry_item_signature(name, head_item) == registry_item_signature(name, current_item):
                 merged.append(deepcopy(head_item))
             else:
-                merged.append(normalized_registry_item(name, current_item))
+                merged.append(merge_registry_item_for_commit(name, head_item, current_item))
         for current_item in current_items:
             key = registry_collection_identity(keys, current_item)
             if key in kept:
                 continue
-            merged.append(normalized_registry_item(name, current_item))
+            merged.append(deepcopy(current_item))
         target_collections[collection] = merged
     return data
 

@@ -168,6 +168,43 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["last_preview_storage_changes"])
             self.assertEqual(state["last_preview_approved_fingerprint"], "fingerprint")
 
+    def test_preview_jobs_clear_stale_preview_state_when_started(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_diff": "old apply diff",
+                    "last_diff_generated_at": "old",
+                    "last_preview_fingerprint": "old",
+                    "last_preview_storage_changes": True,
+                    "last_preview_approved_fingerprint": "old",
+                    "last_save_preview": "old save summary",
+                    "last_save_diff": "old save diff",
+                    "last_save_diff_generated_at": "old",
+                    "last_deleted_devices_preview": "old deleted_devices",
+                    "last_deleted_devices_count": 1,
+                    "last_deleted_devices_fingerprint": "old",
+                    "last_deleted_devices_generated_at": "old",
+                }
+            )
+
+            self.assertFalse(server.run_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_diff"], "")
+            self.assertIsNone(state["last_diff_generated_at"])
+            self.assertIsNone(state["last_preview_fingerprint"])
+            self.assertFalse(state["last_preview_storage_changes"])
+            self.assertIsNone(state["last_preview_approved_fingerprint"])
+
+            server.write_state({"last_save_preview": "old", "last_save_diff": "old", "last_save_diff_generated_at": "old"})
+            self.assertFalse(server.run_save_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_save_diff"], "")
+            self.assertIsNone(state["last_save_diff_generated_at"])
+
     def test_render_page_formats_state_times_in_home_assistant_timezone(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -728,7 +765,7 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "name": "Zigbee2MQTT Bridge",
-                            "modified_at": "old-noise",
+                            "modified_at": "git-modified-at",
                             "sw_version": "2.10.1",
                         }
                     ]
@@ -740,7 +777,7 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "name": "Zigbee2MQTT Bridge",
-                            "modified_at": "new-noise",
+                            "modified_at": "live-modified-at",
                             "sw_version": "2.10.2",
                         }
                     ]
@@ -766,8 +803,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn('\n-        "sw_version": "2.10.1"', diff)
             self.assertIn('\n+        "sw_version": "2.10.2"', diff)
             self.assertNotIn("modified_at", diff)
-            self.assertNotIn("old-noise", diff)
-            self.assertNotIn("new-noise", diff)
+            self.assertNotIn("git-modified-at", diff)
+            self.assertNotIn("live-modified-at", diff)
 
     def test_save_restores_registry_noise_only_worktree_changes(self):
         server = load_server()
@@ -817,7 +854,78 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(restored, ["homeassistant/.storage/core.device_registry"])
             self.assertEqual(self.git(["status", "--porcelain"], repo).stdout.strip(), "")
 
-    def test_save_normalizes_changed_registry_worktree_changes(self):
+    def test_save_restores_entity_registry_noise_only_worktree_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            storage = repo / "homeassistant" / ".storage"
+            storage.mkdir(parents=True)
+            committed_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "modified_at": "git-modified-at",
+                            "platform": "mqtt",
+                            "suggested_object_id": "git_object",
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "modified_at": "git-phone-modified-at",
+                            "original_icon": "mdi:battery-10",
+                            "platform": "mobile_app",
+                        },
+                    ]
+                }
+            }
+            exported_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "modified_at": "live-phone-modified-at",
+                            "original_icon": "mdi:battery-90",
+                            "platform": "mobile_app",
+                        },
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "modified_at": "live-modified-at",
+                            "platform": "mqtt",
+                            "suggested_object_id": "live_object",
+                        },
+                    ]
+                }
+            }
+            registry_path = storage / "core.entity_registry"
+            registry_path.write_text(json.dumps(committed_registry))
+            self.git_commit_all(repo, "base")
+            registry_path.write_text(json.dumps(exported_registry))
+
+            class Ctx:
+                def run_command(self, args, cwd=None):
+                    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+
+                def add_detail(self, details, detail):
+                    details.append(detail)
+
+            restored = server.sync_logic.restore_normalized_equal_save_worktree(
+                repo,
+                [{"id": "homeassistant", "type": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                [],
+                Ctx(),
+            )
+
+            self.assertEqual(restored, ["homeassistant/.storage/core.entity_registry"])
+            self.assertEqual(self.git(["status", "--porcelain"], repo).stdout.strip(), "")
+
+    def test_save_normalizes_changed_registry_worktree_preserves_hidden_fields(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -832,12 +940,12 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "connections": [["b", "2"], ["a", "1"]],
-                            "modified_at": "old-noise",
+                            "modified_at": "git-modified-at",
                             "sw_version": "1",
                         },
                         {
                             "id": "device-2",
-                            "modified_at": "kept-noise",
+                            "modified_at": "git-kept-modified-at",
                             "sw_version": "same",
                         },
                     ]
@@ -849,12 +957,12 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "connections": [["a", "1"], ["b", "2"]],
-                            "modified_at": "new-noise",
+                            "modified_at": "live-modified-at",
                             "sw_version": "2",
                         },
                         {
                             "id": "device-2",
-                            "modified_at": "changed-noise",
+                            "modified_at": "live-changed-modified-at",
                             "sw_version": "same",
                         },
                     ]
@@ -883,15 +991,250 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
             self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
-            self.assertEqual(saved["data"]["devices"][0]["connections"], [["a", "1"], ["b", "2"]])
-            self.assertNotIn("modified_at", saved["data"]["devices"][0])
-            self.assertEqual(saved["data"]["devices"][1]["modified_at"], "kept-noise")
-            self.assertIn('      {"id":"device-1","connections":[["a","1"],["b","2"]],"sw_version":"2"}', text)
+            self.assertEqual(saved["data"]["devices"][0]["connections"], [["b", "2"], ["a", "1"]])
+            self.assertEqual(saved["data"]["devices"][0]["modified_at"], "git-modified-at")
+            self.assertEqual(saved["data"]["devices"][1]["modified_at"], "git-kept-modified-at")
             self.assertIn(
-                '      {"id":"device-2","modified_at":"kept-noise","sw_version":"same"}',
+                '      {"id":"device-1","connections":[["b","2"],["a","1"]],"modified_at":"git-modified-at","sw_version":"2"}',
+                text,
+            )
+            self.assertIn(
+                '      {"id":"device-2","modified_at":"git-kept-modified-at","sw_version":"same"}',
                 text,
             )
             self.assertNotIn('\n        "id": "device-1"', text)
+
+    def test_save_commit_matches_preview_for_hidden_registry_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            seed_storage = seed / "homeassistant" / ".storage"
+            seed_storage.mkdir(parents=True)
+            (seed_storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "git-modified-at",
+                                    "sw_version": "1",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "live-modified-at",
+                                    "sw_version": "2",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job())
+            state = server.read_state()
+            self.assertIn("sw_version", state["last_save_diff"])
+            self.assertIn("2", state["last_save_diff"])
+            self.assertNotIn("modified_at", state["last_save_diff"])
+            self.assertNotIn("git-modified-at", state["last_save_diff"])
+            self.assertNotIn("live-modified-at", state["last_save_diff"])
+
+            server.write_state(
+                {
+                    "save_conflict_resolutions": {
+                        "homeassistant/.storage/core.device_registry": "ha",
+                    }
+                }
+            )
+            self.assertTrue(server.run_save_job())
+            saved = json.loads(self.remote_file(remote, "homeassistant/.storage/core.device_registry"))
+            saved_device = saved["data"]["devices"][0]
+            self.assertEqual(saved_device["sw_version"], "2")
+            self.assertEqual(saved_device["modified_at"], "git-modified-at")
+
+    def test_save_commit_preserves_hidden_entity_registry_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            storage = repo / "homeassistant" / ".storage"
+            storage.mkdir(parents=True)
+            committed_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "modified_at": "old-modified",
+                            "suggested_object_id": "old_object",
+                            "platform": "mqtt",
+                            "supported_features": 1,
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "modified_at": "old-phone-modified",
+                            "original_icon": "mdi:battery-10",
+                            "platform": "mobile_app",
+                            "supported_features": 1,
+                        },
+                    ]
+                }
+            }
+            exported_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.test",
+                            "modified_at": "new-modified",
+                            "suggested_object_id": "new_object",
+                            "platform": "mqtt",
+                            "supported_features": 2,
+                        },
+                        {
+                            "id": "entity-2",
+                            "entity_id": "sensor.phone",
+                            "modified_at": "new-phone-modified",
+                            "original_icon": "mdi:battery-90",
+                            "platform": "mobile_app",
+                            "supported_features": 2,
+                        },
+                    ]
+                }
+            }
+            registry_path = storage / "core.entity_registry"
+            registry_path.write_text(json.dumps(committed_registry))
+            self.git_commit_all(repo, "base")
+            registry_path.write_text(json.dumps(exported_registry))
+
+            class Ctx:
+                def run_command(self, args, cwd=None):
+                    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+
+                def add_detail(self, details, detail):
+                    details.append(detail)
+
+            normalized = server.sync_logic.normalize_changed_save_registry_worktree(
+                repo,
+                [{"id": "homeassistant", "type": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                [],
+                Ctx(),
+            )
+            saved = json.loads(registry_path.read_text())
+            first, second = saved["data"]["entities"]
+
+            self.assertEqual(normalized, ["homeassistant/.storage/core.entity_registry"])
+            self.assertEqual(first["supported_features"], 2)
+            self.assertEqual(first["modified_at"], "old-modified")
+            self.assertEqual(first["suggested_object_id"], "old_object")
+            self.assertEqual(second["supported_features"], 2)
+            self.assertEqual(second["modified_at"], "old-phone-modified")
+            self.assertEqual(second["original_icon"], "mdi:battery-10")
+
+    def test_save_commit_preserves_hidden_registry_order_when_real_fields_change(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            storage = repo / "homeassistant" / ".storage"
+            storage.mkdir(parents=True)
+            committed_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-b",
+                            "connections": [],
+                            "sw_version": "same",
+                        },
+                        {
+                            "id": "device-a",
+                            "connections": [["b", "2"], ["a", "1"]],
+                            "config_entries_subentries": {"entry": ["b", None, "a"]},
+                            "sw_version": "1",
+                        },
+                    ]
+                }
+            }
+            exported_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-a",
+                            "connections": [["a", "1"], ["b", "2"]],
+                            "config_entries_subentries": {"entry": ["a", "b", None]},
+                            "sw_version": "2",
+                        },
+                        {
+                            "id": "device-b",
+                            "connections": [],
+                            "sw_version": "same",
+                        },
+                    ]
+                }
+            }
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps(committed_registry))
+            self.git_commit_all(repo, "base")
+            registry_path.write_text(json.dumps(exported_registry))
+
+            class Ctx:
+                def run_command(self, args, cwd=None):
+                    return subprocess.run(args, cwd=cwd, text=True, capture_output=True)
+
+                def add_detail(self, details, detail):
+                    details.append(detail)
+
+            normalized = server.sync_logic.normalize_changed_save_registry_worktree(
+                repo,
+                [{"id": "homeassistant", "type": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                [],
+                Ctx(),
+            )
+            saved_devices = json.loads(registry_path.read_text())["data"]["devices"]
+
+            self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
+            self.assertEqual([item["id"] for item in saved_devices], ["device-b", "device-a"])
+            self.assertEqual(saved_devices[1]["sw_version"], "2")
+            self.assertEqual(saved_devices[1]["connections"], [["b", "2"], ["a", "1"]])
+            self.assertEqual(saved_devices[1]["config_entries_subentries"], {"entry": ["b", None, "a"]})
 
     def test_sync_code_has_no_diff_truncation_marker(self):
         sync_source = (ROOT / "app" / "sync.py").read_text()
@@ -924,12 +1267,16 @@ class ServerTests(unittest.TestCase):
         class FakeContext:
             def __init__(self):
                 self.calls = []
+                self.state_updates = []
 
             def run_save_job(self):
                 self.calls.append("save")
 
             def run_save_preview_job(self):
                 self.calls.append("save-preview")
+
+            def run_preview_job(self):
+                self.calls.append("preview")
 
             def run_deleted_devices_preview_job(self):
                 self.calls.append("deleted-devices-preview")
@@ -945,6 +1292,9 @@ class ServerTests(unittest.TestCase):
 
             def clear_display_state(self):
                 self.calls.append("clear-display")
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
 
             def set_homeassistant_organizer_enabled(self, enabled):
                 self.calls.append(("organizer", enabled))
@@ -991,6 +1341,22 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("HA to Git preview started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save", "save-preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+
+        post_request = invoke(
+            "do_POST",
+            "/preview",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Git to HA preview started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
+        self.assertIsNone(ctx.state_updates[-1]["last_preview_fingerprint"])
+        self.assertFalse(ctx.state_updates[-1]["last_preview_storage_changes"])
 
         post_request = invoke(
             "do_POST",
@@ -999,7 +1365,10 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "deleted-devices-preview"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_count"], 0)
+        self.assertIsNone(ctx.state_updates[-1]["last_deleted_devices_generated_at"])
 
         post_request = invoke(
             "do_POST",
@@ -1008,7 +1377,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices deletion started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "deleted-devices-preview", "deleted-devices-delete"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview", "deleted-devices-delete"])
 
         post_request = invoke(
             "do_POST",
@@ -1019,7 +1388,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("deleted_devices cleanup confirmation started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
-            ["save", "save-preview", "deleted-devices-preview", "deleted-devices-delete", "deleted-devices-confirm"],
+            ["save", "save-preview", "preview", "deleted-devices-preview", "deleted-devices-delete", "deleted-devices-confirm"],
         )
 
         post_request = invoke(
@@ -1034,6 +1403,7 @@ class ServerTests(unittest.TestCase):
             [
                 "save",
                 "save-preview",
+                "preview",
                 "deleted-devices-preview",
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1053,6 +1423,7 @@ class ServerTests(unittest.TestCase):
             [
                 "save",
                 "save-preview",
+                "preview",
                 "deleted-devices-preview",
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1074,6 +1445,7 @@ class ServerTests(unittest.TestCase):
             [
                 "save",
                 "save-preview",
+                "preview",
                 "deleted-devices-preview",
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1428,7 +1800,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
-                                    "modified_at": "old-noise",
+                                    "modified_at": "git-modified-at",
                                     "sw_version": "1",
                                 }
                             ]
@@ -1449,7 +1821,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
-                                    "modified_at": "new-noise",
+                                    "modified_at": "live-modified-at",
                                     "sw_version": "2",
                                 }
                             ]
@@ -1476,8 +1848,82 @@ class ServerTests(unittest.TestCase):
             self.assertIn("sw_version", page)
             self.assertIn("diff-changed", page)
             self.assertNotIn("modified_at", page)
-            self.assertNotIn("old-noise", page)
-            self.assertNotIn("new-noise", page)
+            self.assertNotIn("git-modified-at", page)
+            self.assertNotIn("live-modified-at", page)
+
+    def test_save_unknown_base_entity_registry_conflict_diff_hides_hidden_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            registry = seed / "homeassistant" / ".storage" / "core.entity_registry"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "sensor.test",
+                                    "modified_at": "git-modified-at",
+                                    "platform": "mqtt",
+                                    "suggested_object_id": "git_object",
+                                    "supported_features": 1,
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (seed / "homeassistant" / "configuration.yaml").unlink()
+            self.git_commit_all(seed, "registry")
+            self.git(["push", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "sensor.test",
+                                    "modified_at": "live-modified-at",
+                                    "platform": "mqtt",
+                                    "suggested_object_id": "live_object",
+                                    "supported_features": 2,
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            page = server.render_page()
+            self.assertIn("Git: homeassistant/.storage/core.entity_registry", page)
+            self.assertIn("HA: homeassistant/.storage/core.entity_registry", page)
+            self.assertIn("supported_features", page)
+            self.assertIn("diff-changed", page)
+            self.assertNotIn("modified_at", page)
+            self.assertNotIn("suggested_object_id", page)
+            self.assertNotIn("git_object", page)
+            self.assertNotIn("live_object", page)
 
     def test_save_unknown_base_use_git_keeps_git_version(self):
         server = load_server()

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Any
 
+import state as state_store
+
 
 @dataclass(frozen=True)
 class JobContext:
@@ -304,6 +306,7 @@ def run_save_preview_job(ctx):
 
     write_state(
         {
+            **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "save_preview",
@@ -392,16 +395,12 @@ def run_deleted_devices_preview_job(ctx):
     log_action(ctx, "deleted_devices preview: started")
     write_state(
         {
+            **state_store.DELETED_DEVICES_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_preview",
             "last_message": "Checking deleted_devices.",
             "last_details": details,
-            "last_deleted_devices_preview": "",
-            "last_deleted_devices_rows": [],
-            "last_deleted_devices_count": 0,
-            "last_deleted_devices_fingerprint": None,
-            "last_deleted_devices_generated_at": None,
         }
     )
 
@@ -969,6 +968,7 @@ def run_preview_job(ctx):
 
     write_state(
         {
+            **state_store.APPLY_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "preview",
