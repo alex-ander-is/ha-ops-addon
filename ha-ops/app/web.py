@@ -686,7 +686,14 @@ def create_handler(ctx):
 
             if parsed.path == "/include-redundant-data":
                 enabled = "include_redundant_data" in body
-                ctx.write_state({"include_redundant_data": enabled})
+                state = ctx.read_state()
+                updates = {
+                    **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
+                    "include_redundant_data": enabled,
+                }
+                if state.get("conflict_type") == "save_unknown_base":
+                    updates.update({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
+                ctx.write_state(updates)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Redundant data setting updated. Refreshing..."})
                 else:

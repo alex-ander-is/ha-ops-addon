@@ -808,6 +808,9 @@ def render_page(data):
             </form>
           </div>
           <div class="action-row">
+            {data['include_redundant_data_html']}
+          </div>
+          <div class="action-row">
             <form method="post" action="preview" data-async-form="true">
               <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
             </form>
@@ -819,9 +822,6 @@ def render_page(data):
             <form method="post" action="deleted-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
             </form>
-          </div>
-          <div class="action-row">
-            {data['include_redundant_data_html']}
           </div>
         </div>
       </section>

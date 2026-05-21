@@ -861,6 +861,100 @@ class ServerTests(unittest.TestCase):
             self.assertIn("git-modified-at", preview["diff"])
             self.assertIn("live-modified-at", preview["diff"])
 
+    def test_save_preview_job_toggle_controls_registry_noise(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            seed_storage = seed / "homeassistant" / ".storage"
+            seed_storage.mkdir(parents=True)
+            (seed_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}})
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}})
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            server.write_state({"include_redundant_data": False})
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview"], "No Save changes.")
+            self.assertEqual(state["last_save_diff"], "")
+
+            server.write_state({"include_redundant_data": True})
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("- Modified: homeassistant/.storage/core.device_registry", state["last_save_preview"])
+            self.assertIn("modified_at", state["last_save_diff"])
+            self.assertIn("git-modified-at", state["last_save_diff"])
+            self.assertIn("live-modified-at", state["last_save_diff"])
+
+    def test_include_redundant_data_toggle_clears_stale_save_preview(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.updates = []
+
+            def read_state(self):
+                return {
+                    "last_save_preview": "old preview",
+                    "last_save_diff": "old huge diff",
+                    "conflicts": ["homeassistant/.storage/core.device_registry"],
+                    "conflict_type": "save_unknown_base",
+                    "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
+                }
+
+            def write_state(self, updates):
+                self.updates.append(updates)
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+        request = handler.__new__(handler)
+        request.path = "/include-redundant-data"
+        request.rfile = io.BytesIO(b"")
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.headers["Accept"] = "application/json"
+        request.headers["X-Requested-With"] = "fetch"
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+
+        request.do_POST()
+
+        self.assertEqual(request.responses[-1], 200)
+        self.assertEqual(ctx.updates[-1]["include_redundant_data"], False)
+        self.assertEqual(ctx.updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.updates[-1]["last_save_diff"], "")
+        self.assertEqual(ctx.updates[-1]["conflicts"], [])
+        self.assertIsNone(ctx.updates[-1]["conflict_type"])
+        self.assertEqual(ctx.updates[-1]["save_conflict_resolutions"], {})
+
     def test_save_conflict_include_redundant_data_shows_registry_noise(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1433,6 +1527,9 @@ class ServerTests(unittest.TestCase):
             def write_state(self, updates):
                 self.state_updates.append(updates)
 
+            def read_state(self):
+                return {}
+
             def set_homeassistant_organizer_enabled(self, enabled):
                 self.calls.append(("organizer", enabled))
 
@@ -1600,7 +1697,10 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Redundant data setting updated", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.state_updates[-1], {"include_redundant_data": True})
+        self.assertEqual(ctx.state_updates[-1]["include_redundant_data"], True)
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
@@ -1754,6 +1854,25 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("modified_at", preview["diff"])
             self.assertNotIn("git-modified-at", preview["diff"])
             self.assertNotIn("live-modified-at", preview["diff"])
+
+    def test_apply_preview_fingerprint_ignores_diff_header_timestamps(self):
+        server = load_server()
+        first = "\n".join(
+            [
+                "## homeassistant",
+                "--- /tmp/left/core.device_registry\t2026-05-21 10:00:00.000000000 +0200",
+                "+++ /tmp/right/core.device_registry\t2026-05-21 10:00:01.000000000 +0200",
+                "@@ -1 +1 @@",
+                "-old",
+                "+new",
+            ]
+        )
+        second = first.replace("10:00:00.000000000", "10:05:00.000000000").replace(
+            "10:00:01.000000000",
+            "10:05:01.000000000",
+        )
+
+        self.assertEqual(server.sync_logic.fingerprint_text(first), server.sync_logic.fingerprint_text(second))
 
     def test_apply_preview_ignores_registry_hidden_only_changes(self):
         server = load_server()
@@ -4143,10 +4262,12 @@ class ServerTests(unittest.TestCase):
 
             ha_to_git = page.index('action="save-preview"')
             save = page.index('action="save"')
+            include_redundant = page.index("action='include-redundant-data'")
             git_to_ha = page.index('action="preview"')
             apply = page.index('action="apply"')
             self.assertLess(ha_to_git, save)
-            self.assertLess(save, git_to_ha)
+            self.assertLess(save, include_redundant)
+            self.assertLess(include_redundant, git_to_ha)
             self.assertLess(git_to_ha, apply)
             self.assertIn('<div class="action-row">', page)
             self.assertIn('<button type="submit" >Save HA to Git</button>', page)
@@ -4155,7 +4276,6 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Check deleted_devices", page)
             self.assertIn("action='include-redundant-data'", page)
             self.assertIn("Include redundant data", page)
-            self.assertLess(page.index("Check deleted_devices"), page.index("Include redundant data"))
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)

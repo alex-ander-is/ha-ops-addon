@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.18
+
+- Move Include redundant data under the HA to Git actions.
+- Clear stale Save previews and Save conflict resolutions when Include redundant data changes.
+- Keep Git to HA approval fingerprints stable across diff header timestamp changes.
+
 ## 0.6.17
 
 - Preserve live Home Assistant registry hidden fields during Git to HA preview and approved apply.

@@ -1632,8 +1632,17 @@ def safe_preview_name(value):
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "target"
 
 
+def diff_text_for_fingerprint(text):
+    lines = []
+    for line in text.splitlines():
+        if line.startswith(("--- ", "+++ ")) and "\t" in line:
+            line = line.split("\t", 1)[0]
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def fingerprint_text(text):
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(diff_text_for_fingerprint(text).encode("utf-8")).hexdigest()
 
 
 def preview_progress(ctx, details, message):
