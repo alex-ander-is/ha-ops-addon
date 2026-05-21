@@ -834,7 +834,12 @@ class ServerTests(unittest.TestCase):
                             "connections": [["b", "2"], ["a", "1"]],
                             "modified_at": "old-noise",
                             "sw_version": "1",
-                        }
+                        },
+                        {
+                            "id": "device-2",
+                            "modified_at": "kept-noise",
+                            "sw_version": "same",
+                        },
                     ]
                 }
             }
@@ -846,7 +851,12 @@ class ServerTests(unittest.TestCase):
                             "connections": [["a", "1"], ["b", "2"]],
                             "modified_at": "new-noise",
                             "sw_version": "2",
-                        }
+                        },
+                        {
+                            "id": "device-2",
+                            "modified_at": "changed-noise",
+                            "sw_version": "same",
+                        },
                     ]
                 }
             }
@@ -869,12 +879,19 @@ class ServerTests(unittest.TestCase):
                 Ctx(),
             )
             saved = json.loads(registry_path.read_text())
+            text = registry_path.read_text()
 
             self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
             self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
             self.assertEqual(saved["data"]["devices"][0]["connections"], [["a", "1"], ["b", "2"]])
             self.assertNotIn("modified_at", saved["data"]["devices"][0])
-            self.assertIn("\n  ", registry_path.read_text())
+            self.assertEqual(saved["data"]["devices"][1]["modified_at"], "kept-noise")
+            self.assertIn('      {"id":"device-1","connections":[["a","1"],["b","2"]],"sw_version":"2"}', text)
+            self.assertIn(
+                '      {"id":"device-2","modified_at":"kept-noise","sw_version":"same"}',
+                text,
+            )
+            self.assertNotIn('\n        "id": "device-1"', text)
 
     def test_sync_code_has_no_diff_truncation_marker(self):
         sync_source = (ROOT / "app" / "sync.py").read_text()
@@ -1386,6 +1403,14 @@ class ServerTests(unittest.TestCase):
             self.assertIn("diff-changed", page)
             self.assertIn("git", page)
             self.assertIn("ha", page)
+
+            state["last_save_preview"] = "Save preview changes (1):\n- Modified: homeassistant/configuration.yaml"
+            state["last_save_diff"] = "--- Git\n+++ HA\n@@ -1 +1 @@\n-git\n+ha"
+            state["last_save_diff_generated_at"] = "2026-05-20T23:00:00+02:00"
+            server.write_state(state)
+            page = server.render_page()
+            self.assertIn("<h2>Git Conflicts</h2>", page)
+            self.assertNotIn("<h2>Save Preview</h2>", page)
 
     def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
         server = load_server()

@@ -2,6 +2,7 @@ import fnmatch
 import hashlib
 import json
 import shutil
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -502,10 +503,23 @@ def stable_json_key(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def compact_json_text(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
 def stable_collection_key(keys, item):
     if not isinstance(item, dict):
         return (stable_json_key(item),)
     return (*[str(item.get(key) or "") for key in keys], stable_json_key(item))
+
+
+def registry_collection_identity(keys, item):
+    if not isinstance(item, dict):
+        return stable_json_key(item)
+    values = tuple(str(item.get(key) or "") for key in keys)
+    if any(values):
+        return values
+    return stable_json_key(item)
 
 
 def sort_json_list(value):
@@ -572,6 +586,128 @@ def normalized_storage_pretty_text_from_text(name, text):
         return None
     data = normalized_storage_data(name, data)
     return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def registry_collection_keys(name):
+    if name == "core.device_registry":
+        return DEVICE_REGISTRY_COLLECTION_KEYS
+    if name == "core.entity_registry":
+        return ENTITY_REGISTRY_COLLECTION_KEYS
+    return {}
+
+
+def registry_item_normalizer(name):
+    if name == "core.device_registry":
+        return normalize_device_registry_item
+    if name == "core.entity_registry":
+        return normalize_entity_registry_item
+    return lambda _item: None
+
+
+def normalized_registry_item(name, item):
+    item = deepcopy(item)
+    registry_item_normalizer(name)(item)
+    return item
+
+
+def registry_item_signature(name, item):
+    return stable_json_key(normalized_registry_item(name, item))
+
+
+def merge_normalized_storage_for_commit(name, head_data, current_data):
+    collections = registry_collection_keys(name)
+    if not collections:
+        return normalized_storage_data(name, deepcopy(current_data))
+    data = deepcopy(head_data)
+    for key, value in current_data.items():
+        if key != "data":
+            data[key] = deepcopy(value)
+    if not isinstance(data.get("data"), dict):
+        data["data"] = {}
+    head_collections = head_data.get("data", {}) if isinstance(head_data.get("data"), dict) else {}
+    current_collections = current_data.get("data", {}) if isinstance(current_data.get("data"), dict) else {}
+    target_collections = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+    for key, value in current_collections.items():
+        if key not in collections:
+            target_collections[key] = deepcopy(value)
+    for collection, keys in collections.items():
+        head_items = head_collections.get(collection)
+        current_items = current_collections.get(collection)
+        if not isinstance(head_items, list) or not isinstance(current_items, list):
+            normalize_registry_collection(data, collection, keys, registry_item_normalizer(name))
+            continue
+        current_by_key = {registry_collection_identity(keys, item): item for item in current_items}
+        kept = set()
+        merged = []
+        for head_item in head_items:
+            key = registry_collection_identity(keys, head_item)
+            current_item = current_by_key.get(key)
+            if current_item is None:
+                continue
+            kept.add(key)
+            if registry_item_signature(name, head_item) == registry_item_signature(name, current_item):
+                merged.append(deepcopy(head_item))
+            else:
+                merged.append(normalized_registry_item(name, current_item))
+        for current_item in current_items:
+            key = registry_collection_identity(keys, current_item)
+            if key in kept:
+                continue
+            merged.append(normalized_registry_item(name, current_item))
+        target_collections[collection] = merged
+    return data
+
+
+def render_registry_commit_json(value, compact_collection_names, indent=0, key_name=None):
+    space = " " * indent
+    next_space = " " * (indent + 2)
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        lines = ["{"]
+        items = list(value.items())
+        for index, (key, item) in enumerate(items):
+            rendered = render_registry_commit_json(item, compact_collection_names, indent + 2, key)
+            comma = "," if index < len(items) - 1 else ""
+            key_text = json.dumps(key, ensure_ascii=False)
+            rendered_lines = rendered.splitlines()
+            if len(rendered_lines) == 1:
+                lines.append(f"{next_space}{key_text}: {rendered_lines[0]}{comma}")
+            else:
+                lines.append(f"{next_space}{key_text}: {rendered_lines[0]}")
+                lines.extend(rendered_lines[1:-1])
+                lines.append(f"{rendered_lines[-1]}{comma}")
+        lines.append(f"{space}}}")
+        return "\n".join(lines)
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        lines = ["["]
+        for index, item in enumerate(value):
+            comma = "," if index < len(value) - 1 else ""
+            if key_name in compact_collection_names:
+                lines.append(f"{next_space}{compact_json_text(item)}{comma}")
+            else:
+                rendered = render_registry_commit_json(item, compact_collection_names, indent + 2)
+                rendered_lines = rendered.splitlines()
+                lines.append(f"{next_space}{rendered_lines[0]}")
+                lines.extend(rendered_lines[1:-1])
+                lines.append(f"{rendered_lines[-1]}{comma}")
+        lines.append(f"{space}]")
+        return "\n".join(lines)
+    return json.dumps(value, ensure_ascii=False)
+
+
+def normalized_storage_commit_text_from_text(name, head_text, current_text):
+    if name not in NORMALIZED_STORAGE_FILES:
+        return None
+    try:
+        head_data = json.loads(head_text)
+        current_data = json.loads(current_text)
+    except json.JSONDecodeError:
+        return None
+    data = merge_normalized_storage_for_commit(name, head_data, current_data)
+    return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
 
 
 def normalized_storage_text_from_path(path):
@@ -1023,7 +1159,7 @@ def normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details
             path_text = path.read_text()
         except (OSError, UnicodeDecodeError):
             continue
-        current_text = normalized_storage_pretty_text_from_text(relative.name, path_text)
+        current_text = normalized_storage_commit_text_from_text(relative.name, head_text, path_text)
         head_bytes = normalized_storage_bytes_from_text(relative.name, head_text)
         current_bytes = normalized_storage_bytes_from_text(relative.name, path_text)
         if current_text is None or head_bytes is None or current_bytes is None or head_bytes == current_bytes:

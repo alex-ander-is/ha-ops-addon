@@ -366,7 +366,7 @@ def render_page(ctx):
             "</section>"
         )
     save_preview_section_html = ""
-    if state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text:
+    if not has_conflicts and (state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text):
         save_preview_section_html = (
             "<section class='card wide'>"
             "<h2>Save Preview</h2>"

@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.15
+
+- Hide the redundant Save Preview diff while Save conflicts are pending.
+- Keep Save commits from rewriting unchanged registry entries while normalizing changed registry entries.
+
 ## 0.6.14
 
 - Save normalized Home Assistant registry files to Git when real registry changes are committed.
