@@ -116,6 +116,7 @@ def default_state():
         "deleted_devices_applied_fingerprint": None,
         "managed_addons": [],
         "homeassistant_organizer_enabled": None,
+        "include_redundant_data": False,
         "conflicts": [],
         "conflict_type": None,
         "save_conflict_resolutions": {},

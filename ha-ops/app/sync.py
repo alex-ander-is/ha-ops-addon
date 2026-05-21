@@ -462,7 +462,7 @@ def sync_storage_allowlist(src, dest, storage_allowlist, protected_storage_files
             continue
         dest_path = dest_storage / name
         ensure_dir(dest_path.parent)
-        shutil.copy2(src_path, dest_path)
+        write_storage_apply_file(src_path, dest_path)
         copied += 1
     return copied, skipped_protected
 
@@ -746,6 +746,32 @@ def normalized_storage_commit_text_from_text(name, head_text, current_text):
         return None
     data = merge_normalized_storage_for_commit(name, head_data, current_data)
     return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
+
+
+def merged_normalized_storage_apply_text(name, live_text, git_text):
+    if name not in NORMALIZED_STORAGE_FILES:
+        return None
+    try:
+        live_data = json.loads(live_text)
+        git_data = json.loads(git_text)
+    except json.JSONDecodeError:
+        return None
+    data = merge_normalized_storage_for_commit(name, live_data, git_data)
+    return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
+
+
+def write_storage_apply_file(src_path, dest_path):
+    src_path = Path(src_path)
+    dest_path = Path(dest_path)
+    if src_path.name in NORMALIZED_STORAGE_FILES and dest_path.exists() and dest_path.is_file():
+        try:
+            merged = merged_normalized_storage_apply_text(src_path.name, dest_path.read_text(), src_path.read_text())
+        except (OSError, UnicodeDecodeError):
+            merged = None
+        if merged is not None:
+            dest_path.write_text(merged)
+            return
+    shutil.copy2(src_path, dest_path)
 
 
 def normalized_storage_text_from_path(path):
@@ -1210,7 +1236,7 @@ def normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details
     return normalized
 
 
-def save_preview_status_lines(repo_dir, preview_repo):
+def save_preview_status_lines(repo_dir, preview_repo, include_redundant_data=False):
     repo_dir = Path(repo_dir)
     preview_repo = Path(preview_repo)
 
@@ -1232,7 +1258,7 @@ def save_preview_status_lines(repo_dir, preview_repo):
             lines.append(f"- Added: {path}")
         elif path not in after:
             lines.append(f"- Deleted: {path}")
-        elif save_file_differs(after[path], before[path]):
+        elif (file_differs(after[path], before[path]) if include_redundant_data else save_file_differs(after[path], before[path])):
             lines.append(f"- Modified: {path}")
     return lines
 
@@ -1244,6 +1270,11 @@ def save_preview_diff(repo_dir, preview_repo, run_command):
     if result.returncode == 1:
         return result.stdout.strip()
     raise RuntimeError(f"Save preview diff failed:\n{result.stderr.strip() or result.stdout.strip()}")
+
+
+def normalized_storage_paths_under(root):
+    root = Path(root)
+    return [Path(".storage") / name for name in sorted(NORMALIZED_STORAGE_FILES) if (root / ".storage" / name).exists()]
 
 
 def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
@@ -1271,7 +1302,7 @@ def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
     return save_preview_diff(repo_copy, preview_copy, ctx.run_command)
 
 
-def build_save_preview(resolved_targets, repo_dir, details, ctx):
+def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
     export_root = build_save_export(resolved_targets, details, ctx)
     preview_repo = ctx.work_dir / "save-to-git-preview"
     clear_tree(preview_repo, ctx.work_dir, ctx.run_command)
@@ -1279,11 +1310,17 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx):
 
     preview_targets = [repo_relative_target(target, repo_dir, preview_repo) for target in resolved_targets]
     apply_save_export(preview_targets, export_root, details, ctx)
-    restore_normalized_equal_save_files(repo_dir, preview_repo, resolved_targets, details, ctx)
+    if not include_redundant_data:
+        restore_normalized_equal_save_files(repo_dir, preview_repo, resolved_targets, details, ctx)
 
-    status_lines = save_preview_status_lines(repo_dir, preview_repo)
+    status_lines = save_preview_status_lines(repo_dir, preview_repo, include_redundant_data)
     summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
-    diff = save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx) if status_lines else ""
+    if not status_lines:
+        diff = ""
+    elif include_redundant_data:
+        diff = save_preview_diff(repo_dir, preview_repo, ctx.run_command)
+    else:
+        diff = save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx)
     return {"summary": summary, "diff": diff}
 
 
@@ -1302,7 +1339,13 @@ def export_target_to_path(target, dest, ctx):
     export_tree(live_path, dest, target_model.save_delete(target), ctx.export_excludes, ctx.run_command)
 
 
-def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, ctx):
+def save_compare_differs(exported_path, source_file, include_redundant_data):
+    if include_redundant_data:
+        return file_differs(exported_path, source_file)
+    return save_file_differs(exported_path, source_file)
+
+
+def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, ctx, include_redundant_data=False):
     preview_root = ctx.work_dir / "save-preview"
     clear_tree(preview_root, ctx.work_dir, ctx.run_command)
     repo_dir = Path(repo_dir)
@@ -1334,7 +1377,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
             repo_relative = source_file.relative_to(repo_dir).as_posix()
             if resolutions.get(repo_relative) in {"ha", "git"}:
                 continue
-            if save_file_differs(exported_path, source_file):
+            if save_compare_differs(exported_path, source_file, include_redundant_data):
                 conflicts.append(repo_relative)
 
         conflicts.extend(
@@ -1346,6 +1389,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
                 repo_dir,
                 resolutions,
                 ctx,
+                include_redundant_data,
             )
         )
 
@@ -1354,7 +1398,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
     return sorted(set(conflicts))
 
 
-def save_deleted_source_conflicts(target, live_path, source_path, preview_path, repo_dir, resolutions, ctx):
+def save_deleted_source_conflicts(target, live_path, source_path, preview_path, repo_dir, resolutions, ctx, include_redundant_data=False):
     conflicts = []
     for relative in managed_save_source_files(target, source_path, ctx):
         if (preview_path / relative).exists():
@@ -1364,7 +1408,7 @@ def save_deleted_source_conflicts(target, live_path, source_path, preview_path, 
         if resolutions.get(repo_relative) in {"ha", "git"}:
             continue
         live_file = live_path / relative
-        if not live_file.exists() or save_file_differs(live_file, source_file):
+        if not live_file.exists() or save_compare_differs(live_file, source_file, include_redundant_data):
             conflicts.append(repo_relative)
     return conflicts
 
@@ -1516,6 +1560,24 @@ def target_diff(target, baseline_path, preview_path, run_command):
     return f"## {target['id']}\n{result.stdout.strip()}\n"
 
 
+def target_diff_normalized(target, baseline_path, preview_path, ctx):
+    if target["type"] != "homeassistant":
+        return target_diff(target, baseline_path, preview_path, ctx.run_command)
+
+    registry_paths = sorted(set(normalized_storage_paths_under(baseline_path)) | set(normalized_storage_paths_under(preview_path)))
+    if not registry_paths:
+        return target_diff(target, baseline_path, preview_path, ctx.run_command)
+
+    diff_root = ctx.work_dir / "apply-preview-diff" / safe_preview_name(str(target["id"]))
+    baseline_copy = diff_root / "baseline"
+    preview_copy = diff_root / "preview"
+    clear_tree(diff_root, ctx.work_dir, ctx.run_command)
+    sync_tree(baseline_path, baseline_copy, True, [".git/"], ctx.run_command)
+    sync_tree(preview_path, preview_copy, True, [".git/"], ctx.run_command)
+    normalize_save_preview_diff_files(baseline_copy, preview_copy, registry_paths)
+    return target_diff(target, baseline_copy, preview_copy, ctx.run_command)
+
+
 def count_preview_deletions(baseline_path, preview_path):
     baseline_path = Path(baseline_path)
     if not baseline_path.exists():
@@ -1554,6 +1616,13 @@ def managed_storage_change_paths(baseline_path, preview_path):
                 if not (left.is_symlink() and right.is_symlink() and left.readlink() == right.readlink()):
                     paths.add(display)
                 continue
+            if dirname == ".storage" and left.name in NORMALIZED_STORAGE_FILES and left.name == right.name:
+                left_normalized = normalized_storage_bytes(left)
+                right_normalized = normalized_storage_bytes(right)
+                if left_normalized is not None and right_normalized is not None:
+                    if left_normalized != right_normalized:
+                        paths.add(display)
+                    continue
             if left.read_bytes() != right.read_bytes():
                 paths.add(display)
     return sorted(paths)
@@ -1599,7 +1668,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         preview_progress(ctx, details, f"Preview {target['id']}: counting deletions")
         deletion_count += count_preview_deletions(baseline_path, preview_path)
         preview_progress(ctx, details, f"Preview {target['id']}: building diff")
-        chunks.append(target_diff(target, baseline_path, preview_path, ctx.run_command))
+        chunks.append(target_diff_normalized(target, baseline_path, preview_path, ctx))
         preview_progress(ctx, details, f"Preview {target['id']}: done")
 
     diff_text = "\n".join(chunks).strip()

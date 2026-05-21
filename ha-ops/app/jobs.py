@@ -196,7 +196,16 @@ def run_save_job(ctx):
         ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         save_resolutions = state.get("save_conflict_resolutions", {})
-        save_conflicts = ctx.save_unknown_base_conflicts(resolved_targets, repo_dir, save_resolutions, details)
+        include_redundant_data = bool(state.get("include_redundant_data"))
+        if include_redundant_data:
+            ctx.add_detail(details, "Including redundant registry data in Save.")
+        save_conflicts = ctx.save_unknown_base_conflicts(
+            resolved_targets,
+            repo_dir,
+            save_resolutions,
+            details,
+            include_redundant_data,
+        )
         if save_conflicts:
             message = "Resolve unknown-base Save conflicts before running Save HA to Git."
             write_state(
@@ -217,8 +226,9 @@ def run_save_job(ctx):
         ctx.add_detail(details, "Saving live Home Assistant config to Git.")
         checkout_dirty_for_save = True
         ctx.export_targets(resolved_targets, details)
-        ctx.restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details)
-        ctx.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details)
+        if not include_redundant_data:
+            ctx.restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details)
+            ctx.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details)
         ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
         ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
         ctx.stage_all(repo_dir)
@@ -342,7 +352,10 @@ def run_save_preview_job(ctx):
         ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Building save preview without committing or pushing.")
-        preview = ctx.build_save_preview(resolved_targets, repo_dir, details)
+        include_redundant_data = bool(state.get("include_redundant_data"))
+        if include_redundant_data:
+            ctx.add_detail(details, "Including redundant registry data in Save preview.")
+        preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
 
         write_state(
             {

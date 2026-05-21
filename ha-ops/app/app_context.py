@@ -417,14 +417,21 @@ class AppContext:
     def export_targets(self, resolved_targets, details):
         return sync_logic.export_targets(resolved_targets, details, self.sync_deps())
 
-    def build_save_preview(self, resolved_targets, repo_dir, details):
-        return sync_logic.build_save_preview(resolved_targets, repo_dir, details, self.sync_deps())
+    def build_save_preview(self, resolved_targets, repo_dir, details, include_redundant_data=False):
+        return sync_logic.build_save_preview(resolved_targets, repo_dir, details, self.sync_deps(), include_redundant_data)
 
     def build_apply_preview(self, resolved_targets, details=None):
         return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details)
 
-    def save_unknown_base_conflicts(self, resolved_targets, repo_dir, resolutions, details):
-        return sync_logic.save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details, self.sync_deps())
+    def save_unknown_base_conflicts(self, resolved_targets, repo_dir, resolutions, details, include_redundant_data=False):
+        return sync_logic.save_unknown_base_conflicts(
+            resolved_targets,
+            repo_dir,
+            resolutions,
+            details,
+            self.sync_deps(),
+            include_redundant_data,
+        )
 
     def restore_save_git_resolutions(self, repo_dir, resolutions, details):
         return sync_logic.restore_save_git_resolutions(repo_dir, resolutions, details, self.sync_deps())

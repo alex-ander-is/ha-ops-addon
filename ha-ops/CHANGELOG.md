@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.17
+
+- Preserve live Home Assistant registry hidden fields during Git to HA preview and approved apply.
+- Hide normalized registry-only noise from Git to HA previews and storage approval checks.
+- Show completed actions as done instead of success.
+- Add an Include redundant data toggle for raw 1:1 HA to Git registry saves and previews.
+
 ## 0.6.16
 
 - Clear stale preview diffs before starting Preview HA to Git, Preview Git to HA, and Check deleted_devices.

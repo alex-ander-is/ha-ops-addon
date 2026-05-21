@@ -154,6 +154,21 @@ def render_homeassistant_organizer(enabled):
     )
 
 
+def render_include_redundant_data(enabled):
+    checked = "checked" if enabled else ""
+    return (
+        "<form method='post' action='include-redundant-data' data-auto-submit='change'>"
+        "<div class='check-list'>"
+        "<label class='check-row'>"
+        f"<input type='checkbox' name='include_redundant_data' value='1' {checked}>"
+        "<span>Include redundant data</span>"
+        "<small>Save HA to Git keeps registry noise exactly as Home Assistant writes it.</small>"
+        "</label>"
+        "</div>"
+        "</form>"
+    )
+
+
 def render_conflicts(conflicts, conflict_type=None):
     if not conflicts:
         return "<p>No unresolved Git conflicts.</p>"
@@ -804,6 +819,9 @@ def render_page(data):
             <form method="post" action="deleted-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
             </form>
+          </div>
+          <div class="action-row">
+            {data['include_redundant_data_html']}
           </div>
         </div>
       </section>

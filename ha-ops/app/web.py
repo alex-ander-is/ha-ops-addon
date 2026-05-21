@@ -106,7 +106,7 @@ def normalized_save_conflict_file_diff(ctx, left_label, left_path, right_label, 
     return file_diff(ctx, left_label, normalized_pair[0], right_label, normalized_pair[1])
 
 
-def save_conflict_detail(ctx, repo_dir, targets, path):
+def save_conflict_detail(ctx, repo_dir, targets, path, include_redundant_data=False):
     safe_path = git_ops.safe_repo_relative_path(path)
     repo_file = Path(repo_dir) / safe_path
     for target in targets or []:
@@ -122,6 +122,8 @@ def save_conflict_detail(ctx, repo_dir, targets, path):
             continue
         relative = Path(safe_path).relative_to(source_root)
         preview_file = ctx.work_dir / "save-preview" / target_id / relative
+        if include_redundant_data:
+            return file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
         return normalized_save_conflict_file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
     return f"Diff unavailable: no managed target found for {safe_path}."
 
@@ -158,7 +160,7 @@ def conflict_items(ctx, state, options):
         try:
             safe_path = git_ops.safe_repo_relative_path(path)
             if conflict_type == "save_unknown_base":
-                detail = save_conflict_detail(ctx, repo_dir, targets, safe_path)
+                detail = save_conflict_detail(ctx, repo_dir, targets, safe_path, bool(state.get("include_redundant_data")))
             else:
                 detail = full_conflict_detail(file_text(Path(repo_dir) / safe_path).strip())
         except Exception as exc:
@@ -275,6 +277,8 @@ def render_page(ctx):
     deleted_devices_rollback_path = state.get("deleted_devices_rollback_path")
     pending_deleted_devices_decision = bool(deleted_devices_pending_confirmation and deleted_devices_rollback_path)
     display_status = "conflicts" if has_conflicts else "pending decision" if pending_deleted_devices_decision else last_status
+    if display_status == "success":
+        display_status = "done"
     details = log_text_for_state(
         ctx,
         state,
@@ -456,6 +460,7 @@ def render_page(ctx):
                 ctx.addon_is_zigbee2mqtt,
             ),
             "organizer_html": ui.render_homeassistant_organizer(homeassistant_organizer_enabled),
+            "include_redundant_data_html": ui.render_include_redundant_data(bool(state.get("include_redundant_data"))),
             "releases_html": ui.render_releases(releases),
             "version": html.escape(ctx.addon_version()),
         }
@@ -675,6 +680,15 @@ def create_handler(ctx):
                 if self.wants_json():
                     message = "Home Assistant Git layout updated. Refreshing..."
                     self.send_json({"ok": True, "message": message})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/include-redundant-data":
+                enabled = "include_redundant_data" in body
+                ctx.write_state({"include_redundant_data": enabled})
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Redundant data setting updated. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return

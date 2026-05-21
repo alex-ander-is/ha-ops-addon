@@ -370,6 +370,18 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<div class="badge success">success</div>', page)
             self.assertIn("Previous transient status was cleared", page)
 
+    def test_success_status_is_displayed_as_done(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"last_status": "success", "last_message": "Preview finished successfully."})
+
+            page = server.render_page()
+
+            self.assertIn('<div class="badge ">done</div>', page)
+            self.assertNotIn('<div class="badge ">success</div>', page)
+
     def test_async_actions_do_not_clear_persisted_state_before_submit(self):
         server = load_server()
 
@@ -806,6 +818,83 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("git-modified-at", diff)
             self.assertNotIn("live-modified-at", diff)
 
+    def test_save_preview_include_redundant_data_shows_registry_noise(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo_storage = repo / "homeassistant" / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            repo_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (repo_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}})
+            )
+            (live_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}})
+            )
+            details = []
+
+            preview = server.sync_logic.build_save_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(repo / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                        "delete": False,
+                    }
+                ],
+                repo,
+                details,
+                server.app_context.AppContext(
+                    data_dir=server.DATA_DIR,
+                    config_dir=server.CONFIG_DIR,
+                    addon_configs_dir=server.ADDON_CONFIGS_DIR,
+                ).sync_deps(),
+                include_redundant_data=True,
+            )
+
+            self.assertIn("- Modified: homeassistant/.storage/core.device_registry", preview["summary"])
+            self.assertIn("modified_at", preview["diff"])
+            self.assertIn("git-modified-at", preview["diff"])
+            self.assertIn("live-modified-at", preview["diff"])
+
+    def test_save_conflict_include_redundant_data_shows_registry_noise(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo_storage = repo / "homeassistant" / ".storage"
+            preview_storage = server.WORK_DIR / "save-preview" / "homeassistant" / ".storage"
+            repo_storage.mkdir(parents=True)
+            preview_storage.mkdir(parents=True)
+            (repo_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}})
+            )
+            (preview_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}})
+            )
+            ctx = server.app_context.AppContext(
+                data_dir=server.DATA_DIR,
+                config_dir=server.CONFIG_DIR,
+                addon_configs_dir=server.ADDON_CONFIGS_DIR,
+            )
+
+            detail = server.web.save_conflict_detail(
+                ctx,
+                repo,
+                [{"id": "homeassistant", "source_path": str(repo / "homeassistant")}],
+                "homeassistant/.storage/core.device_registry",
+                include_redundant_data=True,
+            )
+
+            self.assertIn("modified_at", detail)
+            self.assertIn("git-modified-at", detail)
+            self.assertIn("live-modified-at", detail)
+
     def test_save_restores_registry_noise_only_worktree_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1167,6 +1256,54 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(second["modified_at"], "old-phone-modified")
             self.assertEqual(second["original_icon"], "mdi:battery-10")
 
+    def test_save_include_redundant_data_commits_live_registry_hidden_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            seed_storage = seed / "homeassistant" / ".storage"
+            seed_storage.mkdir(parents=True)
+            (seed_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}})
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "2"}]}})
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            server.write_state(
+                {
+                    "include_redundant_data": True,
+                    "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
+                }
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            saved = json.loads(self.remote_file(remote, "homeassistant/.storage/core.device_registry"))
+
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
+            self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-modified-at")
+
     def test_save_commit_preserves_hidden_registry_order_when_real_fields_change(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1455,6 +1592,16 @@ class ServerTests(unittest.TestCase):
             ],
         )
 
+        post_request = invoke(
+            "do_POST",
+            "/include-redundant-data",
+            body=b"include_redundant_data=1",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Redundant data setting updated", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.state_updates[-1], {"include_redundant_data": True})
+
     def test_empty_git_preview_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1545,6 +1692,188 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(preview["skipped_protected"], [])
             self.assertTrue(preview["storage_changes"])
             self.assertIn("homeassistant/.storage/core.device_registry", preview["storage_change_paths"])
+
+    def test_apply_preview_preserves_live_registry_hidden_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "live-modified-at",
+                                    "sw_version": "2",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (source / ".storage" / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "git-modified-at",
+                                    "sw_version": "1",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+            preview_storage = server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage"
+            saved = json.loads((preview_storage / "core.device_registry").read_text())
+
+            self.assertIn("sw_version", preview["diff"])
+            self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-modified-at")
+            self.assertTrue(preview["storage_changes"])
+            self.assertIn("homeassistant/.storage/core.device_registry", preview["storage_change_paths"])
+            self.assertNotIn("modified_at", preview["diff"])
+            self.assertNotIn("git-modified-at", preview["diff"])
+            self.assertNotIn("live-modified-at", preview["diff"])
+
+    def test_apply_preview_ignores_registry_hidden_only_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            live_registry = {"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}}
+            git_registry = {"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}}
+            (live / ".storage" / "core.device_registry").write_text(json.dumps(live_registry))
+            (source / ".storage" / "core.device_registry").write_text(json.dumps(git_registry))
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+            saved = json.loads((server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage" / "core.device_registry").read_text())
+
+            self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-modified-at")
+            self.assertFalse(preview["storage_changes"])
+            self.assertEqual(preview["storage_change_paths"], [])
+            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
+            self.assertNotIn("modified_at", preview["diff"])
+            self.assertNotIn("git-modified-at", preview["diff"])
+
+    def test_apply_preview_preserves_live_entity_registry_hidden_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "sensor.test",
+                                    "modified_at": "live-modified-at",
+                                    "platform": "mqtt",
+                                    "suggested_object_id": "live_object",
+                                    "supported_features": 2,
+                                },
+                                {
+                                    "id": "entity-2",
+                                    "entity_id": "sensor.phone",
+                                    "modified_at": "live-phone-modified-at",
+                                    "original_icon": "mdi:battery-90",
+                                    "platform": "mobile_app",
+                                    "supported_features": 2,
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+            (source / ".storage" / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "sensor.test",
+                                    "modified_at": "git-modified-at",
+                                    "platform": "mqtt",
+                                    "suggested_object_id": "git_object",
+                                    "supported_features": 1,
+                                },
+                                {
+                                    "id": "entity-2",
+                                    "entity_id": "sensor.phone",
+                                    "modified_at": "git-phone-modified-at",
+                                    "original_icon": "mdi:battery-10",
+                                    "platform": "mobile_app",
+                                    "supported_features": 1,
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+            saved = json.loads((server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage" / "core.entity_registry").read_text())
+
+            self.assertIn("supported_features", preview["diff"])
+            self.assertEqual(saved["data"]["entities"][0]["modified_at"], "live-modified-at")
+            self.assertEqual(saved["data"]["entities"][0]["suggested_object_id"], "live_object")
+            self.assertEqual(saved["data"]["entities"][1]["modified_at"], "live-phone-modified-at")
+            self.assertEqual(saved["data"]["entities"][1]["original_icon"], "mdi:battery-90")
+            self.assertNotIn("modified_at", preview["diff"])
+            self.assertNotIn("suggested_object_id", preview["diff"])
+            self.assertNotIn("original_icon", preview["diff"])
+            self.assertNotIn("git_object", preview["diff"])
+            self.assertNotIn("live_object", preview["diff"])
 
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
@@ -3175,6 +3504,83 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "git-storage\n")
 
+    def test_approved_apply_preserves_live_registry_hidden_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            seed_storage = seed / "homeassistant" / ".storage"
+            seed_storage.mkdir(parents=True)
+            (seed_storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "git-old-modified-at",
+                                    "sw_version": "1",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "device-1",
+                                    "modified_at": "live-fresh-modified-at",
+                                    "sw_version": "2",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job())
+            state = server.read_state()
+            self.assertTrue(state["last_preview_storage_changes"])
+            self.assertNotIn("modified_at", state["last_diff"])
+
+            server.write_state({"last_preview_approved_fingerprint": state["last_preview_fingerprint"]})
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            saved = json.loads((live_storage / "core.device_registry").read_text())
+
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "1")
+            self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-fresh-modified-at")
+
     def test_managed_config_entries_projection_updates_safe_fields_only(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3747,6 +4153,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertIn("action='include-redundant-data'", page)
+            self.assertIn("Include redundant data", page)
+            self.assertLess(page.index("Check deleted_devices"), page.index("Include redundant data"))
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)
