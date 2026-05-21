@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.19
+
+- Compare organizer-enabled Git to HA previews in the organized area view to avoid heap YAML rewrite noise.
+- Normalize organizer index id order in preview diffs.
+
 ## 0.6.18
 
 - Move Include redundant data under the HA to Git actions.

@@ -1287,6 +1287,38 @@ def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
         write_normalized_storage_file(preview_file, preview_file)
 
 
+def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target):
+    options = organizer_options(target)
+    if options is None:
+        return False
+    if not organizer.has_heap_files(baseline_copy) and not organizer.has_heap_files(preview_copy):
+        return False
+    organizer.split_live_heaps_to_git(baseline_copy, baseline_copy, options=options)
+    organizer.split_live_heaps_to_git(preview_copy, preview_copy, options=options)
+    normalize_organizer_index_for_diff(baseline_copy, options)
+    normalize_organizer_index_for_diff(preview_copy, options)
+    return True
+
+
+def normalize_organizer_index_for_diff(root, options):
+    index_path = organizer.organized_root(root, options) / organizer.INDEX_NAME
+    try:
+        data = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    changed = False
+    for kind in ("automations", "scripts", "scenes"):
+        ids = data.get(kind, {}).get("ids")
+        if isinstance(ids, list):
+            sorted_ids = sorted(ids, key=str)
+            if ids != sorted_ids:
+                data[kind]["ids"] = sorted_ids
+                changed = True
+    if changed:
+        index_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
+    return changed
+
+
 def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
     registry_paths = normalized_save_registry_paths(resolved_targets, repo_dir)
     if not registry_paths:
@@ -1565,7 +1597,8 @@ def target_diff_normalized(target, baseline_path, preview_path, ctx):
         return target_diff(target, baseline_path, preview_path, ctx.run_command)
 
     registry_paths = sorted(set(normalized_storage_paths_under(baseline_path)) | set(normalized_storage_paths_under(preview_path)))
-    if not registry_paths:
+    normalize_organizer = organizer_options(target) is not None
+    if not registry_paths and not normalize_organizer:
         return target_diff(target, baseline_path, preview_path, ctx.run_command)
 
     diff_root = ctx.work_dir / "apply-preview-diff" / safe_preview_name(str(target["id"]))
@@ -1574,6 +1607,7 @@ def target_diff_normalized(target, baseline_path, preview_path, ctx):
     clear_tree(diff_root, ctx.work_dir, ctx.run_command)
     sync_tree(baseline_path, baseline_copy, True, [".git/"], ctx.run_command)
     sync_tree(preview_path, preview_copy, True, [".git/"], ctx.run_command)
+    normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target)
     normalize_save_preview_diff_files(baseline_copy, preview_copy, registry_paths)
     return target_diff(target, baseline_copy, preview_copy, ctx.run_command)
 

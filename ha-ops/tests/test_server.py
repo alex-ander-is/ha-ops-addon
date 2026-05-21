@@ -1994,6 +1994,81 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("git_object", preview["diff"])
             self.assertNotIn("live_object", preview["diff"])
 
+    def test_apply_preview_organizer_diff_ignores_heap_order_rewrite(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            live_storage = live / ".storage"
+            live_storage.mkdir(parents=True)
+            live.joinpath("automations.yaml").write_text(
+                "\n".join(
+                    [
+                        "- id: wardrobe_auto",
+                        "  alias: Wardrobe Auto",
+                        "- id: bathroom_auto",
+                        "  alias: Bathroom Auto",
+                        "",
+                    ]
+                )
+            )
+            live.joinpath("scripts.yaml").write_text("{}\n")
+            live.joinpath("scenes.yaml").write_text("[]\n")
+            (live_storage / "core.area_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "areas": [
+                                {"id": "bathroom", "name": "Bathroom"},
+                                {"id": "wardrobe", "name": "Wardrobe"},
+                            ]
+                        }
+                    }
+                )
+            )
+            (live_storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (live_storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "automation.bathroom_auto",
+                                    "unique_id": "bathroom_auto",
+                                    "area_id": "bathroom",
+                                },
+                                {
+                                    "entity_id": "automation.wardrobe_auto",
+                                    "unique_id": "wardrobe_auto",
+                                    "area_id": "wardrobe",
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+            server.sync_logic.organizer.split_live_heaps_to_git(live, source, options={})
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                        "organizer": {"enabled": True},
+                    }
+                ]
+            )
+
+            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
+            self.assertNotIn("automations.yaml", preview["diff"])
+            self.assertNotIn("wardrobe_auto", preview["diff"])
+            self.assertNotIn("bathroom_auto", preview["diff"])
+
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
