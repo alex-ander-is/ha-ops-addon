@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.1
+
+- Improve Internal IDs migration UI table sizing and split check actions into separate rows.
+- Avoid duplicate Internal IDs preview progress text while checks are running.
+
 ## 0.7.0
 
 - Add an internal id migration flow for HA Ops automations, scripts, and scenes with preview and checkbox approval.

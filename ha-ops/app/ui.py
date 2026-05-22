@@ -290,13 +290,13 @@ def render_internal_ids_table(rows):
         path = html.escape(str(row.get("path") or ""))
         rendered_rows.append(
             "<tr>"
-            f"<td><input type='checkbox' name='candidate' value='{index}' {checked} {disabled}></td>"
-            f"<td><code>{path}</code></td>"
-            f"<td>{html.escape(str(row.get('entity_triggers') or 0))}</td>"
-            f"<td>{html.escape(str(row.get('mqtt_triggers') or 0))}</td>"
-            f"<td>{html.escape(str(row.get('actions') or 0))}</td>"
-            f"<td>{html.escape(str(row.get('conditions') or 0))}</td>"
-            f"<td>{html.escape(str(row.get('unresolved') or 0))}</td>"
+            f"<td class='select-col'><input type='checkbox' name='candidate' value='{index}' {checked} {disabled}></td>"
+            f"<td class='file-col'><code>{path}</code></td>"
+            f"<td class='metric-col'>{html.escape(str(row.get('entity_triggers') or 0))}</td>"
+            f"<td class='metric-col'>{html.escape(str(row.get('mqtt_triggers') or 0))}</td>"
+            f"<td class='metric-col'>{html.escape(str(row.get('actions') or 0))}</td>"
+            f"<td class='metric-col'>{html.escape(str(row.get('conditions') or 0))}</td>"
+            f"<td class='metric-col'>{html.escape(str(row.get('unresolved') or 0))}</td>"
             "</tr>"
         )
     return (
@@ -306,8 +306,11 @@ def render_internal_ids_table(rows):
         "</div>"
         "<div class='table-scroll'>"
         "<table class='internal-ids-table' data-checkbox-scope='internal-ids'>"
-        "<thead><tr><th>Migrate</th><th>File</th><th>Entity triggers</th>"
-        "<th>Z2M triggers</th><th>Actions</th><th>Conditions</th><th>Unresolved</th></tr></thead>"
+        "<colgroup><col class='select-col'><col class='file-col'>"
+        "<col class='metric-col'><col class='metric-col'><col class='metric-col'>"
+        "<col class='metric-col'><col class='metric-col'></colgroup>"
+        "<thead><tr><th>Migrate</th><th>File</th><th>Entity</th>"
+        "<th>Z2M</th><th>Actions</th><th>Conditions</th><th>Unresolved</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
         "</div>"
@@ -714,6 +717,26 @@ def render_page(data):
     .conflicts-table th:last-child, .conflicts-table td:last-child {{
       width: 430px;
     }}
+    .internal-ids-table col.select-col {{
+      width: 82px;
+    }}
+    .internal-ids-table col.file-col {{
+      width: auto;
+    }}
+    .internal-ids-table col.metric-col {{
+      width: 96px;
+    }}
+    .internal-ids-table th,
+    .internal-ids-table td {{
+      white-space: nowrap;
+    }}
+    .internal-ids-table .metric-col {{
+      text-align: center;
+    }}
+    .internal-ids-table .file-col code {{
+      overflow-wrap: normal;
+      word-break: normal;
+    }}
     th, td {{
       text-align: left;
       padding: 12px 10px;
@@ -904,9 +927,13 @@ def render_page(data):
             <form method="post" action="deleted-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
             </form>
+          </div>
+          <div class="action-row">
             <form method="post" action="retained-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
             </form>
+          </div>
+          <div class="action-row">
             <form method="post" action="internal-ids-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check internal ids</button>
             </form>

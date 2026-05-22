@@ -518,7 +518,7 @@ def run_internal_ids_preview_job(ctx):
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
             raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking internal ids.")
-        ctx.add_detail(details, "Checking HA Ops automations, scripts, and scenes for safe internal id migrations.")
+        details.append("Checking HA Ops automations, scripts, and scenes for safe internal id migrations.")
         preview = ctx.build_internal_ids_preview()
         count = int(preview["count"])
         message = f"Found {count} internal id migration file{'s' if count != 1 else ''}."

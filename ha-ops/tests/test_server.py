@@ -4593,6 +4593,16 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertLess(page.index('action="deleted-devices-preview"'), page.index('action="retained-devices-preview"'))
+            self.assertLess(page.index('action="retained-devices-preview"'), page.index('action="internal-ids-preview"'))
+            self.assertIn(
+                '</form>\n          </div>\n          <div class="action-row">\n            <form method="post" action="retained-devices-preview"',
+                page,
+            )
+            self.assertIn(
+                '</form>\n          </div>\n          <div class="action-row">\n            <form method="post" action="internal-ids-preview"',
+                page,
+            )
             self.assertIn("action='include-redundant-data'", page)
             self.assertIn("Include redundant data", page)
             self.assertIn("<h2>Log</h2>", page)
@@ -4883,6 +4893,10 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Files: 1. Entity triggers: 0. Z2M triggers: 1. Actions: 1. Conditions: 0. Unresolved: 0.", page)
             self.assertIn("Select all", page)
             self.assertIn("Select none", page)
+            self.assertIn("<colgroup><col class='select-col'><col class='file-col'>", page)
+            self.assertIn("<th>Entity</th><th>Z2M</th><th>Actions</th><th>Conditions</th><th>Unresolved</th>", page)
+            self.assertIn("<td class='file-col'><code>.ha-ops/areas/office/automations.yaml</code></td>", page)
+            self.assertIn("<td class='metric-col'>1</td>", page)
             self.assertIn("View diff:", page)
             self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
             self.assertIn("run Preview Git to HA", page)
@@ -4897,6 +4911,34 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_internal_ids_preview_job())
             self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
+
+    def test_internal_ids_preview_running_state_does_not_duplicate_detail_message(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            seen = {}
+
+            def fake_preview():
+                seen["state"] = server.read_state()
+                seen["page"] = server.render_page()
+                return {
+                    "count": 0,
+                    "rows": [],
+                    "unresolved": [],
+                    "fingerprint": "synthetic",
+                    "summary": "No safe internal id migrations found.",
+                }
+
+            server.context().build_internal_ids_preview = fake_preview
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            self.assertEqual(seen["state"]["last_message"], "Checking internal ids.")
+            self.assertEqual(seen["state"]["last_details"], [])
+            self.assertEqual(
+                seen["page"].count("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
+                0,
+            )
 
     def test_internal_ids_mixed_trigger_gets_mqtt_guard_condition(self):
         server = load_server()
