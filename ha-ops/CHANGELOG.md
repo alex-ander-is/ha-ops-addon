@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.2
+
+- Keep Internal IDs migration file paths clipped with ellipsis so they do not overlap metric columns.
+
 ## 0.7.1
 
 - Improve Internal IDs migration UI table sizing and split check actions into separate rows.

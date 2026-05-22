@@ -733,8 +733,17 @@ def render_page(data):
     .internal-ids-table .metric-col {{
       text-align: center;
     }}
+    .internal-ids-table .file-col {{
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }}
     .internal-ids-table .file-col code {{
+      display: block;
+      overflow: hidden;
       overflow-wrap: normal;
+      text-overflow: ellipsis;
+      white-space: nowrap;
       word-break: normal;
     }}
     th, td {{
