@@ -84,6 +84,66 @@ class ServerTests(unittest.TestCase):
     def repo_status(self, repo):
         return self.git(["status", "--porcelain"], repo).stdout.strip()
 
+    def seed_internal_ids_repo(self, server, root):
+        repo = root / "data" / "ha-config"
+        config = repo / "homeassistant"
+        storage = config / ".storage"
+        z2m = config / "zigbee2mqtt"
+        storage.mkdir(parents=True)
+        z2m.mkdir(parents=True)
+        server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+        (storage / "core.entity_registry").write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "entities": [
+                            {
+                                "id": "11111111111111111111111111111111",
+                                "entity_id": "switch.synthetic_switch",
+                                "device_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            },
+                            {
+                                "id": "22222222222222222222222222222222",
+                                "entity_id": "binary_sensor.synthetic_contact",
+                                "device_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                            },
+                        ]
+                    }
+                }
+            )
+        )
+        (storage / "core.device_registry").write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "devices": [
+                            {
+                                "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]],
+                                "name": "old_registry_name",
+                            },
+                            {
+                                "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                                "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f9"]],
+                                "name": "synthetic_contact",
+                            },
+                        ]
+                    }
+                }
+            )
+        )
+        (z2m / "state.json").write_text(
+            json.dumps(
+                [
+                    {
+                        "ieee_address": "0x00124b00226b31f8",
+                        "friendly_name": "synthetic_remote",
+                    }
+                ]
+            )
+        )
+        return config
+
     def make_rebase_conflict(self, server, root):
         remote = self.seed_remote(root)
         repo = server.DATA_DIR / "ha-config"
@@ -4640,10 +4700,10 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "stale-device",
-                                    "identifiers": [["mqtt", "zigbee2mqtt_0x60a423fffed229de"]],
-                                    "name": "Living Room Switcher Terrace",
-                                    "manufacturer": "TuYa",
-                                    "model": "Wireless switch with 1 button (TS0041)",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0xabc123fffed45678"]],
+                                    "name": "Detached Button",
+                                    "manufacturer": "Example",
+                                    "model": "Battery button",
                                 },
                                 {
                                     "id": "current-device",
@@ -4659,22 +4719,22 @@ class ServerTests(unittest.TestCase):
             preview = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(
                 server.CONFIG_DIR,
                 [
-                    "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
-                    "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                    "homeassistant/device_automation/0xabc123fffed45678/action_double/config",
+                    "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
                     "homeassistant/device_automation/0x0017880104abcd12/action_hold/config",
                 ],
             )
 
             self.assertEqual(preview["count"], 1)
-            self.assertEqual(preview["candidates"][0]["ieee"], "0x60a423fffed229de")
+            self.assertEqual(preview["candidates"][0]["ieee"], "0xabc123fffed45678")
             self.assertEqual(
                 preview["candidates"][0]["retained_topics"],
                 [
-                    "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
-                    "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                    "homeassistant/device_automation/0xabc123fffed45678/action_double/config",
+                    "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
                 ],
             )
-            self.assertIn("Living Room Switcher Terrace", preview["summary"])
+            self.assertIn("Detached Button", preview["summary"])
             self.assertIn("retained Home Assistant MQTT discovery topics", preview["summary"])
             self.assertIn("does not delete files or registry/database records", preview["summary"])
             self.assertNotIn("Current Bulb", preview["summary"])
@@ -4690,12 +4750,12 @@ class ServerTests(unittest.TestCase):
                     "last_retained_devices_rows": [
                         {
                             "selected": True,
-                            "identifiers": ["mqtt", "zigbee2mqtt_0x60a423fffed229de"],
-                            "name": "living_room_switcher_terrace",
-                            "manufacturer": "TuYa",
-                            "model": "Wireless switch with 1 button (TS0041)",
+                            "identifiers": ["mqtt", "zigbee2mqtt_0xabc123fffed45678"],
+                            "name": "detached_button",
+                            "manufacturer": "Example",
+                            "model": "Battery button",
                             "retained_topics": [
-                                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config"
+                                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config"
                             ],
                         }
                     ],
@@ -4715,9 +4775,9 @@ class ServerTests(unittest.TestCase):
 
         cleared = server.app_context.registry_cleanup.clear_stale_mqtt_discovery_topics(
             [
-                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
-                "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
-                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
+                "homeassistant/device_automation/0xabc123fffed45678/action_double/config",
+                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
             ],
             published.append,
         )
@@ -4725,11 +4785,295 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             cleared,
             [
-                "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
-                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                "homeassistant/device_automation/0xabc123fffed45678/action_double/config",
+                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
             ],
         )
         self.assertEqual(published, cleared)
+
+    def test_internal_ids_preview_and_migrate_use_z2m_friendly_name(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = server.DATA_DIR / "ha-config"
+            config = repo / "homeassistant"
+            storage = config / ".storage"
+            area = config / ".ha-ops" / "areas" / "office"
+            z2m = config / "zigbee2mqtt"
+            storage.mkdir(parents=True)
+            area.mkdir(parents=True)
+            z2m.mkdir(parents=True)
+            server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "11111111111111111111111111111111",
+                                    "entity_id": "switch.office_button",
+                                    "device_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]],
+                                    "name": "old_registry_name",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (z2m / "state.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "ieee_address": "0x00124b00226b31f8",
+                            "friendly_name": "office_remote_new",
+                        }
+                    ]
+                )
+            )
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: Synthetic button
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions:
+  - type: turn_on
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    entity_id: '11111111111111111111111111111111'
+    domain: switch
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_internal_ids_count"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["mqtt_triggers"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["actions"], 1)
+            self.assertIn(
+                "--- .ha-ops/areas/office/automations.yaml before internal id migration",
+                state["last_internal_ids_rows"][0]["diff"],
+            )
+            self.assertIn("topic: z2m/office_remote_new", state["last_internal_ids_rows"][0]["diff"])
+
+            page = server.render_page()
+            self.assertIn("Check internal ids", page)
+            self.assertIn("Migrate selected files", page)
+            self.assertIn("Internal IDs Migration Preview", page)
+            self.assertIn("Files: 1. Entity triggers: 0. Z2M triggers: 1. Actions: 1. Conditions: 0. Unresolved: 0.", page)
+            self.assertIn("Select all", page)
+            self.assertIn("Select none", page)
+            self.assertIn("View diff:", page)
+            self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
+            self.assertIn("run Preview Git to HA", page)
+            self.assertIn(".ha-ops/areas/office/automations.yaml after internal id migration", page)
+
+            self.assertTrue(server.run_internal_ids_migrate_job(["0"]))
+            migrated = automation.read_text()
+            self.assertIn("topic: z2m/office_remote_new", migrated)
+            self.assertIn("value_template: '{{ trigger.payload_json.action == ''1_single'' }}'", migrated)
+            self.assertIn("action: switch.turn_on", migrated)
+            self.assertNotIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", migrated)
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
+
+    def test_internal_ids_mixed_trigger_gets_mqtt_guard_condition(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            area = config / ".ha-ops" / "areas" / "synthetic"
+            area.mkdir(parents=True)
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: Mixed trigger
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  - entity_id:
+    - input_boolean.synthetic
+    to:
+    - 'off'
+    trigger: state
+  conditions: []
+  actions:
+  - action: light.turn_off
+    target:
+      entity_id: light.synthetic
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            self.assertTrue(server.run_internal_ids_migrate_job(["0"]))
+
+            migrated = automation.read_text()
+            self.assertIn("topic: z2m/synthetic_remote", migrated)
+            self.assertIn(
+                "trigger.platform != ''mqtt'' or trigger.payload_json.action == ''1_single''",
+                migrated,
+            )
+
+    def test_internal_ids_unresolved_blocker_is_not_selectable(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            area = config / ".ha-ops" / "areas" / "synthetic"
+            area.mkdir(parents=True)
+            (area / "automations.yaml").write_text(
+                """
+- id: '1'
+  alias: Unsupported integration event
+  triggers:
+  - device_id: cccccccccccccccccccccccccccccccc
+    domain: synthetic_integration
+    type: synthetic_event
+    trigger: device
+  conditions: []
+  actions: []
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_internal_ids_count"], 0)
+            self.assertEqual(state["last_internal_ids_rows"][0]["changes"], 0)
+            self.assertEqual(state["last_internal_ids_rows"][0]["unresolved"], 1)
+            self.assertEqual(state["last_internal_ids_unresolved"][0]["alias"], "Unsupported integration event")
+
+            page = server.render_page()
+            self.assertIn("Unresolved device blocks", page)
+            self.assertIn("unsupported device trigger", page)
+            self.assertIn("disabled></td>", page)
+
+    def test_internal_ids_migrate_rejects_stale_preview(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            area = config / ".ha-ops" / "areas" / "synthetic"
+            area.mkdir(parents=True)
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: Stale preview
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions: []
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            automation.write_text(automation.read_text() + "\n")
+
+            self.assertFalse(server.run_internal_ids_migrate_job(["0"]))
+            self.assertIn("changed since preview", server.read_state()["last_message"])
+
+    def test_internal_ids_split_mode_applies_only_selected_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            kitchen = config / ".ha-ops" / "areas" / "kitchen"
+            office = config / ".ha-ops" / "areas" / "office"
+            kitchen.mkdir(parents=True)
+            office.mkdir(parents=True)
+            for path, alias in [
+                (kitchen / "automations.yaml", "Kitchen synthetic"),
+                (office / "automations.yaml", "Office synthetic"),
+            ]:
+                path.write_text(
+                    f"""
+- id: '{alias}'
+  alias: {alias}
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions: []
+""".lstrip()
+                )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            rows = server.read_state()["last_internal_ids_rows"]
+            self.assertEqual(len([row for row in rows if row["changes"]]), 2)
+            office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
+
+            page = server.render_page()
+            self.assertIn(".ha-ops/areas/kitchen/automations.yaml after internal id migration", page)
+            self.assertIn(".ha-ops/areas/office/automations.yaml after internal id migration", page)
+
+            self.assertTrue(server.run_internal_ids_migrate_job([str(office_index)]))
+            self.assertIn("topic: z2m/synthetic_remote", (office / "automations.yaml").read_text())
+            self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", (kitchen / "automations.yaml").read_text())
+
+    def test_internal_ids_no_changes_disables_migration(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            area = config / ".ha-ops" / "areas" / "synthetic"
+            area.mkdir(parents=True)
+            (area / "automations.yaml").write_text(
+                """
+- id: '1'
+  alias: Already migrated
+  triggers:
+  - topic: z2m/synthetic_remote
+    trigger: mqtt
+  conditions:
+  - condition: template
+    value_template: '{{ trigger.payload_json.action == ''1_single'' }}'
+  actions: []
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
+
+            page = server.render_page()
+            self.assertIn("No internal id migration candidates found.", page)
+            self.assertIn("<button type='submit' disabled>Migrate selected files</button>", page)
 
     def test_approve_deleted_devices_clears_array_with_core_stopped(self):
         server = load_server()

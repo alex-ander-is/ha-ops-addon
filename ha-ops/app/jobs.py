@@ -9,6 +9,7 @@ class JobContext:
     add_detail: Any
     apply_targets: Any
     build_deleted_devices_preview: Any
+    build_internal_ids_preview: Any
     build_retained_devices_preview: Any
     build_apply_preview: Any
     build_save_preview: Any
@@ -52,6 +53,7 @@ class JobContext:
     approve_storage_apply_targets: Any
     restore_deleted_devices_rollback: Any
     restore_release_snapshot: Any
+    apply_internal_ids_migration: Any
     run_lock: Any
     save_unknown_base_conflicts: Any
     stage_all: Any
@@ -481,6 +483,157 @@ def retained_device_rows(candidates):
             }
         )
     return rows
+
+
+def run_internal_ids_preview_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not run_lock.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "internal_ids_preview",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    log_action(ctx, "internal ids preview: started")
+    write_state(
+        {
+            **state_store.INTERNAL_IDS_PREVIEW_CLEAR_UPDATES,
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "internal_ids_preview",
+            "last_message": "Checking internal ids.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        if state.get("deleted_devices_pending_confirmation"):
+            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking internal ids.")
+        ctx.add_detail(details, "Checking HA Ops automations, scripts, and scenes for safe internal id migrations.")
+        preview = ctx.build_internal_ids_preview()
+        count = int(preview["count"])
+        message = f"Found {count} internal id migration file{'s' if count != 1 else ''}."
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "internal_ids_preview",
+                "last_message": message,
+                "last_details": details,
+                "last_internal_ids_preview": preview["summary"],
+                "last_internal_ids_rows": preview["rows"],
+                "last_internal_ids_count": count,
+                "last_internal_ids_fingerprint": preview["fingerprint"],
+                "last_internal_ids_generated_at": utc_now(),
+                "last_internal_ids_unresolved": preview["unresolved"],
+            }
+        )
+        log_action(ctx, f"internal ids preview: found {count} file(s)")
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        log_action(ctx, f"internal ids preview: failed: {exc}")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "internal_ids_preview",
+                "last_message": str(exc),
+                "last_details": details,
+                **state_store.INTERNAL_IDS_PREVIEW_CLEAR_UPDATES,
+            }
+        )
+        return False
+    finally:
+        run_lock.release()
+
+
+def run_internal_ids_migrate_job(selected, ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not run_lock.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "internal_ids_migrate",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    log_action(ctx, "internal ids migrate: started")
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "internal_ids_migrate",
+            "last_message": "Migrating internal ids.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        rows = state.get("last_internal_ids_rows") or []
+        fingerprint = state.get("last_internal_ids_fingerprint")
+        if not rows or not fingerprint:
+            raise RuntimeError("Run Check internal ids before approving migration.")
+        selected_indexes = {int(value) for value in selected}
+        if not selected_indexes:
+            raise RuntimeError("Select at least one internal id migration file.")
+        selected_paths = []
+        for index, row in enumerate(rows):
+            if index in selected_indexes and row.get("changes"):
+                selected_paths.append(row.get("path"))
+        result = ctx.apply_internal_ids_migration(fingerprint, selected_paths)
+        for row in result["changed"]:
+            ctx.add_detail(details, f"Migrated internal ids in {row['path']}.")
+        preview = result["preview"]
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "internal_ids_migrate",
+                "last_message": f"Migrated internal ids in {result['changed_count']} file(s).",
+                "last_details": details,
+                "last_internal_ids_preview": preview["summary"],
+                "last_internal_ids_rows": preview["rows"],
+                "last_internal_ids_count": preview["count"],
+                "last_internal_ids_fingerprint": preview["fingerprint"],
+                "last_internal_ids_generated_at": utc_now(),
+                "last_internal_ids_unresolved": preview["unresolved"],
+            }
+        )
+        log_action(ctx, f"internal ids migrate: changed {result['changed_count']} file(s)")
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        log_action(ctx, f"internal ids migrate: failed: {exc}")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "internal_ids_migrate",
+                "last_message": str(exc),
+                "last_details": details,
+            }
+        )
+        return False
+    finally:
+        run_lock.release()
 
 
 def run_retained_devices_preview_job(ctx):

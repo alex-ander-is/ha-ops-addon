@@ -180,6 +180,8 @@ def action_label(action):
         "deleted_devices_delete": "Approve Deletion",
         "deleted_devices_confirm": "Confirm Changes",
         "deleted_devices_revert": "Revert Changes",
+        "internal_ids_preview": "Check internal ids",
+        "internal_ids_migrate": "Migrate internal ids",
         "rollback": "Rollback",
     }.get(action or "", action or "None")
 
@@ -292,6 +294,7 @@ def render_page(ctx):
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
+    internal_ids_rows = state.get("last_internal_ids_rows") or []
     save_details_html = html.escape(save_preview_text)
     if save_diff_text and save_diff_text != save_preview_text:
         save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
@@ -315,6 +318,7 @@ def render_page(ctx):
     )
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
     confirm_deletion_disabled = "disabled" if run_disabled or not deleted_devices_pending_confirmation else ""
     deleted_devices_actions_html = ""
@@ -437,6 +441,63 @@ def render_page(ctx):
             "</section>"
         )
 
+    internal_ids_section_html = ""
+    if state.get("last_internal_ids_generated_at"):
+        internal_ids_migrate_disabled = "disabled" if run_disabled or not any(row.get("changes") for row in internal_ids_rows) else ""
+        internal_ids_changed_files = sum(1 for row in internal_ids_rows if row.get("changes"))
+        internal_ids_totals = {
+            "entity_triggers": sum(int(row.get("entity_triggers") or 0) for row in internal_ids_rows),
+            "mqtt_triggers": sum(int(row.get("mqtt_triggers") or 0) for row in internal_ids_rows),
+            "actions": sum(int(row.get("actions") or 0) for row in internal_ids_rows),
+            "conditions": sum(int(row.get("conditions") or 0) for row in internal_ids_rows),
+            "unresolved": sum(int(row.get("unresolved") or 0) for row in internal_ids_rows),
+        }
+        internal_ids_summary_html = (
+            "<p>"
+            f"Files: {internal_ids_changed_files}. "
+            f"Entity triggers: {internal_ids_totals['entity_triggers']}. "
+            f"Z2M triggers: {internal_ids_totals['mqtt_triggers']}. "
+            f"Actions: {internal_ids_totals['actions']}. "
+            f"Conditions: {internal_ids_totals['conditions']}. "
+            f"Unresolved: {internal_ids_totals['unresolved']}."
+            "</p>"
+        )
+        unresolved = state.get("last_internal_ids_unresolved") or []
+        unresolved_html = ""
+        if unresolved:
+            rendered = []
+            for item in unresolved[:50]:
+                rendered.append(
+                    "<li>"
+                    f"<code>{html.escape(str(item.get('path') or ''))}</code>: "
+                    f"{html.escape(str(item.get('alias') or ''))} - {html.escape(str(item.get('reason') or 'unsupported'))}"
+                    "</li>"
+                )
+            unresolved_html = (
+                "<details><summary>Unresolved device blocks</summary>"
+                f"<ul>{''.join(rendered)}</ul>"
+                "</details>"
+            )
+        internal_ids_section_html = (
+            "<section class='card wide'>"
+            "<h2>Internal IDs Migration Preview</h2>"
+            "<p class='muted'>This migrates only HA Ops YAML in the Git checkout. It does not change live Home Assistant until the normal Git to HA apply flow.</p>"
+            "<p class='muted'>After migrating, run Preview Git to HA before applying to live Home Assistant.</p>"
+            "<p>Generated at "
+            f"<span data-transient='internal-ids-generated'>{html.escape(ctx.format_time(state.get('last_internal_ids_generated_at'), options))}</span>"
+            "</p>"
+            f"{internal_ids_summary_html}"
+            "<form method='post' action='internal-ids-migrate' data-async-form='true' "
+            "data-preserve-display-state='true' "
+            "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references?'>"
+            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows)}{unresolved_html}{ui.render_internal_ids_diffs(internal_ids_rows, ui.render_conflict_detail)}</div>"
+            "<div class='actions deletion-actions'><div class='action-row'>"
+            f"<button type='submit' {internal_ids_migrate_disabled}>Migrate selected files</button>"
+            "</div></div>"
+            "</form>"
+            "</section>"
+        )
+
     return ui.render_page(
         {
             "status": html.escape(display_status),
@@ -466,9 +527,11 @@ def render_page(ctx):
             "save_preview_section_html": save_preview_section_html,
             "deleted_devices_section_html": deleted_devices_section_html,
             "retained_devices_section_html": retained_devices_section_html,
+            "internal_ids_section_html": internal_ids_section_html,
             "action_disabled": action_disabled,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "check_retained_devices_disabled": check_retained_devices_disabled,
+            "check_internal_ids_disabled": check_internal_ids_disabled,
             "deletion_disabled": deletion_disabled,
             "confirm_deletion_disabled": confirm_deletion_disabled,
             "apply_action": apply_action,
@@ -655,6 +718,24 @@ def create_handler(ctx):
                 start_background(ctx.run_retained_devices_delete_job, selected)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Retained devices deletion started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/internal-ids-preview":
+                ctx.write_state(state_store.INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
+                start_background(ctx.run_internal_ids_preview_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Internal ids check started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/internal-ids-migrate":
+                selected = body.get("candidate", [])
+                start_background(ctx.run_internal_ids_migrate_job, selected)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Internal ids migration started. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return

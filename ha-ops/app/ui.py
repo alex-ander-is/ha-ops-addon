@@ -279,6 +279,57 @@ def render_retained_devices_table(rows):
     )
 
 
+def render_internal_ids_table(rows):
+    if not rows:
+        return "<p>No internal id migration candidates found.</p>"
+    rendered_rows = []
+    for index, row in enumerate(rows):
+        can_migrate = bool(row.get("changes"))
+        checked = "checked" if row.get("selected", True) and can_migrate else ""
+        disabled = "" if can_migrate else "disabled"
+        path = html.escape(str(row.get("path") or ""))
+        rendered_rows.append(
+            "<tr>"
+            f"<td><input type='checkbox' name='candidate' value='{index}' {checked} {disabled}></td>"
+            f"<td><code>{path}</code></td>"
+            f"<td>{html.escape(str(row.get('entity_triggers') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('mqtt_triggers') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('actions') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('conditions') or 0))}</td>"
+            f"<td>{html.escape(str(row.get('unresolved') or 0))}</td>"
+            "</tr>"
+        )
+    return (
+        "<div class='action-row'>"
+        "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='all'>Select all</button>"
+        "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='none'>Select none</button>"
+        "</div>"
+        "<div class='table-scroll'>"
+        "<table class='internal-ids-table' data-checkbox-scope='internal-ids'>"
+        "<thead><tr><th>Migrate</th><th>File</th><th>Entity triggers</th>"
+        "<th>Z2M triggers</th><th>Actions</th><th>Conditions</th><th>Unresolved</th></tr></thead>"
+        f"<tbody>{''.join(rendered_rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
+def render_internal_ids_diffs(rows, render_diff):
+    diff_rows = [row for row in rows if row.get("diff")]
+    if not diff_rows:
+        return "<p>No internal id migration diff available.</p>"
+    rendered = []
+    for row in diff_rows:
+        path = html.escape(str(row.get("path") or ""))
+        rendered.append(
+            "<details>"
+            f"<summary>View diff: <code>{path}</code></summary>"
+            f"{render_diff(str(row.get('diff') or ''))}"
+            "</details>"
+        )
+    return "".join(rendered)
+
+
 def target_addon_slug(item):
     return item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""
 
@@ -856,6 +907,9 @@ def render_page(data):
             <form method="post" action="retained-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
             </form>
+            <form method="post" action="internal-ids-preview" data-async-form="true">
+              <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check internal ids</button>
+            </form>
           </div>
         </div>
       </section>
@@ -872,6 +926,8 @@ def render_page(data):
     {data['deleted_devices_section_html']}
 
     {data['retained_devices_section_html']}
+
+    {data['internal_ids_section_html']}
 
     {data['conflicts_section_html']}
 
@@ -1099,6 +1155,19 @@ def render_page(data):
             submitAsyncForm(form);
           }});
         }}
+      }}
+
+      for (const button of document.querySelectorAll("button[data-checkbox-scope]")) {{
+        button.addEventListener("click", () => {{
+          const scope = button.getAttribute("data-checkbox-scope");
+          const action = button.getAttribute("data-checkbox-action");
+          const checked = action === "all";
+          for (const input of document.querySelectorAll(`table[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
+            if (!input.disabled) {{
+              input.checked = checked;
+            }}
+          }}
+        }});
       }}
 
       for (const toggle of document.querySelectorAll(".diff-wrap-toggle")) {{

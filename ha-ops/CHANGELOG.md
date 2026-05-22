@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.0
+
+- Add an internal id migration flow for HA Ops automations, scripts, and scenes with preview and checkbox approval.
+
 ## 0.6.23
 
 - Add a retained devices cleanup flow for stale Zigbee2MQTT MQTT discovery topics with checkbox approval.

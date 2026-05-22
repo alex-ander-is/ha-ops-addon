@@ -7,6 +7,7 @@ import backups as backup_policy
 import git_auth
 import git_ops
 import jobs as job_logic
+import internal_id_migration
 import manifest as manifest_logic
 import policies
 import registry_cleanup
@@ -454,6 +455,22 @@ class AppContext:
     def clear_retained_discovery_topic(self, topic):
         return registry_cleanup.publish_empty_retained_topic(self.run_command, topic)
 
+    def internal_ids_config_dir(self):
+        options = self.load_options()
+        repo_dir = self.repo_checkout_path(options)
+        apply_path = options.get("apply_path") or "homeassistant"
+        return repo_dir / apply_path
+
+    def build_internal_ids_preview(self):
+        return internal_id_migration.build_internal_ids_preview(self.internal_ids_config_dir())
+
+    def apply_internal_ids_migration(self, expected_fingerprint, selected_paths):
+        return internal_id_migration.apply_internal_ids_migration(
+            self.internal_ids_config_dir(),
+            expected_fingerprint,
+            selected_paths,
+        )
+
     def device_registry_fingerprint(self):
         return registry_cleanup.device_registry_fingerprint(self.config_dir)
 
@@ -611,6 +628,7 @@ class AppContext:
             build_apply_preview=self.build_apply_preview,
             build_save_preview=self.build_save_preview,
             build_deleted_devices_preview=self.build_deleted_devices_preview,
+            build_internal_ids_preview=self.build_internal_ids_preview,
             build_retained_devices_preview=self.build_retained_devices_preview,
             clear_deleted_devices=self.clear_deleted_devices,
             clear_retained_discovery_topic=self.clear_retained_discovery_topic,
@@ -652,6 +670,7 @@ class AppContext:
             approve_storage_apply_targets=self.approve_storage_apply_targets,
             restore_deleted_devices_rollback=self.restore_deleted_devices_rollback,
             restore_release_snapshot=self.restore_release_snapshot,
+            apply_internal_ids_migration=self.apply_internal_ids_migration,
             run_lock=self.run_lock,
             save_unknown_base_conflicts=self.save_unknown_base_conflicts,
             stage_all=self.stage_all,
@@ -680,6 +699,12 @@ class AppContext:
 
     def run_retained_devices_delete_job(self, selected):
         return job_logic.run_retained_devices_delete_job(selected, self.job_deps())
+
+    def run_internal_ids_preview_job(self):
+        return job_logic.run_internal_ids_preview_job(self.job_deps())
+
+    def run_internal_ids_migrate_job(self, selected):
+        return job_logic.run_internal_ids_migrate_job(selected, self.job_deps())
 
     def run_deleted_devices_delete_job(self):
         return job_logic.run_deleted_devices_delete_job(self.job_deps())

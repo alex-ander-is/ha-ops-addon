@@ -39,6 +39,14 @@ RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES = {
     "last_retained_devices_fingerprint": None,
     "last_retained_devices_generated_at": None,
 }
+INTERNAL_IDS_PREVIEW_CLEAR_UPDATES = {
+    "last_internal_ids_preview": "",
+    "last_internal_ids_rows": [],
+    "last_internal_ids_count": 0,
+    "last_internal_ids_fingerprint": None,
+    "last_internal_ids_generated_at": None,
+    "last_internal_ids_unresolved": [],
+}
 DISPLAY_CLEAR_UPDATES = {
     "last_details": [],
     "last_diff": "",
@@ -125,6 +133,12 @@ def default_state():
         "last_retained_devices_count": 0,
         "last_retained_devices_fingerprint": None,
         "last_retained_devices_generated_at": None,
+        "last_internal_ids_preview": "",
+        "last_internal_ids_rows": [],
+        "last_internal_ids_count": 0,
+        "last_internal_ids_fingerprint": None,
+        "last_internal_ids_generated_at": None,
+        "last_internal_ids_unresolved": [],
         "deleted_devices_pending_confirmation": False,
         "deleted_devices_rollback_path": None,
         "deleted_devices_rollback_fingerprint": None,
