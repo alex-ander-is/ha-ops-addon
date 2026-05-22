@@ -248,6 +248,37 @@ def render_deleted_devices_table(rows):
     )
 
 
+def render_retained_devices_table(rows):
+    if not rows:
+        return "<p>No retained devices candidates found.</p>"
+    rendered_rows = []
+    for index, row in enumerate(rows):
+        checked = "checked" if row.get("selected", True) else ""
+        identifiers = html.escape(str(row.get("identifiers") or ""))
+        name = html.escape(str(row.get("name") or ""))
+        manufacturer = html.escape(str(row.get("manufacturer") or ""))
+        model = html.escape(str(row.get("model") or ""))
+        topics = html.escape("\n".join(row.get("retained_topics") or []))
+        rendered_rows.append(
+            "<tr>"
+            f"<td><input type='checkbox' name='candidate' value='{index}' {checked}></td>"
+            f"<td><code>{identifiers}</code></td>"
+            f"<td>{name}</td>"
+            f"<td>{manufacturer} | {model}</td>"
+            f"<td><pre>{topics}</pre></td>"
+            "</tr>"
+        )
+    return (
+        "<div class='table-scroll'>"
+        "<table class='retained-devices-table'>"
+        "<thead><tr><th>Delete</th><th>Identifiers</th><th>Name</th>"
+        "<th>Manufacturer | Model</th><th>Retained Discovery Topics</th></tr></thead>"
+        f"<tbody>{''.join(rendered_rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
 def target_addon_slug(item):
     return item.get("resolved_slug") or item.get("addon_slug") or item.get("addon_slug_suffix") or ""
 
@@ -822,6 +853,9 @@ def render_page(data):
             <form method="post" action="deleted-devices-preview" data-async-form="true">
               <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
             </form>
+            <form method="post" action="retained-devices-preview" data-async-form="true">
+              <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
+            </form>
           </div>
         </div>
       </section>
@@ -836,6 +870,8 @@ def render_page(data):
     {data['save_preview_section_html']}
 
     {data['deleted_devices_section_html']}
+
+    {data['retained_devices_section_html']}
 
     {data['conflicts_section_html']}
 

@@ -1633,6 +1633,12 @@ class ServerTests(unittest.TestCase):
             def run_deleted_devices_preview_job(self):
                 self.calls.append("deleted-devices-preview")
 
+            def run_retained_devices_preview_job(self):
+                self.calls.append("retained-devices-preview")
+
+            def run_retained_devices_delete_job(self, selected):
+                self.calls.append(("retained-devices-delete", selected))
+
             def run_deleted_devices_delete_job(self):
                 self.calls.append("deleted-devices-delete")
 
@@ -1727,12 +1733,44 @@ class ServerTests(unittest.TestCase):
 
         post_request = invoke(
             "do_POST",
+            "/retained-devices-preview",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Retained devices check started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview", "retained-devices-preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_retained_devices_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_retained_devices_count"], 0)
+        self.assertIsNone(ctx.state_updates[-1]["last_retained_devices_generated_at"])
+
+        post_request = invoke(
+            "do_POST",
+            "/retained-devices-delete",
+            body=b"candidate=0&candidate=2",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Retained devices deletion started", post_request.wfile.getvalue().decode())
+        self.assertEqual(
+            ctx.calls,
+            [
+                "save",
+                "save-preview",
+                "preview",
+                "deleted-devices-preview",
+                "retained-devices-preview",
+                ("retained-devices-delete", ["0", "2"]),
+            ],
+        )
+
+        post_request = invoke(
+            "do_POST",
             "/deleted-devices-delete",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices deletion started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview", "deleted-devices-delete"])
+        self.assertEqual(ctx.calls[-1], "deleted-devices-delete")
 
         post_request = invoke(
             "do_POST",
@@ -1743,7 +1781,16 @@ class ServerTests(unittest.TestCase):
         self.assertIn("deleted_devices cleanup confirmation started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
-            ["save", "save-preview", "preview", "deleted-devices-preview", "deleted-devices-delete", "deleted-devices-confirm"],
+            [
+                "save",
+                "save-preview",
+                "preview",
+                "deleted-devices-preview",
+                "retained-devices-preview",
+                ("retained-devices-delete", ["0", "2"]),
+                "deleted-devices-delete",
+                "deleted-devices-confirm",
+            ],
         )
 
         post_request = invoke(
@@ -1760,6 +1807,8 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "deleted-devices-preview",
+                "retained-devices-preview",
+                ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -1780,6 +1829,8 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "deleted-devices-preview",
+                "retained-devices-preview",
+                ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -1802,6 +1853,8 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "deleted-devices-preview",
+                "retained-devices-preview",
+                ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -4570,6 +4623,113 @@ class ServerTests(unittest.TestCase):
             self.assertIn("deleted-1", page)
             self.assertIn("Approve Deletion", page)
             self.assertNotIn("identifiers=mqtt:old", page)
+
+    def test_stale_mqtt_discovery_preview_finds_registry_device_missing_from_z2m(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (server.CONFIG_DIR / "zigbee2mqtt").mkdir()
+            (server.CONFIG_DIR / "zigbee2mqtt" / "database.db").write_text('[{"ieeeAddr":"0x0017880104abcd12"}]')
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "stale-device",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x60a423fffed229de"]],
+                                    "name": "Living Room Switcher Terrace",
+                                    "manufacturer": "TuYa",
+                                    "model": "Wireless switch with 1 button (TS0041)",
+                                },
+                                {
+                                    "id": "current-device",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x0017880104abcd12"]],
+                                    "name": "Current Bulb",
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+
+            preview = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(
+                server.CONFIG_DIR,
+                [
+                    "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
+                    "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                    "homeassistant/device_automation/0x0017880104abcd12/action_hold/config",
+                ],
+            )
+
+            self.assertEqual(preview["count"], 1)
+            self.assertEqual(preview["candidates"][0]["ieee"], "0x60a423fffed229de")
+            self.assertEqual(
+                preview["candidates"][0]["retained_topics"],
+                [
+                    "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
+                    "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                ],
+            )
+            self.assertIn("Living Room Switcher Terrace", preview["summary"])
+            self.assertIn("retained Home Assistant MQTT discovery topics", preview["summary"])
+            self.assertIn("does not delete files or registry/database records", preview["summary"])
+            self.assertNotIn("Current Bulb", preview["summary"])
+
+    def test_retained_devices_preview_explains_topic_only_cleanup(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_retained_devices_generated_at": "2026-05-22T12:00:00+00:00",
+                    "last_retained_devices_rows": [
+                        {
+                            "selected": True,
+                            "identifiers": ["mqtt", "zigbee2mqtt_0x60a423fffed229de"],
+                            "name": "living_room_switcher_terrace",
+                            "manufacturer": "TuYa",
+                            "model": "Wireless switch with 1 button (TS0041)",
+                            "retained_topics": [
+                                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config"
+                            ],
+                        }
+                    ],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("stale retained Home Assistant MQTT discovery topics", page)
+            self.assertIn("clears selected MQTT retained discovery topics only", page)
+            self.assertIn("does not delete files", page)
+            self.assertIn("does not delete files or registry/database records", page)
+
+    def test_clear_stale_mqtt_discovery_topics_publishes_empty_retained_payloads(self):
+        server = load_server()
+        published = []
+
+        cleared = server.app_context.registry_cleanup.clear_stale_mqtt_discovery_topics(
+            [
+                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+                "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
+                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+            ],
+            published.append,
+        )
+
+        self.assertEqual(
+            cleared,
+            [
+                "homeassistant/device_automation/0x60a423fffed229de/action_double/config",
+                "homeassistant/device_automation/0x60a423fffed229de/action_hold/config",
+            ],
+        )
+        self.assertEqual(published, cleared)
 
     def test_approve_deleted_devices_clears_array_with_core_stopped(self):
         server = load_server()

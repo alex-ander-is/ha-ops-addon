@@ -9,9 +9,11 @@ class JobContext:
     add_detail: Any
     apply_targets: Any
     build_deleted_devices_preview: Any
+    build_retained_devices_preview: Any
     build_apply_preview: Any
     build_save_preview: Any
     clear_deleted_devices: Any
+    clear_retained_discovery_topic: Any
     commit_if_needed: Any
     core_start: Any
     core_stop: Any
@@ -456,6 +458,174 @@ def run_deleted_devices_preview_job(ctx):
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_fingerprint": None,
                 "last_deleted_devices_generated_at": None,
+            }
+        )
+        return False
+    finally:
+        run_lock.release()
+
+
+def retained_device_rows(candidates):
+    rows = []
+    for item in candidates:
+        rows.append(
+            {
+                "selected": bool(item.get("retained_topics")),
+                "identifiers": item.get("identifiers") or ["mqtt", f"zigbee2mqtt_{item.get('ieee', '')}"],
+                "name": item.get("name") or "",
+                "manufacturer": item.get("manufacturer") or "",
+                "model": item.get("model") or "",
+                "retained_topics": item.get("retained_topics") or [],
+                "ieee": item.get("ieee") or "",
+                "id": item.get("id") or "",
+            }
+        )
+    return rows
+
+
+def run_retained_devices_preview_job(ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not run_lock.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "retained_devices_preview",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    log_action(ctx, "retained devices preview: started")
+    write_state(
+        {
+            **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "retained_devices_preview",
+            "last_message": "Checking retained devices.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        if state.get("deleted_devices_pending_confirmation"):
+            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking retained devices.")
+        ctx.add_detail(details, "Checking retained MQTT discovery against current Zigbee2MQTT files.")
+        preview = ctx.build_retained_devices_preview()
+        rows = retained_device_rows(preview["candidates"])
+        count = len(rows)
+        log_action(ctx, f"retained devices preview: found {count} candidate(s)")
+        message = f"Found {count} retained device candidate{'s' if count != 1 else ''}."
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "retained_devices_preview",
+                "last_message": message,
+                "last_details": details,
+                "last_retained_devices_preview": preview["summary"],
+                "last_retained_devices_rows": rows,
+                "last_retained_devices_count": count,
+                "last_retained_devices_fingerprint": preview["fingerprint"],
+                "last_retained_devices_generated_at": utc_now(),
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        log_action(ctx, f"retained devices preview: failed: {exc}")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "retained_devices_preview",
+                "last_message": str(exc),
+                "last_details": details,
+                **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+            }
+        )
+        return False
+    finally:
+        run_lock.release()
+
+
+def run_retained_devices_delete_job(selected, ctx):
+    run_lock = ctx.run_lock
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not run_lock.acquire(blocking=False):
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "busy",
+                "last_action": "retained_devices_delete",
+                "last_message": "Another HA Ops action is already running.",
+            }
+        )
+        return False
+
+    details = []
+    log_action(ctx, "retained devices delete: started")
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "retained_devices_delete",
+            "last_message": "Deleting retained devices.",
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        rows = state.get("last_retained_devices_rows") or []
+        if not rows:
+            raise RuntimeError("Run Check retained devices before approving deletion.")
+        selected_indexes = {int(value) for value in selected}
+        if not selected_indexes:
+            raise RuntimeError("Select at least one retained device candidate to delete.")
+        topics = []
+        for index, row in enumerate(rows):
+            if index not in selected_indexes:
+                continue
+            topics.extend(row.get("retained_topics") or [])
+        if not topics:
+            raise RuntimeError("Selected retained device candidates have no retained discovery topics.")
+
+        cleared = []
+        for topic in sorted(set(topics)):
+            ctx.clear_retained_discovery_topic(topic)
+            cleared.append(topic)
+            ctx.add_detail(details, f"Cleared retained MQTT discovery topic: {topic}")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "retained_devices_delete",
+                "last_message": f"Deleted retained discovery for {len(selected_indexes)} retained device candidate(s).",
+                "last_details": details,
+                **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+            }
+        )
+        log_action(ctx, f"retained devices delete: cleared {len(cleared)} topic(s)")
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        log_action(ctx, f"retained devices delete: failed: {exc}")
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "retained_devices_delete",
+                "last_message": str(exc),
+                "last_details": details,
             }
         )
         return False

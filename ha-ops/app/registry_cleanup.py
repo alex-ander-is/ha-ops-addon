@@ -2,6 +2,8 @@ import hashlib
 import difflib
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 
 
@@ -15,6 +17,15 @@ def entity_registry_path(config_dir):
 
 def area_registry_path(config_dir):
     return Path(config_dir) / ".storage" / "core.area_registry"
+
+
+ZIGBEE_IEEE_RE = re.compile(r"0x[0-9a-fA-F]{16}")
+ZIGBEE2MQTT_PATHS = (
+    "zigbee2mqtt/database.db",
+    "zigbee2mqtt/configuration.yaml",
+    "zigbee2mqtt/state.json",
+)
+MQTT_DISCOVERY_CONFIG_RE = re.compile(r"^homeassistant/[^/]+/([^/]+)/[^/]+/config$")
 
 
 def fingerprint_text(text):
@@ -34,6 +45,156 @@ def read_optional_registry(path):
     if not path.exists():
         return {}
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def zigbee2mqtt_ieees(config_dir):
+    root = Path(config_dir)
+    values = set()
+    scanned = []
+    for relative in ZIGBEE2MQTT_PATHS:
+        path = root / relative
+        if not path.exists() or not path.is_file():
+            continue
+        scanned.append(relative)
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        values.update(match.lower() for match in ZIGBEE_IEEE_RE.findall(text))
+    return values, scanned
+
+
+def mqtt_zigbee2mqtt_identifier(device):
+    for identifier in device.get("identifiers") or []:
+        if not isinstance(identifier, list) or len(identifier) < 2:
+            continue
+        domain, value = identifier[0], identifier[1]
+        if domain != "mqtt" or not isinstance(value, str):
+            continue
+        prefix = "zigbee2mqtt_"
+        if value.startswith(prefix):
+            ieee = value[len(prefix) :].lower()
+            if ZIGBEE_IEEE_RE.fullmatch(ieee):
+                return ieee
+    return None
+
+
+def retained_discovery_topic_ieees(topics):
+    by_ieee = {}
+    for topic in topics or []:
+        if not isinstance(topic, str):
+            continue
+        match = MQTT_DISCOVERY_CONFIG_RE.match(topic)
+        if not match:
+            continue
+        object_id = match.group(1).lower()
+        if ZIGBEE_IEEE_RE.fullmatch(object_id):
+            by_ieee.setdefault(object_id, []).append(topic)
+    return by_ieee
+
+
+def stale_mqtt_discovery_candidates(config_dir, retained_topics=None):
+    _path, text, data = read_device_registry(config_dir)
+    known_ieees, scanned_paths = zigbee2mqtt_ieees(config_dir)
+    retained_by_ieee = retained_discovery_topic_ieees(retained_topics)
+    candidates = []
+    for device in data.get("data", {}).get("devices", []):
+        ieee = mqtt_zigbee2mqtt_identifier(device)
+        if not ieee or ieee in known_ieees:
+            continue
+        topics = sorted(retained_by_ieee.get(ieee, []))
+        candidates.append(
+            {
+                "id": device.get("id") or "",
+                "ieee": ieee,
+                "identifiers": ["mqtt", f"zigbee2mqtt_{ieee}"],
+                "name": device.get("name_by_user") or device.get("name") or "",
+                "manufacturer": device.get("manufacturer") or "",
+                "model": device.get("model") or device.get("model_id") or "",
+                "retained_topics": topics,
+                "reason": "Device exists in Home Assistant MQTT registry but is missing from current Zigbee2MQTT files.",
+            }
+        )
+    candidates.sort(key=lambda item: (item["name"], item["ieee"], item["id"]))
+    return {
+        "count": len(candidates),
+        "fingerprint": fingerprint_text(text),
+        "scanned_paths": scanned_paths,
+        "candidates": candidates,
+    }
+
+
+def build_stale_mqtt_discovery_preview(config_dir, retained_topics=None):
+    preview = stale_mqtt_discovery_candidates(config_dir, retained_topics)
+    lines = [f"stale MQTT discovery candidates ({preview['count']}):"]
+    lines.append(
+        "These are retained Home Assistant MQTT discovery topics for Zigbee2MQTT devices that are no longer present in current Zigbee2MQTT files."
+    )
+    lines.append("Deleting retained devices clears MQTT retained discovery topics only; it does not delete files or registry/database records.")
+    if preview["scanned_paths"]:
+        lines.append(f"Scanned Zigbee2MQTT files: {', '.join(preview['scanned_paths'])}.")
+    else:
+        lines.append("No Zigbee2MQTT files were found; review candidates carefully.")
+    if not preview["candidates"]:
+        lines.append("No stale MQTT discovery candidates found.")
+    for item in preview["candidates"]:
+        label = " | ".join(part for part in [item["name"], item["manufacturer"], item["model"], item["ieee"]] if part)
+        lines.append(f"- {label}")
+        for topic in item["retained_topics"]:
+            lines.append(f"  retained: {topic}")
+    return {**preview, "summary": "\n".join(lines)}
+
+
+def clear_stale_mqtt_discovery_topics(topics, publish_empty_retained):
+    cleared = []
+    for topic in sorted(set(topics or [])):
+        publish_empty_retained(topic)
+        cleared.append(topic)
+    return cleared
+
+
+def mosquitto_password_command():
+    return "P=$(jq -r .homeassistant.password /data/system_user.json); "
+
+
+def list_retained_discovery_topics(run_command, timeout_seconds=8):
+    command = [
+        "docker",
+        "exec",
+        "addon_core_mosquitto",
+        "sh",
+        "-c",
+        mosquitto_password_command()
+        + f"timeout {int(timeout_seconds)} mosquitto_sub -h localhost -u homeassistant -P \"$P\" "
+        + "-t 'homeassistant/#' -v",
+    ]
+    result = run_command(command)
+    if result.returncode not in (0, 124):
+        raise RuntimeError(f"Failed to list retained MQTT discovery topics: {result.stderr.strip() or result.stdout.strip()}")
+    topics = []
+    for line in result.stdout.splitlines():
+        topic = line.split(" ", 1)[0].strip()
+        if topic.endswith("/config"):
+            topics.append(topic)
+    return topics
+
+
+def publish_empty_retained_topic(run_command, topic):
+    command = [
+        "docker",
+        "exec",
+        "addon_core_mosquitto",
+        "sh",
+        "-c",
+        mosquitto_password_command()
+        + "mosquitto_pub -h localhost -u homeassistant -P \"$P\" -r -n -t \"$1\"",
+        "sh",
+        topic,
+    ]
+    result = run_command(command)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to clear retained MQTT topic {topic}: {result.stderr.strip() or result.stdout.strip()}")
+
 
 
 def rollback_dir(work_dir):

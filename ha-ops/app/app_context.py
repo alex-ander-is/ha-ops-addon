@@ -445,6 +445,15 @@ class AppContext:
     def build_deleted_devices_preview(self):
         return registry_cleanup.build_deleted_devices_preview(self.config_dir)
 
+    def list_retained_discovery_topics(self):
+        return registry_cleanup.list_retained_discovery_topics(self.run_command)
+
+    def build_retained_devices_preview(self):
+        return registry_cleanup.build_stale_mqtt_discovery_preview(self.config_dir, self.list_retained_discovery_topics())
+
+    def clear_retained_discovery_topic(self, topic):
+        return registry_cleanup.publish_empty_retained_topic(self.run_command, topic)
+
     def device_registry_fingerprint(self):
         return registry_cleanup.device_registry_fingerprint(self.config_dir)
 
@@ -602,7 +611,9 @@ class AppContext:
             build_apply_preview=self.build_apply_preview,
             build_save_preview=self.build_save_preview,
             build_deleted_devices_preview=self.build_deleted_devices_preview,
+            build_retained_devices_preview=self.build_retained_devices_preview,
             clear_deleted_devices=self.clear_deleted_devices,
+            clear_retained_discovery_topic=self.clear_retained_discovery_topic,
             commit_if_needed=self.commit_if_needed,
             core_start=self.core_start,
             core_stop=self.core_stop,
@@ -663,6 +674,12 @@ class AppContext:
 
     def run_deleted_devices_preview_job(self):
         return job_logic.run_deleted_devices_preview_job(self.job_deps())
+
+    def run_retained_devices_preview_job(self):
+        return job_logic.run_retained_devices_preview_job(self.job_deps())
+
+    def run_retained_devices_delete_job(self, selected):
+        return job_logic.run_retained_devices_delete_job(selected, self.job_deps())
 
     def run_deleted_devices_delete_job(self):
         return job_logic.run_deleted_devices_delete_job(self.job_deps())

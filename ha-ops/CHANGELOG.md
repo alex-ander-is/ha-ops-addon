@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.23
+
+- Add a retained devices cleanup flow for stale Zigbee2MQTT MQTT discovery topics with checkbox approval.
+
 ## 0.6.22
 
 - Treat Home Assistant entity registry supported_features as redundant runtime data in normalized registry diffs and applies.

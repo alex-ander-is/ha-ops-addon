@@ -291,6 +291,7 @@ def render_page(ctx):
     save_diff_text = state.get("last_save_diff") or ""
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
+    retained_devices_rows = state.get("last_retained_devices_rows") or []
     save_details_html = html.escape(save_preview_text)
     if save_diff_text and save_diff_text != save_preview_text:
         save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
@@ -313,6 +314,7 @@ def render_page(ctx):
         and state.get("last_deleted_devices_fingerprint")
     )
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
     confirm_deletion_disabled = "disabled" if run_disabled or not deleted_devices_pending_confirmation else ""
     deleted_devices_actions_html = ""
@@ -413,6 +415,27 @@ def render_page(ctx):
             f"{deleted_devices_actions_html}"
             "</section>"
         )
+    retained_devices_section_html = ""
+    if state.get("last_retained_devices_generated_at"):
+        retained_delete_disabled = "disabled" if run_disabled or not retained_devices_rows else ""
+        retained_devices_section_html = (
+            "<section class='card wide'>"
+            "<h2>Retained Devices Preview</h2>"
+            "<p class='muted'>These candidates come from stale retained Home Assistant MQTT discovery topics for Zigbee2MQTT devices missing from current Zigbee2MQTT files.</p>"
+            "<p class='muted'>Delete retained devices clears selected MQTT retained discovery topics only. It does not delete files, Home Assistant registry entries, or Zigbee2MQTT database records.</p>"
+            "<p>Generated at "
+            f"<span data-transient='retained-devices-generated'>{html.escape(ctx.format_time(state.get('last_retained_devices_generated_at'), options))}</span>"
+            "</p>"
+            "<form method='post' action='retained-devices-delete' data-async-form='true' "
+            "data-preserve-display-state='true' "
+            "data-confirm='Clear selected MQTT retained discovery topics only? This does not delete files or registry/database records.'>"
+            f"<div data-transient='retained-devices-preview'>{ui.render_retained_devices_table(retained_devices_rows)}</div>"
+            "<div class='actions deletion-actions'><div class='action-row'>"
+            f"<button type='submit' {retained_delete_disabled}>Delete retained devices</button>"
+            "</div></div>"
+            "</form>"
+            "</section>"
+        )
 
     return ui.render_page(
         {
@@ -442,8 +465,10 @@ def render_page(ctx):
             "apply_preview_section_html": apply_preview_section_html,
             "save_preview_section_html": save_preview_section_html,
             "deleted_devices_section_html": deleted_devices_section_html,
+            "retained_devices_section_html": retained_devices_section_html,
             "action_disabled": action_disabled,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
+            "check_retained_devices_disabled": check_retained_devices_disabled,
             "deletion_disabled": deletion_disabled,
             "confirm_deletion_disabled": confirm_deletion_disabled,
             "apply_action": apply_action,
@@ -612,6 +637,24 @@ def create_handler(ctx):
                 start_background(ctx.run_deleted_devices_preview_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "deleted_devices check started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/retained-devices-preview":
+                ctx.write_state(state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+                start_background(ctx.run_retained_devices_preview_job)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Retained devices check started. Refreshing..."})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/retained-devices-delete":
+                selected = body.get("candidate", [])
+                start_background(ctx.run_retained_devices_delete_job, selected)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": "Retained devices deletion started. Refreshing..."})
                 else:
                     self.send_html(render_page(ctx))
                 return
