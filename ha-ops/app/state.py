@@ -90,6 +90,7 @@ def option_int(options, name, default, minimum=0):
 
 def default_state():
     return {
+        "last_seen_addon_version": None,
         "last_run_at": None,
         "last_status": "idle",
         "last_action": None,
@@ -165,8 +166,31 @@ def is_recovered_stale_error(state):
     return message == "Home Assistant config check failed: {'result': 'ok', 'data': {}}"
 
 
-def repair_startup_state(path, now):
+def repair_startup_state(path, now, addon_version=None):
+    state_file_exists = path.exists()
     current = read_state(path)
+    stored_version = current.get("last_seen_addon_version")
+    known_addon_version = addon_version if addon_version and addon_version != "unknown" else None
+    version_changed = bool(known_addon_version) and state_file_exists and stored_version != known_addon_version
+    if known_addon_version:
+        addon_version = known_addon_version
+        current["last_seen_addon_version"] = addon_version
+
+    if version_changed and not current.get("deleted_devices_pending_confirmation"):
+        current.update(DISPLAY_CLEAR_UPDATES)
+        current.update(APPLY_PREVIEW_CLEAR_UPDATES)
+        current.update(SAVE_PREVIEW_CLEAR_UPDATES)
+        current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
+        if current.get("last_status") != "running":
+            current.update(
+                {
+                    "last_status": "idle",
+                    "last_action": None,
+                    "last_message": f"HA Ops updated to {addon_version}. Previous transient status was cleared. Run an action when ready.",
+                }
+            )
+            return write_state(path, current)
+
     current.update(DISPLAY_CLEAR_UPDATES)
     if current.get("last_status") == "error" and (not has_error_context(current) or is_recovered_stale_error(current)):
         current.update(

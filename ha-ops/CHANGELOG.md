@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.21
+
+- Clear stale transient status after an HA Ops add-on version update so old errors are not shown as fresh failures.
+
 ## 0.6.20
 
 - Allow organizer-managed automations, scripts, and scenes to be added or removed in Git without comparing against stale live counts.

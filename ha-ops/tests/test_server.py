@@ -341,6 +341,98 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview"], "")
             self.assertEqual(state["last_preview_fingerprint"], "keep")
 
+    def test_startup_clears_stale_status_after_addon_version_change(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.6.21"\n')
+            server.write_state(
+                {
+                    "last_seen_addon_version": "0.6.20",
+                    "last_status": "error",
+                    "last_action": "apply_preview",
+                    "last_message": "automation count mismatch: expected 159, got 158",
+                    "last_details": ["automation count mismatch: expected 159, got 158"],
+                    "last_diff": "old diff",
+                    "last_preview_commit": "abc",
+                    "last_preview_fingerprint": "old",
+                    "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
+                    "last_preview_approved_fingerprint": "old",
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_seen_addon_version"], "0.6.21")
+            self.assertEqual(state["last_status"], "idle")
+            self.assertIsNone(state["last_action"])
+            self.assertIn("HA Ops updated to 0.6.21", state["last_message"])
+            self.assertEqual(state["last_details"], [])
+            self.assertEqual(state["last_diff"], "")
+            self.assertIsNone(state["last_preview_commit"])
+            self.assertIsNone(state["last_preview_fingerprint"])
+            self.assertEqual(state["last_preview_live_fingerprints"], {})
+            self.assertIsNone(state["last_preview_approved_fingerprint"])
+
+    def test_startup_keeps_error_when_addon_version_is_unchanged(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.6.21"\n')
+            server.write_state(
+                {
+                    "last_seen_addon_version": "0.6.21",
+                    "last_status": "error",
+                    "last_action": "apply_preview",
+                    "last_message": "automation count mismatch: expected 159, got 158",
+                    "last_details": ["automation count mismatch: expected 159, got 158"],
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["last_action"], "apply_preview")
+            self.assertEqual(state["last_message"], "automation count mismatch: expected 159, got 158")
+            self.assertEqual(state["last_details"], [])
+
+    def test_startup_keeps_pending_deleted_devices_on_addon_version_change(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.6.21"\n')
+            server.write_state(
+                {
+                    "last_seen_addon_version": "0.6.20",
+                    "last_status": "pending",
+                    "last_action": "deleted_devices_delete",
+                    "last_message": "Deleted 1 deleted_devices entry. Confirm or revert the changes.",
+                    "last_deleted_devices_preview": "old preview",
+                    "last_deleted_devices_count": 1,
+                    "last_deleted_devices_fingerprint": "fingerprint",
+                    "deleted_devices_pending_confirmation": True,
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_seen_addon_version"], "0.6.21")
+            self.assertEqual(state["last_status"], "pending")
+            self.assertEqual(state["last_action"], "deleted_devices_delete")
+            self.assertEqual(state["last_message"], "Deleted 1 deleted_devices entry. Confirm or revert the changes.")
+            self.assertEqual(state["last_deleted_devices_preview"], "old preview")
+            self.assertEqual(state["last_deleted_devices_count"], 1)
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+
     def test_refresh_clears_transient_conflicts_from_display_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -95,7 +95,7 @@ class AppContext:
             and state.get("deleted_devices_rollback_path")
         ):
             return self.repair_interrupted_deleted_devices_cleanup(state)
-        return state_store.repair_startup_state(self.state_path, self.utc_now())
+        return state_store.repair_startup_state(self.state_path, self.utc_now(), self.addon_version())
 
     def repair_interrupted_deleted_devices_cleanup(self, state):
         details = list(state.get("last_details") or [])
