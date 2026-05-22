@@ -1,8 +1,11 @@
 import json
 import re
 import shutil
+import hashlib
 from collections import Counter
 from pathlib import Path
+
+import rfc8785
 
 try:
     import yaml
@@ -390,6 +393,65 @@ def index_for(automations, scripts, scenes):
     }
 
 
+def canonical_json_bytes(data):
+    try:
+        return rfc8785.dumps(data)
+    except Exception as exc:
+        raise RuntimeError(f"failed to canonicalize organizer fingerprint data: {exc}") from exc
+
+
+def fingerprint_payload(automations, scripts, scenes):
+    script_items = {str(key): scripts[key] for key in scripts}
+    automation_items = [
+        {"id": automation_identity(item, index), "payload": item}
+        for index, item in enumerate(automations)
+    ]
+    scene_items = [
+        {"id": scene_identity(item, index), "payload": item}
+        for index, item in enumerate(scenes)
+    ]
+    automation_items.sort(key=lambda item: item["id"])
+    scene_items.sort(key=lambda item: item["id"])
+    return {
+        "fingerprint_version": 1,
+        "automations": automation_items,
+        "scripts": {key: script_items[key] for key in sorted(script_items)},
+        "scenes": scene_items,
+    }
+
+
+def fingerprint_for(automations, scripts, scenes):
+    validate_unique(
+        [automation_identity(item, index) for index, item in enumerate(automations)],
+        "automation id",
+    )
+    validate_unique([str(key) for key in scripts.keys()], "script key")
+    validate_unique(
+        [scene_identity(item, index) for index, item in enumerate(scenes)],
+        "scene identity",
+    )
+    digest = hashlib.sha256(canonical_json_bytes(fingerprint_payload(automations, scripts, scenes))).hexdigest()
+    return f"sha256:{digest}"
+
+
+def fingerprint_heaps(root):
+    automations, scripts, scenes = read_heaps(root)
+    return {
+        "version": 1,
+        "hash": fingerprint_for(automations, scripts, scenes),
+        "counts": {
+            "automations": len(automations),
+            "scripts": len(scripts),
+            "scenes": len(scenes),
+        },
+        "ids": {
+            "automations": [automation_identity(item, index) for index, item in enumerate(automations)],
+            "scripts": [str(key) for key in scripts.keys()],
+            "scenes": [scene_identity(item, index) for index, item in enumerate(scenes)],
+        },
+    }
+
+
 def summary_from_index(index):
     return {
         kind: {"input_count": index[kind]["count"], "output_count": index[kind]["count"]}
@@ -493,12 +555,17 @@ def validate_index_payload(index, actual):
     for kind in ("automations", "scripts", "scenes"):
         if kind not in index or "count" not in index[kind] or "ids" not in index[kind]:
             raise RuntimeError(f"organizer index missing {kind} integrity data")
-        expected_count = index[kind]["count"]
-        if expected_count != actual[kind]["count"]:
-            raise RuntimeError(f"{kind[:-1]} count mismatch: expected {expected_count}, got {actual[kind]['count']}")
-        expected_ids = index[kind]["ids"]
-        if sorted(expected_ids) != sorted(actual[kind]["ids"]):
-            raise RuntimeError(f"{kind[:-1]} identity mismatch")
+
+
+def verify_written_heaps(live_root, expected):
+    applied = index_for(*read_heaps(live_root))
+    for kind in ("automations", "scripts", "scenes"):
+        if expected[kind]["count"] != applied[kind]["count"]:
+            raise RuntimeError(
+                f"{kind[:-1]} apply count mismatch: expected {expected[kind]['count']}, got {applied[kind]['count']}"
+            )
+        if sorted(expected[kind]["ids"]) != sorted(applied[kind]["ids"]):
+            raise RuntimeError(f"{kind[:-1]} apply identity mismatch")
 
 
 def compose_git_view_to_live(git_root, live_root, options=None):
@@ -521,6 +588,7 @@ def compose_git_view_to_live(git_root, live_root, options=None):
     yaml_dump(live_root / HEAP_FILES["automations"], automations)
     yaml_dump(live_root / HEAP_FILES["scripts"], scripts)
     yaml_dump(live_root / HEAP_FILES["scenes"], scenes)
+    verify_written_heaps(live_root, actual)
 
     return {
         kind: {"input_count": actual[kind]["count"], "output_count": actual[kind]["count"]}

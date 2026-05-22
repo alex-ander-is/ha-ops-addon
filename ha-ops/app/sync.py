@@ -301,6 +301,13 @@ def materialize_homeassistant_source(src, target, ctx):
     return temp
 
 
+def managed_ha_heaps_fingerprint(path):
+    path = Path(path)
+    if not all((path / filename).exists() for filename in organizer.HEAP_FILES.values()):
+        return None
+    return organizer.fingerprint_heaps(path)
+
+
 def apply_homeassistant_config(src, dest, target, ctx, details=None):
     src = materialize_homeassistant_source(src, target, ctx)
     if not src.exists() or not has_managed_content(src):
@@ -1694,12 +1701,17 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     deletion_count = 0
     skipped_protected = []
     storage_change_paths = []
+    live_fingerprints = {}
 
     for target in resolved_targets:
         preview_progress(ctx, details, f"Preview {target['id']}: start")
         baseline_path = baseline_root / safe_preview_name(str(target["id"]))
         preview_path = preview_root / safe_preview_name(str(target["id"]))
         build_preview_baseline(target, baseline_path, ctx)
+        if target["type"] == "homeassistant":
+            fingerprint = managed_ha_heaps_fingerprint(baseline_path)
+            if fingerprint:
+                live_fingerprints[target["id"]] = fingerprint
         skipped = sync_to_preview(target, baseline_path, preview_path, ctx)
         if skipped:
             skipped_protected.extend(skipped)
@@ -1725,4 +1737,5 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         "skipped_protected": sorted(set(skipped_protected)),
         "storage_changes": bool(storage_change_paths),
         "storage_change_paths": sorted(set(storage_change_paths)),
+        "live_fingerprints": live_fingerprints,
     }

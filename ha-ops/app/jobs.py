@@ -1036,6 +1036,7 @@ def run_preview_job(ctx):
                 "last_preview_deletions": preview["deletions"],
                 "last_preview_storage_changes": preview.get("storage_changes", False),
                 "last_preview_storage_paths": preview.get("storage_change_paths", []),
+                "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
                 "last_preview_approved_fingerprint": None,
             }
         )

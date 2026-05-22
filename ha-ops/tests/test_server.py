@@ -145,6 +145,7 @@ class ServerTests(unittest.TestCase):
                     "last_save_diff_generated_at": "now",
                     "last_preview_commit": "abc",
                     "last_preview_fingerprint": "fingerprint",
+                    "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
                     "last_preview_approved_fingerprint": "fingerprint",
                 }
@@ -165,8 +166,28 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_deleted_devices_generated_at"])
             self.assertEqual(state["last_preview_commit"], "abc")
             self.assertEqual(state["last_preview_fingerprint"], "fingerprint")
+            self.assertEqual(state["last_preview_live_fingerprints"], {"homeassistant": {"hash": "sha256:old"}})
             self.assertTrue(state["last_preview_storage_changes"])
             self.assertEqual(state["last_preview_approved_fingerprint"], "fingerprint")
+
+    def test_apply_preview_match_rejects_live_fingerprint_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            state = {
+                "last_preview_commit": "abc",
+                "last_preview_fingerprint": "diff",
+                "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:before"}},
+            }
+            preview = {
+                "fingerprint": "diff",
+                "live_fingerprints": {"homeassistant": {"hash": "sha256:after"}},
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "automations/scripts/scenes changed"):
+                server.ensure_preview_matches_state(state, "abc", preview)
 
     def test_preview_jobs_clear_stale_preview_state_when_started(self):
         server = load_server()
@@ -178,6 +199,7 @@ class ServerTests(unittest.TestCase):
                     "last_diff": "old apply diff",
                     "last_diff_generated_at": "old",
                     "last_preview_fingerprint": "old",
+                    "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
                     "last_preview_approved_fingerprint": "old",
                     "last_save_preview": "old save summary",
@@ -195,6 +217,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_diff"], "")
             self.assertIsNone(state["last_diff_generated_at"])
             self.assertIsNone(state["last_preview_fingerprint"])
+            self.assertEqual(state["last_preview_live_fingerprints"], {})
             self.assertFalse(state["last_preview_storage_changes"])
             self.assertIsNone(state["last_preview_approved_fingerprint"])
 

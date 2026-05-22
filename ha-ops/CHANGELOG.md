@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.20
+
+- Allow organizer-managed automations, scripts, and scenes to be added or removed in Git without comparing against stale live counts.
+- Store and recheck a canonical RFC 8785 live automation/script/scene fingerprint between Preview Git to HA and Apply Git to HA.
+- Verify that organizer apply writes the same automation/script/scene identities and counts that came from the Git source.
+
 ## 0.6.19
 
 - Compare organizer-enabled Git to HA previews in the organized area view to avoid heap YAML rewrite noise.

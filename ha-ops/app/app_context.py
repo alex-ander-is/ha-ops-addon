@@ -561,6 +561,10 @@ class AppContext:
     def ensure_preview_matches_state(self, state, commit, preview):
         if state.get("last_preview_commit") != commit:
             raise RuntimeError("Run Preview Git to HA before Apply Git to HA. The preview commit does not match.")
+        if state.get("last_preview_live_fingerprints") != preview.get("live_fingerprints", {}):
+            raise RuntimeError(
+                "Run Preview Git to HA again. Live Home Assistant automations/scripts/scenes changed since the last preview."
+            )
         if state.get("last_preview_fingerprint") != preview["fingerprint"]:
             raise RuntimeError("Run Preview Git to HA again. The live diff changed since the last preview.")
 

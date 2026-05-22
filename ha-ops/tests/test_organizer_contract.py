@@ -602,7 +602,7 @@ class OrganizerContractTests(unittest.TestCase):
                 ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
             self.assertFalse((composed / "automations.yaml").exists())
 
-    def test_integrity_rejects_count_mismatch_before_writing_live(self):
+    def test_compose_allows_source_deletions_relative_to_old_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             live = seed_live_homeassistant(root)
@@ -610,21 +610,20 @@ class OrganizerContractTests(unittest.TestCase):
             composed = root / "composed"
 
             ORGANIZER.split_live_heaps_to_git(live, git, options=self.options())
-            index_path = git / ".ha-ops" / "areas" / "organizer-index.json"
-            index = json.loads(index_path.read_text())
-            index["automations"]["count"] = index["automations"]["count"] + 1
-            write_json(index_path, index)
+            home_path = area_file(git, "home", "automations.yaml")
+            automations = [item for item in read_yaml(home_path) if item["id"] != "auto_time"]
+            write_yaml(home_path, automations)
 
-            with self.assertRaisesRegex(RuntimeError, "automation.*count"):
-                ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
-            self.assertFalse((composed / "automations.yaml").exists())
+            summary = ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
 
-    def test_integrity_rejects_script_and_scene_count_mismatch_before_writing_live(self):
-        cases = [
-            ("scripts", "script.*count"),
-            ("scenes", "scene.*count"),
-        ]
-        for kind, message in cases:
+            applied = read_yaml(composed / "automations.yaml")
+            self.assertNotIn("auto_time", ids(applied))
+            self.assertEqual(summary["automations"]["input_count"], len(automation_super_set()) - 1)
+            self.assertEqual(summary["automations"]["output_count"], len(automation_super_set()) - 1)
+
+    def test_compose_allows_script_and_scene_deletions_relative_to_old_index(self):
+        cases = ("scripts", "scenes")
+        for kind in cases:
             with self.subTest(kind=kind):
                 with tempfile.TemporaryDirectory() as tmp:
                     root = Path(tmp)
@@ -633,13 +632,59 @@ class OrganizerContractTests(unittest.TestCase):
                     composed = root / "composed"
 
                     ORGANIZER.split_live_heaps_to_git(live, git, options=self.options())
-                    index_path = git / ".ha-ops" / "areas" / "organizer-index.json"
-                    index = json.loads(index_path.read_text())
-                    index[kind]["count"] = index[kind]["count"] + 1
-                    write_json(index_path, index)
+                    if kind == "scripts":
+                        scripts_path = area_file(git, "home", "scripts.yaml")
+                        scripts = read_yaml(scripts_path)
+                        scripts.pop("home_music")
+                        write_yaml(scripts_path, scripts)
+                        expected = len(script_super_set()) - 1
+                    else:
+                        scenes_path = area_file(git, "home", "scenes.yaml")
+                        scenes = [item for item in read_yaml(scenes_path) if item["id"] != "scene_movie"]
+                        write_yaml(scenes_path, scenes)
+                        expected = len(scene_super_set()) - 1
 
-                    with self.assertRaisesRegex(RuntimeError, message):
-                        ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
-                    self.assertFalse((composed / "automations.yaml").exists())
-                    self.assertFalse((composed / "scripts.yaml").exists())
-                    self.assertFalse((composed / "scenes.yaml").exists())
+                    summary = ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
+
+                    self.assertEqual(summary[kind]["input_count"], expected)
+                    self.assertEqual(summary[kind]["output_count"], expected)
+
+    def test_fingerprint_is_stable_for_object_and_rule_order(self):
+        automations = [
+            {"id": "two", "alias": "Two", "action": [{"service": "notify.notify"}]},
+            {"action": [{"service": "light.turn_on"}], "alias": "One", "id": "one"},
+        ]
+        reordered = [
+            {"id": "one", "alias": "One", "action": [{"service": "light.turn_on"}]},
+            {"alias": "Two", "action": [{"service": "notify.notify"}], "id": "two"},
+        ]
+
+        left = ORGANIZER.fingerprint_for(automations, {"b": {"sequence": []}, "a": {"sequence": []}}, [])
+        right = ORGANIZER.fingerprint_for(reordered, {"a": {"sequence": []}, "b": {"sequence": []}}, [])
+
+        self.assertEqual(left, right)
+
+    def test_fingerprint_changes_when_action_order_changes(self):
+        automations = [
+            {
+                "id": "one",
+                "action": [
+                    {"service": "light.turn_on"},
+                    {"service": "notify.notify"},
+                ],
+            }
+        ]
+        reordered_actions = [
+            {
+                "id": "one",
+                "action": [
+                    {"service": "notify.notify"},
+                    {"service": "light.turn_on"},
+                ],
+            }
+        ]
+
+        self.assertNotEqual(
+            ORGANIZER.fingerprint_for(automations, {}, []),
+            ORGANIZER.fingerprint_for(reordered_actions, {}, []),
+        )
