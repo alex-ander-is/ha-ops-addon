@@ -279,7 +279,7 @@ def render_retained_devices_table(rows):
     )
 
 
-def render_internal_ids_table(rows):
+def render_internal_ids_table(rows, render_diff):
     if not rows:
         return "<p>No internal id migration candidates found.</p>"
     rendered_rows = []
@@ -288,49 +288,33 @@ def render_internal_ids_table(rows):
         checked = "checked" if row.get("selected", True) and can_migrate else ""
         disabled = "" if can_migrate else "disabled"
         path = html.escape(str(row.get("path") or ""))
+        diff = str(row.get("diff") or "")
+        diff_html = render_diff(diff) if diff else "<p>No internal id migration diff available.</p>"
         rendered_rows.append(
-            "<tr>"
-            f"<td class='select-col'><input type='checkbox' name='candidate' value='{index}' {checked} {disabled}></td>"
-            f"<td class='file-col'><code>{path}</code></td>"
-            f"<td class='metric-col'>{html.escape(str(row.get('entity_triggers') or 0))}</td>"
-            f"<td class='metric-col'>{html.escape(str(row.get('mqtt_triggers') or 0))}</td>"
-            f"<td class='metric-col'>{html.escape(str(row.get('actions') or 0))}</td>"
-            f"<td class='metric-col'>{html.escape(str(row.get('conditions') or 0))}</td>"
-            f"<td class='metric-col'>{html.escape(str(row.get('unresolved') or 0))}</td>"
-            "</tr>"
+            "<details class='internal-id-row'>"
+            "<summary>"
+            "<span class='internal-id-summary'>"
+            f"<span class='select-col'><input type='checkbox' name='candidate' value='{index}' {checked} {disabled} onclick='event.stopPropagation()'></span>"
+            f"<span class='file-col'><code>{path}</code></span>"
+            f"<span class='metric-col'>{html.escape(str(row.get('changes') or 0))}</span>"
+            f"<span class='metric-col'>{html.escape(str(row.get('unresolved') or 0))}</span>"
+            "</span>"
+            "</summary>"
+            f"<div class='internal-id-diff'>{diff_html}</div>"
+            "</details>"
         )
     return (
         "<div class='action-row'>"
         "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='all'>Select all</button>"
         "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='none'>Select none</button>"
         "</div>"
-        "<div class='table-scroll'>"
-        "<table class='internal-ids-table' data-checkbox-scope='internal-ids'>"
-        "<colgroup><col class='select-col'><col class='file-col'>"
-        "<col class='metric-col'><col class='metric-col'><col class='metric-col'>"
-        "<col class='metric-col'><col class='metric-col'></colgroup>"
-        "<thead><tr><th>Migrate</th><th>File</th><th>Entity</th>"
-        "<th>Z2M</th><th>Actions</th><th>Conditions</th><th>Unresolved</th></tr></thead>"
-        f"<tbody>{''.join(rendered_rows)}</tbody>"
-        "</table>"
+        "<div class='internal-ids-list' data-checkbox-scope='internal-ids'>"
+        "<div class='internal-id-header'>"
+        "<span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>"
+        "</div>"
+        f"{''.join(rendered_rows)}"
         "</div>"
     )
-
-
-def render_internal_ids_diffs(rows, render_diff):
-    diff_rows = [row for row in rows if row.get("diff")]
-    if not diff_rows:
-        return "<p>No internal id migration diff available.</p>"
-    rendered = []
-    for row in diff_rows:
-        path = html.escape(str(row.get("path") or ""))
-        rendered.append(
-            "<details>"
-            f"<summary>View diff: <code>{path}</code></summary>"
-            f"{render_diff(str(row.get('diff') or ''))}"
-            "</details>"
-        )
-    return "".join(rendered)
 
 
 def target_addon_slug(item):
@@ -676,6 +660,9 @@ def render_page(data):
       gap: 10px;
       margin-top: 14px;
     }}
+    .actions .check-list {{
+      margin-top: 0;
+    }}
     .check-row {{
       display: grid;
       grid-template-columns: auto 1fr;
@@ -683,6 +670,10 @@ def render_page(data):
       align-items: center;
       padding: 10px 0;
       border-bottom: 1px solid var(--ha-border);
+    }}
+    .actions .check-row {{
+      padding: 2px 0;
+      border-bottom: 0;
     }}
     .check-row small {{
       grid-column: 2;
@@ -736,34 +727,49 @@ def render_page(data):
     .conflicts-table th:last-child, .conflicts-table td:last-child {{
       width: 430px;
     }}
-    .internal-ids-table col.select-col {{
-      width: 82px;
+    .internal-ids-list {{
+      font-size: 0.94rem;
     }}
-    .internal-ids-table col.file-col {{
-      width: auto;
+    .internal-id-header,
+    .internal-id-summary {{
+      display: grid;
+      grid-template-columns: 82px minmax(0, 1fr) 96px 96px;
+      gap: 10px;
+      align-items: center;
     }}
-    .internal-ids-table col.metric-col {{
-      width: 96px;
+    .internal-id-header {{
+      padding: 12px 10px 12px 34px;
+      color: var(--ha-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--ha-border);
     }}
-    .internal-ids-table th,
-    .internal-ids-table td {{
-      white-space: nowrap;
+    .internal-id-row summary {{
+      cursor: pointer;
+      padding: 12px 10px;
+      border-bottom: 1px solid var(--ha-border);
     }}
-    .internal-ids-table .metric-col {{
+    .internal-id-row[open] summary {{
+      border-bottom: 0;
+    }}
+    .internal-id-summary .metric-col {{
       text-align: center;
     }}
-    .internal-ids-table .file-col {{
+    .internal-id-summary .file-col {{
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
     }}
-    .internal-ids-table .file-col code {{
+    .internal-id-summary .file-col code {{
       display: block;
       overflow: hidden;
       overflow-wrap: normal;
       text-overflow: ellipsis;
       white-space: nowrap;
       word-break: normal;
+    }}
+    .internal-id-diff {{
+      padding: 0 10px 14px 34px;
+      border-bottom: 1px solid var(--ha-border);
     }}
     th, td {{
       text-align: left;
@@ -1226,7 +1232,7 @@ def render_page(data):
           const scope = button.getAttribute("data-checkbox-scope");
           const action = button.getAttribute("data-checkbox-action");
           const checked = action === "all";
-          for (const input of document.querySelectorAll(`table[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
+          for (const input of document.querySelectorAll(`[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
             if (!input.disabled) {{
               input.checked = checked;
             }}

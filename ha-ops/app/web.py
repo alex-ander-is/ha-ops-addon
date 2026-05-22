@@ -446,19 +446,13 @@ def render_page(ctx):
         internal_ids_migrate_disabled = "disabled" if run_disabled or not any(row.get("changes") for row in internal_ids_rows) else ""
         internal_ids_changed_files = sum(1 for row in internal_ids_rows if row.get("changes"))
         internal_ids_totals = {
-            "entity_triggers": sum(int(row.get("entity_triggers") or 0) for row in internal_ids_rows),
-            "mqtt_triggers": sum(int(row.get("mqtt_triggers") or 0) for row in internal_ids_rows),
-            "actions": sum(int(row.get("actions") or 0) for row in internal_ids_rows),
-            "conditions": sum(int(row.get("conditions") or 0) for row in internal_ids_rows),
+            "changes": sum(int(row.get("changes") or 0) for row in internal_ids_rows),
             "unresolved": sum(int(row.get("unresolved") or 0) for row in internal_ids_rows),
         }
         internal_ids_summary_html = (
             "<p>"
             f"Files: {internal_ids_changed_files}. "
-            f"Entity triggers: {internal_ids_totals['entity_triggers']}. "
-            f"Z2M triggers: {internal_ids_totals['mqtt_triggers']}. "
-            f"Actions: {internal_ids_totals['actions']}. "
-            f"Conditions: {internal_ids_totals['conditions']}. "
+            f"Candidates: {internal_ids_totals['changes']}. "
             f"Unresolved: {internal_ids_totals['unresolved']}."
             "</p>"
         )
@@ -490,7 +484,7 @@ def render_page(ctx):
             "<form method='post' action='internal-ids-migrate' data-async-form='true' "
             "data-preserve-display-state='true' "
             "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references?'>"
-            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows)}{unresolved_html}{ui.render_internal_ids_diffs(internal_ids_rows, ui.render_conflict_detail)}</div>"
+            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}{unresolved_html}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
             f"<button type='submit' {internal_ids_migrate_disabled}>Migrate selected files</button>"
             "</div></div>"

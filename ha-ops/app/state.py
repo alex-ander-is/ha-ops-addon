@@ -179,7 +179,7 @@ def clear_display_state(path):
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Previous transient status was cleared. Run an action when ready.",
+                "last_message": "Previous transient status was cleared.",
             }
         )
     return write_state(path, updates)
@@ -216,7 +216,7 @@ def repair_startup_state(path, now, addon_version=None):
                 {
                     "last_status": "idle",
                     "last_action": None,
-                    "last_message": f"HA Ops updated to {addon_version}. Previous transient status was cleared. Run an action when ready.",
+                    "last_message": f"HA Ops updated to {addon_version}. Previous transient status was cleared.",
                 }
             )
             return write_state(path, current)

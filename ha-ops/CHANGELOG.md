@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.4
+
+- Remove the extra divider drawn by action-area checkboxes between grouped controls.
+- Simplify Internal IDs migration totals and table columns to show only per-file candidates and unresolved counts.
+- Combine Internal IDs migration file selection and diff preview into one expandable list.
+
 ## 0.7.3
 
 - Clear stale Internal IDs migration previews after refresh, restart, and add-on updates.
