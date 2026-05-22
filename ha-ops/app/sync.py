@@ -550,6 +550,7 @@ def normalize_entity_registry_item(item):
         return
     item.pop("modified_at", None)
     item.pop("suggested_object_id", None)
+    item.pop("supported_features", None)
     if item.get("platform") == "mobile_app":
         item.pop("original_icon", None)
 
@@ -654,6 +655,7 @@ def merge_registry_item_for_commit(name, head_item, current_item):
         restore_device_order_hidden_fields(merged, head_item, current_item)
     elif name == "core.entity_registry":
         restore_field_from_head(merged, head_item, "suggested_object_id")
+        restore_field_from_head(merged, head_item, "supported_features")
         if current_item.get("platform") == "mobile_app" or head_item.get("platform") == "mobile_app":
             restore_field_from_head(merged, head_item, "original_icon")
     return merged

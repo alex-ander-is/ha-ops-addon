@@ -1402,6 +1402,7 @@ class ServerTests(unittest.TestCase):
                             "suggested_object_id": "old_object",
                             "platform": "mqtt",
                             "supported_features": 1,
+                            "original_name": "old name",
                         },
                         {
                             "id": "entity-2",
@@ -1410,6 +1411,7 @@ class ServerTests(unittest.TestCase):
                             "original_icon": "mdi:battery-10",
                             "platform": "mobile_app",
                             "supported_features": 1,
+                            "original_name": "old phone name",
                         },
                     ]
                 }
@@ -1424,6 +1426,7 @@ class ServerTests(unittest.TestCase):
                             "suggested_object_id": "new_object",
                             "platform": "mqtt",
                             "supported_features": 2,
+                            "original_name": "new name",
                         },
                         {
                             "id": "entity-2",
@@ -1432,6 +1435,7 @@ class ServerTests(unittest.TestCase):
                             "original_icon": "mdi:battery-90",
                             "platform": "mobile_app",
                             "supported_features": 2,
+                            "original_name": "new phone name",
                         },
                     ]
                 }
@@ -1458,12 +1462,14 @@ class ServerTests(unittest.TestCase):
             first, second = saved["data"]["entities"]
 
             self.assertEqual(normalized, ["homeassistant/.storage/core.entity_registry"])
-            self.assertEqual(first["supported_features"], 2)
+            self.assertEqual(first["supported_features"], 1)
             self.assertEqual(first["modified_at"], "old-modified")
             self.assertEqual(first["suggested_object_id"], "old_object")
-            self.assertEqual(second["supported_features"], 2)
+            self.assertEqual(first["original_name"], "new name")
+            self.assertEqual(second["supported_features"], 1)
             self.assertEqual(second["modified_at"], "old-phone-modified")
             self.assertEqual(second["original_icon"], "mdi:battery-10")
+            self.assertEqual(second["original_name"], "new phone name")
 
     def test_save_include_redundant_data_commits_live_registry_hidden_fields(self):
         server = load_server()
@@ -2098,13 +2104,18 @@ class ServerTests(unittest.TestCase):
             )
             saved = json.loads((server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage" / "core.entity_registry").read_text())
 
-            self.assertIn("supported_features", preview["diff"])
+            self.assertFalse(preview["storage_changes"])
+            self.assertEqual(preview["storage_change_paths"], [])
+            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
             self.assertEqual(saved["data"]["entities"][0]["modified_at"], "live-modified-at")
             self.assertEqual(saved["data"]["entities"][0]["suggested_object_id"], "live_object")
+            self.assertEqual(saved["data"]["entities"][0]["supported_features"], 2)
             self.assertEqual(saved["data"]["entities"][1]["modified_at"], "live-phone-modified-at")
             self.assertEqual(saved["data"]["entities"][1]["original_icon"], "mdi:battery-90")
+            self.assertEqual(saved["data"]["entities"][1]["supported_features"], 2)
             self.assertNotIn("modified_at", preview["diff"])
             self.assertNotIn("suggested_object_id", preview["diff"])
+            self.assertNotIn("supported_features", preview["diff"])
             self.assertNotIn("original_icon", preview["diff"])
             self.assertNotIn("git_object", preview["diff"])
             self.assertNotIn("live_object", preview["diff"])
@@ -2510,6 +2521,7 @@ class ServerTests(unittest.TestCase):
                                     "platform": "mqtt",
                                     "suggested_object_id": "git_object",
                                     "supported_features": 1,
+                                    "original_name": "Git Name",
                                 }
                             ]
                         }
@@ -2534,6 +2546,7 @@ class ServerTests(unittest.TestCase):
                                     "platform": "mqtt",
                                     "suggested_object_id": "live_object",
                                     "supported_features": 2,
+                                    "original_name": "Live Name",
                                 }
                             ]
                         }
@@ -2556,7 +2569,10 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
             self.assertIn("Git: homeassistant/.storage/core.entity_registry", page)
             self.assertIn("HA: homeassistant/.storage/core.entity_registry", page)
-            self.assertIn("supported_features", page)
+            self.assertIn("original_name", page)
+            self.assertIn("Git", page)
+            self.assertIn("Live", page)
+            self.assertNotIn("supported_features", page)
             self.assertIn("diff-changed", page)
             self.assertNotIn("modified_at", page)
             self.assertNotIn("suggested_object_id", page)

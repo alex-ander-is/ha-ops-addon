@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.6.22
+
+- Treat Home Assistant entity registry supported_features as redundant runtime data in normalized registry diffs and applies.
+
 ## 0.6.21
 
 - Clear stale transient status after an HA Ops add-on version update so old errors are not shown as fresh failures.
