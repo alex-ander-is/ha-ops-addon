@@ -180,7 +180,7 @@ def action_label(action):
         "deleted_devices_delete": "Approve Deletion",
         "deleted_devices_confirm": "Confirm Changes",
         "deleted_devices_revert": "Revert Changes",
-        "internal_ids_preview": "Check internal ids",
+        "internal_ids_preview": "Check actions IDs",
         "internal_ids_migrate": "Migrate internal ids",
         "rollback": "Rollback",
     }.get(action or "", action or "None")

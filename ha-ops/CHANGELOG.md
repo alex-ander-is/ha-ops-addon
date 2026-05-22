@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.3
+
+- Clear stale Internal IDs migration previews after refresh, restart, and add-on updates.
+- Rename the Internal IDs check action to Check actions IDs and group primary controls by HA to Git, Git to HA, and Maintenance sections.
+
 ## 0.7.2
 
 - Keep Internal IDs migration file paths clipped with ellipsis so they do not overlap metric columns.

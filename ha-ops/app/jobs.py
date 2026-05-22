@@ -590,7 +590,7 @@ def run_internal_ids_migrate_job(selected, ctx):
         rows = state.get("last_internal_ids_rows") or []
         fingerprint = state.get("last_internal_ids_fingerprint")
         if not rows or not fingerprint:
-            raise RuntimeError("Run Check internal ids before approving migration.")
+            raise RuntimeError("Run Check actions IDs before approving migration.")
         selected_indexes = {int(value) for value in selected}
         if not selected_indexes:
             raise RuntimeError("Select at least one internal id migration file.")

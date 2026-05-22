@@ -411,7 +411,7 @@ def build_internal_ids_preview(config_dir):
 def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_paths):
     preview = build_internal_ids_preview(config_dir)
     if expected_fingerprint and preview["fingerprint"] != expected_fingerprint:
-        raise RuntimeError("Internal id migration candidates changed since preview. Run Check internal ids again.")
+        raise RuntimeError("Internal id migration candidates changed since preview. Run Check actions IDs again.")
     selected_paths = set(selected_paths or [])
     if not selected_paths:
         raise RuntimeError("Select at least one internal id migration file.")
@@ -420,7 +420,7 @@ def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_path
         if row["path"] not in selected_paths or not row["changes"]:
             continue
         if not row.get("diff"):
-            raise RuntimeError(f"Internal id migration diff is missing for {row['path']}. Run Check internal ids again.")
+            raise RuntimeError(f"Internal id migration diff is missing for {row['path']}. Run Check actions IDs again.")
         path = Path(config_dir) / row["path"]
         result = migrate_file(config_dir, path)
         if result["changed"]:

@@ -172,6 +172,8 @@ def clear_display_state(path):
     current = read_state(path)
     if not current.get("deleted_devices_pending_confirmation"):
         updates.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
+    updates.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+    updates.update(INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
     if current.get("last_status") in {"success", "conflicts"}:
         updates.update(
             {
@@ -207,6 +209,8 @@ def repair_startup_state(path, now, addon_version=None):
         current.update(APPLY_PREVIEW_CLEAR_UPDATES)
         current.update(SAVE_PREVIEW_CLEAR_UPDATES)
         current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
+        current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+        current.update(INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
         if current.get("last_status") != "running":
             current.update(
                 {
@@ -218,6 +222,10 @@ def repair_startup_state(path, now, addon_version=None):
             return write_state(path, current)
 
     current.update(DISPLAY_CLEAR_UPDATES)
+    if not current.get("deleted_devices_pending_confirmation"):
+        current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
+    current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+    current.update(INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
     if current.get("last_status") == "error" and (not has_error_context(current) or is_recovered_stale_error(current)):
         current.update(
             {

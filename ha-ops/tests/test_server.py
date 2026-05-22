@@ -388,6 +388,9 @@ class ServerTests(unittest.TestCase):
                     "last_details": ["old detail"],
                     "last_diff": "old diff",
                     "last_save_preview": "old save",
+                    "last_internal_ids_preview": "old internal ids preview",
+                    "last_internal_ids_rows": [{"index": 0, "path": ".ha-ops/areas/synthetic/automations.yaml"}],
+                    "last_internal_ids_count": 1,
                     "last_preview_fingerprint": "keep",
                 }
             )
@@ -399,6 +402,9 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_details"], [])
             self.assertEqual(state["last_diff"], "")
             self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_internal_ids_preview"], "")
+            self.assertEqual(state["last_internal_ids_rows"], [])
+            self.assertEqual(state["last_internal_ids_count"], 0)
             self.assertEqual(state["last_preview_fingerprint"], "keep")
 
     def test_startup_clears_stale_status_after_addon_version_change(self):
@@ -436,6 +442,47 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_preview_fingerprint"])
             self.assertEqual(state["last_preview_live_fingerprints"], {})
             self.assertIsNone(state["last_preview_approved_fingerprint"])
+
+    def test_startup_clears_internal_ids_preview_after_addon_version_change(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.7.3"\n')
+            server.write_state(
+                {
+                    "last_seen_addon_version": "0.7.2",
+                    "last_status": "success",
+                    "last_action": "internal_ids_preview",
+                    "last_message": "Internal id migration preview found 1 file.",
+                    "last_internal_ids_generated_at": "2026-05-22T12:00:00+00:00",
+                    "last_internal_ids_preview": "old diff",
+                    "last_internal_ids_count": 1,
+                    "last_internal_ids_fingerprint": "old",
+                    "last_internal_ids_rows": [
+                        {
+                            "index": 0,
+                            "path": ".ha-ops/areas/synthetic/automations.yaml",
+                            "selected": True,
+                            "diff": "old diff",
+                        }
+                    ],
+                    "last_internal_ids_unresolved": [{"path": "old"}],
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["last_internal_ids_preview"], "")
+            self.assertEqual(state["last_internal_ids_rows"], [])
+            self.assertEqual(state["last_internal_ids_count"], 0)
+            self.assertIsNone(state["last_internal_ids_fingerprint"])
+            self.assertIsNone(state["last_internal_ids_generated_at"])
+            self.assertEqual(state["last_internal_ids_unresolved"], [])
+            self.assertNotIn("Internal IDs Migration Preview", page)
 
     def test_startup_keeps_error_when_addon_version_is_unchanged(self):
         server = load_server()
@@ -544,6 +591,30 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_action"])
             self.assertNotIn('<div class="badge success">success</div>', page)
             self.assertIn("Previous transient status was cleared", page)
+
+    def test_refresh_clears_internal_ids_preview(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_internal_ids_generated_at": "2026-05-22T12:00:00+00:00",
+                    "last_internal_ids_preview": "old diff",
+                    "last_internal_ids_count": 1,
+                    "last_internal_ids_rows": [{"index": 0, "path": ".ha-ops/areas/synthetic/automations.yaml"}],
+                }
+            )
+
+            self.assertIn("Internal IDs Migration Preview", server.render_page())
+            server.clear_display_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["last_internal_ids_preview"], "")
+            self.assertEqual(state["last_internal_ids_rows"], [])
+            self.assertEqual(state["last_internal_ids_count"], 0)
+            self.assertNotIn("Internal IDs Migration Preview", page)
 
     def test_success_status_is_displayed_as_done(self):
         server = load_server()
@@ -4579,30 +4650,34 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
 
+            ha_to_git_section = page.index("<h2>HA to Git</h2>")
             ha_to_git = page.index('action="save-preview"')
             save = page.index('action="save"')
             include_redundant = page.index("action='include-redundant-data'")
+            git_to_ha_section = page.index("<h2>Git to HA</h2>")
             git_to_ha = page.index('action="preview"')
             apply = page.index('action="apply"')
+            maintenance_section = page.index("<h2>Maintenance</h2>")
+            deleted = page.index('action="deleted-devices-preview"')
+            retained = page.index('action="retained-devices-preview"')
+            internal_ids = page.index('action="internal-ids-preview"')
+            self.assertLess(ha_to_git_section, ha_to_git)
             self.assertLess(ha_to_git, save)
             self.assertLess(save, include_redundant)
-            self.assertLess(include_redundant, git_to_ha)
+            self.assertLess(include_redundant, git_to_ha_section)
+            self.assertLess(git_to_ha_section, git_to_ha)
             self.assertLess(git_to_ha, apply)
+            self.assertLess(apply, maintenance_section)
+            self.assertLess(maintenance_section, deleted)
             self.assertIn('<div class="action-row">', page)
+            self.assertIn('<section class="action-section">', page)
             self.assertIn('<button type="submit" >Save HA to Git</button>', page)
             self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
-            self.assertIn('action="deleted-devices-preview"', page)
             self.assertIn("Check deleted_devices", page)
-            self.assertLess(page.index('action="deleted-devices-preview"'), page.index('action="retained-devices-preview"'))
-            self.assertLess(page.index('action="retained-devices-preview"'), page.index('action="internal-ids-preview"'))
-            self.assertIn(
-                '</form>\n          </div>\n          <div class="action-row">\n            <form method="post" action="retained-devices-preview"',
-                page,
-            )
-            self.assertIn(
-                '</form>\n          </div>\n          <div class="action-row">\n            <form method="post" action="internal-ids-preview"',
-                page,
-            )
+            self.assertIn("Check actions IDs", page)
+            self.assertNotIn("Check internal ids", page)
+            self.assertLess(deleted, retained)
+            self.assertLess(retained, internal_ids)
             self.assertIn("action='include-redundant-data'", page)
             self.assertIn("Include redundant data", page)
             self.assertIn("<h2>Log</h2>", page)
@@ -4887,7 +4962,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("topic: z2m/office_remote_new", state["last_internal_ids_rows"][0]["diff"])
 
             page = server.render_page()
-            self.assertIn("Check internal ids", page)
+            self.assertIn("Check actions IDs", page)
             self.assertIn("Migrate selected files", page)
             self.assertIn("Internal IDs Migration Preview", page)
             self.assertIn("Files: 1. Entity triggers: 0. Z2M triggers: 1. Actions: 1. Conditions: 0. Unresolved: 0.", page)

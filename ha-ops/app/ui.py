@@ -640,8 +640,27 @@ def render_page(data):
     .actions {{
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: 18px;
       margin-top: 22px;
+    }}
+    .action-section {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding-top: 14px;
+      border-top: 1px solid var(--ha-border);
+    }}
+    .action-section:first-child {{
+      padding-top: 0;
+      border-top: 0;
+    }}
+    .action-section h2 {{
+      margin: 0;
+      color: var(--ha-muted);
+      font-size: 0.86rem;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0;
     }}
     .action-row {{
       display: flex;
@@ -913,40 +932,49 @@ def render_page(data):
         <p id="client-status" class="client-status"></p>
         {data['organizer_html']}
         <div class="actions">
-          <div class="action-row">
-            <form method="post" action="save-preview" data-async-form="true">
-              <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
-            </form>
-            <form method="post" action="save" data-async-form="true">
-              <button type="submit" {data['action_disabled']}>Save HA to Git</button>
-            </form>
-          </div>
-          <div class="action-row">
-            {data['include_redundant_data_html']}
-          </div>
-          <div class="action-row">
-            <form method="post" action="preview" data-async-form="true">
-              <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
-            </form>
-            <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
-              <button type="submit" {data['action_disabled']}>{data['apply_button_text']}</button>
-            </form>
-          </div>
-          <div class="action-row">
-            <form method="post" action="deleted-devices-preview" data-async-form="true">
-              <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
-            </form>
-          </div>
-          <div class="action-row">
-            <form method="post" action="retained-devices-preview" data-async-form="true">
-              <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
-            </form>
-          </div>
-          <div class="action-row">
-            <form method="post" action="internal-ids-preview" data-async-form="true">
-              <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check internal ids</button>
-            </form>
-          </div>
+          <section class="action-section">
+            <h2>HA to Git</h2>
+            <div class="action-row">
+              <form method="post" action="save-preview" data-async-form="true">
+                <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
+              </form>
+              <form method="post" action="save" data-async-form="true">
+                <button type="submit" {data['action_disabled']}>Save HA to Git</button>
+              </form>
+            </div>
+            <div class="action-row">
+              {data['include_redundant_data_html']}
+            </div>
+          </section>
+          <section class="action-section">
+            <h2>Git to HA</h2>
+            <div class="action-row">
+              <form method="post" action="preview" data-async-form="true">
+                <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
+              </form>
+              <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
+                <button type="submit" {data['action_disabled']}>{data['apply_button_text']}</button>
+              </form>
+            </div>
+          </section>
+          <section class="action-section">
+            <h2>Maintenance</h2>
+            <div class="action-row">
+              <form method="post" action="deleted-devices-preview" data-async-form="true">
+                <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
+              </form>
+            </div>
+            <div class="action-row">
+              <form method="post" action="retained-devices-preview" data-async-form="true">
+                <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
+              </form>
+            </div>
+            <div class="action-row">
+              <form method="post" action="internal-ids-preview" data-async-form="true">
+                <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check actions IDs</button>
+              </form>
+            </div>
+          </section>
         </div>
       </section>
       <section class="card details-card">
