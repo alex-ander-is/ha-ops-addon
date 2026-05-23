@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.5
+
+- Align Internal IDs migration expand controls with their file rows.
+- Show unresolved Internal IDs migration YAML blocks inside the expanded file row.
+- Show unresolved-only rows as not selectable and make disabled buttons visibly gray.
+
 ## 0.7.4
 
 - Remove the extra divider drawn by action-area checkboxes between grouped controls.

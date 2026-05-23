@@ -4972,7 +4972,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Select none", page)
             self.assertIn("<div class='internal-ids-list' data-checkbox-scope='internal-ids'>", page)
             self.assertIn("<div class='internal-id-header'>", page)
-            self.assertIn("<span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>", page)
+            self.assertIn("<span></span><span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>", page)
             self.assertIn("<details class='internal-id-row'>", page)
             self.assertNotIn("<th>Entity</th>", page)
             self.assertNotIn("<th>Z2M</th>", page)
@@ -4983,6 +4983,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn(".internal-id-summary .file-col", page)
             self.assertIn("text-overflow: ellipsis", page)
             self.assertIn("white-space: nowrap", page)
+            self.assertIn("grid-template-columns: 24px 82px minmax(0, 1fr) 96px 96px", page)
+            self.assertIn(".internal-id-row summary::before", page)
+            self.assertIn(".internal-id-summary {\n      display: contents;", page)
             self.assertIn('document.querySelectorAll(`[data-checkbox-scope="${scope}"] input[type="checkbox"]`)', page)
             self.assertNotIn("View diff:", page)
             self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
@@ -5096,12 +5099,66 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_internal_ids_count"], 0)
             self.assertEqual(state["last_internal_ids_rows"][0]["changes"], 0)
             self.assertEqual(state["last_internal_ids_rows"][0]["unresolved"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["unresolved_items"][0]["alias"], "Unsupported integration event")
+            self.assertIn("device_id: cccccccccccccccccccccccccccccccc", state["last_internal_ids_rows"][0]["unresolved_items"][0]["yaml"])
             self.assertEqual(state["last_internal_ids_unresolved"][0]["alias"], "Unsupported integration event")
 
             page = server.render_page()
             self.assertIn("Unresolved device blocks", page)
             self.assertIn("unsupported device trigger", page)
-            self.assertIn("disabled></td>", page)
+            self.assertIn("<span class='no-candidates' title='No safe candidates'>None</span>", page)
+            self.assertIn("device_id: cccccccccccccccccccccccccccccccc", page)
+            self.assertIn("<button type='submit' disabled>Migrate selected files</button>", page)
+            self.assertIn("button:disabled,", page)
+            self.assertIn("background: #e5e7eb", page)
+
+    def test_internal_ids_migrate_reports_remaining_unresolved_items(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            config = self.seed_internal_ids_repo(server, root)
+            office = config / ".ha-ops" / "areas" / "office"
+            kitchen = config / ".ha-ops" / "areas" / "kitchen"
+            office.mkdir(parents=True)
+            kitchen.mkdir(parents=True)
+            (office / "automations.yaml").write_text(
+                """
+- id: '1'
+  alias: Migratable
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions: []
+""".lstrip()
+            )
+            (kitchen / "automations.yaml").write_text(
+                """
+- id: '2'
+  alias: Unsupported integration event
+  triggers:
+  - device_id: cccccccccccccccccccccccccccccccc
+    domain: synthetic_integration
+    type: synthetic_event
+    trigger: device
+  conditions: []
+  actions: []
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            rows = server.read_state()["last_internal_ids_rows"]
+            office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
+
+            self.assertTrue(server.run_internal_ids_migrate_job([str(office_index)]))
+            state = server.read_state()
+
+            self.assertEqual(state["last_message"], "Migrated 1 file. 1 unresolved item remains.")
+            self.assertIn("1 unresolved item remains. Review unresolved device blocks.", state["last_details"])
 
     def test_internal_ids_migrate_rejects_stale_preview(self):
         server = load_server()

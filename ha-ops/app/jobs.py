@@ -602,12 +602,22 @@ def run_internal_ids_migrate_job(selected, ctx):
         for row in result["changed"]:
             ctx.add_detail(details, f"Migrated internal ids in {row['path']}.")
         preview = result["preview"]
+        unresolved_count = len(preview.get("unresolved") or [])
+        changed_count = result["changed_count"]
+        file_word = "file" if changed_count == 1 else "files"
+        if unresolved_count:
+            item_word = "item" if unresolved_count == 1 else "items"
+            verb = "remains" if unresolved_count == 1 else "remain"
+            message = f"Migrated {changed_count} {file_word}. {unresolved_count} unresolved {item_word} {verb}."
+            ctx.add_detail(details, f"{unresolved_count} unresolved {item_word} {verb}. Review unresolved device blocks.")
+        else:
+            message = f"Migrated {changed_count} {file_word}."
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "internal_ids_migrate",
-                "last_message": f"Migrated internal ids in {result['changed_count']} file(s).",
+                "last_message": message,
                 "last_details": details,
                 "last_internal_ids_preview": preview["summary"],
                 "last_internal_ids_rows": preview["rows"],

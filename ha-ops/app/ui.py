@@ -286,21 +286,42 @@ def render_internal_ids_table(rows, render_diff):
     for index, row in enumerate(rows):
         can_migrate = bool(row.get("changes"))
         checked = "checked" if row.get("selected", True) and can_migrate else ""
-        disabled = "" if can_migrate else "disabled"
+        migrate_control = (
+            f"<input type='checkbox' name='candidate' value='{index}' {checked} onclick='event.stopPropagation()'>"
+            if can_migrate
+            else "<span class='no-candidates' title='No safe candidates'>None</span>"
+        )
         path = html.escape(str(row.get("path") or ""))
         diff = str(row.get("diff") or "")
-        diff_html = render_diff(diff) if diff else "<p>No internal id migration diff available.</p>"
+        unresolved_items = row.get("unresolved_items") or []
+        if diff:
+            details_html = render_diff(diff)
+        elif unresolved_items:
+            rendered_unresolved = []
+            for item in unresolved_items:
+                reason = html.escape(str(item.get("reason") or "unsupported"))
+                alias = html.escape(str(item.get("alias") or ""))
+                yaml_text = html.escape(str(item.get("yaml") or item.get("item") or ""))
+                rendered_unresolved.append(
+                    "<div class='unresolved-block'>"
+                    f"<p><strong>{alias}</strong> - {reason}</p>"
+                    f"<pre>{yaml_text}</pre>"
+                    "</div>"
+                )
+            details_html = "".join(rendered_unresolved)
+        else:
+            details_html = "<p>No internal id migration diff available.</p>"
         rendered_rows.append(
             "<details class='internal-id-row'>"
             "<summary>"
             "<span class='internal-id-summary'>"
-            f"<span class='select-col'><input type='checkbox' name='candidate' value='{index}' {checked} {disabled} onclick='event.stopPropagation()'></span>"
+            f"<span class='select-col'>{migrate_control}</span>"
             f"<span class='file-col'><code>{path}</code></span>"
             f"<span class='metric-col'>{html.escape(str(row.get('changes') or 0))}</span>"
             f"<span class='metric-col'>{html.escape(str(row.get('unresolved') or 0))}</span>"
             "</span>"
             "</summary>"
-            f"<div class='internal-id-diff'>{diff_html}</div>"
+            f"<div class='internal-id-diff'>{details_html}</div>"
             "</details>"
         )
     return (
@@ -310,7 +331,7 @@ def render_internal_ids_table(rows, render_diff):
         "</div>"
         "<div class='internal-ids-list' data-checkbox-scope='internal-ids'>"
         "<div class='internal-id-header'>"
-        "<span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>"
+        "<span></span><span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>"
         "</div>"
         f"{''.join(rendered_rows)}"
         "</div>"
@@ -689,14 +710,18 @@ def render_page(data):
       cursor: pointer;
       font-weight: 600;
     }}
-    button:disabled {{
-      opacity: 0.6;
-      cursor: default;
-    }}
     button.secondary {{
       background: var(--ha-card-bg);
       color: var(--ha-text);
       border-color: var(--ha-border);
+    }}
+    button:disabled,
+    button.secondary:disabled {{
+      background: #e5e7eb;
+      color: #6b7280;
+      border-color: #d1d5db;
+      cursor: default;
+      opacity: 1;
     }}
     pre {{
       margin: 0;
@@ -731,14 +756,14 @@ def render_page(data):
       font-size: 0.94rem;
     }}
     .internal-id-header,
-    .internal-id-summary {{
+    .internal-id-row summary {{
       display: grid;
-      grid-template-columns: 82px minmax(0, 1fr) 96px 96px;
+      grid-template-columns: 24px 82px minmax(0, 1fr) 96px 96px;
       gap: 10px;
       align-items: center;
     }}
     .internal-id-header {{
-      padding: 12px 10px 12px 34px;
+      padding: 12px 10px;
       color: var(--ha-muted);
       font-weight: 600;
       border-bottom: 1px solid var(--ha-border);
@@ -748,11 +773,37 @@ def render_page(data):
       padding: 12px 10px;
       border-bottom: 1px solid var(--ha-border);
     }}
+    .internal-id-row summary::-webkit-details-marker {{
+      display: none;
+    }}
+    .internal-id-row summary::marker {{
+      content: "";
+    }}
+    .internal-id-row summary::before {{
+      content: "";
+      width: 0;
+      height: 0;
+      border-top: 5px solid transparent;
+      border-bottom: 5px solid transparent;
+      border-left: 7px solid var(--ha-text);
+      justify-self: center;
+      transition: transform 120ms ease;
+    }}
+    .internal-id-row[open] summary::before {{
+      transform: rotate(90deg);
+    }}
     .internal-id-row[open] summary {{
       border-bottom: 0;
     }}
+    .internal-id-summary {{
+      display: contents;
+    }}
     .internal-id-summary .metric-col {{
       text-align: center;
+    }}
+    .no-candidates {{
+      color: var(--ha-muted);
+      font-size: 0.86rem;
     }}
     .internal-id-summary .file-col {{
       min-width: 0;
@@ -768,8 +819,11 @@ def render_page(data):
       word-break: normal;
     }}
     .internal-id-diff {{
-      padding: 0 10px 14px 34px;
+      padding: 0 10px 14px 44px;
       border-bottom: 1px solid var(--ha-border);
+    }}
+    .unresolved-block + .unresolved-block {{
+      margin-top: 14px;
     }}
     th, td {{
       text-align: left;

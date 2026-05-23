@@ -277,7 +277,15 @@ class Migration:
                 self.stats["entity_triggers"] += 1
                 continue
             if "device_id" in item and (item.get("trigger") == "device" or item.get("platform") == "device"):
-                self.unresolved.append({"path": relative_path(self.config_dir, path), "alias": alias, "reason": "unsupported device trigger", "item": item})
+                self.unresolved.append(
+                    {
+                        "path": relative_path(self.config_dir, path),
+                        "alias": alias,
+                        "reason": "unsupported device trigger",
+                        "item": item,
+                        "yaml": dump_yaml(item).strip(),
+                    }
+                )
         return subtypes
 
     def transform_node(self, node):
@@ -379,6 +387,7 @@ def build_internal_ids_preview(config_dir):
                     "actions": result["stats"]["actions"],
                     "conditions": result["stats"]["conditions"],
                     "unresolved": len(result["unresolved"]),
+                    "unresolved_items": result["unresolved"],
                     "diff": diff,
                 }
             )
