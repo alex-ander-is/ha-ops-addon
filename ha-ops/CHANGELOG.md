@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.8
+
+- Report dirty checkout paths before Git sync actions instead of showing a raw pull rebase error.
+- Accept both repository-root and apply-path Internal IDs migration changes when auto-committing pending migrations.
+
 ## 0.7.7
 
 - Keep Internal IDs preview log entries in chronological order.

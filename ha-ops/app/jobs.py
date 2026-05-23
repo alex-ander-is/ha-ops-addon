@@ -13,6 +13,7 @@ class JobContext:
     build_retained_devices_preview: Any
     build_apply_preview: Any
     build_save_preview: Any
+    clean_repo_untracked: Any
     clear_deleted_devices: Any
     clear_retained_discovery_topic: Any
     commit_if_needed: Any
@@ -90,7 +91,8 @@ def log_action(ctx, message):
 
 
 def status_path(line):
-    value = str(line)[3:].strip()
+    line = str(line)
+    value = line[3:].strip() if len(line) >= 3 and line[2] == " " else line.split(maxsplit=1)[-1].strip()
     if " -> " in value:
         value = value.rsplit(" -> ", 1)[1]
     if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
@@ -98,17 +100,55 @@ def status_path(line):
     return value
 
 
+def dirty_paths(ctx, repo_dir):
+    return [status_path(line) for line in (ctx.git_status_porcelain(repo_dir) or "").splitlines() if line.strip()]
+
+
+def internal_ids_migration_prefixes(options):
+    apply_path = str(options.get("apply_path") or "homeassistant").strip().strip("/")
+    prefixes = [".ha-ops/"]
+    if apply_path:
+        prefixes.insert(0, f"{apply_path}/.ha-ops/")
+    return prefixes
+
+
+def internal_ids_migration_path(path, options):
+    return any(path.startswith(prefix) for prefix in internal_ids_migration_prefixes(options))
+
+
+def dirty_checkout_message(paths, action):
+    rendered = "\n".join(f"- {path}" for path in paths[:30])
+    if len(paths) > 30:
+        rendered += f"\n- and {len(paths) - 30} more"
+    return (
+        "Git checkout has uncommitted changes, so HA Ops cannot pull from origin.\n\n"
+        f"Changed paths:\n{rendered}\n\n"
+        f"Commit, save, or clean these changes before running {action}."
+    )
+
+
+def ensure_clean_checkout_for_pull(ctx, repo_dir, action):
+    paths = dirty_paths(ctx, repo_dir)
+    if paths:
+        raise RuntimeError(dirty_checkout_message(paths, action))
+
+
+def prepare_repo_checkout_for_sync(ctx, options, details, action):
+    commit_pending_internal_ids_migration(ctx, options, details)
+    repo_dir = ctx.repo_checkout_path(options)
+    if repo_dir.exists() and (repo_dir / ".git").exists():
+        ctx.clean_repo_untracked(repo_dir)
+        ensure_clean_checkout_for_pull(ctx, repo_dir, action)
+
+
 def commit_pending_internal_ids_migration(ctx, options, details):
     repo_dir = ctx.repo_checkout_path(options)
     if not repo_dir.exists() or not (repo_dir / ".git").exists():
         return None
-    status = [line for line in (ctx.git_status_porcelain(repo_dir) or "").splitlines() if line.strip()]
-    if not status:
+    paths = dirty_paths(ctx, repo_dir)
+    if not paths:
         return None
-    apply_path = str(options.get("apply_path") or "homeassistant").strip().strip("/")
-    migration_prefix = f"{apply_path}/.ha-ops/"
-    paths = [status_path(line) for line in status]
-    if not paths or any(not path.startswith(migration_prefix) for path in paths):
+    if any(not internal_ids_migration_path(path, options) for path in paths):
         return None
 
     ctx.stage_paths(repo_dir, paths)
@@ -121,6 +161,7 @@ def commit_pending_internal_ids_migration(ctx, options, details):
     try:
         ctx.push_branch(repo_dir, env, branch)
     except RuntimeError:
+        ensure_clean_checkout_for_pull(ctx, repo_dir, "pushing pending Internal IDs migration changes")
         ctx.git_pull_rebase(repo_dir, env, branch)
         ctx.push_branch(repo_dir, env, branch)
     ctx.add_detail(details, f"Committed pending Internal IDs migration changes to Git: {commit}.")
@@ -227,7 +268,7 @@ def run_save_job(ctx):
             write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
             return False
 
-        commit_pending_internal_ids_migration(ctx, options, details)
+        prepare_repo_checkout_for_sync(ctx, options, details, "Save HA to Git")
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
@@ -384,7 +425,7 @@ def run_save_preview_job(ctx):
             )
             return False
 
-        commit_pending_internal_ids_migration(ctx, options, details)
+        prepare_repo_checkout_for_sync(ctx, options, details, "Preview HA to Git")
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
@@ -1265,7 +1306,7 @@ def run_apply_job(ctx):
             )
             return False
 
-        commit_pending_internal_ids_migration(ctx, options, details)
+        prepare_repo_checkout_for_sync(ctx, options, details, "Apply Git to HA")
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)
         addons = ctx.get_installed_addons()
@@ -1383,7 +1424,7 @@ def run_preview_job(ctx):
             )
             return False
 
-        commit_pending_internal_ids_migration(ctx, options, details)
+        prepare_repo_checkout_for_sync(ctx, options, details, "Preview Git to HA")
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)
         addons = ctx.get_installed_addons()

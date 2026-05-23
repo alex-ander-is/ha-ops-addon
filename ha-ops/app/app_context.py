@@ -633,6 +633,7 @@ class AppContext:
             build_deleted_devices_preview=self.build_deleted_devices_preview,
             build_internal_ids_preview=self.build_internal_ids_preview,
             build_retained_devices_preview=self.build_retained_devices_preview,
+            clean_repo_untracked=self.clean_repo_untracked,
             clear_deleted_devices=self.clear_deleted_devices,
             clear_retained_discovery_topic=self.clear_retained_discovery_topic,
             commit_if_needed=self.commit_if_needed,

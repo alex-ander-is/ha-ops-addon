@@ -5089,6 +5089,70 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Committed pending Internal IDs migration changes to Git", details[0])
             self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/office/automations.yaml"), "- alias: Migrated\n")
 
+    def test_pending_root_internal_ids_migration_changes_are_committed_before_repo_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(
+                data_dir=root / "data",
+                config_dir=root / "homeassistant",
+                addon_configs_dir=root / "addon_configs",
+                addon_config_path=root / "config.yaml",
+            )
+            ctx.work_dir.mkdir(parents=True)
+            ctx.options_path.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": ".",
+                    }
+                )
+            )
+            options = ctx.load_options()
+            repo = ctx.ensure_repo(options)
+            migrated = repo / ".ha-ops" / "areas" / "office" / "automations.yaml"
+            migrated.parent.mkdir(parents=True)
+            migrated.write_text("- alias: Migrated\n")
+
+            commit = server.app_context.job_logic.commit_pending_internal_ids_migration(ctx.job_deps(), options, [])
+
+            self.assertIsNotNone(commit)
+            self.assertEqual(self.repo_status(repo), "")
+            self.assertEqual(self.remote_file(remote, ".ha-ops/areas/office/automations.yaml"), "- alias: Migrated\n")
+
+    def test_dirty_checkout_reports_paths_before_git_sync(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(
+                data_dir=root / "data",
+                config_dir=root / "homeassistant",
+                addon_configs_dir=root / "addon_configs",
+                addon_config_path=root / "config.yaml",
+            )
+            ctx.work_dir.mkdir(parents=True)
+            ctx.options_path.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            options = ctx.load_options()
+            repo = ctx.ensure_repo(options)
+            changed = repo / "homeassistant" / "configuration.yaml"
+            changed.write_text("dirty\n")
+
+            with self.assertRaisesRegex(RuntimeError, "homeassistant/configuration.yaml"):
+                server.app_context.job_logic.prepare_repo_checkout_for_sync(ctx.job_deps(), options, [], "Preview HA to Git")
+
     def test_internal_ids_mixed_trigger_gets_mqtt_guard_condition(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
