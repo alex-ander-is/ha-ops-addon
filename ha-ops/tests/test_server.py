@@ -5104,7 +5104,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_internal_ids_unresolved"][0]["alias"], "Unsupported integration event")
 
             page = server.render_page()
-            self.assertIn("Unresolved device blocks", page)
+            self.assertNotIn("Unresolved device blocks", page)
             self.assertIn("unsupported device trigger", page)
             self.assertIn("<span class='no-candidates' title='No safe candidates'>None</span>", page)
             self.assertIn("device_id: cccccccccccccccccccccccccccccccc", page)

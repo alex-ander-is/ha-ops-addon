@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.6
+
+- Remove the duplicate unresolved device blocks summary below the Internal IDs migration table.
+
 ## 0.7.5
 
 - Align Internal IDs migration expand controls with their file rows.

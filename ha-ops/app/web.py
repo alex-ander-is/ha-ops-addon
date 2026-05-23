@@ -456,22 +456,6 @@ def render_page(ctx):
             f"Unresolved: {internal_ids_totals['unresolved']}."
             "</p>"
         )
-        unresolved = state.get("last_internal_ids_unresolved") or []
-        unresolved_html = ""
-        if unresolved:
-            rendered = []
-            for item in unresolved[:50]:
-                rendered.append(
-                    "<li>"
-                    f"<code>{html.escape(str(item.get('path') or ''))}</code>: "
-                    f"{html.escape(str(item.get('alias') or ''))} - {html.escape(str(item.get('reason') or 'unsupported'))}"
-                    "</li>"
-                )
-            unresolved_html = (
-                "<details><summary>Unresolved device blocks</summary>"
-                f"<ul>{''.join(rendered)}</ul>"
-                "</details>"
-            )
         internal_ids_section_html = (
             "<section class='card wide'>"
             "<h2>Internal IDs Migration Preview</h2>"
@@ -484,7 +468,7 @@ def render_page(ctx):
             "<form method='post' action='internal-ids-migrate' data-async-form='true' "
             "data-preserve-display-state='true' "
             "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references?'>"
-            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}{unresolved_html}</div>"
+            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
             f"<button type='submit' {internal_ids_migrate_disabled}>Migrate selected files</button>"
             "</div></div>"
