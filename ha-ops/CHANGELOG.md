@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.7
+
+- Keep Internal IDs preview log entries in chronological order.
+- Commit pending Internal IDs migration changes before later Git actions so HA Ops does not block itself on a dirty checkout.
+
 ## 0.7.6
 
 - Remove the duplicate unresolved device blocks summary below the Internal IDs migration table.

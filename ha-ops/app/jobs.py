@@ -57,6 +57,7 @@ class JobContext:
     run_lock: Any
     save_unknown_base_conflicts: Any
     stage_all: Any
+    stage_paths: Any
     stage_homeassistant_storage_allowlist: Any
     utc_now: Any
     write_state: Any
@@ -86,6 +87,44 @@ def log_action(ctx, message):
         ctx.log(message)
     except Exception:
         pass
+
+
+def status_path(line):
+    value = str(line)[3:].strip()
+    if " -> " in value:
+        value = value.rsplit(" -> ", 1)[1]
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = value[1:-1]
+    return value
+
+
+def commit_pending_internal_ids_migration(ctx, options, details):
+    repo_dir = ctx.repo_checkout_path(options)
+    if not repo_dir.exists() or not (repo_dir / ".git").exists():
+        return None
+    status = [line for line in (ctx.git_status_porcelain(repo_dir) or "").splitlines() if line.strip()]
+    if not status:
+        return None
+    apply_path = str(options.get("apply_path") or "homeassistant").strip().strip("/")
+    migration_prefix = f"{apply_path}/.ha-ops/"
+    paths = [status_path(line) for line in status]
+    if not paths or any(not path.startswith(migration_prefix) for path in paths):
+        return None
+
+    ctx.stage_paths(repo_dir, paths)
+    commit = ctx.commit_if_needed(repo_dir, "Migrate HA Ops internal ids")
+    if not commit:
+        return None
+
+    env = ctx.git_env(options)
+    branch = options.get("repo_branch", "main")
+    try:
+        ctx.push_branch(repo_dir, env, branch)
+    except RuntimeError:
+        ctx.git_pull_rebase(repo_dir, env, branch)
+        ctx.push_branch(repo_dir, env, branch)
+    ctx.add_detail(details, f"Committed pending Internal IDs migration changes to Git: {commit}.")
+    return commit
 
 
 def pending_deleted_devices_message():
@@ -188,6 +227,7 @@ def run_save_job(ctx):
             write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
             return False
 
+        commit_pending_internal_ids_migration(ctx, options, details)
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
@@ -344,6 +384,7 @@ def run_save_preview_job(ctx):
             )
             return False
 
+        commit_pending_internal_ids_migration(ctx, options, details)
         repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
@@ -522,12 +563,13 @@ def run_internal_ids_preview_job(ctx):
         preview = ctx.build_internal_ids_preview()
         count = int(preview["count"])
         message = f"Found {count} internal id migration file{'s' if count != 1 else ''}."
+        details.append(message)
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "internal_ids_preview",
-                "last_message": message,
+                "last_message": "",
                 "last_details": details,
                 "last_internal_ids_preview": preview["summary"],
                 "last_internal_ids_rows": preview["rows"],
@@ -586,6 +628,7 @@ def run_internal_ids_migrate_job(selected, ctx):
     )
 
     try:
+        options = ctx.load_options()
         state = ctx.read_state()
         rows = state.get("last_internal_ids_rows") or []
         fingerprint = state.get("last_internal_ids_fingerprint")
@@ -601,6 +644,7 @@ def run_internal_ids_migrate_job(selected, ctx):
         result = ctx.apply_internal_ids_migration(fingerprint, selected_paths)
         for row in result["changed"]:
             ctx.add_detail(details, f"Migrated internal ids in {row['path']}.")
+        commit_pending_internal_ids_migration(ctx, options, details)
         preview = result["preview"]
         unresolved_count = len(preview.get("unresolved") or [])
         changed_count = result["changed_count"]
@@ -1221,6 +1265,7 @@ def run_apply_job(ctx):
             )
             return False
 
+        commit_pending_internal_ids_migration(ctx, options, details)
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)
         addons = ctx.get_installed_addons()
@@ -1338,6 +1383,7 @@ def run_preview_job(ctx):
             )
             return False
 
+        commit_pending_internal_ids_migration(ctx, options, details)
         repo_dir = ctx.ensure_repo(options)
         commit = ctx.git_head_or_unborn(repo_dir)
         addons = ctx.get_installed_addons()

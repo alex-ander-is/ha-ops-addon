@@ -324,6 +324,9 @@ class AppContext:
     def stage_all(self, repo_dir):
         return git_ops.stage_all(repo_dir, self.run_command)
 
+    def stage_paths(self, repo_dir, paths):
+        return git_ops.stage_paths(repo_dir, paths, self.run_command)
+
     def git_status_porcelain(self, repo_dir):
         return git_ops.git_status_porcelain(repo_dir, self.run_command)
 
@@ -674,6 +677,7 @@ class AppContext:
             run_lock=self.run_lock,
             save_unknown_base_conflicts=self.save_unknown_base_conflicts,
             stage_all=self.stage_all,
+            stage_paths=self.stage_paths,
             stage_homeassistant_storage_allowlist=self.stage_homeassistant_storage_allowlist,
             utc_now=self.utc_now,
             write_state=self.write_state,

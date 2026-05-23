@@ -5030,6 +5030,65 @@ class ServerTests(unittest.TestCase):
                 0,
             )
 
+    def test_internal_ids_preview_log_keeps_check_before_result(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["last_message"], "")
+            self.assertEqual(
+                state["last_details"],
+                [
+                    "Checking HA Ops automations, scripts, and scenes for safe internal id migrations.",
+                    "Found 0 internal id migration files.",
+                ],
+            )
+            self.assertLess(
+                page.index("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
+                page.index("Found 0 internal id migration files."),
+            )
+
+    def test_pending_internal_ids_migration_changes_are_committed_before_repo_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(
+                data_dir=root / "data",
+                config_dir=root / "homeassistant",
+                addon_configs_dir=root / "addon_configs",
+                addon_config_path=root / "config.yaml",
+            )
+            ctx.work_dir.mkdir(parents=True)
+            ctx.options_path.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                    }
+                )
+            )
+            options = ctx.load_options()
+            repo = ctx.ensure_repo(options)
+            migrated = repo / "homeassistant" / ".ha-ops" / "areas" / "office" / "automations.yaml"
+            migrated.parent.mkdir(parents=True)
+            migrated.write_text("- alias: Migrated\n")
+            details = []
+
+            commit = server.app_context.job_logic.commit_pending_internal_ids_migration(ctx.job_deps(), options, details)
+
+            self.assertIsNotNone(commit)
+            self.assertEqual(self.repo_status(repo), "")
+            self.assertIn("Committed pending Internal IDs migration changes to Git", details[0])
+            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/office/automations.yaml"), "- alias: Migrated\n")
+
     def test_internal_ids_mixed_trigger_gets_mqtt_guard_condition(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

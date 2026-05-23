@@ -165,6 +165,15 @@ def stage_all(repo_dir, run_command):
         raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
 
 
+def stage_paths(repo_dir, paths, run_command):
+    paths = [str(path) for path in paths if str(path)]
+    if not paths:
+        return
+    add = run_command(["git", "add", "--", *paths], cwd=repo_dir)
+    if add.returncode != 0:
+        raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+
+
 def commit_if_needed(repo_dir, message, run_command, git_status_porcelain):
     status = git_status_porcelain(repo_dir)
     if not status:
