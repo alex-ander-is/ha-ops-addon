@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.10
+
+- Split maintenance checks into separate UI sections with explicit flow descriptions.
+
 ## 0.7.9
 
 - Avoid duplicate log lines when a running action message is also the latest detail.

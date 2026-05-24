@@ -672,6 +672,12 @@ def render_page(data):
       gap: 12px;
       flex-wrap: wrap;
     }}
+    .action-flow {{
+      margin: -2px 0 0;
+      color: var(--ha-muted);
+      font-size: 0.88rem;
+      line-height: 1.4;
+    }}
     td.actions {{
       margin-top: 0;
       flex-direction: row;
@@ -1018,22 +1024,31 @@ def render_page(data):
             </div>
           </section>
           <section class="action-section">
-            <h2>Maintenance</h2>
+            <h2>Deleted Devices</h2>
             <div class="action-row">
               <form method="post" action="deleted-devices-preview" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
               </form>
             </div>
+            <p class="action-flow">Previews deleted device registry entries. Delete clears that registry list only after approval, restart, and confirmation.</p>
+          </section>
+          <section class="action-section">
+            <h2>Retained Devices</h2>
             <div class="action-row">
               <form method="post" action="retained-devices-preview" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
               </form>
             </div>
+            <p class="action-flow">Finds stale Zigbee2MQTT MQTT discovery topics. Delete clears selected retained MQTT topics only.</p>
+          </section>
+          <section class="action-section">
+            <h2>Actions IDs</h2>
             <div class="action-row">
               <form method="post" action="internal-ids-preview" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check actions IDs</button>
               </form>
             </div>
+            <p class="action-flow">Previews Git-only rewrites from HA UI hash ids to stable entity_id or Zigbee2MQTT topic references. Migrate selected files, then run Git to HA.</p>
           </section>
         </div>
       </section>
