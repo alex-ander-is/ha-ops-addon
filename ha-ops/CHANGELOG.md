@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.9
+
+- Avoid duplicate log lines when a running action message is also the latest detail.
+- Skip Internal IDs migrations for Zigbee2MQTT registry devices missing from current Zigbee2MQTT files.
+
 ## 0.7.8
 
 - Report dirty checkout paths before Git sync actions instead of showing a raw pull rebase error.

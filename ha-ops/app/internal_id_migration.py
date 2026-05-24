@@ -117,6 +117,7 @@ class Migration:
         self.config_dir = Path(config_dir)
         self.entities, self.devices = load_registries(self.config_dir)
         self.z2m_names = zigbee2mqtt_friendly_names(self.config_dir)
+        self.z2m_known_ieees = set(self.z2m_names)
         self.stats = {"mqtt_triggers": 0, "entity_triggers": 0, "actions": 0, "conditions": 0}
         self.unresolved = []
 
@@ -133,9 +134,18 @@ class Migration:
         if not device:
             return None
         ieee = device_ieee(device)
+        if ieee and ieee not in self.z2m_known_ieees:
+            return None
         name = self.z2m_names.get(ieee) if ieee else None
         name = name or device.get("name_by_user") or device.get("name")
         return f"z2m/{name}" if name else None
+
+    def unresolved_reason(self, item):
+        device = self.devices.get(item.get("device_id"))
+        ieee = device_ieee(device) if device else None
+        if ieee and ieee not in self.z2m_known_ieees:
+            return "Zigbee2MQTT device is missing from current Zigbee2MQTT files; check retained devices first"
+        return "unsupported device trigger"
 
     @staticmethod
     def trigger_marker(item):
@@ -281,7 +291,7 @@ class Migration:
                     {
                         "path": relative_path(self.config_dir, path),
                         "alias": alias,
-                        "reason": "unsupported device trigger",
+                        "reason": self.unresolved_reason(item),
                         "item": item,
                         "yaml": dump_yaml(item).strip(),
                     }

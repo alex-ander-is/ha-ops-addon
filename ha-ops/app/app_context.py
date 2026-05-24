@@ -190,7 +190,6 @@ class AppContext:
             {
                 "last_run_at": self.utc_now(),
                 "last_status": "running",
-                "last_message": message,
                 "last_details": details,
             }
         )

@@ -5002,6 +5002,79 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_internal_ids_preview_job())
             self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
 
+    def test_internal_ids_preview_skips_stale_z2m_registry_device(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = server.DATA_DIR / "ha-config"
+            config = repo / "homeassistant"
+            storage = config / ".storage"
+            area = config / ".ha-ops" / "areas" / "terrace"
+            z2m = config / "zigbee2mqtt"
+            storage.mkdir(parents=True)
+            area.mkdir(parents=True)
+            z2m.mkdir(parents=True)
+            server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x60a423fffed229de"]],
+                                    "name": "living_room_switcher_terrace",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (z2m / "state.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "ieee_address": "0x00124b00226b31f8",
+                            "friendly_name": "current_remote",
+                        }
+                    ]
+                )
+            )
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: terrace_light
+  trigger:
+  - platform: device
+    domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: single
+  condition: []
+  action:
+  - service: switch.toggle
+    target:
+      entity_id: switch.terrace_light
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_internal_ids_count"], 0)
+            self.assertEqual(len(state["last_internal_ids_rows"]), 1)
+            row = state["last_internal_ids_rows"][0]
+            self.assertFalse(row["selected"])
+            self.assertEqual(row["changes"], 0)
+            self.assertEqual(row["unresolved"], 1)
+            self.assertEqual(row["diff"], "")
+            self.assertIn("check retained devices first", row["unresolved_items"][0]["reason"])
+            self.assertNotIn("z2m/living_room_switcher_terrace", state["last_internal_ids_preview"])
+            self.assertNotIn("z2m/living_room_switcher_terrace", server.render_page())
+            self.assertEqual(automation.read_text().count("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), 1)
+
     def test_internal_ids_preview_running_state_does_not_duplicate_detail_message(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5052,6 +5125,26 @@ class ServerTests(unittest.TestCase):
                 page.index("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
                 page.index("Found 0 internal id migration files."),
             )
+
+    def test_add_detail_keeps_action_message_separate_from_details(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "last_message": "Preparing save preview.",
+                    "last_details": [],
+                }
+            )
+            details = []
+
+            server.context().add_detail(details, "Committed pending Internal IDs migration changes to Git: abc123.")
+            state = server.read_state()
+
+            self.assertEqual(state["last_message"], "Preparing save preview.")
+            self.assertEqual(state["last_details"], ["Committed pending Internal IDs migration changes to Git: abc123."])
 
     def test_pending_internal_ids_migration_changes_are_committed_before_repo_actions(self):
         server = load_server()
