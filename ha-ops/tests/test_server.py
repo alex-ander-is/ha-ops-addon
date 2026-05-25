@@ -5059,6 +5059,12 @@ class ServerTests(unittest.TestCase):
         self.assertIn("services:", config)
         self.assertIn("  - mqtt:need", config)
 
+    def test_addon_declares_homeassistant_api_access(self):
+        config = (ROOT / "config.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("hassio_api: true", config)
+        self.assertIn("homeassistant_api: true", config)
+
     def test_internal_ids_preview_and_migrate_use_z2m_friendly_name(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
