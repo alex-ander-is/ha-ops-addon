@@ -401,7 +401,7 @@ def run_save_preview_job(ctx):
 
     write_state(
         {
-            **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
+            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "save_preview",
@@ -494,6 +494,7 @@ def run_deleted_devices_preview_job(ctx):
     log_action(ctx, "deleted_devices preview: started")
     write_state(
         {
+            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
             **state_store.DELETED_DEVICES_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
@@ -587,6 +588,7 @@ def run_internal_ids_preview_job(ctx):
     log_action(ctx, "internal ids preview: started")
     write_state(
         {
+            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
             **state_store.INTERNAL_IDS_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
@@ -751,6 +753,7 @@ def run_retained_devices_preview_job(ctx):
     log_action(ctx, "retained devices preview: started")
     write_state(
         {
+            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
             **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
@@ -1400,7 +1403,7 @@ def run_preview_job(ctx):
 
     write_state(
         {
-            **state_store.APPLY_PREVIEW_CLEAR_UPDATES,
+            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "preview",

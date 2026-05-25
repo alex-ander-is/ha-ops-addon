@@ -47,6 +47,13 @@ INTERNAL_IDS_PREVIEW_CLEAR_UPDATES = {
     "last_internal_ids_generated_at": None,
     "last_internal_ids_unresolved": [],
 }
+ALL_PREVIEW_CLEAR_UPDATES = {
+    **APPLY_PREVIEW_CLEAR_UPDATES,
+    **SAVE_PREVIEW_CLEAR_UPDATES,
+    **DELETED_DEVICES_PREVIEW_CLEAR_UPDATES,
+    **RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+    **INTERNAL_IDS_PREVIEW_CLEAR_UPDATES,
+}
 DISPLAY_CLEAR_UPDATES = {
     "last_details": [],
     "last_diff": "",
@@ -206,11 +213,7 @@ def repair_startup_state(path, now, addon_version=None):
 
     if version_changed and not current.get("deleted_devices_pending_confirmation"):
         current.update(DISPLAY_CLEAR_UPDATES)
-        current.update(APPLY_PREVIEW_CLEAR_UPDATES)
-        current.update(SAVE_PREVIEW_CLEAR_UPDATES)
-        current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
-        current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
-        current.update(INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
+        current.update(ALL_PREVIEW_CLEAR_UPDATES)
         if current.get("last_status") != "running":
             current.update(
                 {

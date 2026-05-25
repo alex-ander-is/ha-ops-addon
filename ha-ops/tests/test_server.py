@@ -1772,6 +1772,9 @@ class ServerTests(unittest.TestCase):
             def run_retained_devices_preview_job(self):
                 self.calls.append("retained-devices-preview")
 
+            def run_internal_ids_preview_job(self):
+                self.calls.append("internal-ids-preview")
+
             def run_retained_devices_delete_job(self, selected):
                 self.calls.append(("retained-devices-delete", selected))
 
@@ -1863,6 +1866,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
         self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_count"], 0)
         self.assertIsNone(ctx.state_updates[-1]["last_deleted_devices_generated_at"])
@@ -1875,9 +1883,34 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Retained devices check started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview", "retained-devices-preview"])
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
         self.assertEqual(ctx.state_updates[-1]["last_retained_devices_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_retained_devices_count"], 0)
         self.assertIsNone(ctx.state_updates[-1]["last_retained_devices_generated_at"])
+
+        post_request = invoke(
+            "do_POST",
+            "/internal-ids-preview",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Internal ids check started", post_request.wfile.getvalue().decode())
+        self.assertEqual(
+            ctx.calls,
+            ["save", "save-preview", "preview", "deleted-devices-preview", "retained-devices-preview", "internal-ids-preview"],
+        )
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
+        self.assertEqual(ctx.state_updates[-1]["last_internal_ids_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_internal_ids_count"], 0)
+        self.assertIsNone(ctx.state_updates[-1]["last_internal_ids_generated_at"])
 
         post_request = invoke(
             "do_POST",
@@ -1895,6 +1928,7 @@ class ServerTests(unittest.TestCase):
                 "preview",
                 "deleted-devices-preview",
                 "retained-devices-preview",
+                "internal-ids-preview",
                 ("retained-devices-delete", ["0", "2"]),
             ],
         )
@@ -1923,6 +1957,7 @@ class ServerTests(unittest.TestCase):
                 "preview",
                 "deleted-devices-preview",
                 "retained-devices-preview",
+                "internal-ids-preview",
                 ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1944,6 +1979,7 @@ class ServerTests(unittest.TestCase):
                 "preview",
                 "deleted-devices-preview",
                 "retained-devices-preview",
+                "internal-ids-preview",
                 ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1966,6 +2002,7 @@ class ServerTests(unittest.TestCase):
                 "preview",
                 "deleted-devices-preview",
                 "retained-devices-preview",
+                "internal-ids-preview",
                 ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -1990,6 +2027,7 @@ class ServerTests(unittest.TestCase):
                 "preview",
                 "deleted-devices-preview",
                 "retained-devices-preview",
+                "internal-ids-preview",
                 ("retained-devices-delete", ["0", "2"]),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
@@ -5278,11 +5316,27 @@ class ServerTests(unittest.TestCase):
             storage = server.CONFIG_DIR / ".storage"
             storage.mkdir()
             (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            server.write_state(
+                {
+                    "last_save_preview": "stale save preview",
+                    "last_save_diff": "stale save diff",
+                    "last_save_diff_generated_at": "old",
+                    "last_diff": "stale apply diff",
+                    "last_diff_generated_at": "old",
+                }
+            )
 
             self.assertTrue(server.run_deleted_devices_preview_job())
             state = server.read_state()
             page = server.render_page()
 
+            self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_save_diff"], "")
+            self.assertIsNone(state["last_save_diff_generated_at"])
+            self.assertEqual(state["last_diff"], "")
+            self.assertIsNone(state["last_diff_generated_at"])
+            self.assertNotIn("Save Preview", page)
+            self.assertNotIn("stale save diff", page)
             self.assertEqual(state["last_message"], "Found 0 deleted_devices entries.")
             self.assertEqual(
                 state["last_details"],

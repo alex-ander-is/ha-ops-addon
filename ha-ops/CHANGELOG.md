@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.16
+
+- Clear all stale preview panels when starting any preview or maintenance check.
+
 ## 0.7.15
 
 - Treat Home Assistant device registry sw_version as redundant runtime data in previews, saves, and applies.
