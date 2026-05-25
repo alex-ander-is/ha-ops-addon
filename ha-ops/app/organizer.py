@@ -22,6 +22,7 @@ HEAP_FILES = {
     "scripts": "scripts.yaml",
     "scenes": "scenes.yaml",
 }
+YAML_DUMP_WIDTH = 4096
 ENTITY_DOMAINS = [
     "automation",
     "binary_sensor",
@@ -98,7 +99,9 @@ def yaml_load(path, default):
 def yaml_dump(path, data):
     require_yaml()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+    path.write_text(
+        yaml.safe_dump(data, sort_keys=False, allow_unicode=True, width=YAML_DUMP_WIDTH)
+    )
 
 
 def load_json(path, default):

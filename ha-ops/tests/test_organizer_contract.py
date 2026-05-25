@@ -366,6 +366,44 @@ class OrganizerContractTests(unittest.TestCase):
             self.assertEqual(Counter(item for item, area in script_locations), Counter(script_keys(script_super_set())))
             self.assertEqual(Counter(item for item, area in scene_locations), Counter(scene_identity(item) for item in scene_super_set()))
 
+    def test_split_keeps_long_template_scalars_on_one_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "live"
+            storage = live / ".storage"
+            storage.mkdir(parents=True)
+            long_template = "{{ trigger.payload_json.action in ['2_single', '2_double'] }}"
+            write_yaml(
+                live / "automations.yaml",
+                [
+                    {
+                        "id": "long_auto",
+                        "alias": "long_auto",
+                        "triggers": [{"topic": "z2m/button", "trigger": "mqtt"}],
+                        "conditions": [{"condition": "template", "value_template": long_template}],
+                        "actions": [{"action": "script.hallway_toggle_light"}],
+                    }
+                ],
+            )
+            write_yaml(live / "scripts.yaml", {})
+            write_yaml(live / "scenes.yaml", [])
+            write_json(storage / "core.area_registry", area_registry())
+            write_json(storage / "core.device_registry", device_registry())
+            write_json(storage / "core.entity_registry", entity_registry())
+
+            git = root / "git" / "homeassistant"
+            ORGANIZER.split_live_heaps_to_git(
+                live,
+                git,
+                options={"overrides": {"automations": {"long_auto": "home"}}},
+            )
+
+            text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
+            self.assertIn(
+                "value_template: '{{ trigger.payload_json.action in [''2_single'', ''2_double''] }}'\n",
+                text,
+            )
+
     def test_rejects_unsafe_organized_root_values(self):
         unsafe_values = [".", "../areas", "/tmp/areas"]
         for value in unsafe_values:
