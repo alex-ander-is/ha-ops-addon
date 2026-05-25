@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.22
+
+- Keep the Managed Targets checkbox column fixed to checkbox width.
+
 ## 0.7.21
 
 - Keep long Home Assistant organizer YAML scalars on one line to avoid noisy Save HA to Git diffs.
