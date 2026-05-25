@@ -1064,7 +1064,7 @@ def render_page(data):
                 <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check actions IDs</button>
               </form>
             </div>
-            <p class="action-flow">Previews Git-only rewrites from HA UI hash ids to stable entity_id or Zigbee2MQTT topic references. Migrate selected files, then run Git to HA.</p>
+            <p class="action-flow">Previews Git-only rewrites from HA UI hash ids to stable entity_id or Zigbee2MQTT topic references. Migrate and save selected files to Git, then run Git to HA.</p>
           </section>
         </div>
       </section>

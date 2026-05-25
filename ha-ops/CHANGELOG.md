@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.19
+
+- Rename the Actions IDs migration button to make the Git write explicit.
+
 ## 0.7.18
 
 - Use live Zigbee2MQTT data as read-only context for Actions IDs migrations when runtime files are ignored by Git.

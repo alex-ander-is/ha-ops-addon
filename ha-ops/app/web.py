@@ -181,7 +181,7 @@ def action_label(action):
         "deleted_devices_confirm": "Confirm Changes",
         "deleted_devices_revert": "Revert Changes",
         "internal_ids_preview": "Check actions IDs",
-        "internal_ids_migrate": "Migrate internal ids",
+        "internal_ids_migrate": "Migrate and Save to Git",
         "rollback": "Rollback",
     }.get(action or "", action or "None")
 
@@ -462,10 +462,10 @@ def render_page(ctx):
             f"{internal_ids_summary_html}"
             "<form method='post' action='internal-ids-migrate' data-async-form='true' "
             "data-preserve-display-state='true' "
-            "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references?'>"
+            "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references and save the result to Git?'>"
             f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
-            f"<button type='submit' {internal_ids_migrate_disabled}>Migrate selected files</button>"
+            f"<button type='submit' {internal_ids_migrate_disabled}>Migrate and Save to Git</button>"
             "</div></div>"
             "</form>"
             "</section>"

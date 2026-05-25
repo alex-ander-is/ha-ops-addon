@@ -4731,7 +4731,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Previews deleted device registry entries.", page)
             self.assertIn("Finds stale Zigbee2MQTT MQTT discovery topics.", page)
             self.assertIn("Previews Git-only rewrites", page)
-            self.assertIn("Migrate selected files, then run Git to HA.", page)
+            self.assertIn("Migrate and save selected files to Git, then run Git to HA.", page)
             self.assertNotIn("Check deleted_devices previews", page)
             self.assertNotIn("Check retained devices finds", page)
             self.assertNotIn("Check actions IDs previews", page)
@@ -5146,7 +5146,7 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
             self.assertIn("Check actions IDs", page)
-            self.assertIn("Migrate selected files", page)
+            self.assertIn("Migrate and Save to Git", page)
             self.assertIn("Internal IDs Migration Preview", page)
             self.assertIn("Files: 1. Candidates: 2. Unresolved: 0.", page)
             self.assertIn("Select all", page)
@@ -5717,7 +5717,7 @@ devices:
             self.assertIn("unsupported device trigger", page)
             self.assertIn("<span class='no-candidates' title='No safe candidates'>None</span>", page)
             self.assertIn("device_id: cccccccccccccccccccccccccccccccc", page)
-            self.assertIn("<button type='submit' disabled>Migrate selected files</button>", page)
+            self.assertIn("<button type='submit' disabled>Migrate and Save to Git</button>", page)
             self.assertIn("button:disabled,", page)
             self.assertIn("background: #e5e7eb", page)
 
@@ -5868,7 +5868,7 @@ devices:
 
             page = server.render_page()
             self.assertIn("No internal id migration candidates found.", page)
-            self.assertIn("<button type='submit' disabled>Migrate selected files</button>", page)
+            self.assertIn("<button type='submit' disabled>Migrate and Save to Git</button>", page)
 
     def test_approve_deleted_devices_clears_array_with_core_stopped(self):
         server = load_server()
