@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.21
+
+- Keep long Home Assistant organizer YAML scalars on one line to avoid noisy Save HA to Git diffs.
+
 ## 0.7.20
 
 - Request Home Assistant Core API access so Git to HA can reload YAML after applying changes.
