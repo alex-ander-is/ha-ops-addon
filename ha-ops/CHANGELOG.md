@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.12
+
+- Add spacing below the Log header.
+- Use direct Mosquitto clients for retained devices checks instead of Docker.
+
 ## 0.7.11
 
 - Render Log entries by appending details first and the latest message last.

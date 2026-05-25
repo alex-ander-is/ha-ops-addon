@@ -584,6 +584,7 @@ def render_page(data):
       align-items: center;
       justify-content: space-between;
       gap: 12px;
+      margin-bottom: 0.5rem;
     }}
     .details-header h2 {{
       margin: 0;

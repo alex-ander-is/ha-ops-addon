@@ -4895,6 +4895,45 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(published, cleared)
 
+    def test_retained_mqtt_discovery_uses_direct_mosquitto_client(self):
+        server = load_server()
+        commands = []
+
+        def run_command(command):
+            commands.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                124,
+                stdout="homeassistant/device_automation/0xabc123fffed45678/action_hold/config {}\n",
+                stderr="",
+            )
+
+        topics = server.app_context.registry_cleanup.list_retained_discovery_topics(run_command)
+
+        self.assertEqual(topics, ["homeassistant/device_automation/0xabc123fffed45678/action_hold/config"])
+        command = commands[0]
+        self.assertEqual(command[:2], ["sh", "-c"])
+        self.assertIn("mosquitto_sub -h addon_core_mosquitto", command[2])
+        self.assertNotIn("docker", command)
+
+    def test_retained_mqtt_cleanup_uses_direct_mosquitto_client(self):
+        server = load_server()
+        commands = []
+
+        def run_command(command):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        server.app_context.registry_cleanup.publish_empty_retained_topic(
+            run_command,
+            "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
+        )
+
+        command = commands[0]
+        self.assertEqual(command[:2], ["sh", "-c"])
+        self.assertIn("mosquitto_pub -h addon_core_mosquitto", command[2])
+        self.assertNotIn("docker", command)
+
     def test_internal_ids_preview_and_migrate_use_z2m_friendly_name(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

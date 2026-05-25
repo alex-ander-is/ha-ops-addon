@@ -154,18 +154,15 @@ def clear_stale_mqtt_discovery_topics(topics, publish_empty_retained):
 
 
 def mosquitto_password_command():
-    return "P=$(jq -r .homeassistant.password /data/system_user.json); "
+    return "P=$(python3 -c 'import json; print(json.load(open(\"/data/system_user.json\"))[\"homeassistant\"][\"password\"])'); "
 
 
 def list_retained_discovery_topics(run_command, timeout_seconds=8):
     command = [
-        "docker",
-        "exec",
-        "addon_core_mosquitto",
         "sh",
         "-c",
         mosquitto_password_command()
-        + f"timeout {int(timeout_seconds)} mosquitto_sub -h localhost -u homeassistant -P \"$P\" "
+        + f"timeout {int(timeout_seconds)} mosquitto_sub -h addon_core_mosquitto -u homeassistant -P \"$P\" "
         + "-t 'homeassistant/#' -v",
     ]
     result = run_command(command)
@@ -181,13 +178,10 @@ def list_retained_discovery_topics(run_command, timeout_seconds=8):
 
 def publish_empty_retained_topic(run_command, topic):
     command = [
-        "docker",
-        "exec",
-        "addon_core_mosquitto",
         "sh",
         "-c",
         mosquitto_password_command()
-        + "mosquitto_pub -h localhost -u homeassistant -P \"$P\" -r -n -t \"$1\"",
+        + "mosquitto_pub -h addon_core_mosquitto -u homeassistant -P \"$P\" -r -n -t \"$1\"",
         "sh",
         topic,
     ]
