@@ -5183,6 +5183,69 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_internal_ids_preview_job())
             self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
 
+    def test_internal_ids_preview_uses_split_zigbee2mqtt_addon_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = server.DATA_DIR / "ha-config"
+            config = repo / "homeassistant"
+            storage = config / ".storage"
+            area = config / ".ha-ops" / "areas" / "office"
+            addon = repo / "addons" / "local_zigbee2mqtt"
+            storage.mkdir(parents=True)
+            area.mkdir(parents=True)
+            addon.mkdir(parents=True)
+            server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+            server.write_state({"managed_addons": ["local_zigbee2mqtt"]})
+            server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
+            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]],
+                                    "name": "old_registry_name",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (addon / "configuration.yaml").write_text(
+                """
+devices:
+  '0x00124b00226b31f8':
+    friendly_name: split_remote
+""".lstrip()
+            )
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: Split Z2M button
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions:
+  - action: script.synthetic
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_internal_ids_count"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["mqtt_triggers"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["unresolved"], 0)
+            self.assertIn("topic: z2m/split_remote", state["last_internal_ids_rows"][0]["diff"])
+
     def test_internal_ids_preview_skips_stale_z2m_registry_device(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.17
+
+- Use selected Zigbee2MQTT add-on source data when previewing and applying Actions IDs migrations.
+
 ## 0.7.16
 
 - Clear all stale preview panels when starting any preview or maintenance check.

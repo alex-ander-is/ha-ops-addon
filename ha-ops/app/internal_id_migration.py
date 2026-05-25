@@ -13,6 +13,12 @@ Z2M_FILES = (
     "zigbee2mqtt/state.json",
     "zigbee2mqtt/database.db",
 )
+Z2M_ADDON_FILES = (
+    "configuration.yaml",
+    "state.json",
+    "database.db",
+    *Z2M_FILES,
+)
 
 
 class Dumper(yaml.SafeDumper):
@@ -71,18 +77,40 @@ def collect_z2m_names_from_value(value, names):
         friendly = value.get("friendly_name") or value.get("friendlyName")
         if isinstance(ieee, str) and isinstance(friendly, str) and ZIGBEE_IEEE_RE.fullmatch(ieee):
             names[ieee.lower()] = friendly
-        for child in value.values():
+        for key, child in value.items():
+            if isinstance(key, str) and ZIGBEE_IEEE_RE.fullmatch(key):
+                if isinstance(child, dict):
+                    friendly = child.get("friendly_name") or child.get("friendlyName")
+                else:
+                    friendly = None
+                if isinstance(friendly, str):
+                    names[key.lower()] = friendly
             collect_z2m_names_from_value(child, names)
     elif isinstance(value, list):
         for child in value:
             collect_z2m_names_from_value(child, names)
 
 
-def zigbee2mqtt_friendly_names(config_dir):
+def zigbee2mqtt_source_files(config_dir, z2m_dirs=None):
+    seen = set()
+    candidates = []
     root = Path(config_dir)
+    candidates.extend(root / relative for relative in Z2M_FILES)
+    for z2m_dir in z2m_dirs or []:
+        z2m_root = Path(z2m_dir)
+        candidates.extend(z2m_root / relative for relative in Z2M_ADDON_FILES)
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.exists() and path.is_file():
+            yield path
+
+
+def zigbee2mqtt_friendly_names(config_dir, z2m_dirs=None):
     names = {}
-    for relative in Z2M_FILES:
-        path = root / relative
+    for path in zigbee2mqtt_source_files(config_dir, z2m_dirs):
         if not path.exists() or not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -113,10 +141,10 @@ def relative_path(config_dir, path):
 
 
 class Migration:
-    def __init__(self, config_dir):
+    def __init__(self, config_dir, z2m_dirs=None):
         self.config_dir = Path(config_dir)
         self.entities, self.devices = load_registries(self.config_dir)
-        self.z2m_names = zigbee2mqtt_friendly_names(self.config_dir)
+        self.z2m_names = zigbee2mqtt_friendly_names(self.config_dir, z2m_dirs)
         self.z2m_known_ieees = set(self.z2m_names)
         self.stats = {"mqtt_triggers": 0, "entity_triggers": 0, "actions": 0, "conditions": 0}
         self.unresolved = []
@@ -343,8 +371,8 @@ class Migration:
             self.transform_node(data)
 
 
-def migrate_file(config_dir, path):
-    migration = Migration(config_dir)
+def migrate_file(config_dir, path, z2m_dirs=None):
+    migration = Migration(config_dir, z2m_dirs)
     original = Path(path).read_text(encoding="utf-8")
     data = yaml.safe_load(original)
     migration.migrate_data(data, path)
@@ -374,7 +402,7 @@ def migration_diff(path, original, migrated):
     )
 
 
-def build_internal_ids_preview(config_dir):
+def build_internal_ids_preview(config_dir, z2m_dirs=None):
     config_dir = Path(config_dir)
     parts = []
     rows = []
@@ -383,7 +411,7 @@ def build_internal_ids_preview(config_dir):
     for path in managed_files(config_dir):
         original = path.read_text(encoding="utf-8")
         parts.append((relative_path(config_dir, path), original))
-        result = migrate_file(config_dir, path)
+        result = migrate_file(config_dir, path, z2m_dirs)
         changed_count = sum(result["stats"].values())
         diff = migration_diff(result["path"], result["original"], result["text"])
         if changed_count or result["unresolved"]:
@@ -408,6 +436,8 @@ def build_internal_ids_preview(config_dir):
         path = config_dir / relative
         if path.exists():
             parts.append((relative, path.read_text(encoding="utf-8", errors="replace")))
+    for path in zigbee2mqtt_source_files(config_dir, z2m_dirs):
+        parts.append((str(path), path.read_text(encoding="utf-8", errors="replace")))
     changed_files = [row for row in rows if row["changes"]]
     lines = [
         f"internal id migration candidates ({len(changed_files)} file(s)):",
@@ -427,8 +457,8 @@ def build_internal_ids_preview(config_dir):
     }
 
 
-def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_paths):
-    preview = build_internal_ids_preview(config_dir)
+def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_paths, z2m_dirs=None):
+    preview = build_internal_ids_preview(config_dir, z2m_dirs)
     if expected_fingerprint and preview["fingerprint"] != expected_fingerprint:
         raise RuntimeError("Internal id migration candidates changed since preview. Run Check actions IDs again.")
     selected_paths = set(selected_paths or [])
@@ -441,12 +471,12 @@ def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_path
         if not row.get("diff"):
             raise RuntimeError(f"Internal id migration diff is missing for {row['path']}. Run Check actions IDs again.")
         path = Path(config_dir) / row["path"]
-        result = migrate_file(config_dir, path)
+        result = migrate_file(config_dir, path, z2m_dirs)
         if result["changed"]:
             path.write_text(result["text"], encoding="utf-8")
             changed.append(row)
     return {
         "changed": changed,
         "changed_count": len(changed),
-        "preview": build_internal_ids_preview(config_dir),
+        "preview": build_internal_ids_preview(config_dir, z2m_dirs),
     }

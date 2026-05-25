@@ -475,14 +475,59 @@ class AppContext:
         apply_path = options.get("apply_path") or "homeassistant"
         return repo_dir / apply_path
 
+    def internal_ids_z2m_dirs(self):
+        options = self.load_options()
+        repo_dir = self.repo_checkout_path(options)
+        try:
+            addons = self.get_installed_addons()
+        except Exception:
+            addons = []
+        manifest, _path = self.load_manifest(repo_dir, options, addons)
+        dirs = []
+        seen = set()
+        for target in manifest.get("targets", []):
+            if target.get("type") != "addon":
+                continue
+            target_id = str(target.get("id") or "")
+            try:
+                source = manifest_logic.repo_source_path(repo_dir, target.get("source", ""), target_id)
+            except RuntimeError:
+                continue
+            slug = manifest_logic.addon_target_slug(target, addons)
+            addon = manifest_logic.addon_by_slug(addons, slug) if slug else {}
+            candidate = {
+                "slug": slug or target.get("addon_slug") or target.get("id") or "",
+                "name": " ".join(
+                    str(value or "")
+                    for value in (
+                        target.get("name"),
+                        target.get("addon_name_contains"),
+                        addon.get("name"),
+                        target.get("source"),
+                    )
+                ),
+                "description": addon.get("description") or "",
+            }
+            if not self.addon_is_zigbee2mqtt(candidate):
+                continue
+            key = str(source)
+            if key not in seen and source.exists():
+                seen.add(key)
+                dirs.append(source)
+        return dirs
+
     def build_internal_ids_preview(self):
-        return internal_id_migration.build_internal_ids_preview(self.internal_ids_config_dir())
+        return internal_id_migration.build_internal_ids_preview(
+            self.internal_ids_config_dir(),
+            self.internal_ids_z2m_dirs(),
+        )
 
     def apply_internal_ids_migration(self, expected_fingerprint, selected_paths):
         return internal_id_migration.apply_internal_ids_migration(
             self.internal_ids_config_dir(),
             expected_fingerprint,
             selected_paths,
+            self.internal_ids_z2m_dirs(),
         )
 
     def device_registry_fingerprint(self):
