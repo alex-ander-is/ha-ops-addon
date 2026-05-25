@@ -538,6 +538,7 @@ def normalize_device_registry_item(item):
     if not isinstance(item, dict):
         return
     item.pop("modified_at", None)
+    item.pop("sw_version", None)
     sort_json_list(item.get("connections"))
     subentries = item.get("config_entries_subentries")
     if isinstance(subentries, dict):
@@ -652,6 +653,7 @@ def merge_registry_item_for_commit(name, head_item, current_item):
     merged = deepcopy(current_item)
     restore_field_from_head(merged, head_item, "modified_at")
     if name == "core.device_registry":
+        restore_field_from_head(merged, head_item, "sw_version")
         restore_device_order_hidden_fields(merged, head_item, current_item)
     elif name == "core.entity_registry":
         restore_field_from_head(merged, head_item, "suggested_object_id")

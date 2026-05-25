@@ -1055,11 +1055,9 @@ class ServerTests(unittest.TestCase):
                 ).sync_deps(),
             )
 
-            self.assertIn("sw_version", diff)
-            self.assertIn("2.10.1", diff)
-            self.assertIn("2.10.2", diff)
-            self.assertIn('\n-        "sw_version": "2.10.1"', diff)
-            self.assertIn('\n+        "sw_version": "2.10.2"', diff)
+            self.assertNotIn("sw_version", diff)
+            self.assertNotIn("2.10.1", diff)
+            self.assertNotIn("2.10.2", diff)
             self.assertNotIn("modified_at", diff)
             self.assertNotIn("git-modified-at", diff)
             self.assertNotIn("live-modified-at", diff)
@@ -1369,6 +1367,7 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "connections": [["b", "2"], ["a", "1"]],
+                            "manufacturer": "Git",
                             "modified_at": "git-modified-at",
                             "sw_version": "1",
                         },
@@ -1386,6 +1385,7 @@ class ServerTests(unittest.TestCase):
                         {
                             "id": "device-1",
                             "connections": [["a", "1"], ["b", "2"]],
+                            "manufacturer": "Live",
                             "modified_at": "live-modified-at",
                             "sw_version": "2",
                         },
@@ -1419,12 +1419,13 @@ class ServerTests(unittest.TestCase):
             text = registry_path.read_text()
 
             self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
-            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "1")
+            self.assertEqual(saved["data"]["devices"][0]["manufacturer"], "Live")
             self.assertEqual(saved["data"]["devices"][0]["connections"], [["b", "2"], ["a", "1"]])
             self.assertEqual(saved["data"]["devices"][0]["modified_at"], "git-modified-at")
             self.assertEqual(saved["data"]["devices"][1]["modified_at"], "git-kept-modified-at")
             self.assertIn(
-                '      {"id":"device-1","connections":[["b","2"],["a","1"]],"modified_at":"git-modified-at","sw_version":"2"}',
+                '      {"id":"device-1","connections":[["b","2"],["a","1"]],"manufacturer":"Live","modified_at":"git-modified-at","sw_version":"1"}',
                 text,
             )
             self.assertIn(
@@ -1473,6 +1474,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
+                                    "name": "Live Device",
                                     "modified_at": "live-modified-at",
                                     "sw_version": "2",
                                 }
@@ -1495,8 +1497,8 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_save_preview_job())
             state = server.read_state()
-            self.assertIn("sw_version", state["last_save_diff"])
-            self.assertIn("2", state["last_save_diff"])
+            self.assertNotIn("sw_version", state["last_save_diff"])
+            self.assertNotIn('"sw_version": "2"', state["last_save_diff"])
             self.assertNotIn("modified_at", state["last_save_diff"])
             self.assertNotIn("git-modified-at", state["last_save_diff"])
             self.assertNotIn("live-modified-at", state["last_save_diff"])
@@ -1511,7 +1513,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job())
             saved = json.loads(self.remote_file(remote, "homeassistant/.storage/core.device_registry"))
             saved_device = saved["data"]["devices"][0]
-            self.assertEqual(saved_device["sw_version"], "2")
+            self.assertEqual(saved_device["sw_version"], "1")
             self.assertEqual(saved_device["modified_at"], "git-modified-at")
 
     def test_save_commit_preserves_hidden_entity_registry_fields(self):
@@ -1671,6 +1673,7 @@ class ServerTests(unittest.TestCase):
                             "id": "device-a",
                             "connections": [["b", "2"], ["a", "1"]],
                             "config_entries_subentries": {"entry": ["b", None, "a"]},
+                            "manufacturer": "Git",
                             "sw_version": "1",
                         },
                     ]
@@ -1683,6 +1686,7 @@ class ServerTests(unittest.TestCase):
                             "id": "device-a",
                             "connections": [["a", "1"], ["b", "2"]],
                             "config_entries_subentries": {"entry": ["a", "b", None]},
+                            "manufacturer": "Live",
                             "sw_version": "2",
                         },
                         {
@@ -1715,7 +1719,8 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(normalized, ["homeassistant/.storage/core.device_registry"])
             self.assertEqual([item["id"] for item in saved_devices], ["device-b", "device-a"])
-            self.assertEqual(saved_devices[1]["sw_version"], "2")
+            self.assertEqual(saved_devices[1]["sw_version"], "1")
+            self.assertEqual(saved_devices[1]["manufacturer"], "Live")
             self.assertEqual(saved_devices[1]["connections"], [["b", "2"], ["a", "1"]])
             self.assertEqual(saved_devices[1]["config_entries_subentries"], {"entry": ["b", None, "a"]})
 
@@ -2152,10 +2157,11 @@ class ServerTests(unittest.TestCase):
             preview_storage = server.WORK_DIR / "apply-preview" / "homeassistant" / ".storage"
             saved = json.loads((preview_storage / "core.device_registry").read_text())
 
-            self.assertIn("sw_version", preview["diff"])
+            self.assertNotIn("sw_version", preview["diff"])
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
             self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-modified-at")
-            self.assertTrue(preview["storage_changes"])
-            self.assertIn("homeassistant/.storage/core.device_registry", preview["storage_change_paths"])
+            self.assertFalse(preview["storage_changes"])
+            self.assertEqual(preview["storage_change_paths"], [])
             self.assertNotIn("modified_at", preview["diff"])
             self.assertNotIn("git-modified-at", preview["diff"])
             self.assertNotIn("live-modified-at", preview["diff"])
@@ -2654,6 +2660,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
+                                    "name": "Live Device",
                                     "modified_at": "live-modified-at",
                                     "sw_version": "2",
                                 }
@@ -2678,7 +2685,7 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
             self.assertIn("Git: homeassistant/.storage/core.device_registry", page)
             self.assertIn("HA: homeassistant/.storage/core.device_registry", page)
-            self.assertIn("sw_version", page)
+            self.assertNotIn("sw_version", page)
             self.assertIn("diff-changed", page)
             self.assertNotIn("modified_at", page)
             self.assertNotIn("git-modified-at", page)
@@ -4032,6 +4039,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
+                                    "name": "Git Device",
                                     "modified_at": "git-old-modified-at",
                                     "sw_version": "1",
                                 }
@@ -4053,6 +4061,7 @@ class ServerTests(unittest.TestCase):
                             "devices": [
                                 {
                                     "id": "device-1",
+                                    "name": "Live Device",
                                     "modified_at": "live-fresh-modified-at",
                                     "sw_version": "2",
                                 }
@@ -4087,7 +4096,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             saved = json.loads((live_storage / "core.device_registry").read_text())
 
-            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "1")
+            self.assertEqual(saved["data"]["devices"][0]["sw_version"], "2")
             self.assertEqual(saved["data"]["devices"][0]["modified_at"], "live-fresh-modified-at")
 
     def test_managed_config_entries_projection_updates_safe_fields_only(self):

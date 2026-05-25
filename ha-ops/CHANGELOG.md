@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.15
+
+- Treat Home Assistant device registry sw_version as redundant runtime data in previews, saves, and applies.
+
 ## 0.7.14
 
 - Keep the retained devices delete checkbox column fixed to checkbox width.
