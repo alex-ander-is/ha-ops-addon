@@ -5246,6 +5246,70 @@ devices:
             self.assertEqual(state["last_internal_ids_rows"][0]["unresolved"], 0)
             self.assertIn("topic: z2m/split_remote", state["last_internal_ids_rows"][0]["diff"])
 
+    def test_internal_ids_preview_uses_live_zigbee2mqtt_context(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = server.DATA_DIR / "ha-config"
+            config = repo / "homeassistant"
+            storage = config / ".storage"
+            area = config / ".ha-ops" / "areas" / "office"
+            live_z2m = server.CONFIG_DIR / "zigbee2mqtt"
+            storage.mkdir(parents=True)
+            area.mkdir(parents=True)
+            live_z2m.mkdir(parents=True)
+            server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]],
+                                    "name": "old_registry_name",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (live_z2m / "state.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "ieee_address": "0x00124b00226b31f8",
+                            "friendly_name": "live_remote",
+                        }
+                    ]
+                )
+            )
+            automation = area / "automations.yaml"
+            automation.write_text(
+                """
+- id: '1'
+  alias: Live Z2M button
+  triggers:
+  - domain: mqtt
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    type: action
+    subtype: 1_single
+    trigger: device
+  conditions: []
+  actions:
+  - action: script.synthetic
+""".lstrip()
+            )
+
+            self.assertTrue(server.run_internal_ids_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_internal_ids_count"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["mqtt_triggers"], 1)
+            self.assertEqual(state["last_internal_ids_rows"][0]["unresolved"], 0)
+            self.assertIn("topic: z2m/live_remote", state["last_internal_ids_rows"][0]["diff"])
+
     def test_internal_ids_preview_skips_stale_z2m_registry_device(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

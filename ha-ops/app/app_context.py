@@ -485,14 +485,19 @@ class AppContext:
         manifest, _path = self.load_manifest(repo_dir, options, addons)
         dirs = []
         seen = set()
+
+        def add_dir(path):
+            path = Path(path)
+            key = str(path)
+            if key not in seen and path.exists():
+                seen.add(key)
+                dirs.append(path)
+
+        add_dir(self.config_dir / "zigbee2mqtt")
         for target in manifest.get("targets", []):
             if target.get("type") != "addon":
                 continue
             target_id = str(target.get("id") or "")
-            try:
-                source = manifest_logic.repo_source_path(repo_dir, target.get("source", ""), target_id)
-            except RuntimeError:
-                continue
             slug = manifest_logic.addon_target_slug(target, addons)
             addon = manifest_logic.addon_by_slug(addons, slug) if slug else {}
             candidate = {
@@ -510,10 +515,20 @@ class AppContext:
             }
             if not self.addon_is_zigbee2mqtt(candidate):
                 continue
-            key = str(source)
-            if key not in seen and source.exists():
-                seen.add(key)
-                dirs.append(source)
+            try:
+                add_dir(manifest_logic.repo_source_path(repo_dir, target.get("source", ""), target_id))
+            except RuntimeError:
+                pass
+            if slug:
+                for path in manifest_logic.addon_config_path_candidates(
+                    target,
+                    slug,
+                    addon,
+                    self.addon_configs_dir,
+                    self.config_dir,
+                    self.addon_is_zigbee2mqtt,
+                ):
+                    add_dir(path)
         return dirs
 
     def build_internal_ids_preview(self):

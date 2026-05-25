@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.18
+
+- Use live Zigbee2MQTT data as read-only context for Actions IDs migrations when runtime files are ignored by Git.
+
 ## 0.7.17
 
 - Use selected Zigbee2MQTT add-on source data when previewing and applying Actions IDs migrations.
