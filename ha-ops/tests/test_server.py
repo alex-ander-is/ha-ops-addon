@@ -4908,13 +4908,34 @@ class ServerTests(unittest.TestCase):
                 stderr="",
             )
 
-        topics = server.app_context.registry_cleanup.list_retained_discovery_topics(run_command)
+        topics = server.app_context.registry_cleanup.list_retained_discovery_topics(
+            run_command,
+            {"host": "mqtt.local", "port": 1884, "username": "ha-ops", "password": "secret"},
+        )
 
         self.assertEqual(topics, ["homeassistant/device_automation/0xabc123fffed45678/action_hold/config"])
         command = commands[0]
-        self.assertEqual(command[:2], ["sh", "-c"])
-        self.assertIn("mosquitto_sub -h addon_core_mosquitto", command[2])
+        self.assertEqual(
+            command,
+            [
+                "timeout",
+                "8",
+                "mosquitto_sub",
+                "-h",
+                "mqtt.local",
+                "-p",
+                "1884",
+                "-u",
+                "ha-ops",
+                "-P",
+                "secret",
+                "-t",
+                "homeassistant/#",
+                "-v",
+            ],
+        )
         self.assertNotIn("docker", command)
+        self.assertNotIn("/data/system_user.json", command)
 
     def test_retained_mqtt_cleanup_uses_direct_mosquitto_client(self):
         server = load_server()
@@ -4927,12 +4948,64 @@ class ServerTests(unittest.TestCase):
         server.app_context.registry_cleanup.publish_empty_retained_topic(
             run_command,
             "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
+            {"host": "mqtt.local", "port": 1884, "username": "ha-ops", "password": "secret"},
         )
 
         command = commands[0]
-        self.assertEqual(command[:2], ["sh", "-c"])
-        self.assertIn("mosquitto_pub -h addon_core_mosquitto", command[2])
+        self.assertEqual(
+            command,
+            [
+                "mosquitto_pub",
+                "-h",
+                "mqtt.local",
+                "-p",
+                "1884",
+                "-u",
+                "ha-ops",
+                "-P",
+                "secret",
+                "-r",
+                "-n",
+                "-t",
+                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config",
+            ],
+        )
         self.assertNotIn("docker", command)
+        self.assertNotIn("/data/system_user.json", command)
+
+    def test_retained_mqtt_discovery_gets_credentials_from_supervisor_service(self):
+        server = load_server()
+        commands = []
+        calls = []
+        ctx = server.app_context.AppContext()
+        ctx.call_supervisor = lambda method, path, payload=None: (
+            calls.append((method, path)),
+            {"host": "mqtt.local", "port": 1884, "username": "ha-ops", "password": "secret"},
+        )[1]
+        ctx.run_command = lambda command, env=None, cwd=None: (
+            commands.append(command),
+            subprocess.CompletedProcess(command, 124, stdout="", stderr=""),
+        )[1]
+
+        ctx.list_retained_discovery_topics()
+
+        self.assertEqual(calls, [("GET", "/services/mqtt")])
+        self.assertIn("-u", commands[0])
+        self.assertIn("ha-ops", commands[0])
+
+    def test_retained_mqtt_service_errors_are_explicit(self):
+        server = load_server()
+
+        with self.assertRaisesRegex(RuntimeError, "No access to mqtt service"):
+            server.app_context.supervisor.mqtt_service(
+                lambda method, path: {"result": "error", "message": "No access to mqtt service!"}
+            )
+
+    def test_addon_declares_mqtt_service_dependency(self):
+        config = (ROOT / "config.yaml").read_text(encoding="utf-8")
+
+        self.assertIn("services:", config)
+        self.assertIn("  - mqtt:need", config)
 
     def test_internal_ids_preview_and_migrate_use_z2m_friendly_name(self):
         server = load_server()

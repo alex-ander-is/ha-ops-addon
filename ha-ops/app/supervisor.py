@@ -129,3 +129,11 @@ def create_ha_backup(name_prefix, backup_location, call_supervisor, release_now)
 def backup_manager_info(call_supervisor):
     payload = call_supervisor("GET", "/backups/info")
     return payload.get("data", payload)
+
+
+def mqtt_service(call_supervisor):
+    payload = call_supervisor("GET", "/services/mqtt")
+    if payload.get("result") == "error":
+        message = payload.get("message") or payload
+        raise RuntimeError(f"MQTT service is not available to HA Ops: {message}")
+    return payload.get("data", payload)

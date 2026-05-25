@@ -1,6 +1,6 @@
 name: "HA Ops"
 description: "Git-backed Home Assistant config operator with preview, backups, and rollback"
-version: "0.7.12"
+version: "0.7.13"
 slug: "ha_ops"
 init: false
 startup: services
@@ -10,6 +10,8 @@ ingress_port: 8099
 panel_icon: mdi:source-branch-refresh
 hassio_api: true
 hassio_role: manager
+services:
+  - mqtt:need
 watchdog: http://[HOST]:[PORT:8099]/health
 map:
   - homeassistant_config:rw

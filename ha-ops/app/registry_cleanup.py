@@ -153,18 +153,35 @@ def clear_stale_mqtt_discovery_topics(topics, publish_empty_retained):
     return cleared
 
 
-def mosquitto_password_command():
-    return "P=$(python3 -c 'import json; print(json.load(open(\"/data/system_user.json\"))[\"homeassistant\"][\"password\"])'); "
+def mqtt_service_value(config, *names, default=None):
+    for name in names:
+        value = config.get(name)
+        if value not in (None, ""):
+            return value
+    return default
 
 
-def list_retained_discovery_topics(run_command, timeout_seconds=8):
+def mosquitto_command(base, mqtt_config, args):
+    host = mqtt_service_value(mqtt_config, "host", "hostname", default="addon_core_mosquitto")
+    port = mqtt_service_value(mqtt_config, "port", default=1883)
+    username = mqtt_service_value(mqtt_config, "username", "user")
+    password = mqtt_service_value(mqtt_config, "password")
+    command = [*base, "-h", str(host), "-p", str(port)]
+    if username:
+        command.extend(["-u", str(username)])
+    if password:
+        command.extend(["-P", str(password)])
+    command.extend(args)
+    return command
+
+
+def list_retained_discovery_topics(run_command, mqtt_config, timeout_seconds=8):
     command = [
-        "sh",
-        "-c",
-        mosquitto_password_command()
-        + f"timeout {int(timeout_seconds)} mosquitto_sub -h addon_core_mosquitto -u homeassistant -P \"$P\" "
-        + "-t 'homeassistant/#' -v",
+        "timeout",
+        str(int(timeout_seconds)),
+        "mosquitto_sub",
     ]
+    command = mosquitto_command(command, mqtt_config, ["-t", "homeassistant/#", "-v"])
     result = run_command(command)
     if result.returncode not in (0, 124):
         raise RuntimeError(f"Failed to list retained MQTT discovery topics: {result.stderr.strip() or result.stdout.strip()}")
@@ -176,15 +193,11 @@ def list_retained_discovery_topics(run_command, timeout_seconds=8):
     return topics
 
 
-def publish_empty_retained_topic(run_command, topic):
+def publish_empty_retained_topic(run_command, topic, mqtt_config):
     command = [
-        "sh",
-        "-c",
-        mosquitto_password_command()
-        + "mosquitto_pub -h addon_core_mosquitto -u homeassistant -P \"$P\" -r -n -t \"$1\"",
-        "sh",
-        topic,
+        "mosquitto_pub",
     ]
+    command = mosquitto_command(command, mqtt_config, ["-r", "-n", "-t", topic])
     result = run_command(command)
     if result.returncode != 0:
         raise RuntimeError(f"Failed to clear retained MQTT topic {topic}: {result.stderr.strip() or result.stdout.strip()}")

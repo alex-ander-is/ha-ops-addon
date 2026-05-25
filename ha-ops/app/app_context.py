@@ -274,6 +274,9 @@ class AppContext:
     def backup_manager_info(self):
         return supervisor.backup_manager_info(self.call_supervisor)
 
+    def mqtt_service(self):
+        return supervisor.mqtt_service(self.call_supervisor)
+
     def latest_system_backup_status(self, options=None):
         options = options or self.load_options()
         return backup_policy.latest_system_backup_status(
@@ -458,13 +461,13 @@ class AppContext:
         return registry_cleanup.build_deleted_devices_preview(self.config_dir)
 
     def list_retained_discovery_topics(self):
-        return registry_cleanup.list_retained_discovery_topics(self.run_command)
+        return registry_cleanup.list_retained_discovery_topics(self.run_command, self.mqtt_service())
 
     def build_retained_devices_preview(self):
         return registry_cleanup.build_stale_mqtt_discovery_preview(self.config_dir, self.list_retained_discovery_topics())
 
     def clear_retained_discovery_topic(self, topic):
-        return registry_cleanup.publish_empty_retained_topic(self.run_command, topic)
+        return registry_cleanup.publish_empty_retained_topic(self.run_command, topic, self.mqtt_service())
 
     def internal_ids_config_dir(self):
         options = self.load_options()

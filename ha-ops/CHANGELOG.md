@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.13
+
+- Read retained devices MQTT credentials from the Supervisor MQTT service instead of a Mosquitto container file.
+- Declare the HA Ops MQTT service dependency so retained devices checks can authenticate to the broker.
+
 ## 0.7.12
 
 - Add spacing below the Log header.
