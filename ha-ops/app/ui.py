@@ -352,7 +352,7 @@ def render_target_row(item, checkbox, label=None, hint=""):
     hint_html = f"<small>{html.escape(hint)}</small>" if hint else ""
     return (
         "<tr>"
-        f"<td>{checkbox}</td>"
+        f"<td class='checkbox-col'>{checkbox}</td>"
         f"<td><code>{target}</code>{hint_html}</td>"
         f"<td>{target_type}</td>"
         f"<td><code>{source}</code></td>"
@@ -431,7 +431,9 @@ def render_targets(
     return (
         f"{addon_error}"
         "<form method='post' action='addons' data-auto-submit='change'>"
-        "<table><thead><tr><th>Managed</th><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th></tr></thead>"
+        "<table class='managed-targets-table'>"
+        "<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>"
+        "<thead><tr><th class='checkbox-col'>Managed</th><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</form>"
     )
@@ -774,6 +776,16 @@ def render_page(data):
       min-width: 42px;
       max-width: 42px;
       text-align: center;
+    }}
+    .managed-targets-table {{
+      table-layout: auto;
+    }}
+    .managed-targets-table .checkbox-col {{
+      width: 42px;
+      min-width: 42px;
+      max-width: 42px;
+      text-align: center;
+      white-space: nowrap;
     }}
     .internal-ids-list {{
       font-size: 0.94rem;
