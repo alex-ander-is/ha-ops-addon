@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.14
+
+- Keep the retained devices delete checkbox column fixed to checkbox width.
+
 ## 0.7.13
 
 - Read retained devices MQTT credentials from the Supervisor MQTT service instead of a Mosquitto container file.

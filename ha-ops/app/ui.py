@@ -261,7 +261,7 @@ def render_retained_devices_table(rows):
         topics = html.escape("\n".join(row.get("retained_topics") or []))
         rendered_rows.append(
             "<tr>"
-            f"<td><input type='checkbox' name='candidate' value='{index}' {checked}></td>"
+            f"<td class='checkbox-col'><input type='checkbox' name='candidate' value='{index}' {checked}></td>"
             f"<td><code>{identifiers}</code></td>"
             f"<td>{name}</td>"
             f"<td>{manufacturer} | {model}</td>"
@@ -271,7 +271,8 @@ def render_retained_devices_table(rows):
     return (
         "<div class='table-scroll'>"
         "<table class='retained-devices-table'>"
-        "<thead><tr><th>Delete</th><th>Identifiers</th><th>Name</th>"
+        "<colgroup><col class='checkbox-col'><col><col><col><col></colgroup>"
+        "<thead><tr><th class='checkbox-col' aria-label='Delete'></th><th>Identifiers</th><th>Name</th>"
         "<th>Manufacturer | Model</th><th>Retained Discovery Topics</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
@@ -767,6 +768,12 @@ def render_page(data):
     }}
     .conflicts-table th:last-child, .conflicts-table td:last-child {{
       width: 430px;
+    }}
+    .retained-devices-table .checkbox-col {{
+      width: 42px;
+      min-width: 42px;
+      max-width: 42px;
+      text-align: center;
     }}
     .internal-ids-list {{
       font-size: 0.94rem;

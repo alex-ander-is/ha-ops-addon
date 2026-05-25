@@ -4872,6 +4872,11 @@ class ServerTests(unittest.TestCase):
             self.assertIn("clears selected MQTT retained discovery topics only", page)
             self.assertIn("does not delete files", page)
             self.assertIn("does not delete files or registry/database records", page)
+            self.assertIn("<colgroup><col class='checkbox-col'>", page)
+            self.assertIn("<th class='checkbox-col' aria-label='Delete'></th>", page)
+            self.assertIn("<td class='checkbox-col'><input type='checkbox'", page)
+            self.assertIn(".retained-devices-table .checkbox-col", page)
+            self.assertIn("width: 42px;", page)
 
     def test_clear_stale_mqtt_discovery_topics_publishes_empty_retained_payloads(self):
         server = load_server()
