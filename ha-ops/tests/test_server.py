@@ -4697,6 +4697,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn(".actions .check-row", page)
             self.assertIn("border-bottom: 0", page)
             self.assertIn(".action-flow", page)
+            self.assertIn('<div class="details-header">', page)
+            self.assertLess(page.index("<h2>Log</h2>"), page.index('<div class="badge ">'))
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)
@@ -5112,7 +5114,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_internal_ids_preview_job())
             self.assertEqual(seen["state"]["last_message"], "Checking internal ids.")
-            self.assertEqual(seen["state"]["last_details"], [])
+            self.assertEqual(seen["state"]["last_details"], ["Checking internal ids."])
             self.assertEqual(
                 seen["page"].count("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
                 0,
@@ -5132,6 +5134,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(
                 state["last_details"],
                 [
+                    "Checking internal ids.",
                     "Checking HA Ops automations, scripts, and scenes for safe internal id migrations.",
                     "Found 0 internal id migration files.",
                 ],
@@ -5140,6 +5143,74 @@ class ServerTests(unittest.TestCase):
                 page.index("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
                 page.index("Found 0 internal id migration files."),
             )
+
+    def test_deleted_devices_preview_log_keeps_check_before_result(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertEqual(state["last_message"], "Found 0 deleted_devices entries.")
+            self.assertEqual(
+                state["last_details"],
+                [
+                    "Checking deleted_devices.",
+                    "Checking Home Assistant deleted_devices.",
+                    "Found 0 deleted_devices entries.",
+                ],
+            )
+            self.assertLess(
+                page.index("Checking Home Assistant deleted_devices."),
+                page.index("Found 0 deleted_devices entries."),
+            )
+
+    def test_log_appends_message_after_details(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "success",
+                    "last_action": "synthetic",
+                    "last_message": "Finished.",
+                    "last_details": ["Step 1.", "Step 2."],
+                }
+            )
+
+            page = server.render_page()
+            state = server.read_state()
+
+            self.assertEqual(state["last_details"], ["Step 1.", "Step 2.", "Finished."])
+            self.assertLess(page.index("Step 1."), page.index("Step 2."))
+            self.assertLess(page.index("Step 2."), page.index("Finished."))
+
+    def test_log_appends_running_message_after_details(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "last_action": "synthetic",
+                    "last_message": "Preparing save.",
+                    "last_details": ["Using branch main."],
+                }
+            )
+
+            page = server.render_page()
+            state = server.read_state()
+
+            self.assertEqual(state["last_details"], ["Using branch main.", "Preparing save."])
+            self.assertLess(page.index("Using branch main."), page.index("Preparing save."))
 
     def test_add_detail_keeps_action_message_separate_from_details(self):
         server = load_server()

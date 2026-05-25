@@ -83,6 +83,15 @@ class AppContext:
         return state_store.read_state(self.state_path)
 
     def write_state(self, updates):
+        if "last_details" in updates and "last_message" in updates and updates.get("last_action"):
+            message = str(updates.get("last_message") or "")
+            if message:
+                details = updates.get("last_details")
+                if not isinstance(details, list):
+                    details = []
+                if not details or str(details[-1]) != message:
+                    details.append(message)
+                updates = {**updates, "last_details": details}
         return state_store.write_state(self.state_path, updates)
 
     def clear_display_state(self):

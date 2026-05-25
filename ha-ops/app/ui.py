@@ -579,6 +579,15 @@ def render_page(data):
       white-space: pre;
       overflow-wrap: normal;
     }}
+    .details-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }}
+    .details-header h2 {{
+      margin: 0;
+    }}
     h1, h2 {{
       margin: 0 0 14px;
       color: var(--ha-text);
@@ -976,7 +985,6 @@ def render_page(data):
       <section class="card control-card">
         <h1>HA Ops</h1>
         <p>Git-backed config deployer for Home Assistant, Mosquitto, and Zigbee2MQTT.</p>
-        <div class="badge {data['badge_class']}">{data['status']}</div>
         <dl>
           <dt>Repo URL</dt>
           <dd><code>{data['repo_url'] or "(not configured)"}</code></dd>
@@ -1053,7 +1061,10 @@ def render_page(data):
         </div>
       </section>
       <section class="card details-card">
-        <h2>Log</h2>
+        <div class="details-header">
+          <h2>Log</h2>
+          <div class="badge {data['badge_class']}">{data['status']}</div>
+        </div>
         <pre data-transient="details">{data['details_html']}</pre>
       </section>
     </div>

@@ -223,15 +223,10 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
             lines.extend(["", "Previous details:", *details])
         return "\n".join(lines)
 
-    lines = []
-    if message:
-        lines.append(message)
     if details:
-        if lines:
-            lines.append("")
-        lines.extend(details)
-    if lines:
-        return "\n".join(lines)
+        return "\n".join(details)
+    if message:
+        return message
     return "Running..." if last_status == "running" else "No log entries yet."
 
 

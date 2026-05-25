@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.11
+
+- Render Log entries by appending details first and the latest message last.
+
 ## 0.7.10
 
 - Split maintenance checks into separate UI sections with explicit flow descriptions.
