@@ -691,6 +691,24 @@ def render_page(data):
       font-size: 0.88rem;
       line-height: 1.4;
     }}
+    .post-apply-alert {{
+      display: grid;
+      gap: 4px;
+      margin: 18px 0 0;
+      padding: 12px 14px;
+      border: 1px solid color-mix(in srgb, var(--ha-warning) 45%, transparent);
+      border-left: 5px solid var(--ha-warning);
+      border-radius: calc(var(--ha-radius) - 4px);
+      background: color-mix(in srgb, var(--ha-warning) 16%, var(--ha-card-bg));
+      color: var(--ha-text);
+    }}
+    .post-apply-alert strong {{
+      color: var(--ha-text);
+    }}
+    .post-apply-alert span {{
+      color: var(--ha-muted);
+      line-height: 1.4;
+    }}
     td.actions {{
       margin-top: 0;
       flex-direction: row;
@@ -734,8 +752,14 @@ def render_page(data):
       color: var(--ha-text);
       border-color: var(--ha-border);
     }}
+    button.warning {{
+      background: var(--ha-warning);
+      color: #111827;
+      border-color: color-mix(in srgb, var(--ha-warning) 65%, #111827);
+    }}
     button:disabled,
-    button.secondary:disabled {{
+    button.secondary:disabled,
+    button.warning:disabled {{
       background: #e5e7eb;
       color: #6b7280;
       border-color: #d1d5db;
@@ -1024,13 +1048,14 @@ def render_page(data):
           <dd>{data['latest_backup']}</dd>
         </dl>
         <p id="client-status" class="client-status"></p>
+        {data['post_apply_notice_html']}
         {data['organizer_html']}
         <div class="actions">
           <section class="action-section">
             <h2>HA to Git</h2>
             <div class="action-row">
               <form method="post" action="save-preview" data-async-form="true">
-                <button type="submit" class="secondary" {data['action_disabled']}>Preview HA to Git</button>
+                <button type="submit" class="{data['save_preview_button_class']}" {data['action_disabled']}>{data['save_preview_button_text']}</button>
               </form>
               <form method="post" action="save" data-async-form="true">
                 <button type="submit" {data['action_disabled']}>Save HA to Git</button>

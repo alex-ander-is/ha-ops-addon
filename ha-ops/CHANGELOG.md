@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.23
+
+- Highlight post-apply HA registry follow-up with a persistent warning and orange HA to Git preview button.
+- Preserve organizer contract docs during HA to Git previews and saves.
+
 ## 0.7.22
 
 - Keep the Managed Targets checkbox column fixed to checkbox width.

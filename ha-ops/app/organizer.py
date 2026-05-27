@@ -153,14 +153,34 @@ def has_organized_view(root, options=None):
     return any((item.is_file() and item.name in HEAP_FILES.values()) for item in path.rglob("*"))
 
 
-def clean_organized_root(root, options=None):
+def clean_organized_root(root, options=None, preserve_unmanaged=False):
     path = organized_root(root, options)
     if not path.exists() and not path.is_symlink():
         return
-    if path.is_dir() and not path.is_symlink():
-        shutil.rmtree(path)
-    else:
+    if not path.is_dir() or path.is_symlink():
         path.unlink()
+        return
+    if not preserve_unmanaged:
+        shutil.rmtree(path)
+        return
+    for item in path.rglob("*"):
+        if item.is_file() and item.name in {*HEAP_FILES.values(), INDEX_NAME}:
+            item.unlink()
+    for item in sorted(path.rglob("*"), key=lambda child: len(child.parts), reverse=True):
+        if item.is_dir() and not any(item.iterdir()):
+            item.rmdir()
+
+
+def generated_organized_relative_files(root, options=None):
+    path = organized_root(root, options)
+    if not path.exists():
+        return []
+    generated_names = {*HEAP_FILES.values(), INDEX_NAME}
+    return sorted(
+        item.relative_to(root)
+        for item in path.rglob("*")
+        if item.is_file() and item.name in generated_names
+    )
 
 
 def normalize_area(value):
@@ -501,7 +521,7 @@ def split_live_heaps_to_git(live_root, git_root, options=None):
 
     git_root = Path(git_root)
     root = organized_root(git_root, options)
-    clean_organized_root(git_root, options)
+    clean_organized_root(git_root, options, preserve_unmanaged=True)
     root.mkdir(parents=True, exist_ok=True)
 
     for kind, filename in HEAP_FILES.items():

@@ -346,6 +346,7 @@ def run_save_job(ctx):
                 "last_message": save_message,
                 "last_details": details,
                 "last_targets": resolved_targets,
+                "post_apply_save_recommended": False,
             }
         )
         return True
@@ -454,6 +455,7 @@ def run_save_preview_job(ctx):
                 "last_save_preview": preview["summary"],
                 "last_save_diff": preview["diff"],
                 "last_save_diff_generated_at": utc_now(),
+                "post_apply_save_recommended": False,
             }
         )
         return True
@@ -1351,6 +1353,7 @@ def run_apply_job(ctx):
                 "last_backup_slug": backup_slug,
                 "last_targets": resolved_targets,
                 "last_preview_deletions": preview["deletions"],
+                "post_apply_save_recommended": True,
             }
         )
         return True

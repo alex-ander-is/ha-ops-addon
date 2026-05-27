@@ -199,7 +199,7 @@ def clean_homeassistant_export_destination(dest, target, ctx):
             safe_remove_path(dest_path)
     clear_managed_destination_path(dest / storage_managed.MANAGED_DIR, ctx.export_excludes, ctx.work_dir, ctx.run_command)
     if target and homeassistant_organizer_enabled(target):
-        organizer.clean_organized_root(dest, organizer_options(target))
+        organizer.clean_organized_root(dest, organizer_options(target), preserve_unmanaged=True)
 
 
 def export_homeassistant_config(src, dest, target, ctx):
@@ -1123,7 +1123,8 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
         if target["type"] == "homeassistant":
             ctx.add_detail(details, f"Saving config-only {target['id']} to {source_path}.")
             clean_homeassistant_export_destination(source_path, target, ctx)
-            organizer.clean_organized_root(source_path, organizer_cleanup_options(target))
+            if not homeassistant_organizer_enabled(target):
+                organizer.clean_organized_root(source_path, organizer_cleanup_options(target))
             sync_tree(export_path, source_path, False, None, ctx.run_command)
         else:
             ctx.add_detail(details, f"Saving {target['id']} to {source_path}.")
@@ -1511,7 +1512,7 @@ def homeassistant_managed_save_source_files(target, source_path, ctx):
     add_managed_files_under(files, source_path, Path(storage_managed.MANAGED_DIR), ctx.export_excludes)
 
     if target and homeassistant_organizer_enabled(target):
-        add_managed_files_under(files, source_path, Path(organizer.organized_root_name(organizer_options(target))), ctx.export_excludes)
+        files.update(organizer.generated_organized_relative_files(source_path, organizer_options(target)))
 
     return sorted(files)
 

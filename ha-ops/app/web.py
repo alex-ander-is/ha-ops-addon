@@ -304,6 +304,17 @@ def render_page(ctx):
     )
     apply_action = "approve-apply" if storage_approval_pending else "apply"
     apply_button_text = "Approve Git to HA" if storage_approval_pending else "Apply Git to HA"
+    post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
+    save_preview_button_class = "warning" if post_apply_save_recommended else "secondary"
+    save_preview_button_text = "Review Post-Apply HA Changes" if post_apply_save_recommended else "Preview HA to Git"
+    post_apply_notice_html = ""
+    if post_apply_save_recommended:
+        post_apply_notice_html = (
+            "<div class='post-apply-alert' role='alert'>"
+            "<strong>Post-apply HA changes may need saving.</strong>"
+            "<span>Run HA to Git preview before the next Git to HA apply so HA-created registry state is committed.</span>"
+            "</div>"
+        )
     deleted_devices_count = int(state.get("last_deleted_devices_count") or 0)
     deletion_ready = bool(
         deleted_devices_count > 0
@@ -502,6 +513,9 @@ def render_page(ctx):
             "retained_devices_section_html": retained_devices_section_html,
             "internal_ids_section_html": internal_ids_section_html,
             "action_disabled": action_disabled,
+            "post_apply_notice_html": post_apply_notice_html,
+            "save_preview_button_class": save_preview_button_class,
+            "save_preview_button_text": save_preview_button_text,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "check_retained_devices_disabled": check_retained_devices_disabled,
             "check_internal_ids_disabled": check_internal_ids_disabled,

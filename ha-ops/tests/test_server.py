@@ -592,6 +592,53 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<div class="badge success">success</div>', page)
             self.assertIn("Previous transient status was cleared", page)
 
+    def test_post_apply_save_notice_survives_refresh_until_save_preview(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_status": "success",
+                    "last_action": "apply",
+                    "last_message": "Apply finished successfully.",
+                    "post_apply_save_recommended": True,
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("Post-apply HA changes may need saving.", page)
+            self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
+
+            server.clear_display_state()
+            state = server.read_state()
+            page = server.render_page()
+
+            self.assertTrue(state["post_apply_save_recommended"])
+            self.assertIn("Post-apply HA changes may need saving.", page)
+            self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
+
+    def test_post_apply_save_notice_clears_on_version_update(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.6.21"\n')
+            server.write_state(
+                {
+                    "last_seen_addon_version": "0.6.20",
+                    "post_apply_save_recommended": True,
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertFalse(state["post_apply_save_recommended"])
+
     def test_refresh_clears_internal_ids_preview(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1141,11 +1188,12 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            server.write_state({"include_redundant_data": False})
+            server.write_state({"include_redundant_data": False, "post_apply_save_recommended": True})
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             state = server.read_state()
             self.assertEqual(state["last_save_preview"], "No Save changes.")
             self.assertEqual(state["last_save_diff"], "")
+            self.assertFalse(state["post_apply_save_recommended"])
 
             server.write_state({"include_redundant_data": True})
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
@@ -2615,6 +2663,66 @@ class ServerTests(unittest.TestCase):
             self.assertIn("homeassistant/.ha-ops/areas/home/automations.yaml", result.stdout)
             self.assertNotIn("homeassistant/automations.yaml", result.stdout)
 
+    def test_save_preview_preserves_organizer_contract_docs(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            area = seed / "homeassistant" / ".ha-ops" / "areas" / "dining_room"
+            area.mkdir(parents=True)
+            (area / "lighting-contract.md").write_text("# Contract\n")
+            (area / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
+            index = seed / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
+            index.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "automations": {"count": 1, "ids": ["live_auto"]},
+                        "scripts": {"count": 0, "ids": []},
+                        "scenes": {"count": 0, "ids": []},
+                    }
+                )
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
+            (server.CONFIG_DIR / "scripts.yaml").write_text("{}\n")
+            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.set_homeassistant_organizer_enabled(True)
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+
+            self.assertNotIn("lighting-contract.md", state["last_save_preview"])
+            self.assertNotIn("lighting-contract.md", state["last_save_diff"])
+            preview_doc = server.WORK_DIR / "save-to-git-preview" / "homeassistant" / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md"
+            self.assertEqual(preview_doc.read_text(), "# Contract\n")
+
     def test_save_unknown_base_blocks_same_file_difference(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -3121,6 +3229,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_preview_job())
             self.assertTrue(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "homeassistant:\n")
+            self.assertTrue(server.read_state()["post_apply_save_recommended"])
 
     def test_repo_path_rejects_empty_absolute_and_parent_escape(self):
         server = load_server()

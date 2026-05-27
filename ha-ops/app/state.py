@@ -153,6 +153,7 @@ def default_state():
         "managed_addons": [],
         "homeassistant_organizer_enabled": None,
         "include_redundant_data": False,
+        "post_apply_save_recommended": False,
         "conflicts": [],
         "conflict_type": None,
         "save_conflict_resolutions": {},
@@ -214,6 +215,7 @@ def repair_startup_state(path, now, addon_version=None):
     if version_changed and not current.get("deleted_devices_pending_confirmation"):
         current.update(DISPLAY_CLEAR_UPDATES)
         current.update(ALL_PREVIEW_CLEAR_UPDATES)
+        current["post_apply_save_recommended"] = False
         if current.get("last_status") != "running":
             current.update(
                 {
