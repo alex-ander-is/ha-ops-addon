@@ -67,6 +67,24 @@ class UniqueKeyLoader(yaml.SafeLoader if yaml is not None else object):
 
 
 if yaml is not None:
+    YAML_INT_TAG = "tag:yaml.org,2002:int"
+    YAML_INT_PATTERN_WITHOUT_SEXAGESIMAL = re.compile(
+        r"""^(?:[-+]?0b[0-1_]+
+                    |[-+]?0[0-7_]+
+                    |[-+]?(?:0|[1-9][0-9_]*)
+                    |[-+]?0x[0-9a-fA-F_]+)$""",
+        re.X,
+    )
+
+    UniqueKeyLoader.yaml_implicit_resolvers = {
+        key: [item for item in resolvers if item[0] != YAML_INT_TAG]
+        for key, resolvers in UniqueKeyLoader.yaml_implicit_resolvers.items()
+    }
+    UniqueKeyLoader.add_implicit_resolver(
+        YAML_INT_TAG,
+        YAML_INT_PATTERN_WITHOUT_SEXAGESIMAL,
+        list("-+0123456789"),
+    )
 
     def construct_mapping(loader, node, deep=False):
         mapping = {}

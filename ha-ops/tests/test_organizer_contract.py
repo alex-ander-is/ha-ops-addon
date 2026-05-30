@@ -331,6 +331,89 @@ class OrganizerContractTests(unittest.TestCase):
             },
         }
 
+    def test_loader_keeps_unquoted_sexagesimal_values_as_strings(self):
+        cases = [
+            "1:02",
+            "1:02:03",
+            "1:2:3",
+            "9:59:59",
+            "10:00:00",
+            "21:00:00",
+            "23:59:59",
+            "+1:02:03",
+            "-1:02:03",
+            "1_2:34:56",
+        ]
+        for value in cases:
+            with self.subTest(value=value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "values.yaml"
+                    path.write_text(f"value: {value}\n")
+
+                    data = ORGANIZER.yaml_load(path, {})
+
+                    self.assertEqual(data["value"], value)
+
+    def test_loader_still_parses_non_sexagesimal_int_values(self):
+        cases = [
+            ("0", 0),
+            ("42", 42),
+            ("+42", 42),
+            ("-42", -42),
+            ("1_000", 1000),
+            ("0b1010", 10),
+            ("0755", 493),
+            ("0x10", 16),
+        ]
+        for source, expected in cases:
+            with self.subTest(source=source):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "values.yaml"
+                    path.write_text(f"value: {source}\n")
+
+                    data = ORGANIZER.yaml_load(path, {})
+
+                    self.assertEqual(data["value"], expected)
+                    self.assertIsInstance(data["value"], int)
+
+    def test_loader_does_not_change_global_safe_loader_sexagesimal_behavior(self):
+        self.assertEqual(yaml.safe_load("value: 21:00:00\n")["value"], 75600)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "values.yaml"
+            path.write_text("value: 21:00:00\n")
+
+            data = ORGANIZER.yaml_load(path, {})
+
+            self.assertEqual(data["value"], "21:00:00")
+
+    def test_automation_time_fields_survive_unquoted_loader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "automations.yaml"
+            path.write_text(
+                "- id: time\n"
+                "  trigger:\n"
+                "  - platform: time\n"
+                "    at: 21:00:00\n"
+                "  condition:\n"
+                "  - condition: time\n"
+                "    after: 10:00:00\n"
+                "    before: 06:00:00\n"
+                "  data:\n"
+                "    count: 42\n"
+                "    hex: 0x10\n"
+            )
+
+            data = ORGANIZER.yaml_load(path, [])
+            trigger = data[0]["trigger"][0]
+            condition = data[0]["condition"][0]
+
+            self.assertEqual(trigger["at"], "21:00:00")
+            self.assertEqual(condition["after"], "10:00:00")
+            self.assertEqual(condition["before"], "06:00:00")
+            self.assertEqual(data[0]["data"]["count"], 42)
+            self.assertEqual(data[0]["data"]["hex"], 16)
+
     def test_split_creates_area_first_git_view_from_live_heap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
