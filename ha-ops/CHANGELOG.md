@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.25
+
+- Reject HA Ops pushes that forget to include a version bump, changelog entry, and matching release tag.
+
 ## 0.7.24
 
 - Keep HA Ops organizer from parsing Home Assistant time strings like `21:00:00` as sexagesimal integers.
