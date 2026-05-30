@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.24
+
+- Keep HA Ops organizer from parsing Home Assistant time strings like `21:00:00` as sexagesimal integers.
+
 ## 0.7.23
 
 - Highlight post-apply HA registry follow-up with a persistent warning and orange HA to Git preview button.
