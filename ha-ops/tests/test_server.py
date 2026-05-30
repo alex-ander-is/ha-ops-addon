@@ -2271,6 +2271,63 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(server.sync_logic.fingerprint_text(first), server.sync_logic.fingerprint_text(second))
 
+    def test_apply_preview_warns_when_entity_registry_metadata_would_downgrade(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            live_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.example",
+                            "unique_id": "example",
+                            "platform": "zha",
+                            "device_id": "device-1",
+                            "entity_category": "diagnostic",
+                            "has_entity_name": True,
+                            "capabilities": {"state_class": "total"},
+                        }
+                    ]
+                }
+            }
+            git_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "sensor.example",
+                            "unique_id": "example",
+                            "platform": "zha",
+                        }
+                    ]
+                }
+            }
+            (live / ".storage" / "core.entity_registry").write_text(json.dumps(live_registry))
+            (source / ".storage" / "core.entity_registry").write_text(json.dumps(git_registry))
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+
+            self.assertTrue(preview["warnings"])
+            self.assertIn("sensor.example", preview["warnings"][0])
+            self.assertIn("device_id", preview["warnings"][0])
+            self.assertIn("Run HA to Git first", preview["warnings"][0])
+
     def test_apply_preview_ignores_registry_hidden_only_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

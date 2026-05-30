@@ -504,6 +504,19 @@ ENTITY_REGISTRY_COLLECTION_KEYS = {
     "entities": ("id", "entity_id", "unique_id"),
     "deleted_entities": ("id", "entity_id", "unique_id"),
 }
+ENTITY_REGISTRY_METADATA_FIELDS = {
+    "capabilities",
+    "device_id",
+    "entity_category",
+    "has_entity_name",
+    "object_id_base",
+    "original_device_class",
+    "original_icon",
+    "original_name",
+    "previous_unique_id",
+    "translation_key",
+    "unit_of_measurement",
+}
 
 
 def stable_json_key(value):
@@ -527,6 +540,12 @@ def registry_collection_identity(keys, item):
     if any(values):
         return values
     return stable_json_key(item)
+
+
+def registry_item_label(item):
+    if not isinstance(item, dict):
+        return stable_json_key(item)
+    return str(item.get("entity_id") or item.get("unique_id") or item.get("id") or stable_json_key(item))
 
 
 def sort_json_list(value):
@@ -1312,6 +1331,55 @@ def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target):
     return True
 
 
+def load_storage_json(path):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
+def entity_registry_metadata_downgrade_warnings(target_id, baseline_path, preview_path):
+    baseline = load_storage_json(Path(baseline_path) / ".storage" / "core.entity_registry")
+    preview = load_storage_json(Path(preview_path) / ".storage" / "core.entity_registry")
+    if not isinstance(baseline, dict) or not isinstance(preview, dict):
+        return []
+
+    baseline_entities = baseline.get("data", {}).get("entities")
+    preview_entities = preview.get("data", {}).get("entities")
+    if not isinstance(baseline_entities, list) or not isinstance(preview_entities, list):
+        return []
+
+    keys = ENTITY_REGISTRY_COLLECTION_KEYS["entities"]
+    preview_by_identity = {registry_collection_identity(keys, item): item for item in preview_entities}
+    downgrades = []
+    for live_item in baseline_entities:
+        if not isinstance(live_item, dict):
+            continue
+        preview_item = preview_by_identity.get(registry_collection_identity(keys, live_item))
+        if not isinstance(preview_item, dict):
+            continue
+        missing_fields = sorted(
+            field
+            for field in ENTITY_REGISTRY_METADATA_FIELDS
+            if field in live_item and field not in preview_item
+        )
+        if missing_fields:
+            downgrades.append((registry_item_label(live_item), missing_fields))
+
+    if not downgrades:
+        return []
+
+    shown = ", ".join(
+        f"{label} missing {', '.join(fields[:4])}{'...' if len(fields) > 4 else ''}"
+        for label, fields in downgrades[:5]
+    )
+    suffix = f" and {len(downgrades) - 5} more" if len(downgrades) > 5 else ""
+    return [
+        "Warning: Git to HA would downgrade live core.entity_registry metadata "
+        f"for target {target_id}: {shown}{suffix}. Run HA to Git first or update Git registry before applying."
+    ]
+
+
 def normalize_organizer_index_for_diff(root, options):
     index_path = organizer.organized_root(root, options) / organizer.INDEX_NAME
     try:
@@ -1706,6 +1774,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     deletion_count = 0
     skipped_protected = []
     storage_change_paths = []
+    warnings = []
     live_fingerprints = {}
 
     for target in resolved_targets:
@@ -1725,6 +1794,10 @@ def build_apply_preview(resolved_targets, ctx, details=None):
             storage_change_paths.extend(
                 [f"{target['id']}/{path}" for path in managed_storage_change_paths(baseline_path, preview_path)]
             )
+            for warning in entity_registry_metadata_downgrade_warnings(target["id"], baseline_path, preview_path):
+                warnings.append(warning)
+                if details is not None:
+                    ctx.add_detail(details, warning)
         preview_progress(ctx, details, f"Preview {target['id']}: counting deletions")
         deletion_count += count_preview_deletions(baseline_path, preview_path)
         preview_progress(ctx, details, f"Preview {target['id']}: building diff")
@@ -1742,5 +1815,6 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         "skipped_protected": sorted(set(skipped_protected)),
         "storage_changes": bool(storage_change_paths),
         "storage_change_paths": sorted(set(storage_change_paths)),
+        "warnings": warnings,
         "live_fingerprints": live_fingerprints,
     }

@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.26
+
+- Warn when Git to HA would downgrade newer live Home Assistant entity registry metadata.
+
 ## 0.7.25
 
 - Reject HA Ops pushes that forget to include a version bump, changelog entry, and matching release tag.
