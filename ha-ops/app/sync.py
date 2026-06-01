@@ -1864,9 +1864,6 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     diff_text = "\n".join(chunks).strip()
     if not diff_text:
         diff_text = "No file changes."
-    if warnings:
-        warning_text = "\n".join(f"- {warning}" for warning in warnings)
-        diff_text = f"## Warnings\n{warning_text}\n\n{diff_text}"
 
     return {
         "diff": diff_text,

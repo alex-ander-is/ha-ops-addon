@@ -18,6 +18,7 @@ APPLY_PREVIEW_CLEAR_UPDATES = {
     "last_preview_storage_changes": False,
     "last_preview_storage_paths": [],
     "last_preview_live_fingerprints": {},
+    "last_preview_warnings": [],
     "last_preview_approved_fingerprint": None,
 }
 SAVE_PREVIEW_CLEAR_UPDATES = {
@@ -58,6 +59,7 @@ DISPLAY_CLEAR_UPDATES = {
     "last_details": [],
     "last_diff": "",
     "last_diff_generated_at": None,
+    "last_preview_warnings": [],
     **SAVE_PREVIEW_CLEAR_UPDATES,
     "conflicts": [],
     "conflict_type": None,
@@ -129,6 +131,7 @@ def default_state():
         "last_preview_storage_changes": False,
         "last_preview_storage_paths": [],
         "last_preview_live_fingerprints": {},
+        "last_preview_warnings": [],
         "last_preview_approved_fingerprint": None,
         "last_deleted_devices_preview": "",
         "last_deleted_devices_rows": [],

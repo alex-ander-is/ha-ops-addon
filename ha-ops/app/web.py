@@ -284,6 +284,7 @@ def render_page(ctx):
         deleted_devices_rollback_path,
     )
     diff_text = state.get("last_diff", "")
+    preview_warnings = [str(item) for item in (state.get("last_preview_warnings") or []) if str(item)]
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
@@ -373,12 +374,22 @@ def render_page(ctx):
         )
     apply_preview_section_html = ""
     if state.get("last_diff_generated_at") or diff_text:
+        apply_preview_warnings_html = ""
+        if preview_warnings:
+            warning_items = "".join(f"<li>{html.escape(item)}</li>" for item in preview_warnings)
+            apply_preview_warnings_html = (
+                "<div class='apply-preview-warning' role='alert'>"
+                "<strong>Warnings</strong>"
+                f"<ul>{warning_items}</ul>"
+                "</div>"
+            )
         apply_preview_section_html = (
             "<section class='card wide'>"
             "<h2>Apply Preview</h2>"
             "<p>Generated at "
             f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
             "</p>"
+            f"{apply_preview_warnings_html}"
             f"<div data-transient='apply-preview'>{ui.render_conflict_detail(diff_text) if diff_text else ''}</div>"
             "</section>"
         )

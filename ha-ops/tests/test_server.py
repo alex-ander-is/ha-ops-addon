@@ -207,6 +207,7 @@ class ServerTests(unittest.TestCase):
                     "last_preview_fingerprint": "fingerprint",
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
+                    "last_preview_warnings": ["old warning"],
                     "last_preview_approved_fingerprint": "fingerprint",
                 }
             )
@@ -220,6 +221,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview"], "")
             self.assertEqual(state["last_save_diff"], "")
             self.assertIsNone(state["last_save_diff_generated_at"])
+            self.assertEqual(state["last_preview_warnings"], [])
             self.assertEqual(state["last_deleted_devices_preview"], "")
             self.assertEqual(state["last_deleted_devices_count"], 0)
             self.assertIsNone(state["last_deleted_devices_fingerprint"])
@@ -261,6 +263,7 @@ class ServerTests(unittest.TestCase):
                     "last_preview_fingerprint": "old",
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
+                    "last_preview_warnings": ["old warning"],
                     "last_preview_approved_fingerprint": "old",
                     "last_save_preview": "old save summary",
                     "last_save_diff": "old save diff",
@@ -279,6 +282,7 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_preview_fingerprint"])
             self.assertEqual(state["last_preview_live_fingerprints"], {})
             self.assertFalse(state["last_preview_storage_changes"])
+            self.assertEqual(state["last_preview_warnings"], [])
             self.assertIsNone(state["last_preview_approved_fingerprint"])
 
             server.write_state({"last_save_preview": "old", "last_save_diff": "old", "last_save_diff_generated_at": "old"})
@@ -310,6 +314,27 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("2026-05-14T21:52:16+02:00", page)
             self.assertNotIn("2026-05-14T19:52:16+00:00", page)
+
+    def test_render_page_shows_apply_preview_warnings_outside_diff(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_diff": "## homeassistant\nNo file changes.",
+                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_preview_warnings": ["registry item would be removed"],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("Apply Preview", page)
+            self.assertIn("apply-preview-warning", page)
+            self.assertIn("registry item would be removed", page)
+            self.assertLess(page.index("apply-preview-warning"), page.index("data-transient='apply-preview'"))
 
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
@@ -2327,8 +2352,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("sensor.example", preview["warnings"][0])
             self.assertIn("device_id", preview["warnings"][0])
             self.assertIn("Run HA to Git first", preview["warnings"][0])
-            self.assertIn("## Warnings", preview["diff"])
-            self.assertIn("sensor.example", preview["diff"])
+            self.assertNotIn("## Warnings", preview["diff"])
 
     def test_apply_preview_warns_when_registry_items_would_be_removed(self):
         server = load_server()
@@ -2385,7 +2409,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("0xa4c13877facbdebd", joined)
             self.assertIn("core.entity_registry entities", joined)
             self.assertIn("switch.0xa4c13877facbdebd_l1", joined)
-            self.assertIn("## Warnings", preview["diff"])
+            self.assertNotIn("## Warnings", preview["diff"])
 
     def test_apply_preview_ignores_registry_hidden_only_changes(self):
         server = load_server()

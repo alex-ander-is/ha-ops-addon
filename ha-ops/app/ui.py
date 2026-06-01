@@ -709,6 +709,23 @@ def render_page(data):
       color: var(--ha-muted);
       line-height: 1.4;
     }}
+    .apply-preview-warning {{
+      display: grid;
+      gap: 8px;
+      margin: 12px 0;
+      padding: 12px 14px;
+      border: 1px solid color-mix(in srgb, var(--ha-warning) 45%, transparent);
+      border-left: 5px solid var(--ha-warning);
+      border-radius: calc(var(--ha-radius) - 4px);
+      background: color-mix(in srgb, var(--ha-warning) 14%, var(--ha-card-bg));
+      color: var(--ha-text);
+    }}
+    .apply-preview-warning ul {{
+      margin: 0;
+      padding-left: 20px;
+      color: var(--ha-muted);
+      line-height: 1.45;
+    }}
     td.actions {{
       margin-top: 0;
       flex-direction: row;
