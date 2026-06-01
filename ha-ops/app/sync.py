@@ -545,7 +545,7 @@ def registry_collection_identity(keys, item):
 def registry_item_label(item):
     if not isinstance(item, dict):
         return stable_json_key(item)
-    return str(item.get("entity_id") or item.get("unique_id") or item.get("id") or stable_json_key(item))
+    return str(item.get("entity_id") or item.get("name") or item.get("unique_id") or item.get("id") or stable_json_key(item))
 
 
 def sort_json_list(value):
@@ -1380,6 +1380,63 @@ def entity_registry_metadata_downgrade_warnings(target_id, baseline_path, previe
     ]
 
 
+def registry_deleted_item_warnings(target_id, registry_name, collection, keys, baseline_path, preview_path):
+    baseline = load_storage_json(Path(baseline_path) / ".storage" / registry_name)
+    preview = load_storage_json(Path(preview_path) / ".storage" / registry_name)
+    if not isinstance(baseline, dict) or not isinstance(preview, dict):
+        return []
+
+    baseline_items = baseline.get("data", {}).get(collection)
+    preview_items = preview.get("data", {}).get(collection)
+    if not isinstance(baseline_items, list) or not isinstance(preview_items, list):
+        return []
+
+    preview_keys = {
+        registry_collection_identity(keys, item)
+        for item in preview_items
+    }
+    deleted = [
+        registry_item_label(item)
+        for item in baseline_items
+        if registry_collection_identity(keys, item) not in preview_keys
+    ]
+    if not deleted:
+        return []
+
+    shown = ", ".join(deleted[:8])
+    suffix = f" and {len(deleted) - 8} more" if len(deleted) > 8 else ""
+    return [
+        f"Warning: Git to HA would remove live {registry_name} {collection} "
+        f"for target {target_id}: {shown}{suffix}. Run HA to Git first or update Git registry before applying."
+    ]
+
+
+def storage_registry_warnings(target_id, baseline_path, preview_path):
+    warnings = []
+    warnings.extend(entity_registry_metadata_downgrade_warnings(target_id, baseline_path, preview_path))
+    warnings.extend(
+        registry_deleted_item_warnings(
+            target_id,
+            "core.device_registry",
+            "devices",
+            DEVICE_REGISTRY_COLLECTION_KEYS["devices"],
+            baseline_path,
+            preview_path,
+        )
+    )
+    warnings.extend(
+        registry_deleted_item_warnings(
+            target_id,
+            "core.entity_registry",
+            "entities",
+            ENTITY_REGISTRY_COLLECTION_KEYS["entities"],
+            baseline_path,
+            preview_path,
+        )
+    )
+    return warnings
+
+
 def normalize_organizer_index_for_diff(root, options):
     index_path = organizer.organized_root(root, options) / organizer.INDEX_NAME
     try:
@@ -1794,7 +1851,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
             storage_change_paths.extend(
                 [f"{target['id']}/{path}" for path in managed_storage_change_paths(baseline_path, preview_path)]
             )
-            for warning in entity_registry_metadata_downgrade_warnings(target["id"], baseline_path, preview_path):
+            for warning in storage_registry_warnings(target["id"], baseline_path, preview_path):
                 warnings.append(warning)
                 if details is not None:
                     ctx.add_detail(details, warning)
@@ -1807,6 +1864,9 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     diff_text = "\n".join(chunks).strip()
     if not diff_text:
         diff_text = "No file changes."
+    if warnings:
+        warning_text = "\n".join(f"- {warning}" for warning in warnings)
+        diff_text = f"## Warnings\n{warning_text}\n\n{diff_text}"
 
     return {
         "diff": diff_text,

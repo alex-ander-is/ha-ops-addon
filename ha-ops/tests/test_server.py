@@ -2327,6 +2327,65 @@ class ServerTests(unittest.TestCase):
             self.assertIn("sensor.example", preview["warnings"][0])
             self.assertIn("device_id", preview["warnings"][0])
             self.assertIn("Run HA to Git first", preview["warnings"][0])
+            self.assertIn("## Warnings", preview["diff"])
+            self.assertIn("sensor.example", preview["diff"])
+
+    def test_apply_preview_warns_when_registry_items_would_be_removed(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage").mkdir(parents=True)
+            live_device_registry = {
+                "data": {
+                    "devices": [
+                        {
+                            "id": "device-1",
+                            "name": "0xa4c13877facbdebd",
+                            "identifiers": [["mqtt", "zigbee2mqtt_0xa4c13877facbdebd"]],
+                        }
+                    ]
+                }
+            }
+            live_entity_registry = {
+                "data": {
+                    "entities": [
+                        {
+                            "id": "entity-1",
+                            "entity_id": "switch.0xa4c13877facbdebd_l1",
+                            "unique_id": "0xa4c13877facbdebd_switch_l1_z2m",
+                        }
+                    ]
+                }
+            }
+            empty_registry = {"data": {"devices": []}}
+            empty_entities = {"data": {"entities": []}}
+            (live / ".storage" / "core.device_registry").write_text(json.dumps(live_device_registry))
+            (live / ".storage" / "core.entity_registry").write_text(json.dumps(live_entity_registry))
+            (source / ".storage" / "core.device_registry").write_text(json.dumps(empty_registry))
+            (source / ".storage" / "core.entity_registry").write_text(json.dumps(empty_entities))
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                    }
+                ]
+            )
+
+            joined = "\n".join(preview["warnings"])
+            self.assertIn("core.device_registry devices", joined)
+            self.assertIn("0xa4c13877facbdebd", joined)
+            self.assertIn("core.entity_registry entities", joined)
+            self.assertIn("switch.0xa4c13877facbdebd_l1", joined)
+            self.assertIn("## Warnings", preview["diff"])
 
     def test_apply_preview_ignores_registry_hidden_only_changes(self):
         server = load_server()

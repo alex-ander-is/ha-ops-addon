@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.27
+
+- Show Git to HA registry safety warnings directly in the preview diff and warn when live registry devices or entities would be removed.
+
 ## 0.7.26
 
 - Warn when Git to HA would downgrade newer live Home Assistant entity registry metadata.
