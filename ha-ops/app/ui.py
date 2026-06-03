@@ -224,6 +224,48 @@ def render_conflicts(conflicts, conflict_type=None):
     )
 
 
+def render_preview_decisions(paths, resolutions, direction):
+    if not paths:
+        return ""
+    action_label = "Save all changes to Git" if direction == "save" else "Apply all changes to HA"
+    path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
+    all_action = "save" if direction == "save" else "apply"
+    rows = []
+    for path in paths:
+        choice = resolutions.get(path)
+        status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
+        rows.append(
+            "<tr>"
+            f"<td><code>{html.escape(path)}</code>{status}</td>"
+            "<td class='actions'>"
+            f"<form method='post' action='{path_action}' data-async-form='true'>"
+            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
+            "<input type='hidden' name='choice' value='ha'>"
+            "<button type='submit' class='secondary'>Use HA Version</button>"
+            "</form>"
+            f"<form method='post' action='{path_action}' data-async-form='true'>"
+            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
+            "<input type='hidden' name='choice' value='git'>"
+            "<button type='submit' class='secondary'>Use Git Version</button>"
+            "</form>"
+            "</td>"
+            "</tr>"
+        )
+    return (
+        "<div class='preview-decisions'>"
+        "<div class='action-row'>"
+        f"<form method='post' action='{all_action}' data-async-form='true'>"
+        f"<button type='submit'>{action_label}</button>"
+        "</form>"
+        "</div>"
+        "<div class='table-scroll'>"
+        "<table class='conflicts-table'><thead><tr><th>File</th><th>Action</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
+        "</div>"
+    )
+
+
 def render_deleted_devices_table(rows):
     if not rows:
         return "<p>No deleted_devices entries found.</p>"
@@ -725,6 +767,18 @@ def render_page(data):
       padding-left: 20px;
       color: var(--ha-muted);
       line-height: 1.45;
+    }}
+    .preview-decisions {{
+      display: grid;
+      gap: 10px;
+      margin: 12px 0;
+    }}
+    .decision-status {{
+      display: inline-block;
+      margin-left: 8px;
+      color: var(--ha-muted);
+      font-size: 12px;
+      font-weight: 700;
     }}
     td.actions {{
       margin-top: 0;

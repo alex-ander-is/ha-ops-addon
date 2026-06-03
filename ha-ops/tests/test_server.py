@@ -2909,6 +2909,83 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<h2>Git Conflicts</h2>", page)
             self.assertNotIn("<h2>Save Preview</h2>", page)
 
+    def test_save_preview_save_all_uses_preview_approval(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
+            page = server.render_page()
+            self.assertIn("Save all changes to Git", page)
+            self.assertIn("homeassistant/configuration.yaml", page)
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertNotEqual(state["last_status"], "conflicts")
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
+
+    def test_save_preview_per_file_choice_keeps_git_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text("git-automations\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state(
+                {
+                    "save_preview_resolutions": {
+                        "homeassistant/configuration.yaml": "git",
+                        "homeassistant/automations.yaml": "ha",
+                    }
+                }
+            )
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
+
     def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4260,7 +4337,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((live / ".storage" / "core.device_registry").read_text(), "live\n")
             self.assertEqual((live / ".storage" / "input_boolean").read_text(), "safe\n")
 
-    def test_apply_blocks_storage_changes_until_approved(self):
+    def test_apply_preview_apply_all_approves_storage_changes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -4285,6 +4362,9 @@ class ServerTests(unittest.TestCase):
                         "repo_path": "ha-config",
                         "apply_path": "homeassistant",
                         "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
                     }
                 )
             )
@@ -4297,15 +4377,67 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_preview_job())
             state = server.read_state()
             self.assertTrue(state["last_preview_storage_changes"])
-            self.assertIn("Approve Git to HA", server.render_page())
+            page = server.render_page()
+            self.assertIn("Apply all changes to HA", page)
+            self.assertIn("homeassistant/.storage/input_boolean", page)
 
-            self.assertFalse(server.run_apply_job())
-            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
-            self.assertIn("Approve Git to HA", server.read_state()["last_message"])
-
-            server.write_state({"last_preview_approved_fingerprint": state["last_preview_fingerprint"]})
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "git-storage\n")
+
+    def test_apply_preview_per_file_choice_keeps_ha_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text("git-automations\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {"homeassistant/automations.yaml", "homeassistant/configuration.yaml"},
+            )
+            server.write_state(
+                {
+                    "apply_preview_resolutions": {
+                        "homeassistant/configuration.yaml": "ha",
+                        "homeassistant/automations.yaml": "git",
+                    }
+                }
+            )
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
+            self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), "git-automations\n")
 
     def test_approved_apply_preserves_live_registry_hidden_fields(self):
         server = load_server()

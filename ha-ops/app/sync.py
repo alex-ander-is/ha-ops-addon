@@ -1294,6 +1294,15 @@ def save_preview_status_lines(repo_dir, preview_repo, include_redundant_data=Fal
     return lines
 
 
+def save_preview_change_paths(status_lines):
+    paths = []
+    for line in status_lines:
+        marker = ": "
+        if marker in line:
+            paths.append(line.split(marker, 1)[1])
+    return sorted(set(paths))
+
+
 def save_preview_diff(repo_dir, preview_repo, run_command):
     result = run_command(["diff", "-ruN", "-x", ".git", str(repo_dir), str(preview_repo)])
     if result.returncode == 0:
@@ -1483,6 +1492,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
         restore_normalized_equal_save_files(repo_dir, preview_repo, resolved_targets, details, ctx)
 
     status_lines = save_preview_status_lines(repo_dir, preview_repo, include_redundant_data)
+    paths = save_preview_change_paths(status_lines)
     summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
     if not status_lines:
         diff = ""
@@ -1490,7 +1500,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
         diff = save_preview_diff(repo_dir, preview_repo, ctx.run_command)
     else:
         diff = save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx)
-    return {"summary": summary, "diff": diff}
+    return {"summary": summary, "diff": diff, "paths": paths, "fingerprint": fingerprint_text(diff)}
 
 
 def export_target_to_path(target, dest, ctx):
@@ -1803,6 +1813,79 @@ def safe_preview_name(value):
     return "".join(char if char.isalnum() or char in "._-" else "_" for char in value) or "target"
 
 
+def diff_path_relative(path):
+    if not path or path == "/dev/null":
+        return None
+    for marker in ("/save-to-git-preview/", "/apply-preview/", "/preview/", "/baseline/"):
+        if marker in path:
+            return path.rsplit(marker, 1)[1]
+    return None
+
+
+def diff_change_paths(diff_text):
+    current_target = None
+    previous_old = None
+    paths = []
+    for line in diff_text.splitlines():
+        if line.startswith("## "):
+            current_target = line[3:].strip()
+            continue
+        if line.startswith("--- "):
+            previous_old = line[4:].split("\t", 1)[0]
+            continue
+        if not line.startswith("+++ "):
+            continue
+        new_path = line[4:].split("\t", 1)[0]
+        relative = diff_path_relative(new_path) or diff_path_relative(previous_old)
+        if not relative:
+            continue
+        if current_target and not relative.startswith(f"{current_target}/"):
+            relative = f"{current_target}/{relative}"
+        paths.append(relative)
+    return sorted(set(paths))
+
+
+def restore_preview_paths_from_baseline(preview_path, baseline_path, keep_paths):
+    for relative in sorted(set(keep_paths)):
+        preview_file = preview_path / relative
+        baseline_file = baseline_path / relative
+        if baseline_file.exists():
+            ensure_dir(preview_file.parent)
+            shutil.copy2(baseline_file, preview_file)
+        elif preview_file.exists() or preview_file.is_symlink():
+            safe_remove_path(preview_file)
+
+
+def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
+    selected_root = ctx.work_dir / "apply-preview-selected"
+    clear_tree(selected_root, ctx.work_dir, ctx.run_command)
+    selected_targets = []
+    keep_by_target = {}
+    for path in keep_ha_paths:
+        target_id, _, relative = path.partition("/")
+        if target_id and relative:
+            keep_by_target.setdefault(target_id, []).append(Path(relative))
+
+    for target in resolved_targets:
+        target_id = str(target["id"])
+        safe_id = safe_preview_name(target_id)
+        diff_root = ctx.work_dir / "apply-preview-diff" / safe_id
+        baseline_path = diff_root / "baseline"
+        preview_path = diff_root / "preview"
+        if not preview_path.exists():
+            baseline_path = ctx.work_dir / "apply-preview-baseline" / safe_id
+            preview_path = ctx.work_dir / "apply-preview" / safe_id
+        selected_path = selected_root / safe_id
+        sync_tree(preview_path, selected_path, True, [".git/"], ctx.run_command)
+        restore_preview_paths_from_baseline(selected_path, baseline_path, keep_by_target.get(target_id, []))
+        updated = dict(target)
+        updated["source_path"] = str(selected_path)
+        if updated.get("type") == "homeassistant":
+            updated["allow_protected_storage"] = True
+        selected_targets.append(updated)
+    return selected_targets
+
+
 def diff_text_for_fingerprint(text):
     lines = []
     for line in text.splitlines():
@@ -1868,6 +1951,7 @@ def build_apply_preview(resolved_targets, ctx, details=None):
     return {
         "diff": diff_text,
         "fingerprint": fingerprint_text(diff_text),
+        "paths": diff_change_paths(diff_text),
         "deletions": deletion_count,
         "skipped_protected": sorted(set(skipped_protected)),
         "storage_changes": bool(storage_change_paths),

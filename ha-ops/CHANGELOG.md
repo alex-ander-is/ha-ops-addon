@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.7.29
+
+- Move HA to Git and Git to HA approvals into the preview step with all-file and per-file HA/Git choices.
+
 ## 0.7.28
 
 - Show Git to HA registry safety warnings as a separate Apply Preview warning panel instead of injecting them into the diff.

@@ -19,12 +19,18 @@ APPLY_PREVIEW_CLEAR_UPDATES = {
     "last_preview_storage_paths": [],
     "last_preview_live_fingerprints": {},
     "last_preview_warnings": [],
+    "last_preview_paths": [],
+    "apply_preview_resolutions": {},
     "last_preview_approved_fingerprint": None,
 }
 SAVE_PREVIEW_CLEAR_UPDATES = {
     "last_save_preview": "",
     "last_save_diff": "",
     "last_save_diff_generated_at": None,
+    "last_save_preview_commit": None,
+    "last_save_preview_fingerprint": None,
+    "last_save_preview_paths": [],
+    "save_preview_resolutions": {},
 }
 DELETED_DEVICES_PREVIEW_CLEAR_UPDATES = {
     "last_deleted_devices_preview": "",
@@ -132,7 +138,13 @@ def default_state():
         "last_preview_storage_paths": [],
         "last_preview_live_fingerprints": {},
         "last_preview_warnings": [],
+        "last_preview_paths": [],
+        "apply_preview_resolutions": {},
         "last_preview_approved_fingerprint": None,
+        "last_save_preview_commit": None,
+        "last_save_preview_fingerprint": None,
+        "last_save_preview_paths": [],
+        "save_preview_resolutions": {},
         "last_deleted_devices_preview": "",
         "last_deleted_devices_rows": [],
         "last_deleted_devices_count": 0,

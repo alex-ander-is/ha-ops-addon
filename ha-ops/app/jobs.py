@@ -51,6 +51,7 @@ class JobContext:
     restore_normalized_equal_save_worktree: Any
     restore_save_git_resolutions: Any
     resolve_targets: Any
+    selected_apply_targets_from_preview: Any
     approve_storage_apply_targets: Any
     restore_deleted_devices_rollback: Any
     restore_release_snapshot: Any
@@ -68,6 +69,35 @@ def conflict_status_message(state, default_message="Resolve Git conflicts before
     if state.get("conflict_type") == "save_unknown_base":
         return "Resolve unknown-base Save conflicts before running Save HA to Git."
     return default_message
+
+
+def save_preview_matches_state(state, commit, preview):
+    return (
+        state.get("last_save_preview_commit") == commit
+        and state.get("last_save_preview_fingerprint") == preview.get("fingerprint")
+    )
+
+
+def save_preview_resolutions_for_current_preview(state, commit, preview):
+    paths = list(preview.get("paths") or [])
+    if not paths or not save_preview_matches_state(state, commit, preview):
+        return dict(state.get("save_conflict_resolutions", {}))
+
+    stored = dict(state.get("save_preview_resolutions", {}))
+    if stored:
+        return {path: stored.get(path, "ha") for path in paths}
+    return {path: "ha" for path in paths}
+
+
+def apply_preview_resolutions_for_current_preview(state, preview):
+    paths = list(preview.get("paths") or [])
+    stored = dict(state.get("apply_preview_resolutions", {}))
+    if stored:
+        missing = [path for path in paths if path not in stored]
+        if missing:
+            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Apply Preview file(s) before applying.")
+        return {path: stored.get(path, "git") for path in paths}
+    return {path: "git" for path in paths}
 
 
 def write_pending_conflicts(ctx, action, message, details=None, targets=None):
@@ -280,10 +310,11 @@ def run_save_job(ctx):
 
         ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
-        save_resolutions = state.get("save_conflict_resolutions", {})
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
             ctx.add_detail(details, "Including redundant registry data in Save.")
+        current_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
+        save_resolutions = save_preview_resolutions_for_current_preview(state, commit, current_preview)
         save_conflicts = ctx.save_unknown_base_conflicts(
             resolved_targets,
             repo_dir,
@@ -336,7 +367,14 @@ def run_save_job(ctx):
             ctx.add_detail(details, "No live Home Assistant changes to save.")
             save_message = "No live Home Assistant changes to save."
 
-        write_state({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
+        write_state(
+            {
+                "conflicts": [],
+                "conflict_type": None,
+                "save_conflict_resolutions": {},
+                "save_preview_resolutions": {},
+            }
+        )
 
         write_state(
             {
@@ -455,6 +493,10 @@ def run_save_preview_job(ctx):
                 "last_save_preview": preview["summary"],
                 "last_save_diff": preview["diff"],
                 "last_save_diff_generated_at": utc_now(),
+                "last_save_preview_commit": commit,
+                "last_save_preview_fingerprint": preview["fingerprint"],
+                "last_save_preview_paths": preview.get("paths", []),
+                "save_preview_resolutions": {},
                 "post_apply_save_recommended": False,
             }
         )
@@ -1323,11 +1365,12 @@ def run_apply_job(ctx):
         ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
         preview = ctx.build_apply_preview(resolved_targets, details)
         ctx.ensure_preview_matches_state(state, commit, preview)
-        ctx.ensure_storage_apply_approved(state, preview)
+        apply_resolutions = apply_preview_resolutions_for_current_preview(state, preview)
         ctx.enforce_apply_limits(options, preview)
-        if preview.get("storage_changes"):
-            resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
-            ctx.add_detail(details, "Approved .storage changes for Git to HA apply.")
+        if preview.get("paths"):
+            keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
+            resolved_targets = ctx.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths)
+            ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview file decision(s).")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
 
@@ -1353,6 +1396,7 @@ def run_apply_job(ctx):
                 "last_backup_slug": backup_slug,
                 "last_targets": resolved_targets,
                 "last_preview_deletions": preview["deletions"],
+                "apply_preview_resolutions": {},
                 "post_apply_save_recommended": True,
             }
         )
@@ -1464,6 +1508,8 @@ def run_preview_job(ctx):
                 "last_preview_storage_paths": preview.get("storage_change_paths", []),
                 "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
                 "last_preview_warnings": preview.get("warnings", []),
+                "last_preview_paths": preview.get("paths", []),
+                "apply_preview_resolutions": {},
                 "last_preview_approved_fingerprint": None,
             }
         )

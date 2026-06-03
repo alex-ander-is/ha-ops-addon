@@ -429,6 +429,9 @@ class AppContext:
     def apply_targets(self, resolved_targets, details):
         return sync_logic.apply_targets(resolved_targets, details, self.sync_deps())
 
+    def selected_apply_targets_from_preview(self, resolved_targets, keep_ha_paths):
+        return sync_logic.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, self.sync_deps())
+
     def export_targets(self, resolved_targets, details):
         return sync_logic.export_targets(resolved_targets, details, self.sync_deps())
 
@@ -742,6 +745,7 @@ class AppContext:
             restore_normalized_equal_save_worktree=self.restore_normalized_equal_save_worktree,
             restore_save_git_resolutions=self.restore_save_git_resolutions,
             resolve_targets=self.resolve_targets,
+            selected_apply_targets_from_preview=self.selected_apply_targets_from_preview,
             approve_storage_apply_targets=self.approve_storage_apply_targets,
             restore_deleted_devices_rollback=self.restore_deleted_devices_rollback,
             restore_release_snapshot=self.restore_release_snapshot,

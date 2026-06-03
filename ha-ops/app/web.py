@@ -285,8 +285,12 @@ def render_page(ctx):
     )
     diff_text = state.get("last_diff", "")
     preview_warnings = [str(item) for item in (state.get("last_preview_warnings") or []) if str(item)]
+    apply_preview_paths = [str(item) for item in (state.get("last_preview_paths") or []) if str(item)]
+    apply_preview_resolutions = dict(state.get("apply_preview_resolutions") or {})
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
+    save_preview_paths = [str(item) for item in (state.get("last_save_preview_paths") or []) if str(item)]
+    save_preview_resolutions = dict(state.get("save_preview_resolutions") or {})
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
@@ -298,13 +302,9 @@ def render_page(ctx):
         save_details_html = ui.render_conflict_detail(save_diff_text)
     run_disabled = "disabled" if last_status == "running" else ""
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
-    storage_approval_pending = bool(
-        state.get("last_preview_storage_changes")
-        and state.get("last_preview_fingerprint")
-        and state.get("last_preview_approved_fingerprint") != state.get("last_preview_fingerprint")
-    )
-    apply_action = "approve-apply" if storage_approval_pending else "apply"
-    apply_button_text = "Approve Git to HA" if storage_approval_pending else "Apply Git to HA"
+    storage_approval_pending = False
+    apply_action = "apply"
+    apply_button_text = "Apply Git to HA"
     post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
     save_preview_button_class = "warning" if post_apply_save_recommended else "secondary"
     save_preview_button_text = "Review Post-Apply HA Changes" if post_apply_save_recommended else "Preview HA to Git"
@@ -390,6 +390,7 @@ def render_page(ctx):
             f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
             "</p>"
             f"{apply_preview_warnings_html}"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply')}"
             f"<div data-transient='apply-preview'>{ui.render_conflict_detail(diff_text) if diff_text else ''}</div>"
             "</section>"
         )
@@ -401,6 +402,7 @@ def render_page(ctx):
             "<p>Generated at "
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save')}"
             f"<div data-transient='save-preview'>{save_details_html}</div>"
             "</section>"
         )
@@ -666,6 +668,59 @@ def create_handler(ctx):
                 else:
                     self.send_html(render_page(ctx))
                 return
+
+            if parsed.path in {"/resolve-save-preview", "/resolve-apply-preview"}:
+                direction = "save" if parsed.path == "/resolve-save-preview" else "apply"
+                state = ctx.read_state()
+                raw_path = body.get("path", [""])[0]
+                choice = body.get("choice", [""])[0]
+                try:
+                    safe_path = git_ops.safe_repo_relative_path(raw_path)
+                    if choice not in {"ha", "git"}:
+                        raise RuntimeError("Invalid preview choice")
+                    paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
+                    resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
+                    paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
+                    if safe_path not in paths:
+                        raise RuntimeError("Preview path is not pending")
+                    resolutions = dict(state.get(resolutions_key) or {})
+                    resolutions[safe_path] = choice
+                    remaining = [path for path in paths if path not in resolutions]
+                    ctx.write_state(
+                        {
+                            resolutions_key: resolutions,
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "idle",
+                            "last_action": f"resolve_{direction}_preview",
+                            "last_message": (
+                                f"Resolved {safe_path}. {len(remaining)} preview file decision(s) remain."
+                                if remaining
+                                else f"Resolved all {direction} preview files. Starting {'Save HA to Git' if direction == 'save' else 'Apply Git to HA'}."
+                            ),
+                        }
+                    )
+                    if not remaining:
+                        start_background(ctx.run_save_job if direction == "save" else ctx.run_apply_job)
+                    if self.wants_json():
+                        self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
+                    else:
+                        self.send_html(render_page(ctx))
+                    return
+                except Exception as exc:
+                    ctx.write_state(
+                        {
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "error",
+                            "last_action": f"resolve_{direction}_preview",
+                            "last_message": str(exc),
+                            "last_details": [str(exc)],
+                        }
+                    )
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": str(exc)}, status=400)
+                    else:
+                        self.send_html(render_page(ctx), status=400)
+                    return
 
             if parsed.path == "/preview":
                 ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
