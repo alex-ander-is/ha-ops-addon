@@ -1445,9 +1445,13 @@ def run_apply_job(ctx):
         apply_resolutions = apply_preview_resolutions_for_current_preview(state, preview)
         ctx.enforce_apply_limits(options, preview)
         keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
-        if preview.get("paths"):
+        conflict_preview = bool(preview.get("conflicts"))
+        apply_commit = None
+        if preview.get("paths") and not conflict_preview:
             resolved_targets = ctx.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths)
             ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview file decision(s).")
+        elif conflict_preview:
+            ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview conflict decision(s).")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
 
@@ -1456,18 +1460,31 @@ def run_apply_job(ctx):
             release_name = ctx.create_release_snapshot(resolved_targets, commit, backup_slug)
             ctx.add_detail(details, f"Created local release snapshot {release_name}.")
 
+        if conflict_preview:
+            apply_commit = ctx.commit_apply_merge(
+                repo_dir,
+                branch,
+                resolved_targets,
+                keep_ha_paths,
+                f"Apply Git config to Home Assistant {ctx.release_now()}",
+                details,
+            )
+            if apply_commit:
+                ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
+
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
-        apply_commit = ctx.commit_apply_merge(
-            repo_dir,
-            branch,
-            resolved_targets,
-            keep_ha_paths,
-            f"Apply Git config to Home Assistant {ctx.release_now()}",
-            details,
-        )
-        if apply_commit:
-            ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
+        if not conflict_preview:
+            apply_commit = ctx.commit_apply_merge(
+                repo_dir,
+                branch,
+                resolved_targets,
+                keep_ha_paths,
+                f"Apply Git config to Home Assistant {ctx.release_now()}",
+                details,
+            )
+            if apply_commit:
+                ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)

@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.1
+
+- Bootstrap HA Ops service branches for existing repositories that only have the configured Git branch.
+- Keep freshly exported live HA state when building Git to HA merge previews, allow conflict previews to be confirmed, and clean up no-op merges.
+
 ## 0.8.0
 
 - Rework HA to Git and Git to HA previews around HA Ops service branches so both directions use Git-style three-way merges.

@@ -97,6 +97,10 @@ class ServerTests(unittest.TestCase):
     def repo_status(self, repo):
         return self.git(["status", "--porcelain"], repo).stdout.strip()
 
+    def merge_head_exists(self, repo):
+        path = self.git(["rev-parse", "--git-path", "MERGE_HEAD"], repo).stdout.strip()
+        return (repo / path).exists()
+
     def seed_internal_ids_repo(self, server, root):
         repo = root / "data" / "ha-config"
         config = repo / "homeassistant"
@@ -3071,6 +3075,80 @@ class ServerTests(unittest.TestCase):
             self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
+    def test_save_preview_bootstraps_existing_repo_without_live_branch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            path = seed / "homeassistant" / "configuration.yaml"
+            path.parent.mkdir(parents=True)
+            path.write_text("git\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
+            refs = subprocess.run(
+                ["git", "--git-dir", str(remote), "show-ref", "--heads", "ha-ops/ha-live"],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(refs.returncode, 0, refs.stderr)
+
+    def test_save_use_git_noop_aborts_merge(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state({"save_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            repo = server.DATA_DIR / "ha-config"
+            self.assertFalse(self.merge_head_exists(repo))
+            self.assertEqual(self.repo_status(repo), "")
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
     def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4532,6 +4610,76 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
             self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), "git-automations\n")
+
+    def test_apply_preview_conflict_uses_fresh_live_branch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("Apply preview conflicts (1):", state["last_diff"])
+            self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
+
+    def test_apply_preview_conflict_can_be_confirmed(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
 
     def test_apply_without_matching_preview_rebuilds_preview_and_warns(self):
         server = load_server()

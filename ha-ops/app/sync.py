@@ -1324,6 +1324,11 @@ def git_abort_merge(repo_dir, ctx):
         ctx.run_command(["git", "merge", "--abort"], cwd=repo_dir)
 
 
+def git_merge_in_progress(repo_dir, ctx):
+    path = ctx.run_command(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=repo_dir)
+    return path.returncode == 0 and (Path(repo_dir) / path.stdout.strip()).exists()
+
+
 def git_ensure_head(repo_dir, ctx, details=None):
     if git_has_head(repo_dir, ctx):
         return None
@@ -1398,6 +1403,8 @@ def git_status_porcelain(repo_dir, ctx):
 
 def git_commit_if_needed(repo_dir, message, ctx):
     if not git_status_porcelain(repo_dir, ctx):
+        if git_merge_in_progress(repo_dir, ctx):
+            git_abort_merge(repo_dir, ctx)
         return None
     result = ctx.run_command(
         [
@@ -1422,15 +1429,10 @@ def git_commit_if_needed(repo_dir, message, ctx):
 
 def ensure_live_branch_available(repo_dir, ctx):
     if not git_checkout_branch_from_best_ref(repo_dir, HA_LIVE_BRANCH, ctx):
-        if git_head_tree_empty(repo_dir, ctx):
-            result = ctx.run_command(["git", "checkout", "-B", HA_LIVE_BRANCH, "HEAD"], cwd=repo_dir)
-            if result.returncode != 0:
-                raise RuntimeError(f"git checkout {HA_LIVE_BRANCH} failed:\n{result.stderr.strip() or result.stdout.strip()}")
-            return
-        raise RuntimeError(
-            f"HA Ops live branch {HA_LIVE_BRANCH} is missing. "
-            "Run an explicit bootstrap before merging HA and Git changes."
-        )
+        result = ctx.run_command(["git", "checkout", "-B", HA_LIVE_BRANCH, "HEAD"], cwd=repo_dir)
+        if result.returncode != 0:
+            raise RuntimeError(f"git checkout {HA_LIVE_BRANCH} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+        return
 
 
 def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
@@ -2278,7 +2280,8 @@ def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
 
 
 def merge_git_into_ha_live(repo_dir, main_branch, ctx):
-    ensure_live_branch_available(repo_dir, ctx)
+    if git_current_branch(repo_dir, ctx) != HA_LIVE_BRANCH:
+        ensure_live_branch_available(repo_dir, ctx)
     result = ctx.run_command(["git", "merge", "--no-commit", "--no-ff", main_branch], cwd=repo_dir)
     conflicts = []
     if result.returncode != 0:
@@ -2347,6 +2350,7 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
                 "live_fingerprints": {},
                 "conflicts": conflicts,
             }
+        git_checkout(repo_dir, main_branch, ctx)
         return build_apply_preview_from_sources(resolved_targets, ctx, details)
     finally:
         git_abort_merge(repo_dir, ctx)
