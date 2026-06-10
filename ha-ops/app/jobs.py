@@ -17,6 +17,7 @@ class JobContext:
     clear_deleted_devices: Any
     clear_retained_discovery_topic: Any
     commit_if_needed: Any
+    commit_apply_merge: Any
     core_start: Any
     core_stop: Any
     create_deleted_devices_rollback: Any
@@ -37,6 +38,7 @@ class JobContext:
     git_head_or_unborn: Any
     git_pull_rebase: Any
     git_status_porcelain: Any
+    commit_save_merge: Any
     load_manifest: Any
     load_options: Any
     log: Any
@@ -87,6 +89,10 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
     if stored:
         return {path: stored.get(path, "ha") for path in paths}
     return {path: "ha" for path in paths}
+
+
+def preview_changed_message():
+    return "State changed since this preview was created. Review the updated preview before continuing."
 
 
 def apply_preview_resolutions_for_current_preview(state, preview):
@@ -310,47 +316,74 @@ def run_save_job(ctx):
 
         ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        if state.get("save_push_retry_pending") and ctx.git_has_unpushed_commits(repo_dir, branch):
+            ctx.add_detail(details, "Retrying push for previously committed Save.")
+            try:
+                ctx.push_branch(repo_dir, env, branch)
+            except RuntimeError:
+                ctx.git_pull_rebase(repo_dir, env, branch)
+                ctx.push_branch(repo_dir, env, branch)
+            ctx.add_detail(details, f"Pushed to origin/{branch}.")
+            for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
+                try:
+                    ctx.push_branch(repo_dir, env, service_branch)
+                    ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+                except RuntimeError as exc:
+                    ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "success",
+                    "last_action": "save",
+                    "last_message": "Save finished successfully and pushed to Git.",
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                    "post_apply_save_recommended": False,
+                    "save_push_retry_pending": False,
+                }
+            )
+            return True
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
             ctx.add_detail(details, "Including redundant registry data in Save.")
         current_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
-        save_resolutions = save_preview_resolutions_for_current_preview(state, commit, current_preview)
-        save_conflicts = ctx.save_unknown_base_conflicts(
-            resolved_targets,
-            repo_dir,
-            save_resolutions,
-            details,
-            include_redundant_data,
-        )
-        if save_conflicts:
-            message = "Resolve unknown-base Save conflicts before running Save HA to Git."
+        commit = ctx.git_head_or_unborn(repo_dir)
+        if not save_preview_matches_state(state, commit, current_preview):
+            message = preview_changed_message()
+            details.append(message)
             write_state(
                 {
                     "last_run_at": utc_now(),
-                    "last_status": "conflicts",
+                    "last_status": "warning",
                     "last_action": "save",
                     "last_message": message,
                     "last_details": details,
                     "last_targets": resolved_targets,
-                    "conflicts": save_conflicts,
-                    "conflict_type": "save_unknown_base",
-                    "save_conflict_resolutions": save_resolutions,
+                    "last_save_preview": current_preview["summary"],
+                    "last_save_diff": current_preview["diff"],
+                    "last_save_diff_generated_at": utc_now(),
+                    "last_save_preview_commit": commit,
+                    "last_save_preview_fingerprint": current_preview["fingerprint"],
+                    "last_save_preview_paths": current_preview.get("paths", []),
+                    "save_preview_resolutions": {},
+                    "post_apply_save_recommended": False,
                 }
             )
             return False
+        save_resolutions = save_preview_resolutions_for_current_preview(state, commit, current_preview)
 
-        ctx.add_detail(details, "Saving live Home Assistant config to Git.")
+        ctx.add_detail(details, "Merging live Home Assistant export into Git.")
         checkout_dirty_for_save = True
-        ctx.export_targets(resolved_targets, details)
-        if not include_redundant_data:
-            ctx.restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details)
-            ctx.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details)
-        ctx.restore_save_git_resolutions(repo_dir, save_resolutions, details)
-        ctx.stage_homeassistant_storage_allowlist(repo_dir, options, details)
-        ctx.stage_all(repo_dir)
+        new_commit = ctx.commit_save_merge(
+            repo_dir,
+            branch,
+            resolved_targets,
+            save_resolutions,
+            f"Save Home Assistant config {ctx.release_now()}",
+            details,
+        )
         add_save_change_details(ctx, details, ctx.git_status_porcelain(repo_dir))
 
-        new_commit = ctx.commit_if_needed(repo_dir, f"Save Home Assistant config {ctx.release_now()}")
         if new_commit:
             save_commit_created = True
             ctx.add_detail(details, f"Created commit {new_commit}.")
@@ -366,6 +399,12 @@ def run_save_job(ctx):
         else:
             ctx.add_detail(details, "No live Home Assistant changes to save.")
             save_message = "No live Home Assistant changes to save."
+        for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
+            try:
+                ctx.push_branch(repo_dir, env, service_branch)
+                ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+            except RuntimeError as exc:
+                ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
 
         write_state(
             {
@@ -373,6 +412,7 @@ def run_save_job(ctx):
                 "conflict_type": None,
                 "save_conflict_resolutions": {},
                 "save_preview_resolutions": {},
+                "save_push_retry_pending": False,
             }
         )
 
@@ -411,6 +451,7 @@ def run_save_job(ctx):
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "conflicts": conflicts,
+                "save_push_retry_pending": bool(state.get("save_push_retry_pending") or save_commit_created),
             }
         )
         return False
@@ -469,18 +510,25 @@ def run_save_preview_job(ctx):
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
         ctx.git_pull_rebase(repo_dir, env, branch)
-        commit = ctx.git_head_or_unborn(repo_dir)
         addons = ctx.get_installed_addons()
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
+        ctx.add_detail(details, f"Using branch {branch} at commit {ctx.git_head_or_unborn(repo_dir)}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Building save preview without committing or pushing.")
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
             ctx.add_detail(details, "Including redundant registry data in Save preview.")
         preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
+        ctx.add_detail(details, "Pushed to origin/ha-ops/ha-live.")
+        try:
+            ctx.push_branch(repo_dir, env, "ha-ops/base")
+            ctx.add_detail(details, "Pushed to origin/ha-ops/base.")
+        except RuntimeError as exc:
+            ctx.add_detail(details, f"Skipped pushing ha-ops/base: {exc}")
 
         write_state(
             {
@@ -1355,20 +1403,49 @@ def run_apply_job(ctx):
 
         prepare_repo_checkout_for_sync(ctx, options, details, "Apply Git to HA")
         repo_dir = ctx.ensure_repo(options)
-        commit = ctx.git_head_or_unborn(repo_dir)
+        env = ctx.git_env(options)
+        branch = options.get("repo_branch", "main")
         addons = ctx.get_installed_addons()
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Fetched repository at commit {commit}.")
+        ctx.add_detail(details, f"Fetched repository at commit {ctx.git_head_or_unborn(repo_dir)}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
-        preview = ctx.build_apply_preview(resolved_targets, details)
-        ctx.ensure_preview_matches_state(state, commit, preview)
+        preview = ctx.build_apply_preview(resolved_targets, details, repo_dir, branch)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        try:
+            ctx.ensure_preview_matches_state(state, commit, preview)
+        except RuntimeError:
+            message = preview_changed_message()
+            details.append(message)
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "warning",
+                    "last_action": "apply",
+                    "last_message": message,
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                    "last_diff": preview["diff"],
+                    "last_diff_generated_at": utc_now(),
+                    "last_preview_commit": commit,
+                    "last_preview_fingerprint": preview["fingerprint"],
+                    "last_preview_deletions": preview["deletions"],
+                    "last_preview_storage_changes": preview.get("storage_changes", False),
+                    "last_preview_storage_paths": preview.get("storage_change_paths", []),
+                    "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
+                    "last_preview_warnings": preview.get("warnings", []),
+                    "last_preview_paths": preview.get("paths", []),
+                    "apply_preview_resolutions": {},
+                    "last_preview_approved_fingerprint": None,
+                }
+            )
+            return False
         apply_resolutions = apply_preview_resolutions_for_current_preview(state, preview)
         ctx.enforce_apply_limits(options, preview)
+        keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
         if preview.get("paths"):
-            keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
             resolved_targets = ctx.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths)
             ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview file decision(s).")
 
@@ -1381,6 +1458,22 @@ def run_apply_job(ctx):
 
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
+        apply_commit = ctx.commit_apply_merge(
+            repo_dir,
+            branch,
+            resolved_targets,
+            keep_ha_paths,
+            f"Apply Git config to Home Assistant {ctx.release_now()}",
+            details,
+        )
+        if apply_commit:
+            ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
+        for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
+            try:
+                ctx.push_branch(repo_dir, env, service_branch)
+                ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+            except RuntimeError as exc:
+                ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
         pruned = ctx.prune_release_snapshots(options, protected_release=release_name)
         if pruned:
             ctx.add_detail(details, f"Pruned {len(pruned)} old local release snapshot(s): {', '.join(pruned)}.")
@@ -1476,15 +1569,24 @@ def run_preview_job(ctx):
 
         prepare_repo_checkout_for_sync(ctx, options, details, "Preview Git to HA")
         repo_dir = ctx.ensure_repo(options)
-        commit = ctx.git_head_or_unborn(repo_dir)
+        env = ctx.git_env(options)
+        branch = options.get("repo_branch", "main")
         addons = ctx.get_installed_addons()
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Fetched repository at commit {commit}.")
+        ctx.add_detail(details, f"Fetched repository at commit {ctx.git_head_or_unborn(repo_dir)}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
         ctx.add_detail(details, "Building apply preview without changing live config.")
-        preview = ctx.build_apply_preview(resolved_targets, details)
+        preview = ctx.build_apply_preview(resolved_targets, details, repo_dir, branch)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
+        ctx.add_detail(details, "Pushed to origin/ha-ops/ha-live.")
+        try:
+            ctx.push_branch(repo_dir, env, "ha-ops/base")
+            ctx.add_detail(details, "Pushed to origin/ha-ops/base.")
+        except RuntimeError as exc:
+            ctx.add_detail(details, f"Skipped pushing ha-ops/base: {exc}")
         message = "Apply preview finished successfully."
         if preview.get("storage_changes"):
             paths = preview.get("storage_change_paths") or []

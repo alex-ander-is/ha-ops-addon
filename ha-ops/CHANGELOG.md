@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.0
+
+- Rework HA to Git and Git to HA previews around HA Ops service branches so both directions use Git-style three-way merges.
+- Require a fresh Preview before Save or Apply confirmation, and warn with an updated preview when Git or live HA changed in between.
+
 ## 0.7.29
 
 - Move HA to Git and Git to HA approvals into the preview step with all-file and per-file HA/Git choices.

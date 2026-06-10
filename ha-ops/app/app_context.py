@@ -438,8 +438,30 @@ class AppContext:
     def build_save_preview(self, resolved_targets, repo_dir, details, include_redundant_data=False):
         return sync_logic.build_save_preview(resolved_targets, repo_dir, details, self.sync_deps(), include_redundant_data)
 
-    def build_apply_preview(self, resolved_targets, details=None):
-        return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details)
+    def commit_save_merge(self, repo_dir, main_branch, resolved_targets, resolutions, message, details):
+        return sync_logic.commit_save_merge(
+            repo_dir,
+            main_branch,
+            resolved_targets,
+            resolutions,
+            message,
+            details,
+            self.sync_deps(),
+        )
+
+    def commit_apply_merge(self, repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details):
+        return sync_logic.commit_apply_merge(
+            repo_dir,
+            main_branch,
+            resolved_targets,
+            keep_ha_paths,
+            message,
+            details,
+            self.sync_deps(),
+        )
+
+    def build_apply_preview(self, resolved_targets, details=None, repo_dir=None, main_branch="main"):
+        return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details, repo_dir, main_branch)
 
     def save_unknown_base_conflicts(self, resolved_targets, repo_dir, resolutions, details, include_redundant_data=False):
         return sync_logic.save_unknown_base_conflicts(
@@ -711,6 +733,8 @@ class AppContext:
             clear_deleted_devices=self.clear_deleted_devices,
             clear_retained_discovery_topic=self.clear_retained_discovery_topic,
             commit_if_needed=self.commit_if_needed,
+            commit_apply_merge=self.commit_apply_merge,
+            commit_save_merge=self.commit_save_merge,
             core_start=self.core_start,
             core_stop=self.core_stop,
             create_release_snapshot=self.create_release_snapshot,

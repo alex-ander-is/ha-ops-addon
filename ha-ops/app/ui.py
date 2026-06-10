@@ -227,7 +227,7 @@ def render_conflicts(conflicts, conflict_type=None):
 def render_preview_decisions(paths, resolutions, direction):
     if not paths:
         return ""
-    action_label = "Save all changes to Git" if direction == "save" else "Apply all changes to HA"
+    action_label = "Confirm Save to Git" if direction == "save" else "Confirm Apply to HA"
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
     all_action = "save" if direction == "save" else "apply"
     rows = []
@@ -692,7 +692,7 @@ def render_page(data):
       color: var(--ha-warning);
       border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
     }}
-    .badge.pending {{
+    .badge.pending, .badge.warning {{
       background: color-mix(in srgb, var(--ha-warning) 14%, transparent);
       color: var(--ha-warning);
       border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
@@ -1128,9 +1128,6 @@ def render_page(data):
               <form method="post" action="save-preview" data-async-form="true">
                 <button type="submit" class="{data['save_preview_button_class']}" {data['action_disabled']}>{data['save_preview_button_text']}</button>
               </form>
-              <form method="post" action="save" data-async-form="true">
-                <button type="submit" {data['action_disabled']}>Save HA to Git</button>
-              </form>
             </div>
             <div class="action-row">
               {data['include_redundant_data_html']}
@@ -1141,9 +1138,6 @@ def render_page(data):
             <div class="action-row">
               <form method="post" action="preview" data-async-form="true">
                 <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
-              </form>
-              <form method="post" action="{data['apply_action']}" data-async-form="true" {data['apply_confirm']}>
-                <button type="submit" {data['action_disabled']}>{data['apply_button_text']}</button>
               </form>
             </div>
           </section>

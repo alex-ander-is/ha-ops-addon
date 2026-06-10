@@ -12,6 +12,10 @@ import targets as target_model
 import organizer
 
 
+HA_LIVE_BRANCH = "ha-ops/ha-live"
+HA_BASE_BRANCH = "ha-ops/base"
+
+
 @dataclass(frozen=True)
 class SyncContext:
     add_detail: Callable[..., Any]
@@ -1267,6 +1271,308 @@ def normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details
     return normalized
 
 
+def git_ref_exists(repo_dir, ref, ctx):
+    result = ctx.run_command(["git", "rev-parse", "--verify", "--quiet", ref], cwd=repo_dir)
+    return result.returncode == 0
+
+
+def git_has_head(repo_dir, ctx):
+    return git_ref_exists(repo_dir, "HEAD", ctx)
+
+
+def git_current_branch(repo_dir, ctx):
+    result = ctx.run_command(["git", "branch", "--show-current"], cwd=repo_dir)
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def git_checkout(repo_dir, ref, ctx):
+    result = ctx.run_command(["git", "checkout", ref], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git checkout {ref} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+
+
+def git_checkout_branch_from_best_ref(repo_dir, branch, ctx):
+    remote_ref = f"refs/remotes/origin/{branch}"
+    local_ref = f"refs/heads/{branch}"
+    if git_ref_exists(repo_dir, remote_ref, ctx):
+        result = ctx.run_command(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=repo_dir)
+    elif git_ref_exists(repo_dir, local_ref, ctx):
+        result = ctx.run_command(["git", "checkout", branch], cwd=repo_dir)
+    else:
+        return False
+    if result.returncode != 0:
+        raise RuntimeError(f"git checkout {branch} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    return True
+
+
+def git_reset_hard(repo_dir, ctx):
+    if not git_has_head(repo_dir, ctx):
+        result = ctx.run_command(["git", "clean", "-ffdx"], cwd=repo_dir)
+        if result.returncode != 0:
+            raise RuntimeError(f"git clean failed:\n{result.stderr.strip() or result.stdout.strip()}")
+        return
+    result = ctx.run_command(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git reset failed:\n{result.stderr.strip() or result.stdout.strip()}")
+
+
+def git_abort_merge(repo_dir, ctx):
+    path = ctx.run_command(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=repo_dir)
+    if path.returncode == 0 and (Path(repo_dir) / path.stdout.strip()).exists():
+        ctx.run_command(["git", "merge", "--abort"], cwd=repo_dir)
+
+
+def git_ensure_head(repo_dir, ctx, details=None):
+    if git_has_head(repo_dir, ctx):
+        return None
+    result = ctx.run_command(
+        [
+            "git",
+            "-c",
+            "user.name=HA Ops",
+            "-c",
+            "user.email=ha-ops@local",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Initialize HA Ops merge base",
+        ],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git empty base commit failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    rev = ctx.run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir)
+    if rev.returncode != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed:\n{rev.stderr.strip()}")
+    commit = rev.stdout.strip()
+    if details is not None:
+        ctx.add_detail(details, f"Created empty HA Ops merge base {commit}.")
+    return commit
+
+
+def git_head_tree_empty(repo_dir, ctx):
+    if not git_has_head(repo_dir, ctx):
+        return True
+    result = ctx.run_command(["git", "ls-tree", "-r", "--name-only", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git ls-tree failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    return not result.stdout.strip()
+
+
+def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
+    add = ctx.run_command(["git", "add", "-A"], cwd=repo_dir)
+    if add.returncode != 0:
+        raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
+
+    storage_paths = []
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        if target.get("type") != "homeassistant":
+            continue
+        try:
+            source_relative = Path(target["source_path"]).relative_to(repo_dir)
+        except ValueError:
+            source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+        storage = repo_dir / source_relative / ".storage"
+        if not storage.exists():
+            continue
+        for name in ctx.storage_allowlist:
+            path = storage / name
+            if path.exists():
+                storage_paths.append(str(path.relative_to(repo_dir)))
+
+    if storage_paths:
+        forced = ctx.run_command(["git", "add", "-f", "--", *storage_paths], cwd=repo_dir)
+        if forced.returncode != 0:
+            raise RuntimeError(f"git add allowlisted .storage failed:\n{forced.stderr.strip()}")
+
+
+def git_status_porcelain(repo_dir, ctx):
+    result = ctx.run_command(["git", "status", "--porcelain"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git status failed:\n{result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def git_commit_if_needed(repo_dir, message, ctx):
+    if not git_status_porcelain(repo_dir, ctx):
+        return None
+    result = ctx.run_command(
+        [
+            "git",
+            "-c",
+            "user.name=HA Ops",
+            "-c",
+            "user.email=ha-ops@local",
+            "commit",
+            "-m",
+            message,
+        ],
+        cwd=repo_dir,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git commit failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    rev = ctx.run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir)
+    if rev.returncode != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed:\n{rev.stderr.strip()}")
+    return rev.stdout.strip()
+
+
+def ensure_live_branch_available(repo_dir, ctx):
+    if not git_checkout_branch_from_best_ref(repo_dir, HA_LIVE_BRANCH, ctx):
+        if git_head_tree_empty(repo_dir, ctx):
+            result = ctx.run_command(["git", "checkout", "-B", HA_LIVE_BRANCH, "HEAD"], cwd=repo_dir)
+            if result.returncode != 0:
+                raise RuntimeError(f"git checkout {HA_LIVE_BRANCH} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+            return
+        raise RuntimeError(
+            f"HA Ops live branch {HA_LIVE_BRANCH} is missing. "
+            "Run an explicit bootstrap before merging HA and Git changes."
+        )
+
+
+def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
+    export_root = build_save_export(resolved_targets, details, ctx)
+    ensure_live_branch_available(repo_dir, ctx)
+    apply_save_export(resolved_targets, export_root, details, ctx)
+    if not include_redundant_data:
+        restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, ctx)
+        normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details, ctx)
+    stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
+    commit = git_commit_if_needed(repo_dir, "Update HA live export", ctx)
+    if commit and details is not None:
+        ctx.add_detail(details, f"Updated {HA_LIVE_BRANCH} at {commit}.")
+    return commit
+
+
+def merge_status_lines(repo_dir, ctx):
+    result = ctx.run_command(["git", "diff", "--name-status", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff --name-status failed:\n{result.stderr.strip()}")
+    labels = {"A": "Added", "M": "Modified", "D": "Deleted", "R": "Renamed", "C": "Copied"}
+    lines = []
+    paths = []
+    for raw in result.stdout.splitlines():
+        if not raw.strip():
+            continue
+        parts = raw.split("\t")
+        status = parts[0]
+        path = parts[-1]
+        label = labels.get(status[:1], "Modified")
+        lines.append(f"- {label}: {path}")
+        paths.append(path)
+    return lines, sorted(set(paths))
+
+
+def merge_diff(repo_dir, ctx):
+    result = ctx.run_command(["git", "diff", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff failed:\n{result.stderr.strip()}")
+    return result.stdout.strip()
+
+
+def merge_diff_normalized(repo_dir, resolved_targets, ctx):
+    result = ctx.run_command(["git", "diff", "--name-only", "HEAD"], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git diff --name-only failed:\n{result.stderr.strip()}")
+    paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not paths:
+        return ""
+
+    repo_dir = Path(repo_dir)
+    diff_root = ctx.work_dir / "save-merge-diff"
+    before_root = diff_root / "before"
+    after_root = diff_root / "after"
+    clear_tree(diff_root, ctx.work_dir, ctx.run_command)
+    for raw_path in paths:
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            continue
+        head = ctx.run_command(["git", "show", f"HEAD:{relative.as_posix()}"], cwd=repo_dir)
+        if head.returncode == 0:
+            before_path = before_root / relative
+            ensure_dir(before_path.parent)
+            before_path.write_text(head.stdout)
+        worktree_path = repo_dir / relative
+        if worktree_path.exists() and worktree_path.is_file():
+            after_path = after_root / relative
+            ensure_dir(after_path.parent)
+            shutil.copy2(worktree_path, after_path)
+
+    normalize_save_preview_diff_files(
+        before_root,
+        after_root,
+        normalized_save_registry_paths(resolved_targets, repo_dir),
+    )
+    return save_preview_diff(before_root, after_root, ctx.run_command)
+
+
+def merge_ha_live_into_git(repo_dir, main_branch, ctx):
+    git_checkout(repo_dir, main_branch, ctx)
+    git_abort_merge(repo_dir, ctx)
+    git_reset_hard(repo_dir, ctx)
+    result = ctx.run_command(["git", "merge", "--no-commit", "--no-ff", HA_LIVE_BRANCH], cwd=repo_dir)
+    conflicts = []
+    if result.returncode != 0:
+        conflict_result = ctx.run_command(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_dir)
+        conflicts = [line.strip() for line in conflict_result.stdout.splitlines() if line.strip()]
+        if not conflicts:
+            raise RuntimeError(f"git merge {HA_LIVE_BRANCH} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    return conflicts
+
+
+def update_base_branch(repo_dir, main_branch, ctx):
+    merge_base = ctx.run_command(["git", "merge-base", main_branch, HA_LIVE_BRANCH], cwd=repo_dir)
+    if merge_base.returncode != 0:
+        return None
+    base = merge_base.stdout.strip()
+    if not base:
+        return None
+    result = ctx.run_command(["git", "branch", "-f", HA_BASE_BRANCH, base], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git branch {HA_BASE_BRANCH} failed:\n{result.stderr.strip()}")
+    return base
+
+
+def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, message, details, ctx):
+    conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+    if conflicts:
+        missing = [path for path in conflicts if (resolutions or {}).get(path) not in {"ha", "git"}]
+        if missing:
+            raise RuntimeError(f"Save merge has unresolved conflict(s): {', '.join(missing)}")
+        for path in conflicts:
+            safe_path = Path(path)
+            if safe_path.is_absolute() or ".." in safe_path.parts:
+                raise RuntimeError("Invalid save preview path")
+            side = "--theirs" if resolutions.get(path) == "ha" else "--ours"
+            checkout = ctx.run_command(["git", "checkout", side, "--", safe_path.as_posix()], cwd=repo_dir)
+            if checkout.returncode != 0:
+                raise RuntimeError(f"git checkout conflict path failed:\n{checkout.stderr.strip()}")
+        if details is not None:
+            ctx.add_detail(details, f"Resolved {len(conflicts)} Save merge conflict(s) from preview decisions.")
+
+    for path, choice in sorted((resolutions or {}).items()):
+        if path in conflicts:
+            continue
+        if choice != "git":
+            continue
+        safe_path = Path(path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise RuntimeError("Invalid save preview path")
+        checkout = ctx.run_command(["git", "checkout", "HEAD", "--", safe_path.as_posix()], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout preview path failed:\n{checkout.stderr.strip()}")
+
+    stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
+    commit = git_commit_if_needed(repo_dir, message, ctx)
+    base = update_base_branch(repo_dir, main_branch, ctx)
+    if base and details is not None:
+        ctx.add_detail(details, f"Updated {HA_BASE_BRANCH} at {base}.")
+    return commit
+
+
 def save_preview_status_lines(repo_dir, preview_repo, include_redundant_data=False):
     repo_dir = Path(repo_dir)
     preview_repo = Path(preview_repo)
@@ -1481,26 +1787,36 @@ def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
 
 
 def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
-    export_root = build_save_export(resolved_targets, details, ctx)
-    preview_repo = ctx.work_dir / "save-to-git-preview"
-    clear_tree(preview_repo, ctx.work_dir, ctx.run_command)
-    sync_tree(repo_dir, preview_repo, True, [".git/"], ctx.run_command)
+    repo_dir = Path(repo_dir)
+    main_branch = git_current_branch(repo_dir, ctx) or "main"
+    try:
+        git_ensure_head(repo_dir, ctx, details)
+        update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data)
+        conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+        update_base_branch(repo_dir, main_branch, ctx)
+        if conflicts:
+            summary = "\n".join([f"Save preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            return {
+                "summary": summary,
+                "diff": summary,
+                "paths": conflicts,
+                "conflicts": conflicts,
+                "fingerprint": fingerprint_text(summary),
+            }
 
-    preview_targets = [repo_relative_target(target, repo_dir, preview_repo) for target in resolved_targets]
-    apply_save_export(preview_targets, export_root, details, ctx)
-    if not include_redundant_data:
-        restore_normalized_equal_save_files(repo_dir, preview_repo, resolved_targets, details, ctx)
-
-    status_lines = save_preview_status_lines(repo_dir, preview_repo, include_redundant_data)
-    paths = save_preview_change_paths(status_lines)
-    summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
-    if not status_lines:
-        diff = ""
-    elif include_redundant_data:
-        diff = save_preview_diff(repo_dir, preview_repo, ctx.run_command)
-    else:
-        diff = save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx)
-    return {"summary": summary, "diff": diff, "paths": paths, "fingerprint": fingerprint_text(diff)}
+        status_lines, paths = merge_status_lines(repo_dir, ctx)
+        summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
+        if not status_lines:
+            diff = ""
+        elif include_redundant_data:
+            diff = merge_diff(repo_dir, ctx)
+        else:
+            diff = merge_diff_normalized(repo_dir, resolved_targets, ctx)
+        return {"summary": summary, "diff": diff, "paths": paths, "fingerprint": fingerprint_text(diff)}
+    finally:
+        git_abort_merge(repo_dir, ctx)
+        git_reset_hard(repo_dir, ctx)
+        git_checkout(repo_dir, main_branch, ctx)
 
 
 def export_target_to_path(target, dest, ctx):
@@ -1905,7 +2221,7 @@ def preview_progress(ctx, details, message):
         ctx.add_detail(details, message)
 
 
-def build_apply_preview(resolved_targets, ctx, details=None):
+def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
     preview_root = ctx.work_dir / "apply-preview"
     baseline_root = ctx.work_dir / "apply-preview-baseline"
     clear_tree(preview_root, ctx.work_dir, ctx.run_command)
@@ -1959,3 +2275,80 @@ def build_apply_preview(resolved_targets, ctx, details=None):
         "warnings": warnings,
         "live_fingerprints": live_fingerprints,
     }
+
+
+def merge_git_into_ha_live(repo_dir, main_branch, ctx):
+    ensure_live_branch_available(repo_dir, ctx)
+    result = ctx.run_command(["git", "merge", "--no-commit", "--no-ff", main_branch], cwd=repo_dir)
+    conflicts = []
+    if result.returncode != 0:
+        conflict_result = ctx.run_command(["git", "diff", "--name-only", "--diff-filter=U"], cwd=repo_dir)
+        conflicts = [line.strip() for line in conflict_result.stdout.splitlines() if line.strip()]
+        if not conflicts:
+            raise RuntimeError(f"git merge {main_branch} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    return conflicts
+
+
+def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx):
+    conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
+    keep_ha = set(keep_ha_paths or [])
+    if conflicts:
+        for path in conflicts:
+            safe_path = Path(path)
+            if safe_path.is_absolute() or ".." in safe_path.parts:
+                raise RuntimeError("Invalid apply preview path")
+            side = "--ours" if path in keep_ha else "--theirs"
+            checkout = ctx.run_command(["git", "checkout", side, "--", safe_path.as_posix()], cwd=repo_dir)
+            if checkout.returncode != 0:
+                raise RuntimeError(f"git checkout conflict path failed:\n{checkout.stderr.strip()}")
+        if details is not None:
+            ctx.add_detail(details, f"Resolved {len(conflicts)} Apply merge conflict(s) from preview decisions.")
+
+    for path in sorted(keep_ha):
+        if path in conflicts:
+            continue
+        safe_path = Path(path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise RuntimeError("Invalid apply preview path")
+        checkout = ctx.run_command(["git", "checkout", "HEAD", "--", safe_path.as_posix()], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout apply preview path failed:\n{checkout.stderr.strip()}")
+
+    stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
+    commit = git_commit_if_needed(repo_dir, message, ctx)
+    base = update_base_branch(repo_dir, main_branch, ctx)
+    if base and details is not None:
+        ctx.add_detail(details, f"Updated {HA_BASE_BRANCH} at {base}.")
+    return commit
+
+
+def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main_branch="main"):
+    if repo_dir is None:
+        return build_apply_preview_from_sources(resolved_targets, ctx, details)
+
+    repo_dir = Path(repo_dir)
+    original_branch = git_current_branch(repo_dir, ctx) or main_branch
+    try:
+        git_ensure_head(repo_dir, ctx, details)
+        update_ha_live_branch(resolved_targets, repo_dir, details, ctx)
+        conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
+        update_base_branch(repo_dir, main_branch, ctx)
+        if conflicts:
+            summary = "\n".join([f"Apply preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            return {
+                "diff": summary,
+                "fingerprint": fingerprint_text(summary),
+                "paths": conflicts,
+                "deletions": 0,
+                "skipped_protected": [],
+                "storage_changes": False,
+                "storage_change_paths": [],
+                "warnings": [],
+                "live_fingerprints": {},
+                "conflicts": conflicts,
+            }
+        return build_apply_preview_from_sources(resolved_targets, ctx, details)
+    finally:
+        git_abort_merge(repo_dir, ctx)
+        git_reset_hard(repo_dir, ctx)
+        git_checkout(repo_dir, original_branch, ctx)

@@ -58,6 +58,18 @@ class ServerTests(unittest.TestCase):
             repo,
         )
 
+    def push_service_branches(self, seed):
+        for branch in ("ha-ops/ha-live", "ha-ops/base"):
+            exists = subprocess.run(
+                ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+                cwd=seed,
+                text=True,
+                capture_output=True,
+            )
+            if exists.returncode != 0:
+                self.git(["branch", branch], seed)
+        self.git(["push", "origin", "ha-ops/ha-live", "ha-ops/base"], seed)
+
     def seed_remote(self, root, file_text="base\n"):
         remote = root / "remote.git"
         seed = root / "seed"
@@ -70,6 +82,7 @@ class ServerTests(unittest.TestCase):
         self.git_commit_all(seed, "base")
         self.git(["remote", "add", "origin", str(remote)], seed)
         self.git(["push", "-u", "origin", "main"], seed)
+        self.push_service_branches(seed)
         return remote
 
     def remote_file(self, remote, path):
@@ -1150,6 +1163,11 @@ class ServerTests(unittest.TestCase):
             (live_storage / "core.device_registry").write_text(
                 json.dumps({"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}})
             )
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            self.git_commit_all(repo, "base")
+            self.git(["branch", "ha-ops/ha-live"], repo)
+            self.git(["branch", "ha-ops/base"], repo)
             details = []
 
             preview = server.sync_logic.build_save_preview(
@@ -1195,6 +1213,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             live_storage = server.CONFIG_DIR / ".storage"
             live_storage.mkdir(parents=True)
@@ -1537,6 +1556,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             live_storage = server.CONFIG_DIR / ".storage"
             live_storage.mkdir(parents=True)
@@ -1695,6 +1715,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             live_storage = server.CONFIG_DIR / ".storage"
             live_storage.mkdir(parents=True)
@@ -1719,6 +1740,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             saved = json.loads(self.remote_file(remote, "homeassistant/.storage/core.device_registry"))
 
@@ -2732,11 +2754,12 @@ class ServerTests(unittest.TestCase):
                 )
             )
             server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             state = server.read_state()
             details = "\n".join(server.read_state()["last_details"])
-            self.assertIn("Git changes prepared for commit (1):", details)
-            self.assertIn("- Added: homeassistant/configuration.yaml", details)
+            self.assertIn("Created commit", details)
+            self.assertIn("Pushed to origin/main.", details)
             self.assertEqual(state["last_message"], "Save finished successfully and pushed to Git.")
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
@@ -2792,6 +2815,7 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
             server.set_homeassistant_organizer_enabled(True)
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
@@ -2831,6 +2855,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
             (server.CONFIG_DIR / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
@@ -2860,8 +2885,8 @@ class ServerTests(unittest.TestCase):
 
             self.assertNotIn("lighting-contract.md", state["last_save_preview"])
             self.assertNotIn("lighting-contract.md", state["last_save_diff"])
-            preview_doc = server.WORK_DIR / "save-to-git-preview" / "homeassistant" / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md"
-            self.assertEqual(preview_doc.read_text(), "# Contract\n")
+            repo_doc = server.DATA_DIR / "ha-config" / "homeassistant" / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md"
+            self.assertEqual(repo_doc.read_text(), "# Contract\n")
 
     def test_save_unknown_base_blocks_same_file_difference(self):
         server = load_server()
@@ -2885,29 +2910,21 @@ class ServerTests(unittest.TestCase):
 
             self.assertFalse(server.run_save_job())
             state = server.read_state()
-            self.assertEqual(state["last_status"], "conflicts")
-            self.assertEqual(state["conflict_type"], "save_unknown_base")
-            self.assertEqual(state["conflicts"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(state["last_status"], "warning")
+            self.assertIn("State changed since this preview was created", state["last_message"])
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
             details = "\n".join(state["last_details"])
             self.assertIn("Save export candidates for homeassistant (1):", details)
             self.assertIn("- homeassistant/configuration.yaml", details)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
             page = server.render_page()
-            self.assertIn('<div class="badge conflicts">conflicts</div>', page)
+            self.assertIn('<div class="badge ">warning</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
-            self.assertIn("Git: homeassistant/configuration.yaml", page)
-            self.assertIn("HA: homeassistant/configuration.yaml", page)
-            self.assertIn("diff-changed", page)
+            self.assertIn("Save Preview", page)
+            self.assertIn("Confirm Save to Git", page)
+            self.assertIn("homeassistant/configuration.yaml", page)
             self.assertIn("git", page)
             self.assertIn("ha", page)
-
-            state["last_save_preview"] = "Save preview changes (1):\n- Modified: homeassistant/configuration.yaml"
-            state["last_save_diff"] = "--- Git\n+++ HA\n@@ -1 +1 @@\n-git\n+ha"
-            state["last_save_diff_generated_at"] = "2026-05-20T23:00:00+02:00"
-            server.write_state(state)
-            page = server.render_page()
-            self.assertIn("<h2>Git Conflicts</h2>", page)
-            self.assertNotIn("<h2>Save Preview</h2>", page)
 
     def test_save_preview_save_all_uses_preview_approval(self):
         server = load_server()
@@ -2933,7 +2950,7 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
             page = server.render_page()
-            self.assertIn("Save all changes to Git", page)
+            self.assertIn("Confirm Save to Git", page)
             self.assertIn("homeassistant/configuration.yaml", page)
 
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
@@ -2957,6 +2974,9 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.git(["branch", "ha-ops/ha-live"], seed)
+            self.git(["branch", "ha-ops/base"], seed)
+            self.git(["push", "origin", "ha-ops/ha-live", "ha-ops/base"], seed)
             (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
             (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
             server.OPTIONS_PATH.write_text(
@@ -2985,6 +3005,71 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
+
+    def test_ha_to_git_merge_preserves_git_only_battery_attention_addition(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            battery = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
+            battery.parent.mkdir(parents=True)
+            battery.write_text("battery_attention_scan:\n  alias: battery_attention_scan\n")
+            self.git_commit_all(updater, "add battery attention")
+            self.git(["push", "origin", "main"], updater)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(server.read_state()["last_save_preview"], "No Save changes.")
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertEqual(
+                self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"),
+                "battery_attention_scan:\n  alias: battery_attention_scan\n",
+            )
+
+    def test_save_without_matching_preview_rebuilds_preview_and_warns(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertFalse(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "warning")
+            self.assertIn("State changed since this preview was created", state["last_message"])
+            self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
     def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
         server = load_server()
@@ -3044,12 +3129,11 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertFalse(server.run_save_job())
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             page = server.render_page()
-            self.assertIn("Git: homeassistant/.storage/core.device_registry", page)
-            self.assertIn("HA: homeassistant/.storage/core.device_registry", page)
+            self.assertIn("Save Preview", page)
+            self.assertIn("homeassistant/.storage/core.device_registry", page)
             self.assertNotIn("sw_version", page)
-            self.assertIn("diff-changed", page)
             self.assertNotIn("modified_at", page)
             self.assertNotIn("git-modified-at", page)
             self.assertNotIn("live-modified-at", page)
@@ -3119,15 +3203,11 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertFalse(server.run_save_job())
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             page = server.render_page()
-            self.assertIn("Git: homeassistant/.storage/core.entity_registry", page)
-            self.assertIn("HA: homeassistant/.storage/core.entity_registry", page)
-            self.assertIn("original_name", page)
-            self.assertIn("Git", page)
-            self.assertIn("Live", page)
+            self.assertIn("Save Preview", page)
+            self.assertIn("homeassistant/.storage/core.entity_registry", page)
             self.assertNotIn("supported_features", page)
-            self.assertIn("diff-changed", page)
             self.assertNotIn("modified_at", page)
             self.assertNotIn("suggested_object_id", page)
             self.assertNotIn("git_object", page)
@@ -3153,11 +3233,10 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertFalse(server.run_save_job())
-            message = server.resolve_git_conflict("homeassistant/configuration.yaml", "git")
-            self.assertIn("Run Save HA to Git again", message)
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertIn("Save export candidates for homeassistant (1):", "\n".join(server.read_state()["last_details"]))
-            self.assertTrue(server.run_save_job())
+            server.write_state({"save_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
     def test_save_unknown_base_use_ha_overwrites_git_version(self):
@@ -3180,10 +3259,9 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertFalse(server.run_save_job())
-            message = server.resolve_git_conflict("homeassistant/configuration.yaml", "ha")
-            self.assertIn("Run Save HA to Git again", message)
-            self.assertTrue(server.run_save_job())
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state({"save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
 
     def test_save_unknown_base_allows_same_file_same_content(self):
@@ -3206,6 +3284,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             state = server.read_state()
             self.assertEqual(state["conflicts"], [])
@@ -3291,6 +3370,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / ".storage").mkdir()
             (server.CONFIG_DIR / ".storage" / "core.config_entries").write_text(
@@ -3338,6 +3418,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "homeassistant/.storage/input_boolean"), "safe\n")
             projection = json.loads(self.remote_file(remote, "homeassistant/.storage_managed/core.config_entries.json"))
@@ -3377,6 +3458,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
             (server.CONFIG_DIR / "packages").mkdir()
@@ -3402,6 +3484,7 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
@@ -3797,6 +3880,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
@@ -3823,6 +3907,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
@@ -3853,6 +3938,7 @@ class ServerTests(unittest.TestCase):
                 )
             )
             server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             original_push_branch = server.push_branch
             calls = {"count": 0}
 
@@ -3899,6 +3985,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "manifest")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
             addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
@@ -3918,6 +4005,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
@@ -3937,6 +4025,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "scaffold addon")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             addon_live = server.ADDON_CONFIGS_DIR / "local_zigbee2mqtt"
             addon_live.mkdir()
@@ -3955,6 +4044,7 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
 
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
@@ -4352,6 +4442,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
             (server.CONFIG_DIR / ".storage").mkdir(parents=True)
             (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
             server.OPTIONS_PATH.write_text(
@@ -4378,7 +4469,7 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertTrue(state["last_preview_storage_changes"])
             page = server.render_page()
-            self.assertIn("Apply all changes to HA", page)
+            self.assertIn("Confirm Apply to HA", page)
             self.assertIn("homeassistant/.storage/input_boolean", page)
 
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
@@ -4400,6 +4491,9 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.git(["branch", "ha-ops/ha-live"], seed)
+            self.git(["branch", "ha-ops/base"], seed)
+            self.git(["push", "origin", "ha-ops/ha-live", "ha-ops/base"], seed)
             (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
             (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
             server.OPTIONS_PATH.write_text(
@@ -4439,6 +4533,38 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
             self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), "git-automations\n")
 
+    def test_apply_without_matching_preview_rebuilds_preview_and_warns(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertFalse(server.run_apply_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "warning")
+            self.assertIn("State changed since this preview was created", state["last_message"])
+            self.assertIn("git", state["last_diff"])
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha\n")
+
     def test_approved_apply_preserves_live_registry_hidden_fields(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4470,6 +4596,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             live_storage = server.CONFIG_DIR / ".storage"
             live_storage.mkdir(parents=True)
@@ -4831,6 +4958,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / ".storage").mkdir(parents=True)
             (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
@@ -4882,6 +5010,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
             server.OPTIONS_PATH.write_text(
@@ -4928,6 +5057,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(seed, "base")
             self.git(["remote", "add", "origin", str(remote)], seed)
             self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
 
             (server.CONFIG_DIR / ".storage").mkdir(parents=True)
             (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
@@ -5084,11 +5214,9 @@ class ServerTests(unittest.TestCase):
 
             ha_to_git_section = page.index("<h2>HA to Git</h2>")
             ha_to_git = page.index('action="save-preview"')
-            save = page.index('action="save"')
             include_redundant = page.index("action='include-redundant-data'")
             git_to_ha_section = page.index("<h2>Git to HA</h2>")
             git_to_ha = page.index('action="preview"')
-            apply = page.index('action="apply"')
             deleted_section = page.index("<h2>Deleted Devices</h2>")
             deleted = page.index('action="deleted-devices-preview"')
             retained_section = page.index("<h2>Retained Devices</h2>")
@@ -5096,12 +5224,10 @@ class ServerTests(unittest.TestCase):
             internal_ids_section = page.index("<h2>Actions IDs</h2>")
             internal_ids = page.index('action="internal-ids-preview"')
             self.assertLess(ha_to_git_section, ha_to_git)
-            self.assertLess(ha_to_git, save)
-            self.assertLess(save, include_redundant)
+            self.assertLess(ha_to_git, include_redundant)
             self.assertLess(include_redundant, git_to_ha_section)
             self.assertLess(git_to_ha_section, git_to_ha)
-            self.assertLess(git_to_ha, apply)
-            self.assertLess(apply, deleted_section)
+            self.assertLess(git_to_ha, deleted_section)
             self.assertLess(deleted_section, deleted)
             self.assertLess(deleted, retained_section)
             self.assertLess(retained_section, retained)
@@ -5109,8 +5235,8 @@ class ServerTests(unittest.TestCase):
             self.assertLess(internal_ids_section, internal_ids)
             self.assertIn('<div class="action-row">', page)
             self.assertIn('<section class="action-section">', page)
-            self.assertIn('<button type="submit" >Save HA to Git</button>', page)
-            self.assertIn('<button type="submit" >Apply Git to HA</button>', page)
+            self.assertNotIn('<button type="submit" >Save HA to Git</button>', page)
+            self.assertNotIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn("Check deleted_devices", page)
             self.assertIn("Check actions IDs", page)
             self.assertIn("Previews deleted device registry entries.", page)
@@ -6601,9 +6727,9 @@ devices:
 
             page = server.render_page()
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview HA to Git</button>", page)
-            self.assertIn("<button type=\"submit\" disabled>Save HA to Git</button>", page)
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", page)
-            self.assertIn("<button type=\"submit\" disabled>Apply Git to HA</button>", page)
+            self.assertNotIn("Save HA to Git</button>", page)
+            self.assertNotIn("Apply Git to HA</button>", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
 
