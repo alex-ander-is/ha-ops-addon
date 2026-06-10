@@ -3149,6 +3149,89 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.repo_status(repo), "")
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
+    def test_save_preview_conflict_rejects_stale_live_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha1\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha2\n")
+            server.write_state({"save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+
+            self.assertFalse(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "warning")
+            self.assertIn("State changed since this preview was created", state["last_message"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+    def test_save_preview_modify_delete_conflict_can_keep_git_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            package = seed / "homeassistant" / "packages" / "a.yaml"
+            package.parent.mkdir(parents=True)
+            package.write_text("base\n")
+            self.git_commit_all(seed, "base package")
+            self.git(["push", "origin", "main"], seed)
+            self.git(["branch", "-f", "ha-ops/ha-live", "HEAD"], seed)
+            self.git(["branch", "-f", "ha-ops/base", "HEAD"], seed)
+            self.push_service_branches(seed)
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "packages" / "a.yaml").unlink()
+            self.git_commit_all(updater, "delete config")
+            self.git(["push", "origin", "main"], updater)
+            live_package = server.CONFIG_DIR / "packages" / "a.yaml"
+            live_package.parent.mkdir(parents=True)
+            live_package.write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state({"save_preview_resolutions": {"homeassistant/packages/a.yaml": "git"}})
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "show", "main:homeassistant/packages/a.yaml"],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
     def test_save_unknown_base_registry_conflict_diff_hides_noise(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4776,6 +4859,53 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((live_storage / "core.device_registry").read_text(), "git-storage\n")
+
+    def test_apply_preview_modify_delete_conflict_can_apply_git_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            package = seed / "homeassistant" / "packages" / "a.yaml"
+            package.parent.mkdir(parents=True)
+            package.write_text("base\n")
+            self.git_commit_all(seed, "base package")
+            self.git(["push", "origin", "main"], seed)
+            self.git(["branch", "-f", "ha-ops/ha-live", "HEAD"], seed)
+            self.git(["branch", "-f", "ha-ops/base", "HEAD"], seed)
+            self.push_service_branches(seed)
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "packages" / "a.yaml").unlink()
+            self.git_commit_all(updater, "delete config")
+            self.git(["push", "origin", "main"], updater)
+            live_package = server.CONFIG_DIR / "packages" / "a.yaml"
+            live_package.parent.mkdir(parents=True)
+            live_package.write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            server.write_state({"apply_preview_resolutions": {"homeassistant/packages/a.yaml": "git"}})
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            self.assertFalse(live_package.exists())
 
     def test_apply_without_matching_preview_rebuilds_preview_and_warns(self):
         server = load_server()

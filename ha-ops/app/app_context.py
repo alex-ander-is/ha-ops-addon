@@ -460,6 +460,16 @@ class AppContext:
             self.sync_deps(),
         )
 
+    def delete_apply_conflict_live_deletions(self, resolved_targets, repo_dir, main_branch, resolutions, details):
+        return sync_logic.delete_apply_conflict_live_deletions(
+            resolved_targets,
+            repo_dir,
+            main_branch,
+            resolutions,
+            details,
+            self.sync_deps(),
+        )
+
     def build_apply_preview(self, resolved_targets, details=None, repo_dir=None, main_branch="main"):
         return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details, repo_dir, main_branch)
 
@@ -734,6 +744,7 @@ class AppContext:
             clear_retained_discovery_topic=self.clear_retained_discovery_topic,
             commit_if_needed=self.commit_if_needed,
             commit_apply_merge=self.commit_apply_merge,
+            delete_apply_conflict_live_deletions=self.delete_apply_conflict_live_deletions,
             commit_save_merge=self.commit_save_merge,
             core_start=self.core_start,
             core_stop=self.core_stop,

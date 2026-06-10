@@ -18,6 +18,7 @@ class JobContext:
     clear_retained_discovery_topic: Any
     commit_if_needed: Any
     commit_apply_merge: Any
+    delete_apply_conflict_live_deletions: Any
     core_start: Any
     core_stop: Any
     create_deleted_devices_rollback: Any
@@ -1476,6 +1477,8 @@ def run_apply_job(ctx):
 
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
+        if conflict_preview:
+            ctx.delete_apply_conflict_live_deletions(resolved_targets, repo_dir, branch, apply_resolutions, details)
         if not conflict_preview:
             apply_commit = ctx.commit_apply_merge(
                 repo_dir,

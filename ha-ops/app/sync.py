@@ -1538,6 +1538,65 @@ def update_base_branch(repo_dir, main_branch, ctx):
     return base
 
 
+def git_conflict_stage_exists(repo_dir, stage, path, ctx):
+    result = ctx.run_command(["git", "cat-file", "-e", f":{stage}:{path}"], cwd=repo_dir)
+    return result.returncode == 0
+
+
+def git_ref_path_exists(repo_dir, ref, path, ctx):
+    result = ctx.run_command(["git", "cat-file", "-e", f"{ref}:{path}"], cwd=repo_dir)
+    return result.returncode == 0
+
+
+def git_resolve_conflict_path(repo_dir, path, stage, ctx):
+    safe_path = Path(path)
+    if safe_path.is_absolute() or ".." in safe_path.parts:
+        raise RuntimeError("Invalid preview path")
+    path_text = safe_path.as_posix()
+    if git_conflict_stage_exists(repo_dir, stage, path_text, ctx):
+        checkout = ctx.run_command(["git", "checkout-index", "-f", f"--stage={stage}", "--", path_text], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout conflict path failed:\n{checkout.stderr.strip()}")
+        add = ctx.run_command(["git", "add", "--", path_text], cwd=repo_dir)
+        if add.returncode != 0:
+            raise RuntimeError(f"git add conflict path failed:\n{add.stderr.strip()}")
+        return
+    remove = ctx.run_command(["git", "rm", "-f", "--ignore-unmatch", "--", path_text], cwd=repo_dir)
+    if remove.returncode != 0:
+        raise RuntimeError(f"git rm conflict path failed:\n{remove.stderr.strip()}")
+
+
+def git_restore_path_from_ref(repo_dir, ref, path, ctx):
+    safe_path = Path(path)
+    if safe_path.is_absolute() or ".." in safe_path.parts:
+        raise RuntimeError("Invalid preview path")
+    path_text = safe_path.as_posix()
+    if git_ref_path_exists(repo_dir, ref, path_text, ctx):
+        checkout = ctx.run_command(["git", "checkout", ref, "--", path_text], cwd=repo_dir)
+        if checkout.returncode != 0:
+            raise RuntimeError(f"git checkout preview path failed:\n{checkout.stderr.strip()}")
+        return
+    remove = ctx.run_command(["git", "rm", "-f", "--ignore-unmatch", "--", path_text], cwd=repo_dir)
+    if remove.returncode != 0:
+        raise RuntimeError(f"git rm preview path failed:\n{remove.stderr.strip()}")
+
+
+def git_stage_text(repo_dir, stage, path, ctx):
+    result = ctx.run_command(["git", "show", f":{stage}:{path}"], cwd=repo_dir)
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def conflict_fingerprint(conflicts, repo_dir, ctx):
+    chunks = []
+    for path in sorted(conflicts):
+        chunks.append(f"path:{path}")
+        chunks.append(f"stage2:{git_stage_text(repo_dir, 2, path, ctx)}")
+        chunks.append(f"stage3:{git_stage_text(repo_dir, 3, path, ctx)}")
+    return fingerprint_text("\n".join(chunks))
+
+
 def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, message, details, ctx):
     conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
     if conflicts:
@@ -1545,13 +1604,8 @@ def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, mess
         if missing:
             raise RuntimeError(f"Save merge has unresolved conflict(s): {', '.join(missing)}")
         for path in conflicts:
-            safe_path = Path(path)
-            if safe_path.is_absolute() or ".." in safe_path.parts:
-                raise RuntimeError("Invalid save preview path")
-            side = "--theirs" if resolutions.get(path) == "ha" else "--ours"
-            checkout = ctx.run_command(["git", "checkout", side, "--", safe_path.as_posix()], cwd=repo_dir)
-            if checkout.returncode != 0:
-                raise RuntimeError(f"git checkout conflict path failed:\n{checkout.stderr.strip()}")
+            stage = 3 if resolutions.get(path) == "ha" else 2
+            git_resolve_conflict_path(repo_dir, path, stage, ctx)
         if details is not None:
             ctx.add_detail(details, f"Resolved {len(conflicts)} Save merge conflict(s) from preview decisions.")
 
@@ -1560,12 +1614,7 @@ def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, mess
             continue
         if choice != "git":
             continue
-        safe_path = Path(path)
-        if safe_path.is_absolute() or ".." in safe_path.parts:
-            raise RuntimeError("Invalid save preview path")
-        checkout = ctx.run_command(["git", "checkout", "HEAD", "--", safe_path.as_posix()], cwd=repo_dir)
-        if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout preview path failed:\n{checkout.stderr.strip()}")
+        git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
 
     stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
     commit = git_commit_if_needed(repo_dir, message, ctx)
@@ -1803,7 +1852,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
                 "diff": summary,
                 "paths": conflicts,
                 "conflicts": conflicts,
-                "fingerprint": fingerprint_text(summary),
+                "fingerprint": conflict_fingerprint(conflicts, repo_dir, ctx),
             }
 
         status_lines, paths = merge_status_lines(repo_dir, ctx)
@@ -2292,22 +2341,6 @@ def merge_git_into_ha_live(repo_dir, main_branch, ctx):
     return conflicts
 
 
-def git_stage_text(repo_dir, stage, path, ctx):
-    result = ctx.run_command(["git", "show", f":{stage}:{path}"], cwd=repo_dir)
-    if result.returncode != 0:
-        return ""
-    return result.stdout
-
-
-def conflict_fingerprint(conflicts, repo_dir, ctx):
-    chunks = []
-    for path in sorted(conflicts):
-        chunks.append(f"path:{path}")
-        chunks.append(f"ha:{git_stage_text(repo_dir, 2, path, ctx)}")
-        chunks.append(f"git:{git_stage_text(repo_dir, 3, path, ctx)}")
-    return fingerprint_text("\n".join(chunks))
-
-
 def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
     repo_dir = Path(repo_dir)
     paths = []
@@ -2330,30 +2363,49 @@ def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
     return sorted(set(paths))
 
 
+def delete_apply_conflict_live_deletions(resolved_targets, repo_dir, main_branch, resolutions, details, ctx):
+    deleted = []
+    repo_dir = Path(repo_dir)
+    for path, choice in sorted((resolutions or {}).items()):
+        safe_path = Path(path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise RuntimeError("Invalid apply preview path")
+        path_text = safe_path.as_posix()
+        if choice != "git" or git_ref_path_exists(repo_dir, main_branch, path_text, ctx):
+            continue
+        for target in resolved_targets:
+            try:
+                source_relative = Path(target["source_path"]).relative_to(repo_dir)
+            except ValueError:
+                source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+            try:
+                live_relative = safe_path.relative_to(source_relative)
+            except ValueError:
+                continue
+            live_path = Path(target["live_path"]) / live_relative
+            if live_path.exists() or live_path.is_symlink():
+                safe_remove_path(live_path)
+                deleted.append(f"{target['id']}/{live_relative.as_posix()}")
+            break
+    if deleted and details is not None:
+        ctx.add_detail(details, f"Removed {len(deleted)} live file(s) selected as Git deletions.")
+    return deleted
+
+
 def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx):
     conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
     keep_ha = set(keep_ha_paths or [])
     if conflicts:
         for path in conflicts:
-            safe_path = Path(path)
-            if safe_path.is_absolute() or ".." in safe_path.parts:
-                raise RuntimeError("Invalid apply preview path")
-            side = "--ours" if path in keep_ha else "--theirs"
-            checkout = ctx.run_command(["git", "checkout", side, "--", safe_path.as_posix()], cwd=repo_dir)
-            if checkout.returncode != 0:
-                raise RuntimeError(f"git checkout conflict path failed:\n{checkout.stderr.strip()}")
+            stage = 2 if path in keep_ha else 3
+            git_resolve_conflict_path(repo_dir, path, stage, ctx)
         if details is not None:
             ctx.add_detail(details, f"Resolved {len(conflicts)} Apply merge conflict(s) from preview decisions.")
 
     for path in sorted(keep_ha):
         if path in conflicts:
             continue
-        safe_path = Path(path)
-        if safe_path.is_absolute() or ".." in safe_path.parts:
-            raise RuntimeError("Invalid apply preview path")
-        checkout = ctx.run_command(["git", "checkout", "HEAD", "--", safe_path.as_posix()], cwd=repo_dir)
-        if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout apply preview path failed:\n{checkout.stderr.strip()}")
+        git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
 
     stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
     commit = git_commit_if_needed(repo_dir, message, ctx)

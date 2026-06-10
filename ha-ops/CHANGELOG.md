@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.3
+
+- Reject stale HA to Git conflict previews when live Home Assistant content changes after preview.
+- Resolve modify/delete merge conflicts when the selected side deleted the file.
+
 ## 0.8.2
 
 - Reject stale Git to HA conflict previews when live Home Assistant changes after preview.
