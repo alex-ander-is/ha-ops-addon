@@ -1452,6 +1452,8 @@ def run_apply_job(ctx):
             ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview file decision(s).")
         elif conflict_preview:
             ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview conflict decision(s).")
+            if preview.get("storage_changes"):
+                resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
 

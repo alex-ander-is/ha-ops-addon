@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.2
+
+- Reject stale Git to HA conflict previews when live Home Assistant changes after preview.
+- Apply confirmed protected .storage merge conflicts instead of reporting success after skipping them.
+
 ## 0.8.1
 
 - Bootstrap HA Ops service branches for existing repositories that only have the configured Git branch.

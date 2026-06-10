@@ -1296,10 +1296,10 @@ def git_checkout(repo_dir, ref, ctx):
 def git_checkout_branch_from_best_ref(repo_dir, branch, ctx):
     remote_ref = f"refs/remotes/origin/{branch}"
     local_ref = f"refs/heads/{branch}"
-    if git_ref_exists(repo_dir, remote_ref, ctx):
-        result = ctx.run_command(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=repo_dir)
-    elif git_ref_exists(repo_dir, local_ref, ctx):
+    if git_ref_exists(repo_dir, local_ref, ctx):
         result = ctx.run_command(["git", "checkout", branch], cwd=repo_dir)
+    elif git_ref_exists(repo_dir, remote_ref, ctx):
+        result = ctx.run_command(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=repo_dir)
     else:
         return False
     if result.returncode != 0:
@@ -2292,6 +2292,44 @@ def merge_git_into_ha_live(repo_dir, main_branch, ctx):
     return conflicts
 
 
+def git_stage_text(repo_dir, stage, path, ctx):
+    result = ctx.run_command(["git", "show", f":{stage}:{path}"], cwd=repo_dir)
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def conflict_fingerprint(conflicts, repo_dir, ctx):
+    chunks = []
+    for path in sorted(conflicts):
+        chunks.append(f"path:{path}")
+        chunks.append(f"ha:{git_stage_text(repo_dir, 2, path, ctx)}")
+        chunks.append(f"git:{git_stage_text(repo_dir, 3, path, ctx)}")
+    return fingerprint_text("\n".join(chunks))
+
+
+def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
+    repo_dir = Path(repo_dir)
+    paths = []
+    for target in resolved_targets:
+        if target.get("type") != "homeassistant":
+            continue
+        try:
+            source_relative = Path(target["source_path"]).relative_to(repo_dir)
+        except ValueError:
+            source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+        storage_prefix = source_relative / ".storage"
+        for path in conflicts:
+            relative = Path(path)
+            try:
+                storage_relative = relative.relative_to(storage_prefix)
+            except ValueError:
+                continue
+            if len(storage_relative.parts) == 1:
+                paths.append(f"{target['id']}/.storage/{storage_relative.as_posix()}")
+    return sorted(set(paths))
+
+
 def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx):
     conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
     keep_ha = set(keep_ha_paths or [])
@@ -2338,16 +2376,17 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
             summary = "\n".join([f"Apply preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            storage_change_paths = conflict_storage_change_paths(conflicts, resolved_targets, repo_dir)
             return {
                 "diff": summary,
-                "fingerprint": fingerprint_text(summary),
+                "fingerprint": conflict_fingerprint(conflicts, repo_dir, ctx),
                 "paths": conflicts,
                 "deletions": 0,
                 "skipped_protected": [],
-                "storage_changes": False,
-                "storage_change_paths": [],
+                "storage_changes": bool(storage_change_paths),
+                "storage_change_paths": storage_change_paths,
                 "warnings": [],
-                "live_fingerprints": {},
+                "live_fingerprints": {"ha-ops/ha-live-conflicts": conflict_fingerprint(conflicts, repo_dir, ctx)},
                 "conflicts": conflicts,
             }
         git_checkout(repo_dir, main_branch, ctx)
