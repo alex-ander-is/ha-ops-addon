@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.7
+
+- Default unresolved non-conflict Apply preview paths to Git when another path is explicitly kept from HA.
+
 ## 0.8.6
 
 - Document the HA Ops 0.8 service-branch merge contract for future code reviews.

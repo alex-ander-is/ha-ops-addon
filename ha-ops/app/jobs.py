@@ -110,9 +110,6 @@ def apply_preview_resolutions_for_current_preview(state, preview):
             raise RuntimeError(f"Choose HA or Git version for {len(missing)} Apply Preview conflict file(s) before applying.")
         return {path: stored[path] for path in paths}
     if stored:
-        missing = [path for path in paths if path not in stored]
-        if missing:
-            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Apply Preview file(s) before applying.")
         return {path: stored.get(path, "git") for path in paths}
     return {path: "git" for path in paths}
 

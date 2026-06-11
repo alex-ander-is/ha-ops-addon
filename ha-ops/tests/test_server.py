@@ -4740,7 +4740,6 @@ class ServerTests(unittest.TestCase):
                 {
                     "apply_preview_resolutions": {
                         "homeassistant/configuration.yaml": "ha",
-                        "homeassistant/automations.yaml": "git",
                     }
                 }
             )
