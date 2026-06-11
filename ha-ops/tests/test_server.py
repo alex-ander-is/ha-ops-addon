@@ -3223,7 +3223,13 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            page = server.render_page()
+            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
+            self.assertFalse(server.run_save_job())
+            self.assertIn("Choose HA or Git version", server.read_state()["last_message"])
             server.write_state({"save_preview_resolutions": {"homeassistant/packages/a.yaml": "git"}})
+            page = server.render_page()
+            self.assertIn("<button type='submit'>Confirm Save to Git</button>", page)
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "show", "main:homeassistant/packages/a.yaml"],
@@ -4806,7 +4812,13 @@ class ServerTests(unittest.TestCase):
             server.core_start = lambda: None
 
             self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            page = server.render_page()
+            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
+            self.assertFalse(server.run_apply_job())
+            self.assertIn("Choose HA or Git version", server.read_state()["last_message"])
             server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
+            page = server.render_page()
+            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
 

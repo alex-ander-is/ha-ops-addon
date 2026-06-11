@@ -224,12 +224,14 @@ def render_conflicts(conflicts, conflict_type=None):
     )
 
 
-def render_preview_decisions(paths, resolutions, direction):
+def render_preview_decisions(paths, resolutions, direction, require_all=False):
     if not paths:
         return ""
     action_label = "Confirm Save to Git" if direction == "save" else "Confirm Apply to HA"
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
     all_action = "save" if direction == "save" else "apply"
+    missing = [path for path in paths if path not in resolutions]
+    confirm_disabled = " disabled" if require_all and missing else ""
     rows = []
     for path in paths:
         choice = resolutions.get(path)
@@ -255,7 +257,7 @@ def render_preview_decisions(paths, resolutions, direction):
         "<div class='preview-decisions'>"
         "<div class='action-row'>"
         f"<form method='post' action='{all_action}' data-async-form='true'>"
-        f"<button type='submit'>{action_label}</button>"
+        f"<button type='submit'{confirm_disabled}>{action_label}</button>"
         "</form>"
         "</div>"
         "<div class='table-scroll'>"

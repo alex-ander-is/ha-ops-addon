@@ -287,10 +287,12 @@ def render_page(ctx):
     preview_warnings = [str(item) for item in (state.get("last_preview_warnings") or []) if str(item)]
     apply_preview_paths = [str(item) for item in (state.get("last_preview_paths") or []) if str(item)]
     apply_preview_resolutions = dict(state.get("apply_preview_resolutions") or {})
+    apply_preview_conflicts = bool(state.get("last_preview_conflicts"))
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
     save_preview_paths = [str(item) for item in (state.get("last_save_preview_paths") or []) if str(item)]
     save_preview_resolutions = dict(state.get("save_preview_resolutions") or {})
+    save_preview_conflicts = bool(state.get("last_save_preview_conflicts"))
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
@@ -390,7 +392,7 @@ def render_page(ctx):
             f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
             "</p>"
             f"{apply_preview_warnings_html}"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply')}"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts)}"
             f"<div data-transient='apply-preview'>{ui.render_conflict_detail(diff_text) if diff_text else ''}</div>"
             "</section>"
         )
@@ -402,7 +404,7 @@ def render_page(ctx):
             "<p>Generated at "
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save')}"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts)}"
             f"<div data-transient='save-preview'>{save_details_html}</div>"
             "</section>"
         )
@@ -680,6 +682,7 @@ def create_handler(ctx):
                         raise RuntimeError("Invalid preview choice")
                     paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
                     resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
+                    conflicts_key = "last_save_preview_conflicts" if direction == "save" else "last_preview_conflicts"
                     paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
                     if safe_path not in paths:
                         raise RuntimeError("Preview path is not pending")
@@ -695,11 +698,11 @@ def create_handler(ctx):
                             "last_message": (
                                 f"Resolved {safe_path}. {len(remaining)} preview file decision(s) remain."
                                 if remaining
-                                else f"Resolved all {direction} preview files. Starting {'Save HA to Git' if direction == 'save' else 'Apply Git to HA'}."
+                                else f"Resolved all {direction} preview files. Confirm is enabled."
                             ),
                         }
                     )
-                    if not remaining:
+                    if not remaining and not state.get(conflicts_key):
                         start_background(ctx.run_save_job if direction == "save" else ctx.run_apply_job)
                     if self.wants_json():
                         self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})

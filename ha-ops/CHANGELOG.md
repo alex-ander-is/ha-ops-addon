@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.5
+
+- Require explicit HA/Git choices for every conflict preview file before Save or Apply can be confirmed.
+
 ## 0.8.4
 
 - Refresh local HA Ops service branches from origin before rebuilding live previews.

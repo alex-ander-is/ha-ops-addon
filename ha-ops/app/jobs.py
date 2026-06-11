@@ -87,6 +87,11 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
         return dict(state.get("save_conflict_resolutions", {}))
 
     stored = dict(state.get("save_preview_resolutions", {}))
+    if preview.get("conflicts"):
+        missing = [path for path in paths if path not in stored]
+        if missing:
+            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Save Preview conflict file(s) before saving.")
+        return {path: stored[path] for path in paths}
     if stored:
         return {path: stored.get(path, "ha") for path in paths}
     return {path: "ha" for path in paths}
@@ -99,6 +104,11 @@ def preview_changed_message():
 def apply_preview_resolutions_for_current_preview(state, preview):
     paths = list(preview.get("paths") or [])
     stored = dict(state.get("apply_preview_resolutions", {}))
+    if preview.get("conflicts"):
+        missing = [path for path in paths if path not in stored]
+        if missing:
+            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Apply Preview conflict file(s) before applying.")
+        return {path: stored[path] for path in paths}
     if stored:
         missing = [path for path in paths if path not in stored]
         if missing:
@@ -366,6 +376,7 @@ def run_save_job(ctx):
                     "last_save_preview_commit": commit,
                     "last_save_preview_fingerprint": current_preview["fingerprint"],
                     "last_save_preview_paths": current_preview.get("paths", []),
+                    "last_save_preview_conflicts": bool(current_preview.get("conflicts")),
                     "save_preview_resolutions": {},
                     "post_apply_save_recommended": False,
                 }
@@ -545,6 +556,7 @@ def run_save_preview_job(ctx):
                 "last_save_preview_commit": commit,
                 "last_save_preview_fingerprint": preview["fingerprint"],
                 "last_save_preview_paths": preview.get("paths", []),
+                "last_save_preview_conflicts": bool(preview.get("conflicts")),
                 "save_preview_resolutions": {},
                 "post_apply_save_recommended": False,
             }
@@ -1438,6 +1450,7 @@ def run_apply_job(ctx):
                     "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
                     "last_preview_warnings": preview.get("warnings", []),
                     "last_preview_paths": preview.get("paths", []),
+                    "last_preview_conflicts": bool(preview.get("conflicts")),
                     "apply_preview_resolutions": {},
                     "last_preview_approved_fingerprint": None,
                 }
@@ -1633,6 +1646,7 @@ def run_preview_job(ctx):
                 "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
                 "last_preview_warnings": preview.get("warnings", []),
                 "last_preview_paths": preview.get("paths", []),
+                "last_preview_conflicts": bool(preview.get("conflicts")),
                 "apply_preview_resolutions": {},
                 "last_preview_approved_fingerprint": None,
             }
