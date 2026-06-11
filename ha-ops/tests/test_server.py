@@ -4964,6 +4964,65 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
             self.assertEqual((server.CONFIG_DIR / "packages" / "clean.yaml").read_text(), "git-clean\n")
 
+    def test_apply_preview_conflict_applies_clean_git_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / "configuration.yaml").parent.mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("base\n")
+            clean_delete = seed / "homeassistant" / "packages" / "clean_delete.yaml"
+            clean_delete.parent.mkdir(parents=True)
+            clean_delete.write_text("base-clean\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            (updater / "homeassistant" / "packages" / "clean_delete.yaml").unlink()
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            live_clean_delete = server.CONFIG_DIR / "packages" / "clean_delete.yaml"
+            live_clean_delete.parent.mkdir(parents=True)
+            live_clean_delete.write_text("base-clean\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("homeassistant/packages/clean_delete.yaml", state["last_diff"])
+            self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(state["last_preview_deletions"], 1)
+            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha\n")
+            self.assertFalse(live_clean_delete.exists())
+
     def test_apply_preview_conflict_rejects_stale_live_version(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

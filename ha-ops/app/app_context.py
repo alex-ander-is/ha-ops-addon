@@ -460,7 +460,15 @@ class AppContext:
             self.sync_deps(),
         )
 
-    def delete_apply_conflict_live_deletions(self, resolved_targets, repo_dir, main_branch, resolutions, details):
+    def delete_apply_conflict_live_deletions(
+        self,
+        resolved_targets,
+        repo_dir,
+        main_branch,
+        resolutions,
+        details,
+        clean_git_delete_paths=None,
+    ):
         return sync_logic.delete_apply_conflict_live_deletions(
             resolved_targets,
             repo_dir,
@@ -468,6 +476,7 @@ class AppContext:
             resolutions,
             details,
             self.sync_deps(),
+            clean_git_delete_paths,
         )
 
     def build_apply_preview(self, resolved_targets, details=None, repo_dir=None, main_branch="main"):

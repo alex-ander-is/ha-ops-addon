@@ -1488,7 +1488,14 @@ def run_apply_job(ctx):
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
         if conflict_preview:
-            ctx.delete_apply_conflict_live_deletions(resolved_targets, repo_dir, branch, apply_resolutions, details)
+            ctx.delete_apply_conflict_live_deletions(
+                resolved_targets,
+                repo_dir,
+                branch,
+                apply_resolutions,
+                details,
+                preview.get("clean_git_delete_paths", []),
+            )
         if not conflict_preview:
             apply_commit = ctx.commit_apply_merge(
                 repo_dir,

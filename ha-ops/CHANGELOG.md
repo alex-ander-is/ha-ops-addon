@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.9
+
+- Apply clean Git-only deletions shown in conflict previews to live Home Assistant and count them against Apply deletion limits.
+
 ## 0.8.8
 
 - Preserve same-content divergent service-branch merges as real merge commits.

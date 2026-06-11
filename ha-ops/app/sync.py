@@ -2396,32 +2396,76 @@ def merge_storage_change_paths(resolved_targets, repo_dir, ctx):
     return storage_change_paths_for_repo_paths(merge_change_paths(repo_dir, ctx), resolved_targets, repo_dir)
 
 
-def delete_apply_conflict_live_deletions(resolved_targets, repo_dir, main_branch, resolutions, details, ctx):
+def apply_live_path_for_repo_path(resolved_targets, repo_dir, path):
+    repo_dir = Path(repo_dir)
+    safe_path = Path(path)
+    if safe_path.is_absolute() or ".." in safe_path.parts:
+        raise RuntimeError("Invalid apply preview path")
+    for target in resolved_targets:
+        try:
+            source_relative = Path(target["source_path"]).relative_to(repo_dir)
+        except ValueError:
+            source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+        try:
+            live_relative = safe_path.relative_to(source_relative)
+        except ValueError:
+            continue
+        live_path = Path(target["live_path"]) / live_relative
+        return live_path, f"{target['id']}/{live_relative.as_posix()}"
+    return None, None
+
+
+def clean_apply_git_delete_paths(resolved_targets, repo_dir, main_branch, conflicts, ctx):
+    repo_dir = Path(repo_dir)
+    conflict_paths = set(conflicts or [])
+    delete_paths = []
+    for raw_path in merge_change_paths(repo_dir, ctx):
+        safe_path = Path(raw_path)
+        if safe_path.is_absolute() or ".." in safe_path.parts:
+            raise RuntimeError("Invalid apply preview path")
+        path_text = safe_path.as_posix()
+        if path_text in conflict_paths:
+            continue
+        if git_ref_path_exists(repo_dir, main_branch, path_text, ctx):
+            continue
+        worktree_path = repo_dir / safe_path
+        if worktree_path.exists() or worktree_path.is_symlink():
+            continue
+        live_path, _display = apply_live_path_for_repo_path(resolved_targets, repo_dir, safe_path)
+        if live_path is not None:
+            delete_paths.append(path_text)
+    return sorted(set(delete_paths))
+
+
+def delete_apply_conflict_live_deletions(
+    resolved_targets,
+    repo_dir,
+    main_branch,
+    resolutions,
+    details,
+    ctx,
+    clean_git_delete_paths=None,
+):
     deleted = []
     repo_dir = Path(repo_dir)
+    delete_paths = set(clean_git_delete_paths or [])
     for path, choice in sorted((resolutions or {}).items()):
         safe_path = Path(path)
         if safe_path.is_absolute() or ".." in safe_path.parts:
             raise RuntimeError("Invalid apply preview path")
         path_text = safe_path.as_posix()
-        if choice != "git" or git_ref_path_exists(repo_dir, main_branch, path_text, ctx):
+        if choice == "git" and not git_ref_path_exists(repo_dir, main_branch, path_text, ctx):
+            delete_paths.add(path_text)
+
+    for path_text in sorted(delete_paths):
+        live_path, display_path = apply_live_path_for_repo_path(resolved_targets, repo_dir, path_text)
+        if live_path is None:
             continue
-        for target in resolved_targets:
-            try:
-                source_relative = Path(target["source_path"]).relative_to(repo_dir)
-            except ValueError:
-                source_relative = Path(target.get("source") or Path(target["source_path"]).name)
-            try:
-                live_relative = safe_path.relative_to(source_relative)
-            except ValueError:
-                continue
-            live_path = Path(target["live_path"]) / live_relative
-            if live_path.exists() or live_path.is_symlink():
-                safe_remove_path(live_path)
-                deleted.append(f"{target['id']}/{live_relative.as_posix()}")
-            break
+        if live_path.exists() or live_path.is_symlink():
+            safe_remove_path(live_path)
+            deleted.append(display_path)
     if deleted and details is not None:
-        ctx.add_detail(details, f"Removed {len(deleted)} live file(s) selected as Git deletions.")
+        ctx.add_detail(details, f"Removed {len(deleted)} live file(s) from Git deletions.")
     return deleted
 
 
@@ -2465,11 +2509,13 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
             full_diff = "\n\n".join([part for part in [summary, diff] if part])
             fingerprint = merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx)
             storage_change_paths = merge_storage_change_paths(resolved_targets, repo_dir, ctx)
+            clean_git_delete_paths = clean_apply_git_delete_paths(resolved_targets, repo_dir, main_branch, conflicts, ctx)
             return {
                 "diff": full_diff,
                 "fingerprint": fingerprint,
                 "paths": conflicts,
-                "deletions": 0,
+                "deletions": len(clean_git_delete_paths),
+                "clean_git_delete_paths": clean_git_delete_paths,
                 "skipped_protected": [],
                 "storage_changes": bool(storage_change_paths),
                 "storage_change_paths": storage_change_paths,
