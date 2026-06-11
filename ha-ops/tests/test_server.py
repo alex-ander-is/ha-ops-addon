@@ -4223,6 +4223,56 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
             self.assertGreaterEqual(calls["count"], 2)
 
+    def test_save_push_retry_preserves_merge_commit_after_remote_advances(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_first_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_main_pushes
+
+            self.assertFalse(server.run_save_job())
+            self.assertTrue(server.read_state()["save_push_retry_pending"])
+
+            server.push_branch = original_push_branch
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "remote.yaml").write_text("remote\n")
+            self.git_commit_all(updater, "remote")
+            self.git(["push", "origin", "main"], updater)
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            parents = self.remote_parents(remote, "main")
+            self.assertEqual(len(parents), 2)
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/remote.yaml"), "remote\n")
+
     def test_selected_addon_is_saved_when_manifest_exists(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

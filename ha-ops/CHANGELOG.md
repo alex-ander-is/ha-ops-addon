@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.10
+
+- Preserve Save merge commits when retrying a failed push after the Git branch moved.
+
 ## 0.8.9
 
 - Apply clean Git-only deletions shown in conflict previews to live Home Assistant and count them against Apply deletion limits.

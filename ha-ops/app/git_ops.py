@@ -150,12 +150,12 @@ def git_pull_rebase(repo_dir, env, branch, run_command, write_conflicts):
     remote_head = git_remote_head(repo_dir, env, branch, run_command)
     if not remote_head:
         return None
-    pull = run_command(["git", "pull", "--rebase", "origin", branch], env=env, cwd=repo_dir)
+    pull = run_command(["git", "pull", "--rebase=merges", "origin", branch], env=env, cwd=repo_dir)
     if pull.returncode != 0:
         conflicts = git_conflict_paths(repo_dir, run_command)
         if conflicts:
             write_conflicts(conflicts)
-        raise RuntimeError(f"git pull --rebase failed:\n{pull.stderr.strip() or pull.stdout.strip()}")
+        raise RuntimeError(f"git pull --rebase=merges failed:\n{pull.stderr.strip() or pull.stdout.strip()}")
     return remote_head
 
 

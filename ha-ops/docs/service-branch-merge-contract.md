@@ -59,6 +59,10 @@ warning preview to state and stop without committing to `repo_branch`.
 user-branch commit but push failed, the next Save should retry the push instead
 of exporting live HA again and creating a second commit.
 
+Save push recovery must preserve merge commits. Do not use a plain rebase on a
+local branch that can contain an unpushed Save merge commit, because it can
+flatten the HA live parent out of history.
+
 ## Apply Git to HA
 
 Apply direction merges Git into live HA:
