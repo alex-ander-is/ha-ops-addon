@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.8
+
+- Preserve same-content divergent service-branch merges as real merge commits.
+
 ## 0.8.7
 
 - Default unresolved non-conflict Apply preview paths to Git when another path is explicitly kept from HA.

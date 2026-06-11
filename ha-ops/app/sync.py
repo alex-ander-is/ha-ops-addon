@@ -1402,9 +1402,8 @@ def git_status_porcelain(repo_dir, ctx):
 
 
 def git_commit_if_needed(repo_dir, message, ctx):
-    if not git_status_porcelain(repo_dir, ctx):
-        if git_merge_in_progress(repo_dir, ctx):
-            git_abort_merge(repo_dir, ctx)
+    merge_in_progress = git_merge_in_progress(repo_dir, ctx)
+    if not git_status_porcelain(repo_dir, ctx) and not merge_in_progress:
         return None
     result = ctx.run_command(
         [

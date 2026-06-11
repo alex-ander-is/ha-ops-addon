@@ -94,6 +94,24 @@ class ServerTests(unittest.TestCase):
         )
         return result.stdout
 
+    def remote_parents(self, remote, ref):
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-list", "--parents", "-n", "1", ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return result.stdout.strip().split()[1:]
+
+    def remote_rev(self, remote, ref):
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote), "rev-parse", ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        return result.stdout.strip()
+
     def repo_status(self, repo):
         return self.git(["status", "--porcelain"], repo).stdout.strip()
 
@@ -3149,6 +3167,40 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.repo_status(repo), "")
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
+    def test_save_same_content_divergent_merge_creates_merge_commit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("same\n")
+            self.git_commit_all(updater, "main same")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("same\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(server.read_state()["last_save_preview"], "No Save changes.")
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+
+            parents = self.remote_parents(remote, "main")
+            self.assertEqual(len(parents), 2)
+            self.assertEqual(self.remote_rev(remote, "ha-ops/base"), self.remote_rev(remote, "ha-ops/ha-live"))
+
     def test_save_preview_conflict_rejects_stale_live_version(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4823,6 +4875,45 @@ class ServerTests(unittest.TestCase):
                 check=True,
             )
             self.assertEqual(result.stdout, "ha2\n")
+
+    def test_apply_same_content_divergent_merge_creates_live_merge_commit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("same\n")
+            self.git_commit_all(updater, "main same")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("same\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(server.read_state()["last_diff"], "Target homeassistant: no file changes.")
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+
+            parents = self.remote_parents(remote, "ha-ops/ha-live")
+            self.assertEqual(len(parents), 2)
+            self.assertEqual(self.remote_rev(remote, "ha-ops/base"), self.remote_rev(remote, "main"))
 
     def test_apply_preview_conflict_can_be_confirmed(self):
         server = load_server()
