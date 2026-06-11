@@ -1,17 +1,20 @@
 # HA Ops
 
-HA Ops manages Home Assistant config with a single Git branch.
+HA Ops manages Home Assistant config with Git-backed previews and service branches.
 
 ## Actions
 
-- `Save HA to Git`: export live Home Assistant config into `repo_branch`, commit, and push.
-- `Preview Git to HA`: fetch `repo_branch` and show the diff that would be applied to live Home Assistant.
+- `Preview HA to Git`: export live Home Assistant config, update service branches, and show the merge result before Save.
+- `Save HA to Git`: commit the confirmed HA to Git merge into `repo_branch` and push.
+- `Preview Git to HA`: export current live Home Assistant config to `ha-ops/ha-live`, push service branches, and show the merge diff before Apply.
 - `Apply Git to HA`: apply Git config after matching preview and safety checks.
 - `Rollback`: restore a saved local release snapshot.
 
 ## Repository Model
 
-- `repo_branch`, usually `main`, is the only normal branch.
+- `repo_branch`, usually `main`, is the user-managed branch.
+- `ha-ops/ha-live` stores the latest exported live Home Assistant config used as a merge branch.
+- `ha-ops/base` stores the common base between Git and the latest live export.
 - The repository may be empty before first use.
 - `ha-ops.json` is optional; when it is missing, HA Ops uses a built-in default manifest.
 - There is no user-facing `export` branch.

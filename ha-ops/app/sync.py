@@ -1296,10 +1296,10 @@ def git_checkout(repo_dir, ref, ctx):
 def git_checkout_branch_from_best_ref(repo_dir, branch, ctx):
     remote_ref = f"refs/remotes/origin/{branch}"
     local_ref = f"refs/heads/{branch}"
-    if git_ref_exists(repo_dir, local_ref, ctx):
-        result = ctx.run_command(["git", "checkout", branch], cwd=repo_dir)
-    elif git_ref_exists(repo_dir, remote_ref, ctx):
+    if git_ref_exists(repo_dir, remote_ref, ctx):
         result = ctx.run_command(["git", "checkout", "-B", branch, f"origin/{branch}"], cwd=repo_dir)
+    elif git_ref_exists(repo_dir, local_ref, ctx):
+        result = ctx.run_command(["git", "checkout", branch], cwd=repo_dir)
     else:
         return False
     if result.returncode != 0:

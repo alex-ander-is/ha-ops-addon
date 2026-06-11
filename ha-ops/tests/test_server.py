@@ -4730,6 +4730,48 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Apply preview conflicts (1):", state["last_diff"])
             self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
 
+    def test_apply_preview_uses_updated_remote_live_branch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            live_config = server.CONFIG_DIR / "configuration.yaml"
+            live_config.write_text("ha1\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            updater = root / "live-updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "ha-ops/ha-live"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("ha-remote\n")
+            self.git_commit_all(updater, "remote live")
+            self.git(["push", "origin", "ha-ops/ha-live"], updater)
+            live_config.write_text("ha2\n")
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "show", "ha-ops/ha-live:homeassistant/configuration.yaml"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertEqual(result.stdout, "ha2\n")
+
     def test_apply_preview_conflict_can_be_confirmed(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

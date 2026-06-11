@@ -4,8 +4,9 @@ Home Assistant add-on repository for HA Ops.
 
 `ha-ops` is an ingress UI for managing a Git-backed Home Assistant configuration:
 
-- Save live Home Assistant config directly to the configured Git branch
-- Preview Git changes before applying them to Home Assistant
+- Preview live Home Assistant config before saving it to Git
+- Save confirmed Home Assistant changes to the configured Git branch
+- Preview Git changes through service branch merges before applying them to Home Assistant
 - Apply Git config without deleting live-only files from an empty or partial repository
 - Discover installed add-ons and let the user choose which add-on configs are managed
 - Require fresh system backups and create full Home Assistant backups when needed

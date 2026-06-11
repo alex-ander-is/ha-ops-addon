@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.4
+
+- Refresh local HA Ops service branches from origin before rebuilding live previews.
+- Update README and job details for service-branch previews.
+
 ## 0.8.3
 
 - Reject stale HA to Git conflict previews when live Home Assistant content changes after preview.

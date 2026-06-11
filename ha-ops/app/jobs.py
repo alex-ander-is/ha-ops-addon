@@ -517,7 +517,7 @@ def run_save_preview_job(ctx):
 
         ctx.add_detail(details, f"Using branch {branch} at commit {ctx.git_head_or_unborn(repo_dir)}.")
         ctx.add_detail(details, f"Using manifest {manifest_path}.")
-        ctx.add_detail(details, "Building save preview without committing or pushing.")
+        ctx.add_detail(details, "Building save preview and updating service branches.")
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
             ctx.add_detail(details, "Including redundant registry data in Save preview.")
