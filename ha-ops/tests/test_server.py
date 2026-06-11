@@ -243,7 +243,6 @@ class ServerTests(unittest.TestCase):
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
                     "last_preview_warnings": ["old warning"],
-                    "last_preview_approved_fingerprint": "fingerprint",
                 }
             )
 
@@ -265,7 +264,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_fingerprint"], "fingerprint")
             self.assertEqual(state["last_preview_live_fingerprints"], {"homeassistant": {"hash": "sha256:old"}})
             self.assertTrue(state["last_preview_storage_changes"])
-            self.assertEqual(state["last_preview_approved_fingerprint"], "fingerprint")
 
     def test_apply_preview_match_rejects_live_fingerprint_changes(self):
         server = load_server()
@@ -299,7 +297,6 @@ class ServerTests(unittest.TestCase):
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
                     "last_preview_storage_changes": True,
                     "last_preview_warnings": ["old warning"],
-                    "last_preview_approved_fingerprint": "old",
                     "last_save_preview": "old save summary",
                     "last_save_diff": "old save diff",
                     "last_save_diff_generated_at": "old",
@@ -318,7 +315,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_live_fingerprints"], {})
             self.assertFalse(state["last_preview_storage_changes"])
             self.assertEqual(state["last_preview_warnings"], [])
-            self.assertIsNone(state["last_preview_approved_fingerprint"])
 
             server.write_state({"last_save_preview": "old", "last_save_diff": "old", "last_save_diff_generated_at": "old"})
             self.assertFalse(server.run_save_preview_job())
@@ -485,7 +481,6 @@ class ServerTests(unittest.TestCase):
                     "last_preview_commit": "abc",
                     "last_preview_fingerprint": "old",
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
-                    "last_preview_approved_fingerprint": "old",
                 }
             )
 
@@ -501,7 +496,6 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_preview_commit"])
             self.assertIsNone(state["last_preview_fingerprint"])
             self.assertEqual(state["last_preview_live_fingerprints"], {})
-            self.assertIsNone(state["last_preview_approved_fingerprint"])
 
     def test_startup_clears_internal_ids_preview_after_addon_version_change(self):
         server = load_server()
@@ -1883,6 +1877,9 @@ class ServerTests(unittest.TestCase):
             def run_preview_job(self):
                 self.calls.append("preview")
 
+            def run_apply_job(self):
+                self.calls.append("apply")
+
             def run_deleted_devices_preview_job(self):
                 self.calls.append("deleted-devices-preview")
 
@@ -1932,6 +1929,7 @@ class ServerTests(unittest.TestCase):
             request.responses = []
             request.response_headers = []
             request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_error = MethodType(lambda self, status, message=None: self.responses.append(status), request)
             request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
             request.end_headers = MethodType(lambda self: None, request)
             getattr(request, method)()
@@ -1974,6 +1972,14 @@ class ServerTests(unittest.TestCase):
         self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
         self.assertIsNone(ctx.state_updates[-1]["last_preview_fingerprint"])
         self.assertFalse(ctx.state_updates[-1]["last_preview_storage_changes"])
+
+        post_request = invoke(
+            "do_POST",
+            "/approve-apply",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 404)
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview"])
 
         post_request = invoke(
             "do_POST",
@@ -3092,6 +3098,28 @@ class ServerTests(unittest.TestCase):
             self.assertIn("State changed since this preview was created", state["last_message"])
             self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+    def test_save_error_before_state_read_is_reported(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            original_read_state = server._CTX.read_state
+
+            def fail_read_state():
+                raise RuntimeError("state read failed")
+
+            server._CTX.read_state = fail_read_state
+            try:
+                self.assertFalse(server.run_save_job())
+            finally:
+                server._CTX.read_state = original_read_state
+
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["last_action"], "save")
+            self.assertEqual(state["last_message"], "state read failed")
+            self.assertFalse(state.get("save_push_retry_pending", False))
 
     def test_save_preview_bootstraps_existing_repo_without_live_branch(self):
         server = load_server()
@@ -5244,7 +5272,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("git", state["last_diff"])
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha\n")
 
-    def test_approved_apply_preserves_live_registry_hidden_fields(self):
+    def test_confirmed_apply_preserves_live_registry_hidden_fields(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5317,7 +5345,6 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["last_preview_storage_changes"])
             self.assertNotIn("modified_at", state["last_diff"])
 
-            server.write_state({"last_preview_approved_fingerprint": state["last_preview_fingerprint"]})
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             saved = json.loads((live_storage / "core.device_registry").read_text())
 
@@ -5609,7 +5636,6 @@ class ServerTests(unittest.TestCase):
             server.core_restart = lambda: events.append("restart")
 
             self.assertTrue(server.run_preview_job())
-            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
 
             def fail_check():
                 events.append("check")
@@ -5661,8 +5687,6 @@ class ServerTests(unittest.TestCase):
             server.core_restart = lambda: events.append("restart")
 
             self.assertTrue(server.run_preview_job())
-            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
-
             def fail_check():
                 events.append("check")
                 raise RuntimeError("bad config")
@@ -5769,7 +5793,6 @@ class ServerTests(unittest.TestCase):
             server.core_start = start_or_fail_once
 
             self.assertTrue(server.run_preview_job())
-            server.write_state({"last_preview_approved_fingerprint": server.read_state()["last_preview_fingerprint"]})
             self.assertFalse(server.run_apply_job())
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
             self.assertEqual(events, ["stop", "check", "start", "start"])

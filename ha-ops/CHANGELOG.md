@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.11
+
+- Remove the obsolete Apply storage approval endpoint and keep early Save errors from escaping the job error handler.
+
 ## 0.8.10
 
 - Preserve Save merge commits when retrying a failed push after the Git branch moved.

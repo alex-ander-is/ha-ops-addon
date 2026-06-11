@@ -151,9 +151,7 @@ Allowlisted `.storage` files are shown in previews. Protected files such as
 and may be applied to HA only after the matching preview decision flow.
 
 In 0.8.x the preview decision and Confirm flow is the explicit approval for
-previewed `.storage` paths. Do not infer from the older `/approve-apply` handler
-that protected storage still requires a separate second approval path unless the
-UI, tests, and README are changed together.
+previewed `.storage` paths. There is no separate `/approve-apply` approval path.
 
 When conflict preview storage paths are confirmed, Apply must use
 `approve_storage_apply_targets(...)` so the resolved protected storage content

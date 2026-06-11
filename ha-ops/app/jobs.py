@@ -29,7 +29,6 @@ class JobContext:
     enforce_apply_limits: Any
     ensure_fresh_system_backup: Any
     ensure_preview_matches_state: Any
-    ensure_storage_apply_approved: Any
     ensure_repo: Any
     export_targets: Any
     get_installed_addons: Any
@@ -292,6 +291,7 @@ def run_save_job(ctx):
     repo_dir = None
     checkout_dirty_for_save = False
     save_commit_created = False
+    state = {}
 
     write_state(
         {
@@ -1449,7 +1449,6 @@ def run_apply_job(ctx):
                     "last_preview_paths": preview.get("paths", []),
                     "last_preview_conflicts": bool(preview.get("conflicts")),
                     "apply_preview_resolutions": {},
-                    "last_preview_approved_fingerprint": None,
                 }
             )
             return False
@@ -1629,8 +1628,8 @@ def run_preview_job(ctx):
         message = "Apply preview finished successfully."
         if preview.get("storage_changes"):
             paths = preview.get("storage_change_paths") or []
-            ctx.add_detail(details, f"Approval required for {len(paths)} .storage change(s) before Apply Git to HA.")
-            message = "Apply preview contains .storage changes. Approve Git to HA before applying."
+            ctx.add_detail(details, f"Confirm required for {len(paths)} .storage change(s) before Apply Git to HA.")
+            message = "Apply preview contains .storage changes. Confirm Apply Git to HA to continue."
 
         write_state(
             {
@@ -1652,7 +1651,6 @@ def run_preview_job(ctx):
                 "last_preview_paths": preview.get("paths", []),
                 "last_preview_conflicts": bool(preview.get("conflicts")),
                 "apply_preview_resolutions": {},
-                "last_preview_approved_fingerprint": None,
             }
         )
         return True

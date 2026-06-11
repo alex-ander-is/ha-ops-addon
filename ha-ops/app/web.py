@@ -304,7 +304,6 @@ def render_page(ctx):
         save_details_html = ui.render_conflict_detail(save_diff_text)
     run_disabled = "disabled" if last_status == "running" else ""
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
-    storage_approval_pending = False
     apply_action = "apply"
     apply_button_text = "Apply Git to HA"
     post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
@@ -649,24 +648,6 @@ def create_handler(ctx):
                 start_background(ctx.run_apply_job)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": "Apply Git to HA started. Refreshing..."})
-                else:
-                    self.send_html(render_page(ctx))
-                return
-
-            if parsed.path == "/approve-apply":
-                state = ctx.read_state()
-                fingerprint = state.get("last_preview_fingerprint")
-                if not fingerprint or not state.get("last_preview_storage_changes"):
-                    message = "Run Preview Git to HA with .storage changes before approval."
-                    if self.wants_json():
-                        self.send_json({"ok": False, "message": message}, status=400)
-                    else:
-                        self.send_html(render_page(ctx), status=400)
-                    return
-                ctx.write_state({"last_preview_approved_fingerprint": fingerprint})
-                start_background(ctx.run_apply_job)
-                if self.wants_json():
-                    self.send_json({"ok": True, "message": "Approved Git to HA. Applying..."})
                 else:
                     self.send_html(render_page(ctx))
                 return
