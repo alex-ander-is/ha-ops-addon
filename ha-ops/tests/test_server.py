@@ -3185,6 +3185,53 @@ class ServerTests(unittest.TestCase):
             self.assertIn("State changed since this preview was created", state["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
+    def test_save_conflict_preview_includes_clean_merge_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            self.git_commit_all(updater, "git")
+            self.git(["push", "origin", "main"], updater)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            clean_live = server.CONFIG_DIR / "packages" / "clean.yaml"
+            clean_live.parent.mkdir(parents=True)
+            clean_live.write_text("ha-clean-1\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("Save preview conflicts (1):", state["last_save_preview"])
+            self.assertIn("homeassistant/packages/clean.yaml", state["last_save_diff"])
+            clean_live.write_text("ha-clean-2\n")
+            server.write_state({"save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+
+            self.assertFalse(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "warning")
+            self.assertIn("State changed since this preview was created", state["last_message"])
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "show", "main:homeassistant/packages/clean.yaml"],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+
     def test_save_preview_modify_delete_conflict_can_keep_git_delete(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4788,6 +4835,9 @@ class ServerTests(unittest.TestCase):
             self.git(["clone", str(remote), str(updater)], root)
             self.git(["checkout", "main"], updater)
             (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            clean_git = updater / "homeassistant" / "packages" / "clean.yaml"
+            clean_git.parent.mkdir(parents=True)
+            clean_git.write_text("git-clean\n")
             self.git_commit_all(updater, "git")
             self.git(["push", "origin", "main"], updater)
             (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
@@ -4812,6 +4862,7 @@ class ServerTests(unittest.TestCase):
             server.core_start = lambda: None
 
             self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            self.assertIn("homeassistant/packages/clean.yaml", server.read_state()["last_diff"])
             page = server.render_page()
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertFalse(server.run_apply_job())
@@ -4821,6 +4872,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
+            self.assertEqual((server.CONFIG_DIR / "packages" / "clean.yaml").read_text(), "git-clean\n")
 
     def test_apply_preview_conflict_rejects_stale_live_version(self):
         server = load_server()

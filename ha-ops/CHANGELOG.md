@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.6
+
+- Document the HA Ops 0.8 service-branch merge contract for future code reviews.
+- Show and fingerprint cleanly merged files in conflict previews.
+
 ## 0.8.5
 
 - Require explicit HA/Git choices for every conflict preview file before Save or Apply can be confirmed.

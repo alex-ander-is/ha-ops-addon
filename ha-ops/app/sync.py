@@ -1475,11 +1475,15 @@ def merge_diff(repo_dir, ctx):
     return result.stdout.strip()
 
 
-def merge_diff_normalized(repo_dir, resolved_targets, ctx):
+def merge_change_paths(repo_dir, ctx):
     result = ctx.run_command(["git", "diff", "--name-only", "HEAD"], cwd=repo_dir)
     if result.returncode != 0:
         raise RuntimeError(f"git diff --name-only failed:\n{result.stderr.strip()}")
-    paths = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def merge_diff_normalized(repo_dir, resolved_targets, ctx):
+    paths = merge_change_paths(repo_dir, ctx)
     if not paths:
         return ""
 
@@ -1492,16 +1496,29 @@ def merge_diff_normalized(repo_dir, resolved_targets, ctx):
         relative = Path(raw_path)
         if relative.is_absolute() or ".." in relative.parts:
             continue
-        head = ctx.run_command(["git", "show", f"HEAD:{relative.as_posix()}"], cwd=repo_dir)
-        if head.returncode == 0:
+        path_text = relative.as_posix()
+        if (
+            relative.name in NORMALIZED_STORAGE_FILES
+            and git_conflict_stage_exists(repo_dir, 2, path_text, ctx)
+            and git_conflict_stage_exists(repo_dir, 3, path_text, ctx)
+        ):
             before_path = before_root / relative
-            ensure_dir(before_path.parent)
-            before_path.write_text(head.stdout)
-        worktree_path = repo_dir / relative
-        if worktree_path.exists() and worktree_path.is_file():
             after_path = after_root / relative
+            ensure_dir(before_path.parent)
             ensure_dir(after_path.parent)
-            shutil.copy2(worktree_path, after_path)
+            before_path.write_text(git_stage_text(repo_dir, 2, path_text, ctx))
+            after_path.write_text(git_stage_text(repo_dir, 3, path_text, ctx))
+        else:
+            head = ctx.run_command(["git", "show", f"HEAD:{path_text}"], cwd=repo_dir)
+            if head.returncode == 0:
+                before_path = before_root / relative
+                ensure_dir(before_path.parent)
+                before_path.write_text(head.stdout)
+            worktree_path = repo_dir / relative
+            if worktree_path.exists() and worktree_path.is_file():
+                after_path = after_root / relative
+                ensure_dir(after_path.parent)
+                shutil.copy2(worktree_path, after_path)
 
     normalize_save_preview_diff_files(
         before_root,
@@ -1595,6 +1612,16 @@ def conflict_fingerprint(conflicts, repo_dir, ctx):
         chunks.append(f"stage2:{git_stage_text(repo_dir, 2, path, ctx)}")
         chunks.append(f"stage3:{git_stage_text(repo_dir, 3, path, ctx)}")
     return fingerprint_text("\n".join(chunks))
+
+
+def merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx):
+    return fingerprint_text("\n".join([diff, conflict_fingerprint(conflicts, repo_dir, ctx)]))
+
+
+def merge_diff_for_save_preview(repo_dir, resolved_targets, include_redundant_data, ctx):
+    if include_redundant_data:
+        return merge_diff(repo_dir, ctx)
+    return merge_diff_normalized(repo_dir, resolved_targets, ctx)
 
 
 def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, message, details, ctx):
@@ -1847,22 +1874,21 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
             summary = "\n".join([f"Save preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            diff = merge_diff_for_save_preview(repo_dir, resolved_targets, include_redundant_data, ctx)
             return {
                 "summary": summary,
-                "diff": summary,
+                "diff": diff or summary,
                 "paths": conflicts,
                 "conflicts": conflicts,
-                "fingerprint": conflict_fingerprint(conflicts, repo_dir, ctx),
+                "fingerprint": merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx),
             }
 
         status_lines, paths = merge_status_lines(repo_dir, ctx)
         summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
         if not status_lines:
             diff = ""
-        elif include_redundant_data:
-            diff = merge_diff(repo_dir, ctx)
         else:
-            diff = merge_diff_normalized(repo_dir, resolved_targets, ctx)
+            diff = merge_diff_for_save_preview(repo_dir, resolved_targets, include_redundant_data, ctx)
         return {"summary": summary, "diff": diff, "paths": paths, "fingerprint": fingerprint_text(diff)}
     finally:
         git_abort_merge(repo_dir, ctx)
@@ -2341,9 +2367,9 @@ def merge_git_into_ha_live(repo_dir, main_branch, ctx):
     return conflicts
 
 
-def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
+def storage_change_paths_for_repo_paths(paths, resolved_targets, repo_dir):
     repo_dir = Path(repo_dir)
-    paths = []
+    storage_paths = []
     for target in resolved_targets:
         if target.get("type") != "homeassistant":
             continue
@@ -2352,15 +2378,23 @@ def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
         except ValueError:
             source_relative = Path(target.get("source") or Path(target["source_path"]).name)
         storage_prefix = source_relative / ".storage"
-        for path in conflicts:
+        for path in paths:
             relative = Path(path)
             try:
                 storage_relative = relative.relative_to(storage_prefix)
             except ValueError:
                 continue
             if len(storage_relative.parts) == 1:
-                paths.append(f"{target['id']}/.storage/{storage_relative.as_posix()}")
-    return sorted(set(paths))
+                storage_paths.append(f"{target['id']}/.storage/{storage_relative.as_posix()}")
+    return sorted(set(storage_paths))
+
+
+def conflict_storage_change_paths(conflicts, resolved_targets, repo_dir):
+    return storage_change_paths_for_repo_paths(conflicts, resolved_targets, repo_dir)
+
+
+def merge_storage_change_paths(resolved_targets, repo_dir, ctx):
+    return storage_change_paths_for_repo_paths(merge_change_paths(repo_dir, ctx), resolved_targets, repo_dir)
 
 
 def delete_apply_conflict_live_deletions(resolved_targets, repo_dir, main_branch, resolutions, details, ctx):
@@ -2428,17 +2462,20 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
             summary = "\n".join([f"Apply preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
-            storage_change_paths = conflict_storage_change_paths(conflicts, resolved_targets, repo_dir)
+            diff = merge_diff_normalized(repo_dir, resolved_targets, ctx)
+            full_diff = "\n\n".join([part for part in [summary, diff] if part])
+            fingerprint = merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx)
+            storage_change_paths = merge_storage_change_paths(resolved_targets, repo_dir, ctx)
             return {
-                "diff": summary,
-                "fingerprint": conflict_fingerprint(conflicts, repo_dir, ctx),
+                "diff": full_diff,
+                "fingerprint": fingerprint,
                 "paths": conflicts,
                 "deletions": 0,
                 "skipped_protected": [],
                 "storage_changes": bool(storage_change_paths),
                 "storage_change_paths": storage_change_paths,
                 "warnings": [],
-                "live_fingerprints": {"ha-ops/ha-live-conflicts": conflict_fingerprint(conflicts, repo_dir, ctx)},
+                "live_fingerprints": {"ha-ops/ha-live-conflicts": fingerprint},
                 "conflicts": conflicts,
             }
         git_checkout(repo_dir, main_branch, ctx)

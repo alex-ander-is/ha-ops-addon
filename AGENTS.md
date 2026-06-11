@@ -7,3 +7,8 @@ If tests are red after your changes, fix them yourself without waiting for an ex
 Avoid redundant test runs. This repository has a pre-push hook that runs the HA Ops test suite; do not also run that exact suite manually immediately before pushing unless code changed after the last run or you need faster feedback before committing. Prefer pushing branch and tags together when practical so the hook runs once.
 When adding a new feature that persists UI or workflow state, define how that state is cleared on refresh, restart, and version update. Add or update tests that prove stale state does not reappear without the user starting that feature again.
 Disabled buttons must be visibly disabled on their own, not only slightly different from enabled buttons. Use a pale gray background, muted text, and muted border for every disabled button, and keep this rule for new UI.
+
+Before changing or reviewing the HA Ops 0.8 service-branch preview/save/apply
+flow, read `ha-ops/docs/service-branch-merge-contract.md`. It documents the
+parts of the branch, preview, conflict, `.storage`, and UI behavior that are
+intentional versus unsafe shortcuts.
