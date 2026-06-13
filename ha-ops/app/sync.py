@@ -1426,7 +1426,10 @@ def git_commit_if_needed(repo_dir, message, ctx):
     return rev.stdout.strip()
 
 
-def ensure_live_branch_available(repo_dir, ctx):
+def ensure_live_branch_available(repo_dir, ctx, prefer_local=False):
+    if prefer_local and git_ref_exists(repo_dir, f"refs/heads/{HA_LIVE_BRANCH}", ctx):
+        git_checkout(repo_dir, HA_LIVE_BRANCH, ctx)
+        return
     if not git_checkout_branch_from_best_ref(repo_dir, HA_LIVE_BRANCH, ctx):
         result = ctx.run_command(["git", "checkout", "-B", HA_LIVE_BRANCH, "HEAD"], cwd=repo_dir)
         if result.returncode != 0:
@@ -2353,9 +2356,9 @@ def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
     }
 
 
-def merge_git_into_ha_live(repo_dir, main_branch, ctx):
+def merge_git_into_ha_live(repo_dir, main_branch, ctx, prefer_local_live=False):
     if git_current_branch(repo_dir, ctx) != HA_LIVE_BRANCH:
-        ensure_live_branch_available(repo_dir, ctx)
+        ensure_live_branch_available(repo_dir, ctx, prefer_local=prefer_local_live)
     result = ctx.run_command(["git", "merge", "--no-commit", "--no-ff", main_branch], cwd=repo_dir)
     conflicts = []
     if result.returncode != 0:
@@ -2470,7 +2473,7 @@ def delete_apply_conflict_live_deletions(
 
 
 def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx):
-    conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
+    conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx, prefer_local_live=True)
     keep_ha = set(keep_ha_paths or [])
     if conflicts:
         for path in conflicts:
