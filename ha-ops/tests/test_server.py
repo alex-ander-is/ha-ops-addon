@@ -5154,6 +5154,53 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha\n")
             self.assertFalse(live_clean_delete.exists())
 
+    def test_apply_conflict_git_delete_counts_against_max_apply_deletions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").unlink()
+            self.git_commit_all(updater, "git delete")
+            self.git(["push", "origin", "main"], updater)
+            live_config = server.CONFIG_DIR / "configuration.yaml"
+            live_config.write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "max_apply_deletions": 0,
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
+            self.assertTrue(state["last_preview_conflicts"])
+            self.assertEqual(state["last_preview_deletions"], 0)
+            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
+
+            self.assertFalse(server.run_apply_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "error")
+            self.assertIn("Apply would delete 1 file(s), above the limit of 0", state["last_message"])
+            self.assertTrue(live_config.exists())
+            self.assertEqual(live_config.read_text(), "ha\n")
+
     def test_apply_preview_conflict_rejects_stale_live_version(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -1453,6 +1453,15 @@ def run_apply_job(ctx):
             )
             return False
         apply_resolutions = apply_preview_resolutions_for_current_preview(state, preview)
+        if preview.get("conflicts"):
+            selected_delete_paths = {
+                path
+                for path in preview.get("conflict_git_delete_paths", [])
+                if apply_resolutions.get(path) == "git"
+            }
+            if selected_delete_paths:
+                preview = dict(preview)
+                preview["deletions"] = len(set(preview.get("clean_git_delete_paths", [])) | selected_delete_paths)
         ctx.enforce_apply_limits(options, preview)
         keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
         conflict_preview = bool(preview.get("conflicts"))
