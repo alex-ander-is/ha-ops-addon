@@ -229,11 +229,16 @@ def repair_startup_state(path, now, addon_version=None):
         addon_version = known_addon_version
         current["last_seen_addon_version"] = addon_version
 
-    if version_changed and not current.get("deleted_devices_pending_confirmation"):
+    if version_changed:
         current.update(DISPLAY_CLEAR_UPDATES)
-        current.update(ALL_PREVIEW_CLEAR_UPDATES)
+        current.update(APPLY_PREVIEW_CLEAR_UPDATES)
+        current.update(SAVE_PREVIEW_CLEAR_UPDATES)
+        if not current.get("deleted_devices_pending_confirmation"):
+            current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
+        current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+        current.update(INTERNAL_IDS_PREVIEW_CLEAR_UPDATES)
         current["post_apply_save_recommended"] = False
-        if current.get("last_status") != "running":
+        if current.get("last_status") != "running" and not current.get("deleted_devices_pending_confirmation"):
             current.update(
                 {
                     "last_status": "idle",

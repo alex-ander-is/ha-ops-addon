@@ -580,6 +580,20 @@ class ServerTests(unittest.TestCase):
                     "last_deleted_devices_count": 1,
                     "last_deleted_devices_fingerprint": "fingerprint",
                     "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": "/tmp/rollback",
+                    "deleted_devices_rollback_fingerprint": "before",
+                    "deleted_devices_applied_fingerprint": "after",
+                    "last_preview_commit": "apply-commit",
+                    "last_preview_fingerprint": "apply-fingerprint",
+                    "last_preview_live_fingerprints": {"homeassistant/configuration.yaml": "live"},
+                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_preview_conflicts": True,
+                    "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
+                    "last_save_preview_commit": "save-commit",
+                    "last_save_preview_fingerprint": "save-fingerprint",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_save_preview_conflicts": True,
+                    "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
                 }
             )
 
@@ -593,6 +607,32 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_deleted_devices_preview"], "old preview")
             self.assertEqual(state["last_deleted_devices_count"], 1)
             self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
+            self.assertIsNone(state["last_preview_commit"])
+            self.assertIsNone(state["last_preview_fingerprint"])
+            self.assertEqual(state["last_preview_live_fingerprints"], {})
+            self.assertEqual(state["last_preview_paths"], [])
+            self.assertFalse(state["last_preview_conflicts"])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            self.assertIsNone(state["last_save_preview_commit"])
+            self.assertIsNone(state["last_save_preview_fingerprint"])
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertFalse(state["last_save_preview_conflicts"])
+            self.assertEqual(state["save_preview_resolutions"], {})
+
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            rollback_path = server.WORK_DIR / "deleted-devices-rollback" / "core.device_registry"
+            rollback_path.parent.mkdir(parents=True)
+            rollback_path.write_text(
+                json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}]}})
+            )
+            server.write_state({"deleted_devices_rollback_path": str(rollback_path)})
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            state = server.read_state()
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            self.assertEqual(state["save_preview_resolutions"], {})
 
     def test_refresh_clears_transient_conflicts_from_display_state(self):
         server = load_server()
