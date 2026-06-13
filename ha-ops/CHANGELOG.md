@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.12
+
+- Hide stale Save and Apply previews while deleted_devices cleanup is waiting for confirm or revert.
+
 ## 0.8.11
 
 - Remove the obsolete Apply storage approval endpoint and keep early Save errors from escaping the job error handler.

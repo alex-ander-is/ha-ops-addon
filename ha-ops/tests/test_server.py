@@ -7549,7 +7549,44 @@ devices:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
-            server.write_state({"deleted_devices_pending_confirmation": True})
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "last_diff": "stale apply diff",
+                    "last_diff_generated_at": "2026-06-13T12:00:00+00:00",
+                    "last_preview_commit": "stale-apply-commit",
+                    "last_preview_fingerprint": "stale-apply-fingerprint",
+                    "last_preview_live_fingerprints": {"homeassistant/configuration.yaml": "live"},
+                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_preview_conflicts": True,
+                    "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
+                    "last_save_preview": "stale save preview",
+                    "last_save_diff": "stale save diff",
+                    "last_save_diff_generated_at": "2026-06-13T12:00:00+00:00",
+                    "last_save_preview_commit": "stale-save-commit",
+                    "last_save_preview_fingerprint": "stale-save-fingerprint",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_save_preview_conflicts": True,
+                    "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
+                }
+            )
+            state = server.read_state()
+            self.assertEqual(state["last_diff"], "")
+            self.assertIsNone(state["last_diff_generated_at"])
+            self.assertIsNone(state["last_preview_commit"])
+            self.assertIsNone(state["last_preview_fingerprint"])
+            self.assertEqual(state["last_preview_live_fingerprints"], {})
+            self.assertEqual(state["last_preview_paths"], [])
+            self.assertFalse(state["last_preview_conflicts"])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            self.assertEqual(state["last_save_preview"], "")
+            self.assertEqual(state["last_save_diff"], "")
+            self.assertIsNone(state["last_save_diff_generated_at"])
+            self.assertIsNone(state["last_save_preview_commit"])
+            self.assertIsNone(state["last_save_preview_fingerprint"])
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertFalse(state["last_save_preview_conflicts"])
+            self.assertEqual(state["save_preview_resolutions"], {})
 
             self.assertFalse(server.run_save_preview_job())
             self.assertEqual(server.read_state()["last_action"], "save_preview")
@@ -7572,8 +7609,88 @@ devices:
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", page)
             self.assertNotIn("Save HA to Git</button>", page)
             self.assertNotIn("Apply Git to HA</button>", page)
+            self.assertNotIn("<h2>Save Preview</h2>", page)
+            self.assertNotIn("<h2>Apply Preview</h2>", page)
+            self.assertNotIn("Confirm Save to Git", page)
+            self.assertNotIn("Confirm Apply to HA", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
+
+    def test_deleted_devices_cleanup_clears_stale_save_apply_previews_through_decision(self):
+        server = load_server()
+        for decision in ("confirm", "revert"):
+            with self.subTest(decision=decision):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+                    storage = server.CONFIG_DIR / ".storage"
+                    storage.mkdir()
+                    registry_path = storage / "core.device_registry"
+                    registry_path.write_text(
+                        json.dumps(
+                            {
+                                "data": {
+                                    "devices": [],
+                                    "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}],
+                                }
+                            }
+                        )
+                    )
+                    server.core_stop = lambda: None
+                    server.core_start = lambda: None
+                    server.write_state(
+                        {
+                            "last_diff": "stale apply diff",
+                            "last_diff_generated_at": "2026-06-13T12:00:00+00:00",
+                            "last_preview_commit": "stale-apply-commit",
+                            "last_preview_fingerprint": "stale-apply-fingerprint",
+                            "last_preview_live_fingerprints": {"homeassistant/configuration.yaml": "live"},
+                            "last_preview_paths": ["homeassistant/configuration.yaml"],
+                            "last_preview_conflicts": True,
+                            "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
+                            "last_save_preview": "stale save preview",
+                            "last_save_diff": "stale save diff",
+                            "last_save_diff_generated_at": "2026-06-13T12:00:00+00:00",
+                            "last_save_preview_commit": "stale-save-commit",
+                            "last_save_preview_fingerprint": "stale-save-fingerprint",
+                            "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                            "last_save_preview_conflicts": True,
+                            "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
+                        }
+                    )
+
+                    self.assertTrue(server.run_deleted_devices_preview_job())
+                    self.assertTrue(server.run_deleted_devices_delete_job())
+                    state = server.read_state()
+                    page = server.render_page()
+
+                    self.assertTrue(state["deleted_devices_pending_confirmation"])
+                    self.assertEqual(state["last_diff"], "")
+                    self.assertEqual(state["last_preview_paths"], [])
+                    self.assertEqual(state["last_save_preview"], "")
+                    self.assertEqual(state["last_save_preview_paths"], [])
+                    self.assertNotIn("<h2>Save Preview</h2>", page)
+                    self.assertNotIn("<h2>Apply Preview</h2>", page)
+                    self.assertNotIn("Confirm Save to Git", page)
+                    self.assertNotIn("Confirm Apply to HA", page)
+
+                    if decision == "confirm":
+                        self.assertTrue(server.run_deleted_devices_confirm_job())
+                    else:
+                        self.assertTrue(server.run_deleted_devices_revert_job())
+                    state = server.read_state()
+                    page = server.render_page()
+
+                    self.assertFalse(state["deleted_devices_pending_confirmation"])
+                    self.assertEqual(state["last_diff"], "")
+                    self.assertEqual(state["last_preview_paths"], [])
+                    self.assertEqual(state["last_save_preview"], "")
+                    self.assertEqual(state["last_save_preview_paths"], [])
+                    self.assertNotIn("<h2>Save Preview</h2>", page)
+                    self.assertNotIn("<h2>Apply Preview</h2>", page)
+                    self.assertNotIn("Confirm Save to Git", page)
+                    self.assertNotIn("Confirm Apply to HA", page)
 
     def test_failed_deleted_devices_preview_clears_old_approval(self):
         server = load_server()

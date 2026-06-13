@@ -185,6 +185,9 @@ def write_state(path, updates):
     with STATE_LOCK:
         current = read_state(path)
         current.update(updates)
+        if updates.get("deleted_devices_pending_confirmation") is True:
+            current.update(APPLY_PREVIEW_CLEAR_UPDATES)
+            current.update(SAVE_PREVIEW_CLEAR_UPDATES)
         path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_name(f".{path.name}.tmp")
         temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
