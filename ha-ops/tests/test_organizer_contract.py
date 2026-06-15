@@ -449,7 +449,7 @@ class OrganizerContractTests(unittest.TestCase):
             self.assertEqual(Counter(item for item, area in script_locations), Counter(script_keys(script_super_set())))
             self.assertEqual(Counter(item for item, area in scene_locations), Counter(scene_identity(item) for item in scene_super_set()))
 
-    def test_split_keeps_long_template_scalars_on_one_line(self):
+    def test_split_quotes_single_line_template_scalars_like_repo_style(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             live = root / "live"
@@ -483,7 +483,60 @@ class OrganizerContractTests(unittest.TestCase):
 
             text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
             self.assertIn(
-                "value_template: '{{ trigger.payload_json.action in [''2_single'', ''2_double''] }}'\n",
+                "value_template: \"{{ trigger.payload_json.action in ['2_single', '2_double'] }}\"\n",
+                text,
+            )
+
+    def test_split_folds_multi_statement_jinja_scalars(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "live"
+            storage = live / ".storage"
+            storage.mkdir(parents=True)
+            brightness_template = (
+                "{% set fallback = 25 %} "
+                "{% set minimum = state_attr('input_number.dining_room_dimmer_range', 'min') | float(0) %} "
+                "{% set maximum = state_attr('input_number.dining_room_dimmer_range', 'max') | float(100) %} "
+                "{{ [minimum, [fallback, maximum] | min] | max }}"
+            )
+            write_yaml(
+                live / "automations.yaml",
+                [
+                    {
+                        "id": "brightness_auto",
+                        "alias": "brightness_auto",
+                        "triggers": [{"entity_id": "switch.dining_room_light", "trigger": "state"}],
+                        "conditions": [],
+                        "actions": [
+                            {
+                                "action": "light.turn_on",
+                                "data": {"brightness_pct": brightness_template},
+                                "target": {"entity_id": "light.dining_room_dimmer"},
+                            }
+                        ],
+                    }
+                ],
+            )
+            write_yaml(live / "scripts.yaml", {})
+            write_yaml(live / "scenes.yaml", [])
+            write_json(storage / "core.area_registry", area_registry())
+            write_json(storage / "core.device_registry", device_registry())
+            write_json(storage / "core.entity_registry", entity_registry())
+
+            git = root / "git" / "homeassistant"
+            ORGANIZER.split_live_heaps_to_git(
+                live,
+                git,
+                options={"overrides": {"automations": {"brightness_auto": "home"}}},
+            )
+
+            text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
+            self.assertIn(
+                "brightness_pct: >-\n"
+                "        {% set fallback = 25 %}\n"
+                "        {% set minimum = state_attr('input_number.dining_room_dimmer_range', 'min') | float(0) %}\n"
+                "        {% set maximum = state_attr('input_number.dining_room_dimmer_range', 'max') | float(100) %}\n"
+                "        {{ [minimum, [fallback, maximum] | min] | max }}\n",
                 text,
             )
 

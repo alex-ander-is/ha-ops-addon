@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.14
+
+- Normalize Home Assistant organizer Jinja YAML scalars to avoid quote-only Save preview diffs.
+
 ## 0.8.13
 
 - Group Save and Apply preview diffs by file with collapsed per-file rows, change labels, global expand/collapse controls, and footer Confirm/Cancel actions.
