@@ -79,7 +79,7 @@ def render_diff_block(lines, start):
     return rendered, index
 
 
-def render_conflict_detail(detail):
+def render_conflict_detail(detail, include_wrap_control=True):
     lines = []
     raw_lines = detail.splitlines() or [""]
     index = 0
@@ -91,12 +91,17 @@ def render_conflict_detail(detail):
             continue
         lines.append(render_diff_line(line))
         index += 1
-    return (
-        "<div class='conflict-diff' role='region' aria-label='Conflict diff'>"
+    wrap_control = (
         "<label class='diff-wrap-control'>"
         "<input type='checkbox' class='diff-wrap-toggle'>"
         "<span>Wrap lines</span>"
         "</label>"
+        if include_wrap_control
+        else ""
+    )
+    return (
+        "<div class='conflict-diff' role='region' aria-label='Conflict diff'>"
+        f"{wrap_control}"
         "<div class='diff-lines'>"
         f"{''.join(lines)}"
         "</div>"
@@ -224,46 +229,228 @@ def render_conflicts(conflicts, conflict_type=None):
     )
 
 
-def render_preview_decisions(paths, resolutions, direction, require_all=False):
-    if not paths:
-        return ""
+def preview_choice_buttons(path, direction, path_action):
+    escaped_path = html.escape(path, quote=True)
+    if direction == "save":
+        primary_choice = "ha"
+        primary_label = "Use HA Version"
+        keep_choice = "git"
+    else:
+        primary_choice = "git"
+        primary_label = "Use Git Version"
+        keep_choice = "ha"
+    return (
+        "<button type='button' class='secondary preview-wrap-button'>Wrap Lines</button>"
+        f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
+        f"<input type='hidden' name='path' value='{escaped_path}'>"
+        f"<input type='hidden' name='choice' value='{primary_choice}'>"
+        f"<button type='submit' class='secondary'>{primary_label}</button>"
+        "</form>"
+        f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
+        f"<input type='hidden' name='path' value='{escaped_path}'>"
+        f"<input type='hidden' name='choice' value='{keep_choice}'>"
+        "<button type='submit' class='secondary'>Keep Unchanged</button>"
+        "</form>"
+    )
+
+
+def render_preview_path(path):
+    path = str(path)
+    if "/" not in path:
+        return f"<code><strong>{html.escape(path)}</strong></code>"
+    parent, filename = path.rsplit("/", 1)
+    return f"<code>{html.escape(parent)}/<strong>{html.escape(filename)}</strong></code>"
+
+
+def preview_change_labels_by_path(summary_text):
+    labels = {}
+    for line in str(summary_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- ") or ":" not in stripped:
+            continue
+        label, path = stripped[2:].split(":", 1)
+        label = label.strip()
+        path = path.strip()
+        if label and path:
+            labels[path] = label
+    return labels
+
+
+def diff_path_relative(path):
+    if not path or path == "/dev/null":
+        return None
+    path = path[2:] if path.startswith(("a/", "b/")) else path
+    for marker in ("/baseline/", "/preview/", "/save-to-git-preview/", "/apply-preview/"):
+        if marker in path:
+            return path.rsplit(marker, 1)[1]
+    return path
+
+
+def match_preview_path(raw_path, paths, current_target=None):
+    relative = diff_path_relative(raw_path)
+    if not relative:
+        return None
+    candidates = [relative]
+    if current_target and not relative.startswith(f"{current_target}/"):
+        candidates.append(f"{current_target}/{relative}")
+    for candidate in candidates:
+        for path in paths:
+            if candidate == path or candidate.endswith(f"/{path}"):
+                return path
+    return None
+
+
+def diff_git_path(line):
+    parts = line.split()
+    if len(parts) >= 4:
+        return parts[3]
+    return None
+
+
+def diff_command_path(line):
+    parts = line.split()
+    if len(parts) >= 4:
+        return parts[-1]
+    return None
+
+
+def diff_header_path(line):
+    return line[4:].split("\t", 1)[0]
+
+
+def split_preview_diff_by_path(detail, paths):
+    path_set = set(paths)
+    chunks = {}
+    summary = []
+    current_target = None
+    current_path = None
+    current_lines = []
+    pending_old_path = None
+
+    def flush():
+        nonlocal current_path, current_lines
+        if not current_lines:
+            return
+        if current_path in path_set:
+            chunks.setdefault(current_path, []).extend(current_lines)
+        else:
+            summary.extend(current_lines)
+        current_lines = []
+        current_path = None
+
+    for line in detail.splitlines():
+        if line.startswith("## "):
+            flush()
+            current_target = line[3:].strip()
+            summary.append(line)
+            continue
+        if line.startswith("diff --git "):
+            flush()
+            current_path = match_preview_path(diff_git_path(line), paths, current_target)
+            current_lines = [line]
+            pending_old_path = None
+            continue
+        if line.startswith("diff "):
+            flush()
+            current_path = match_preview_path(diff_command_path(line), paths, current_target)
+            current_lines = [line]
+            pending_old_path = None
+            continue
+        if line.startswith("--- "):
+            if current_lines and current_path is None:
+                flush()
+            if not current_lines:
+                current_lines = []
+            pending_old_path = diff_header_path(line)
+            current_lines.append(line)
+            continue
+        if line.startswith("+++ "):
+            new_path = diff_header_path(line)
+            if current_path is None:
+                current_path = match_preview_path(new_path, paths, current_target) or match_preview_path(
+                    pending_old_path, paths, current_target
+                )
+            current_lines.append(line)
+            continue
+        if current_lines:
+            current_lines.append(line)
+        else:
+            summary.append(line)
+    flush()
+    return {path: "\n".join(lines) for path, lines in chunks.items()}, "\n".join(summary).strip()
+
+
+def render_preview_decisions(paths, resolutions, direction, require_all=False, diff_text="", summary_text=""):
     action_label = "Confirm Save to Git" if direction == "save" else "Confirm Apply to HA"
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
     all_action = "save" if direction == "save" else "apply"
     missing = [path for path in paths if path not in resolutions]
     confirm_disabled = " disabled" if require_all and missing else ""
-    rows = []
+    cancel_direction = "save" if direction == "save" else "apply"
+    diff_by_path, diff_summary = split_preview_diff_by_path(diff_text or "", paths)
+    change_labels = preview_change_labels_by_path(summary_text)
+    summary_parts = []
+    if summary_text:
+        summary_parts.append(f"<pre class='preview-summary'>{html.escape(summary_text)}</pre>")
+    elif diff_summary and not paths:
+        summary_parts.append(render_conflict_detail(diff_summary, include_wrap_control=False))
+    elif diff_summary:
+        summary_parts.append(f"<pre class='preview-summary'>{html.escape(diff_summary)}</pre>")
+    files = []
     for path in paths:
         choice = resolutions.get(path)
         status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
-        rows.append(
-            "<tr>"
-            f"<td><code>{html.escape(path)}</code>{status}</td>"
-            "<td class='actions'>"
-            f"<form method='post' action='{path_action}' data-async-form='true'>"
-            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
-            "<input type='hidden' name='choice' value='ha'>"
-            "<button type='submit' class='secondary'>Use HA Version</button>"
+        change_label = change_labels.get(path)
+        change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
+        detail = diff_by_path.get(path) or "Diff detail unavailable for this file."
+        files.append(
+            "<article class='preview-file' data-preview-file>"
+            "<div class='preview-file-header'>"
+            "<div class='preview-file-title'>"
+            "<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>Expand Diff</button>"
+            f"{render_preview_path(path)}{change}{status}"
+            "</div>"
+            "<div class='preview-file-actions'>"
+            f"{preview_choice_buttons(path, direction, path_action)}"
+            "</div>"
+            "</div>"
+            "<div class='preview-file-detail' hidden>"
+            f"{render_conflict_detail(detail, include_wrap_control=False)}"
+            "</div>"
+            "</article>"
+        )
+    if not paths and not summary_parts:
+        summary_parts.append("<p class='muted'>No file changes.</p>")
+    global_controls = (
+        "<div class='preview-list-controls'>"
+        "<button type='button' class='secondary preview-expand-all'>Expand All</button>"
+        "<button type='button' class='secondary preview-collapse-all'>Collapse All</button>"
+        "</div>"
+        if paths
+        else ""
+    )
+    footer = ""
+    if paths:
+        footer = (
+            "<div class='preview-footer-actions'>"
+            f"<form method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+            f"<button type='submit'{confirm_disabled}>{action_label}</button>"
             "</form>"
-            f"<form method='post' action='{path_action}' data-async-form='true'>"
-            f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
-            "<input type='hidden' name='choice' value='git'>"
-            "<button type='submit' class='secondary'>Use Git Version</button>"
+            "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
+            f"<input type='hidden' name='direction' value='{cancel_direction}'>"
+            "<button type='submit' class='secondary'>Cancel</button>"
             "</form>"
-            "</td>"
-            "</tr>"
+            "</div>"
         )
     return (
         "<div class='preview-decisions'>"
-        "<div class='action-row'>"
-        f"<form method='post' action='{all_action}' data-async-form='true'>"
-        f"<button type='submit'{confirm_disabled}>{action_label}</button>"
-        "</form>"
+        "<div class='preview-list-header'>"
+        "<h3>Список изменений</h3>"
+        f"{global_controls}"
         "</div>"
-        "<div class='table-scroll'>"
-        "<table class='conflicts-table'><thead><tr><th>File</th><th>Action</th></tr></thead>"
-        f"<tbody>{''.join(rows)}</tbody></table>"
-        "</div>"
+        f"{''.join(summary_parts)}"
+        f"<div class='preview-file-list'>{''.join(files)}</div>"
+        f"{footer}"
         "</div>"
     )
 
@@ -775,6 +962,67 @@ def render_page(data):
       gap: 10px;
       margin: 12px 0;
     }}
+    .preview-list-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .preview-list-header h3 {{
+      margin: 0;
+      font-size: 1rem;
+    }}
+    .preview-list-controls,
+    .preview-footer-actions,
+    .preview-file-actions {{
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .preview-file-list {{
+      display: grid;
+      gap: 8px;
+    }}
+    .preview-file {{
+      border: 1px solid var(--ha-border);
+      border-radius: calc(var(--ha-radius) - 4px);
+      background: var(--ha-card-bg);
+      overflow: hidden;
+    }}
+    .preview-file-header {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 12px;
+    }}
+    .preview-file-title {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .preview-file-title code {{
+      overflow-wrap: anywhere;
+    }}
+    .preview-file-title code strong {{
+      color: var(--ha-text);
+    }}
+    .preview-file-change {{
+      color: var(--ha-muted);
+      font-size: 0.86rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+    .preview-file-detail {{
+      border-top: 1px solid var(--ha-border);
+    }}
+    .preview-footer-actions {{
+      margin-top: 4px;
+    }}
     .decision-status {{
       display: inline-block;
       margin-left: 8px;
@@ -1089,6 +1337,9 @@ def render_page(data):
       }}
       .card {{
         padding: 16px;
+      }}
+      .preview-file-header {{
+        grid-template-columns: minmax(0, 1fr);
       }}
       dl {{
         grid-template-columns: 1fr;
@@ -1428,6 +1679,51 @@ def render_page(data):
             if (!input.disabled) {{
               input.checked = checked;
             }}
+          }}
+        }});
+      }}
+
+      function setPreviewFileExpanded(file, expanded) {{
+        const detail = file.querySelector(".preview-file-detail");
+        const toggle = file.querySelector(".preview-file-toggle");
+        if (detail) {{
+          detail.hidden = !expanded;
+        }}
+        if (toggle) {{
+          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+          toggle.textContent = expanded ? "Collapse Diff" : "Expand Diff";
+        }}
+      }}
+
+      for (const button of document.querySelectorAll(".preview-file-toggle")) {{
+        button.addEventListener("click", () => {{
+          const file = button.closest("[data-preview-file]");
+          if (!file) {{
+            return;
+          }}
+          setPreviewFileExpanded(file, button.getAttribute("aria-expanded") !== "true");
+        }});
+      }}
+
+      for (const button of document.querySelectorAll(".preview-expand-all, .preview-collapse-all")) {{
+        button.addEventListener("click", () => {{
+          const section = button.closest(".preview-decisions");
+          if (!section) {{
+            return;
+          }}
+          const expanded = button.classList.contains("preview-expand-all");
+          for (const file of section.querySelectorAll("[data-preview-file]")) {{
+            setPreviewFileExpanded(file, expanded);
+          }}
+        }});
+      }}
+
+      for (const button of document.querySelectorAll(".preview-wrap-button")) {{
+        button.addEventListener("click", () => {{
+          const file = button.closest("[data-preview-file]");
+          const diff = file ? file.querySelector(".conflict-diff") : null;
+          if (diff) {{
+            diff.classList.toggle("wrap-lines");
           }}
         }});
       }}

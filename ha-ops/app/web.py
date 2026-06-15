@@ -297,11 +297,8 @@ def render_page(ctx):
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
     internal_ids_rows = state.get("last_internal_ids_rows") or []
-    save_details_html = html.escape(save_preview_text)
-    if save_diff_text and save_diff_text != save_preview_text:
-        save_details_html = f"<pre class='preview-summary'>{html.escape(save_preview_text)}</pre>{ui.render_conflict_detail(save_diff_text)}"
-    elif save_diff_text:
-        save_details_html = ui.render_conflict_detail(save_diff_text)
+    save_details_text = save_diff_text or save_preview_text
+    save_summary_text = save_preview_text if save_diff_text and save_diff_text != save_preview_text else ""
     run_disabled = "disabled" if last_status == "running" else ""
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     apply_action = "apply"
@@ -391,8 +388,9 @@ def render_page(ctx):
             f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
             "</p>"
             f"{apply_preview_warnings_html}"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts)}"
-            f"<div data-transient='apply-preview'>{ui.render_conflict_detail(diff_text) if diff_text else ''}</div>"
+            f"<div data-transient='apply-preview'>"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text)}"
+            "</div>"
             "</section>"
         )
     save_preview_section_html = ""
@@ -403,8 +401,9 @@ def render_page(ctx):
             "<p>Generated at "
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts)}"
-            f"<div data-transient='save-preview'>{save_details_html}</div>"
+            f"<div data-transient='save-preview'>"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text)}"
+            "</div>"
             "</section>"
         )
     deleted_devices_section_html = ""
@@ -642,6 +641,26 @@ def create_handler(ctx):
                 else:
                     self.send_response(204)
                     self.end_headers()
+                return
+
+            if parsed.path == "/clear-preview":
+                direction = body.get("direction", [""])[0]
+                if direction == "save":
+                    ctx.write_state(state_store.SAVE_PREVIEW_CLEAR_UPDATES)
+                    message = "Save preview cancelled."
+                elif direction == "apply":
+                    ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
+                    message = "Apply preview cancelled."
+                else:
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": "Invalid preview direction."}, status=400)
+                    else:
+                        self.send_html(render_page(ctx), status=400)
+                    return
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": message})
+                else:
+                    self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/apply":

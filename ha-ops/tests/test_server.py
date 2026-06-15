@@ -367,6 +367,106 @@ class ServerTests(unittest.TestCase):
             self.assertIn("registry item would be removed", page)
             self.assertLess(page.index("apply-preview-warning"), page.index("data-transient='apply-preview'"))
 
+    def test_save_preview_renders_collapsed_change_list_with_save_choices_and_footer_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_save_preview": (
+                        "Save preview changes (2):\n"
+                        "- Modified: homeassistant/configuration.yaml\n"
+                        "- Added: homeassistant/packages/lights.yaml"
+                    ),
+                    "last_save_diff": "\n".join(
+                        [
+                            "diff -ruN /tmp/repo/homeassistant/configuration.yaml /tmp/preview/homeassistant/configuration.yaml",
+                            "--- /tmp/repo/homeassistant/configuration.yaml",
+                            "+++ /tmp/preview/homeassistant/configuration.yaml",
+                            "@@ -1 +1 @@",
+                            "-git",
+                            "+ha",
+                            "diff -ruN /tmp/repo/homeassistant/packages/lights.yaml /tmp/preview/homeassistant/packages/lights.yaml",
+                            "--- /tmp/repo/homeassistant/packages/lights.yaml",
+                            "+++ /tmp/preview/homeassistant/packages/lights.yaml",
+                            "@@ -0,0 +1 @@",
+                            "+light:",
+                        ]
+                    ),
+                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_save_preview_paths": [
+                        "homeassistant/configuration.yaml",
+                        "homeassistant/packages/lights.yaml",
+                    ],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("<h3>Список изменений</h3>", page)
+            self.assertIn("preview-expand-all", page)
+            self.assertIn("preview-collapse-all", page)
+            self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
+            self.assertIn("<div class='preview-file-detail' hidden>", page)
+            self.assertIn("homeassistant/<strong>configuration.yaml</strong>", page)
+            self.assertIn("homeassistant/packages/<strong>lights.yaml</strong>", page)
+            self.assertIn("<span class='preview-file-change'>Modified</span>", page)
+            self.assertIn("<span class='preview-file-change'>Added</span>", page)
+            self.assertIn("Use HA Version", page)
+            self.assertIn(
+                "<input type='hidden' name='choice' value='git'><button type='submit' class='secondary'>Keep Unchanged</button>",
+                page,
+            )
+            self.assertNotIn("Use Git Version", page)
+            self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
+            self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
+
+    def test_apply_preview_renders_collapsed_change_list_with_apply_choices_and_footer_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_diff": "\n".join(
+                        [
+                            "## homeassistant",
+                            "diff -ruN /tmp/apply-preview/baseline/configuration.yaml /tmp/apply-preview/preview/configuration.yaml",
+                            "--- /tmp/apply-preview/baseline/configuration.yaml",
+                            "+++ /tmp/apply-preview/preview/configuration.yaml",
+                            "@@ -1 +1 @@",
+                            "-ha",
+                            "+git",
+                        ]
+                    ),
+                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_preview_conflicts": True,
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("<h3>Список изменений</h3>", page)
+            self.assertIn("preview-expand-all", page)
+            self.assertIn("preview-collapse-all", page)
+            self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
+            self.assertIn("<div class='preview-file-detail' hidden>", page)
+            self.assertIn("homeassistant/<strong>configuration.yaml</strong>", page)
+            self.assertIn("Wrap Lines", page)
+            self.assertIn("Use Git Version", page)
+            self.assertIn(
+                "<input type='hidden' name='choice' value='ha'><button type='submit' class='secondary'>Keep Unchanged</button>",
+                page,
+            )
+            self.assertNotIn("Use HA Version", page)
+            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
+            self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
+            self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
+
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2173,6 +2273,41 @@ class ServerTests(unittest.TestCase):
                 "clear-display",
             ],
         )
+
+        post_request = invoke(
+            "do_POST",
+            "/clear-preview",
+            body=b"direction=save",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Save preview cancelled", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+        self.assertNotIn("last_diff", ctx.state_updates[-1])
+
+        post_request = invoke(
+            "do_POST",
+            "/clear-preview",
+            body=b"direction=apply",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Apply preview cancelled", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
+        self.assertIsNone(ctx.state_updates[-1]["last_preview_commit"])
+        self.assertNotIn("last_save_preview", ctx.state_updates[-1])
+
+        post_request = invoke(
+            "do_POST",
+            "/clear-preview",
+            body=b"direction=bad",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 400)
+        self.assertIn("Invalid preview direction", post_request.wfile.getvalue().decode())
 
         post_request = invoke(
             "do_POST",

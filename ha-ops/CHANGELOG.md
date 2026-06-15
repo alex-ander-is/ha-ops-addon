@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.13
+
+- Group Save and Apply preview diffs by file with collapsed per-file rows, change labels, global expand/collapse controls, and footer Confirm/Cancel actions.
+
 ## 0.8.12
 
 - Hide stale Save and Apply previews while deleted_devices cleanup is waiting for confirm or revert.
