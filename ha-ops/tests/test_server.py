@@ -1,9 +1,12 @@
+import ast
 import importlib.util
 import io
 import json
 import subprocess
 import sys
 import tempfile
+import threading
+import unicodedata
 import unittest
 from datetime import datetime, timedelta, timezone
 from email.message import Message
@@ -13,6 +16,15 @@ from types import MethodType
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "app" / "server.py"
+I18N_PATH = ROOT / "app" / "i18n.py"
+I18N_GUARD_PATHS = [
+    ROOT / "app" / "app_context.py",
+    ROOT / "app" / "conflicts.py",
+    ROOT / "app" / "jobs.py",
+    ROOT / "app" / "state.py",
+    ROOT / "app" / "web.py",
+]
+I18N_APP_PATHS = sorted((ROOT / "app").glob("*.py"))
 
 
 def load_server():
@@ -24,7 +36,932 @@ def load_server():
     return server
 
 
+def load_i18n():
+    sys.modules.pop("i18n", None)
+    spec = importlib.util.spec_from_file_location("i18n", I18N_PATH)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["i18n"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class ServerTests(unittest.TestCase):
+    def assertEnglishTranslationText(self, text, context):
+        offenders = []
+        for index, char in enumerate(text):
+            if ord(char) <= 0x7F or not unicodedata.category(char).startswith("L"):
+                continue
+            codepoint = f"U+{ord(char):04X}"
+            name = unicodedata.name(char, "UNKNOWN")
+            start = max(0, index - 24)
+            end = min(len(text), index + 25)
+            snippet = text[start:end].replace("\n", "\\n")
+            offenders.append(f"{context}: {codepoint} {name} in {snippet!r}")
+        if offenders:
+            self.fail("Non-English alphabet text found:\n" + "\n".join(offenders))
+
+    def test_english_translation_library_has_no_non_english_alphabet_text(self):
+        i18n = load_i18n()
+        self.assertEnglishTranslationText("ASCII punctuation, quotes, arrows ->, and Emoji 😀 stay allowed.", "guard sample")
+        for key, value in i18n.EN_TEXT.items():
+            self.assertEnglishTranslationText(value, key)
+
+    def test_literal_translation_keys_exist_in_english_catalog(self):
+        i18n = load_i18n()
+        offenders = []
+        for path in I18N_APP_PATHS:
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                func = node.func
+                is_lookup = isinstance(func, ast.Name) and func.id == "_"
+                is_i18n_lookup = (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in {"t", "error"}
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "i18n"
+                )
+                if not (is_lookup or is_i18n_lookup):
+                    continue
+                key_arg = node.args[0]
+                if (
+                    isinstance(key_arg, ast.Constant)
+                    and isinstance(key_arg.value, str)
+                    and key_arg.value not in i18n.EN_TEXT
+                ):
+                    offenders.append(f"{path.name}:{node.lineno}: {key_arg.value}")
+        if offenders:
+            self.fail("Translation lookup keys missing from English catalog:\n" + "\n".join(offenders))
+
+    def test_user_facing_message_literals_use_translation_catalog(self):
+        def is_catalog_or_exception_message(node):
+            if isinstance(node, ast.Constant) and node.value == "":
+                return True
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return False
+            if isinstance(node, ast.JoinedStr):
+                return False
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in {"_", "str"}:
+                    return True
+                if (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "t"
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "i18n"
+                ):
+                    return True
+            if isinstance(node, ast.IfExp):
+                return is_catalog_or_exception_message(node.body) and is_catalog_or_exception_message(node.orelse)
+            return True
+
+        def add_offender(path, source, node, label, offenders):
+            segment = ast.get_source_segment(source, node) or type(node).__name__
+            offenders.append(f"{path.name}:{node.lineno}: {label} uses {segment}")
+
+        offenders = []
+        for path in I18N_GUARD_PATHS:
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Dict):
+                    for key, value in zip(node.keys, node.values):
+                        if (
+                            isinstance(key, ast.Constant)
+                            and key.value == "last_message"
+                            and not is_catalog_or_exception_message(value)
+                        ):
+                            add_offender(path, source, value, "last_message", offenders)
+                        if isinstance(key, ast.Constant) and key.value == "last_details":
+                            if isinstance(value, ast.List):
+                                for item in value.elts:
+                                    if not is_catalog_or_exception_message(item):
+                                        add_offender(path, source, item, "last_details list item", offenders)
+                            elif not is_catalog_or_exception_message(value):
+                                add_offender(path, source, value, "last_details", offenders)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "send_json":
+                    for arg in node.args[:1]:
+                        if not isinstance(arg, ast.Dict):
+                            continue
+                        for key, value in zip(arg.keys, arg.values):
+                            if (
+                                isinstance(key, ast.Constant)
+                                and key.value == "message"
+                                and not is_catalog_or_exception_message(value)
+                            ):
+                                add_offender(path, source, value, "JSON message", offenders)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if (
+                        node.func.attr == "append"
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "details"
+                        and node.args
+                        and not is_catalog_or_exception_message(node.args[0])
+                    ):
+                        add_offender(path, source, node.args[0], "details.append", offenders)
+                    if node.func.attr == "add_detail" and node.args:
+                        message_arg = node.args[-1]
+                        if not is_catalog_or_exception_message(message_arg):
+                            add_offender(path, source, message_arg, "add_detail", offenders)
+        if offenders:
+            self.fail("User-facing messages bypass the translation catalog:\n" + "\n".join(offenders))
+
+    def test_f013_runtime_and_preview_messages_use_translation_catalog(self):
+        guarded = {
+            ROOT / "app" / "app_context.py": {
+                "ensure_preview_matches_state",
+                "enforce_apply_limits",
+            },
+            ROOT / "app" / "jobs.py": {"run_deleted_devices_confirm_job"},
+            ROOT / "app" / "registry_cleanup.py": {
+                "build_deleted_devices_preview",
+                "build_stale_mqtt_discovery_preview",
+            },
+            ROOT / "app" / "sync.py": {
+                "build_apply_preview",
+                "build_apply_preview_from_sources",
+                "build_save_preview",
+                "merge_status_lines",
+                "save_preview_status_lines",
+            },
+        }
+
+        def catalog_call(node):
+            if not isinstance(node, ast.Call):
+                return False
+            if isinstance(node.func, ast.Name) and node.func.id == "_":
+                return True
+            return (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"error", "t", "user_message"}
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "i18n"
+            )
+
+        def user_text_literal(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return any(char.isalpha() for char in node.value)
+            if isinstance(node, ast.JoinedStr):
+                return any(
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and any(char.isalpha() for char in part.value)
+                    for part in node.values
+                )
+            if isinstance(node, (ast.List, ast.Tuple)):
+                return any(user_text_literal(item) for item in node.elts)
+            if isinstance(node, ast.IfExp):
+                return user_text_literal(node.body) or user_text_literal(node.orelse)
+            return False
+
+        def target_name(target):
+            return target.id if isinstance(target, ast.Name) else None
+
+        offenders = []
+        for path, functions in guarded.items():
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name in functions]:
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                        if (
+                            isinstance(node.exc.func, ast.Name)
+                            and node.exc.func.id == "RuntimeError"
+                            and node.exc.args
+                            and user_text_literal(node.exc.args[0])
+                        ):
+                            offenders.append(f"{path.name}:{node.lineno}: RuntimeError text bypasses catalog")
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "str":
+                        if node.args and isinstance(node.args[0], ast.Name) and node.args[0].id == "exc":
+                            offenders.append(f"{path.name}:{node.lineno}: str(exc) used for guarded user-facing text")
+                    if isinstance(node, ast.Assign):
+                        names = {target_name(target) for target in node.targets}
+                        if names.intersection({"summary", "diff_text", "lines"}) and user_text_literal(node.value):
+                            offenders.append(f"{path.name}:{node.lineno}: preview text literal bypasses catalog")
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                        receiver = node.func.value
+                        if isinstance(receiver, ast.Name) and receiver.id in {"lines", "chunks"} and node.args:
+                            if not catalog_call(node.args[0]) and user_text_literal(node.args[0]):
+                                offenders.append(f"{path.name}:{node.lineno}: preview append bypasses catalog")
+
+        if offenders:
+            self.fail("F013 catalog guard found bypasses:\n" + "\n".join(offenders))
+
+    def test_f013_catalog_backed_runtime_errors_render_from_library(self):
+        server = load_server()
+        i18n = server.app_context.i18n
+        replacements = {
+            "error.preview_commit_mismatch": "CATALOG: preview commit mismatch.",
+            "error.apply_delete_limit": "CATALOG: delete limit {deletions}/{limit}.",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+        try:
+            i18n.EN_TEXT.update(replacements)
+            with self.assertRaises(i18n.CatalogError) as commit_error:
+                server._CTX.ensure_preview_matches_state(
+                    {"last_preview_commit": "old"},
+                    "new",
+                    {"fingerprint": "same", "live_fingerprints": {}},
+                )
+            self.assertEqual(str(commit_error.exception), "CATALOG: preview commit mismatch.")
+
+            with self.assertRaises(i18n.CatalogError) as limit_error:
+                server._CTX.enforce_apply_limits({"max_apply_deletions": 0}, {"deletions": 2})
+            self.assertEqual(str(limit_error.exception), "CATALOG: delete limit 2/0.")
+        finally:
+            i18n.EN_TEXT.update(originals)
+
+    def test_f013_deleted_devices_confirm_failure_uses_catalog_message(self):
+        server = load_server()
+        i18n = server.app_context.job_logic.i18n
+        key = "error.deleted_devices_cleanup_not_pending"
+        original = i18n.EN_TEXT[key]
+        i18n.EN_TEXT[key] = "CATALOG: no deleted_devices confirmation pending."
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.configure_paths(server, Path(tmp))
+                server.write_state({"deleted_devices_pending_confirmation": False})
+                self.assertFalse(server.run_deleted_devices_confirm_job())
+                state = server.read_state()
+                self.assertEqual(state["last_message"], "CATALOG: no deleted_devices confirmation pending.")
+                self.assertEqual(state["last_details"][-1], "CATALOG: no deleted_devices confirmation pending.")
+                self.assertNotIn("No deleted_devices cleanup is pending confirmation.", state["last_details"])
+        finally:
+            i18n.EN_TEXT[key] = original
+
+    def test_f014_job_and_sync_details_use_translation_catalog(self):
+        guarded = {
+            ROOT / "app" / "jobs.py": {
+                "run_deleted_devices_delete_job",
+                "run_internal_ids_migrate_job",
+                "run_retained_devices_delete_job",
+            },
+            ROOT / "app" / "sync.py": {
+                "add_save_export_candidate_details",
+                "apply_homeassistant_config",
+                "apply_targets",
+            },
+        }
+
+        def user_text_literal(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return any(char.isalpha() for char in node.value)
+            if isinstance(node, ast.JoinedStr):
+                return any(
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and any(char.isalpha() for char in part.value)
+                    for part in node.values
+                )
+            if isinstance(node, (ast.List, ast.Tuple)):
+                return any(user_text_literal(item) for item in node.elts)
+            if isinstance(node, ast.IfExp):
+                return user_text_literal(node.body) or user_text_literal(node.orelse)
+            return False
+
+        offenders = []
+        for path, functions in guarded.items():
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name in functions]:
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                        if (
+                            isinstance(node.exc.func, ast.Name)
+                            and node.exc.func.id == "RuntimeError"
+                            and node.exc.args
+                            and user_text_literal(node.exc.args[0])
+                        ):
+                            offenders.append(f"{path.name}:{node.lineno}: RuntimeError text bypasses catalog")
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                        if node.func.attr == "add_detail" and node.args and user_text_literal(node.args[-1]):
+                            offenders.append(f"{path.name}:{node.lineno}: add_detail text bypasses catalog")
+                        if (
+                            node.func.attr == "append"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == "details"
+                            and node.args
+                            and user_text_literal(node.args[0])
+                        ):
+                            offenders.append(f"{path.name}:{node.lineno}: details.append text bypasses catalog")
+
+        if offenders:
+            self.fail("F014 catalog guard found bypasses:\n" + "\n".join(offenders))
+
+    def test_f014_precondition_failures_render_from_translation_catalog(self):
+        server = load_server()
+        i18n = server.app_context.job_logic.i18n
+        replacements = {
+            "error.deleted_devices_preview_changed": "CATALOG: deleted_devices preview changed.",
+            "error.deleted_devices_preview_required": "CATALOG: deleted_devices preview required.",
+            "error.internal_ids_preview_required": "CATALOG: internal IDs preview required.",
+            "error.internal_ids_selection_required": "CATALOG: internal IDs selection required.",
+            "error.retained_devices_no_topics": "CATALOG: retained devices have no topics.",
+            "error.retained_devices_preview_required": "CATALOG: retained devices preview required.",
+            "error.retained_devices_selection_required": "CATALOG: retained devices selection required.",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+
+        class JobContext:
+            def __init__(self, state):
+                self.run_lock = threading.Lock()
+                self.state = dict(state)
+                self.updates = []
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def load_options(self):
+                return {}
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.updates.append(updates)
+                self.state.update(updates)
+
+            def log(self, message):
+                pass
+
+            def build_deleted_devices_preview(self):
+                return {"fingerprint": "fresh"}
+
+        cases = [
+            (
+                "internal ids preview required",
+                lambda ctx: server.app_context.job_logic.run_internal_ids_migrate_job(["0"], ctx),
+                {},
+                "CATALOG: internal IDs preview required.",
+                "Run Check actions IDs before approving migration.",
+            ),
+            (
+                "internal ids selection required",
+                lambda ctx: server.app_context.job_logic.run_internal_ids_migrate_job([], ctx),
+                {"last_internal_ids_rows": [{"path": "a.yaml", "changes": True}], "last_internal_ids_fingerprint": "fp"},
+                "CATALOG: internal IDs selection required.",
+                "Select at least one internal id migration file.",
+            ),
+            (
+                "retained devices preview required",
+                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job(["0"], ctx),
+                {},
+                "CATALOG: retained devices preview required.",
+                "Run Check retained devices before approving deletion.",
+            ),
+            (
+                "retained devices selection required",
+                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job([], ctx),
+                {"last_retained_devices_rows": [{"retained_topics": ["homeassistant/sensor/stale/config"]}]},
+                "CATALOG: retained devices selection required.",
+                "Select at least one retained device candidate to delete.",
+            ),
+            (
+                "retained devices no topics",
+                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job(["0"], ctx),
+                {"last_retained_devices_rows": [{"retained_topics": []}]},
+                "CATALOG: retained devices have no topics.",
+                "Selected retained device candidates have no retained discovery topics.",
+            ),
+            (
+                "deleted devices preview required",
+                lambda ctx: server.app_context.job_logic.run_deleted_devices_delete_job(ctx),
+                {},
+                "CATALOG: deleted_devices preview required.",
+                "Run Check deleted_devices before approving deletion.",
+            ),
+            (
+                "deleted devices preview changed",
+                lambda ctx: server.app_context.job_logic.run_deleted_devices_delete_job(ctx),
+                {"last_deleted_devices_count": 1, "last_deleted_devices_fingerprint": "stale"},
+                "CATALOG: deleted_devices preview changed.",
+                "Device registry changed since preview. Run Check deleted_devices again.",
+            ),
+        ]
+
+        try:
+            i18n.EN_TEXT.update(replacements)
+            for label, action, state, expected, forbidden in cases:
+                with self.subTest(label=label):
+                    ctx = JobContext(state)
+                    self.assertFalse(action(ctx))
+                    self.assertEqual(ctx.updates[-1]["last_message"], expected)
+                    self.assertEqual(ctx.updates[-1]["last_details"][-1], expected)
+                    self.assertNotIn(forbidden, ctx.updates[-1]["last_details"])
+        finally:
+            i18n.EN_TEXT.update(originals)
+
+    def test_f017_stale_state_and_save_export_paths_use_translation_catalog(self):
+        guarded = {
+            ROOT / "app" / "jobs.py": {
+                "run_deleted_devices_preview_job",
+                "run_internal_ids_preview_job",
+                "run_retained_devices_preview_job",
+                "run_deleted_devices_revert_job",
+            },
+            ROOT / "app" / "sync.py": {
+                "build_save_export",
+                "apply_save_export",
+                "restore_normalized_equal_save_files",
+                "restore_normalized_equal_save_worktree",
+                "save_unknown_base_conflicts",
+            },
+        }
+
+        def user_text_literal(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return any(char.isalpha() for char in node.value)
+            if isinstance(node, ast.JoinedStr):
+                return any(
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and any(char.isalpha() for char in part.value)
+                    for part in node.values
+                )
+            if isinstance(node, (ast.List, ast.Tuple)):
+                return any(user_text_literal(item) for item in node.elts)
+            if isinstance(node, ast.IfExp):
+                return user_text_literal(node.body) or user_text_literal(node.orelse)
+            return False
+
+        offenders = []
+        for path, functions in guarded.items():
+            source = path.read_text()
+            tree = ast.parse(source, filename=str(path))
+            for function in [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name in functions]:
+                for node in ast.walk(function):
+                    if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+                        if (
+                            isinstance(node.exc.func, ast.Name)
+                            and node.exc.func.id == "RuntimeError"
+                            and node.exc.args
+                            and user_text_literal(node.exc.args[0])
+                        ):
+                            offenders.append(f"{path.name}:{node.lineno}: RuntimeError text bypasses catalog")
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                        if node.func.attr == "add_detail" and node.args and user_text_literal(node.args[-1]):
+                            offenders.append(f"{path.name}:{node.lineno}: add_detail text bypasses catalog")
+                        if (
+                            node.func.attr == "append"
+                            and isinstance(node.func.value, ast.Name)
+                            and node.func.value.id == "details"
+                            and node.args
+                            and user_text_literal(node.args[0])
+                        ):
+                            offenders.append(f"{path.name}:{node.lineno}: details.append text bypasses catalog")
+
+        if offenders:
+            self.fail("F017 catalog guard found bypasses:\n" + "\n".join(offenders))
+
+    def test_f017_deleted_devices_preconditions_render_from_translation_catalog(self):
+        server = load_server()
+        i18n = server.app_context.job_logic.i18n
+        replacements = {
+            "error.deleted_devices_cleanup_not_pending": "CATALOG: no cleanup pending.",
+            "error.deleted_devices_pending_before_check": "CATALOG: pending before deleted_devices check.",
+            "error.deleted_devices_pending_before_internal_ids": "CATALOG: pending before internal ids check.",
+            "error.deleted_devices_pending_before_retained": "CATALOG: pending before retained check.",
+            "error.deleted_devices_rollback_missing": "CATALOG: rollback missing.",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+
+        class JobContext:
+            def __init__(self, state):
+                self.run_lock = threading.Lock()
+                self.state = dict(state)
+                self.updates = []
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def load_options(self):
+                return {}
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.updates.append(updates)
+                self.state.update(updates)
+
+            def log(self, message):
+                pass
+
+        cases = [
+            (
+                "deleted_devices check blocked",
+                server.app_context.job_logic.run_deleted_devices_preview_job,
+                {"deleted_devices_pending_confirmation": True},
+                "CATALOG: pending before deleted_devices check.",
+                "Confirm or revert the pending deleted_devices cleanup before checking again.",
+            ),
+            (
+                "internal ids check blocked",
+                server.app_context.job_logic.run_internal_ids_preview_job,
+                {"deleted_devices_pending_confirmation": True},
+                "CATALOG: pending before internal ids check.",
+                "Confirm or revert the pending deleted_devices cleanup before checking internal ids.",
+            ),
+            (
+                "retained devices check blocked",
+                server.app_context.job_logic.run_retained_devices_preview_job,
+                {"deleted_devices_pending_confirmation": True},
+                "CATALOG: pending before retained check.",
+                "Confirm or revert the pending deleted_devices cleanup before checking retained devices.",
+            ),
+            (
+                "revert not pending",
+                server.app_context.job_logic.run_deleted_devices_revert_job,
+                {"deleted_devices_pending_confirmation": False},
+                "CATALOG: no cleanup pending.",
+                "No deleted_devices cleanup is pending confirmation.",
+            ),
+            (
+                "revert rollback missing",
+                server.app_context.job_logic.run_deleted_devices_revert_job,
+                {"deleted_devices_pending_confirmation": True},
+                "CATALOG: rollback missing.",
+                "deleted_devices rollback snapshot is missing.",
+            ),
+        ]
+
+        try:
+            i18n.EN_TEXT.update(replacements)
+            for label, action, state, expected, forbidden in cases:
+                with self.subTest(label=label):
+                    ctx = JobContext(state)
+                    self.assertFalse(action(ctx))
+                    self.assertEqual(ctx.updates[-1]["last_message"], expected)
+                    self.assertEqual(ctx.updates[-1]["last_details"][-1], expected)
+                    self.assertNotIn(forbidden, ctx.updates[-1]["last_details"])
+        finally:
+            i18n.EN_TEXT.update(originals)
+
+    def test_f017_save_export_details_render_from_translation_catalog(self):
+        server = load_server()
+        sync = server.sync_logic
+        i18n = sync.i18n
+        replacements = {
+            "detail.exported_homeassistant_paths": "CATALOG: exported HA {count}.",
+            "detail.exported_legacy_zigbee2mqtt_paths": "CATALOG: exported Z2M {count}.",
+            "detail.exported_managed_storage_projection": "CATALOG: exported managed storage {count}.",
+            "detail.exported_storage_allowlist": "CATALOG: exported storage {count}.",
+            "detail.exporting_config_only": "CATALOG: exporting config {target} from {path}.",
+            "detail.exporting_target": "CATALOG: exporting target {target} from {path}.",
+            "detail.save_export_candidates": "CATALOG: candidates {target} {count}:",
+            "detail.skipped_optional_target_missing": "CATALOG: skipped optional {target} at {path}.",
+            "error.live_path_missing": "CATALOG: missing live path {target} at {path}.",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+
+        class SyncContext:
+            def __init__(self, root):
+                self.work_dir = root / "work"
+                self.work_dir.mkdir()
+
+            def add_detail(self, details, message):
+                details.append(message)
+
+            def run_command(self, args, cwd=None):
+                return subprocess.CompletedProcess(args, 0, "", "")
+
+        original_export_homeassistant_config = sync.export_homeassistant_config
+        original_export_target_to_path = sync.export_target_to_path
+        original_organize_homeassistant_export = sync.organize_homeassistant_export
+
+        def fake_export_homeassistant_config(src, dest, target, ctx):
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "configuration.yaml").write_text("homeassistant:\n")
+            return (1, 2, 3, 4)
+
+        def fake_export_target_to_path(target, dest, ctx):
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "config.yaml").write_text("addon: true\n")
+
+        try:
+            i18n.EN_TEXT.update(replacements)
+            sync.export_homeassistant_config = fake_export_homeassistant_config
+            sync.export_target_to_path = fake_export_target_to_path
+            sync.organize_homeassistant_export = lambda path, target, details, ctx: None
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                live_ha = root / "live-ha"
+                live_addon = root / "live-addon"
+                live_ha.mkdir()
+                live_addon.mkdir()
+                ctx = SyncContext(root)
+                details = []
+                sync.build_save_export(
+                    [
+                        {
+                            "id": "optional-addon",
+                            "type": "addon",
+                            "live_path": str(root / "missing-optional"),
+                            "source_path": str(root / "git" / "optional-addon"),
+                            "optional": True,
+                        },
+                        {
+                            "id": "homeassistant",
+                            "type": "homeassistant",
+                            "live_path": str(live_ha),
+                            "source_path": str(root / "git" / "homeassistant"),
+                        },
+                        {
+                            "id": "addon",
+                            "type": "addon",
+                            "live_path": str(live_addon),
+                            "source_path": str(root / "git" / "addon"),
+                        },
+                    ],
+                    details,
+                    ctx,
+                )
+                joined = "\n".join(details)
+                self.assertIn("CATALOG: skipped optional optional-addon", joined)
+                self.assertIn("CATALOG: exporting config homeassistant", joined)
+                self.assertIn("CATALOG: exported HA 1.", joined)
+                self.assertIn("CATALOG: exported Z2M 2.", joined)
+                self.assertIn("CATALOG: exported storage 3.", joined)
+                self.assertIn("CATALOG: exported managed storage 4.", joined)
+                self.assertIn("CATALOG: exporting target addon", joined)
+                self.assertIn("CATALOG: candidates homeassistant 1:", joined)
+                self.assertIn("CATALOG: candidates addon 1:", joined)
+                self.assertNotIn("Exporting config-only", joined)
+                self.assertNotIn("Skipping optional target", joined)
+
+                with self.assertRaises(i18n.CatalogError) as missing_error:
+                    sync.build_save_export(
+                        [
+                            {
+                                "id": "required-addon",
+                                "type": "addon",
+                                "live_path": str(root / "missing-required"),
+                                "source_path": str(root / "git" / "required-addon"),
+                            }
+                        ],
+                        [],
+                        ctx,
+                    )
+                self.assertIn("CATALOG: missing live path required-addon", str(missing_error.exception))
+                self.assertNotIn("Live path does not exist", str(missing_error.exception))
+        finally:
+            sync.export_homeassistant_config = original_export_homeassistant_config
+            sync.export_target_to_path = original_export_target_to_path
+            sync.organize_homeassistant_export = original_organize_homeassistant_export
+            i18n.EN_TEXT.update(originals)
+
+    def test_f020_preview_status_lines_render_from_translation_catalog(self):
+        server = load_server()
+        sync = server.sync_logic
+        i18n = sync.i18n
+        replacements = {
+            "preview.change_added": "CATALOG_ADDED",
+            "preview.change_copied": "CATALOG_COPIED",
+            "preview.change_deleted": "CATALOG_DELETED",
+            "preview.change_modified": "CATALOG_MODIFIED",
+            "preview.change_renamed": "CATALOG_RENAMED",
+            "preview.change_status_line": "- {label}: {path}",
+            "preview.save_changes_title": "CATALOG save changes {count}:",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+
+        class MergeStatusContext:
+            def run_command(self, args, cwd=None):
+                output = "\n".join(
+                    [
+                        "A\thomeassistant/added.yaml",
+                        "D\thomeassistant/deleted.yaml",
+                        "M\thomeassistant/modified.yaml",
+                        "R100\thomeassistant/old.yaml\thomeassistant/renamed.yaml",
+                        "C100\thomeassistant/source.yaml\thomeassistant/copied.yaml",
+                    ]
+                )
+                return subprocess.CompletedProcess(args, 0, output, "")
+
+        try:
+            i18n.EN_TEXT.update(replacements)
+            merge_lines, merge_paths = sync.merge_status_lines(Path("/repo"), MergeStatusContext())
+            self.assertEqual(
+                merge_lines,
+                    [
+                        "- CATALOG_ADDED: homeassistant/added.yaml",
+                        "- CATALOG_DELETED: homeassistant/deleted.yaml",
+                        "- CATALOG_MODIFIED: homeassistant/modified.yaml",
+                        "- CATALOG_RENAMED: homeassistant/renamed.yaml",
+                        "- CATALOG_COPIED: homeassistant/copied.yaml",
+                ],
+            )
+            self.assertEqual(
+                merge_paths,
+                [
+                    "homeassistant/added.yaml",
+                    "homeassistant/copied.yaml",
+                    "homeassistant/deleted.yaml",
+                    "homeassistant/modified.yaml",
+                    "homeassistant/renamed.yaml",
+                ],
+            )
+
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                repo = root / "repo"
+                preview = root / "preview"
+                (repo / "homeassistant").mkdir(parents=True)
+                (preview / "homeassistant").mkdir(parents=True)
+                (repo / "homeassistant" / "deleted.yaml").write_text("old\n")
+                (repo / "homeassistant" / "modified.yaml").write_text("git\n")
+                (preview / "homeassistant" / "added.yaml").write_text("ha\n")
+                (preview / "homeassistant" / "modified.yaml").write_text("ha\n")
+
+                save_lines = sync.save_preview_status_lines(repo, preview)
+                self.assertEqual(
+                    save_lines,
+                    [
+                        "- CATALOG_ADDED: homeassistant/added.yaml",
+                        "- CATALOG_DELETED: homeassistant/deleted.yaml",
+                        "- CATALOG_MODIFIED: homeassistant/modified.yaml",
+                    ],
+                )
+
+                self.configure_paths(server, root)
+                server.get_installed_addons = lambda: []
+                server.write_state(
+                    {
+                        "last_save_preview": "\n".join(
+                            [i18n.t("preview.save_changes_title", count=len(save_lines)), *save_lines]
+                        ),
+                        "last_save_diff": "diff content",
+                        "last_save_preview_paths": [
+                            "homeassistant/added.yaml",
+                            "homeassistant/deleted.yaml",
+                            "homeassistant/modified.yaml",
+                        ],
+                    }
+                )
+                page = server.render_page()
+                self.assertIn("CATALOG save changes 3:", page)
+                self.assertIn("<span class='preview-file-change'>CATALOG_ADDED</span>", page)
+                self.assertIn("<span class='preview-file-change'>CATALOG_DELETED</span>", page)
+                self.assertIn("<span class='preview-file-change'>CATALOG_MODIFIED</span>", page)
+        finally:
+            i18n.EN_TEXT.update(originals)
+
+    def test_f013_retained_devices_preview_summary_uses_catalog(self):
+        server = load_server()
+        i18n = server.app_context.registry_cleanup.i18n
+        key = "preview.retained_description"
+        original = i18n.EN_TEXT[key]
+        i18n.EN_TEXT[key] = "CATALOG: retained preview description."
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                storage = root / ".storage"
+                storage.mkdir()
+                (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+                preview = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(root, retained_topics=[])
+                self.assertIn("CATALOG: retained preview description.", preview["summary"])
+        finally:
+            i18n.EN_TEXT[key] = original
+
+    def test_run_save_job_status_message_comes_from_translation_catalog(self):
+        server = load_server()
+
+        class SaveContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.updates = []
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def load_options(self):
+                return {}
+
+            def read_state(self):
+                return {"deleted_devices_pending_confirmation": True}
+
+            def write_state(self, updates):
+                self.updates.append(updates)
+
+        i18n = server.app_context.job_logic.i18n
+        original_preparing = i18n.EN_TEXT["message.preparing_save"]
+        original_pending = i18n.EN_TEXT["message.pending_deleted_devices"]
+        i18n.EN_TEXT["message.preparing_save"] = "CATALOG: preparing save."
+        i18n.EN_TEXT["message.pending_deleted_devices"] = "CATALOG: pending deleted_devices cleanup."
+        try:
+            ctx = SaveContext()
+            self.assertFalse(server.app_context.job_logic.run_save_job(ctx))
+        finally:
+            i18n.EN_TEXT["message.preparing_save"] = original_preparing
+            i18n.EN_TEXT["message.pending_deleted_devices"] = original_pending
+
+        self.assertEqual(ctx.updates[0]["last_message"], "CATALOG: preparing save.")
+        self.assertEqual(ctx.updates[1]["last_message"], "CATALOG: pending deleted_devices cleanup.")
+
+    def test_job_detail_log_text_comes_from_translation_catalog(self):
+        server = load_server()
+
+        class DeletedDevicesPreviewContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.updates = {}
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def read_state(self):
+                return {}
+
+            def write_state(self, updates):
+                self.updates.update(updates)
+
+            def add_detail(self, details, message):
+                details.append(message)
+                self.write_state({"last_details": details})
+
+            def log(self, message):
+                pass
+
+            def build_deleted_devices_preview(self):
+                return {
+                    "summary": "No deleted_devices entries found.",
+                    "rows": [],
+                    "count": 0,
+                    "fingerprint": "empty",
+                }
+
+        i18n = server.app_context.job_logic.i18n
+        original_detail = i18n.EN_TEXT["detail.checking_deleted_devices"]
+        i18n.EN_TEXT["detail.checking_deleted_devices"] = "CATALOG: deleted_devices detail sentinel."
+        try:
+            ctx = DeletedDevicesPreviewContext()
+            self.assertTrue(server.app_context.job_logic.run_deleted_devices_preview_job(ctx))
+        finally:
+            i18n.EN_TEXT["detail.checking_deleted_devices"] = original_detail
+
+        self.assertIn("CATALOG: deleted_devices detail sentinel.", ctx.updates["last_details"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(ctx.updates)
+
+            page = server.render_page()
+
+        self.assertIn("CATALOG: deleted_devices detail sentinel.", page)
+        self.assertNotIn("Checking Home Assistant deleted_devices.", page)
+
+    def test_render_page_escapes_translation_text_in_inline_script_literals(self):
+        server = load_server()
+        i18n = server.web.i18n
+        replacements = {
+            "message.no_log_entries": 'No log "quoted" and backslash \\ sentinel {braces} 😀 <tag>',
+            "message.working": 'Working "quoted" and backslash \\ sentinel {braces} 😀 <tag>',
+            "error.request_failed": 'Request "failed" and backslash \\ sentinel {braces} 😀 <tag>',
+            "message.done_refreshing": 'Done "refreshing" and backslash \\ sentinel {braces} 😀 <tag>',
+            "error.network": 'Network "error" and backslash \\ sentinel {braces} 😀 <tag>',
+            "button.collapse_diff": 'Collapse "diff" and backslash \\ sentinel {braces} 😀 <tag>',
+            "button.expand_diff": 'Expand "diff" and backslash \\ sentinel {braces} 😀 <tag>',
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+
+        def script_literal(value):
+            return (
+                json.dumps(value, ensure_ascii=False)
+                .replace("<", "\\u003c")
+                .replace(">", "\\u003e")
+                .replace("&", "\\u0026")
+            )
+
+        try:
+            i18n.EN_TEXT.update(replacements)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.configure_paths(server, root)
+                server.get_installed_addons = lambda: []
+
+                page = server.render_page()
+        finally:
+            i18n.EN_TEXT.update(originals)
+
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        self.assertIn(f"details.textContent = {script_literal(replacements['message.no_log_entries'])};", script)
+        self.assertIn(f"button.textContent = {script_literal(replacements['message.working'])};", script)
+        self.assertIn(f"setClientStatus({script_literal(replacements['message.working'])});", script)
+        self.assertIn(f"payload.message || {script_literal(replacements['error.request_failed'])}", script)
+        self.assertIn(f"payload.message || {script_literal(replacements['message.done_refreshing'])}", script)
+        self.assertIn(f"error?.message || {script_literal(replacements['error.network'])}", script)
+        self.assertIn(
+            "toggle.textContent = expanded ? "
+            f"{script_literal(replacements['button.collapse_diff'])} : "
+            f"{script_literal(replacements['button.expand_diff'])};",
+            script,
+        )
+        for value in replacements.values():
+            self.assertNotIn(f'"{value}"', script)
+
     def configure_paths(self, server, root):
         server.DATA_DIR = root / "data"
         server.WORK_DIR = server.DATA_DIR / "work"
@@ -405,7 +1342,7 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
 
-            self.assertIn("<h3>Список изменений</h3>", page)
+            self.assertIn("<h3>Change List</h3>", page)
             self.assertIn("preview-expand-all", page)
             self.assertIn("preview-collapse-all", page)
             self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
@@ -450,7 +1387,7 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
 
-            self.assertIn("<h3>Список изменений</h3>", page)
+            self.assertIn("<h3>Change List</h3>", page)
             self.assertIn("preview-expand-all", page)
             self.assertIn("preview-collapse-all", page)
             self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
@@ -466,6 +1403,67 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
             self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
+
+    def test_running_preview_disables_save_and_apply_cancel_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "last_save_preview": "Save preview changes (1):\n- Modified: homeassistant/configuration.yaml",
+                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_diff": "\n".join(
+                        [
+                            "## homeassistant",
+                            "diff -ruN /tmp/apply-preview/baseline/configuration.yaml /tmp/apply-preview/preview/configuration.yaml",
+                            "--- /tmp/apply-preview/baseline/configuration.yaml",
+                            "+++ /tmp/apply-preview/preview/configuration.yaml",
+                            "@@ -1 +1 @@",
+                            "-ha",
+                            "+git",
+                        ]
+                    ),
+                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
+            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
+            self.assertEqual(page.count("<button type='submit' class='secondary' disabled>Cancel</button>"), 2)
+            self.assertIn("<button type='submit' class='secondary' disabled>Use HA Version</button>", page)
+            self.assertIn("<button type='submit' class='secondary' disabled>Use Git Version</button>", page)
+            self.assertEqual(page.count("<button type='submit' class='secondary' disabled>Keep Unchanged</button>"), 2)
+            self.assertIn(
+                "<input type='checkbox' name='include_redundant_data' value='1' disabled>",
+                page,
+            )
+
+    def test_running_job_disables_save_conflict_actions(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "conflict_type": "save_unknown_base",
+                    "conflicts": ["homeassistant/configuration.yaml"],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("<button type='submit' disabled>Approve HA to Git</button>", page)
+            self.assertIn("<button type='submit' class='secondary' disabled>Use HA Version</button>", page)
+            self.assertIn("<button type='submit' class='secondary' disabled>Use Git Version</button>", page)
 
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
@@ -751,7 +1749,7 @@ class ServerTests(unittest.TestCase):
             )
 
             page = server.render_page()
-            self.assertIn('<div class="badge conflicts">conflicts</div>', page)
+            self.assertIn('<div class="badge conflicts" data-status-code="conflicts">conflicts</div>', page)
             self.assertIn("<h2>Git Conflicts</h2>", page)
 
             server.clear_display_state()
@@ -866,8 +1864,65 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
 
-            self.assertIn('<div class="badge ">done</div>', page)
+            self.assertIn('<div class="badge " data-status-code="success">done</div>', page)
             self.assertNotIn('<div class="badge ">success</div>', page)
+
+    def test_status_badge_labels_come_from_translation_catalog(self):
+        server = load_server()
+        i18n = server.web.i18n
+        replacements = {
+            "status.running": "CATALOG: running sentinel",
+            "status.conflicts": "CATALOG: conflicts sentinel",
+            "status.pending_decision": "CATALOG: pending decision sentinel",
+        }
+        originals = {key: i18n.EN_TEXT[key] for key in replacements}
+        try:
+            i18n.EN_TEXT.update(replacements)
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.configure_paths(server, root)
+                server.get_installed_addons = lambda: []
+
+                server.write_state({"last_status": "running"})
+                running_page = server.render_page()
+                self.assertIn(
+                    '<div class="badge running" data-status-code="running">CATALOG: running sentinel</div>',
+                    running_page,
+                )
+                self.assertNotIn(">running</div>", running_page)
+
+                server.write_state(
+                    {
+                        "last_status": "idle",
+                        "conflicts": ["homeassistant/configuration.yaml"],
+                        "conflict_type": "save_unknown_base",
+                    }
+                )
+                conflicts_page = server.render_page()
+                self.assertIn(
+                    '<div class="badge conflicts" data-status-code="conflicts">CATALOG: conflicts sentinel</div>',
+                    conflicts_page,
+                )
+                self.assertNotIn(">conflicts</div>", conflicts_page)
+
+                rollback_path = root / "work" / "deleted-devices-rollback" / "core.device_registry"
+                rollback_path.parent.mkdir(parents=True)
+                rollback_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+                server.write_state(
+                    {
+                        "conflicts": [],
+                        "deleted_devices_pending_confirmation": True,
+                        "deleted_devices_rollback_path": str(rollback_path),
+                    }
+                )
+                pending_page = server.render_page()
+                self.assertIn(
+                    '<div class="badge pending" data-status-code="pending decision">CATALOG: pending decision sentinel</div>',
+                    pending_page,
+                )
+                self.assertNotIn(">pending decision</div>", pending_page)
+        finally:
+            i18n.EN_TEXT.update(originals)
 
     def test_async_actions_do_not_clear_persisted_state_before_submit(self):
         server = load_server()
@@ -2000,6 +3055,426 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["conflicts"], [])
             self.assertEqual(state["save_conflict_resolutions"], {"homeassistant/.storage/core.device_registry": "ha"})
 
+    def test_approve_save_conflicts_error_message_comes_from_translation_catalog(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.state = {}
+                self.state_updates = []
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+        request = handler.__new__(handler)
+        request.path = "/approve-save-conflicts"
+        request.rfile = io.BytesIO(b"")
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.headers["Accept"] = "application/json"
+        request.headers["X-Requested-With"] = "fetch"
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+
+        key = "message.no_save_conflicts_pending_approval"
+        original = server.web.i18n.EN_TEXT[key]
+        server.web.i18n.EN_TEXT[key] = "CATALOG: no Save approvals pending."
+        try:
+            request.do_POST()
+        finally:
+            server.web.i18n.EN_TEXT[key] = original
+
+        self.assertEqual(request.responses[-1], 500)
+        response = json.loads(request.wfile.getvalue().decode())
+        self.assertEqual(response, {"ok": False, "message": "CATALOG: no Save approvals pending."})
+        self.assertEqual(ctx.state_updates[-1]["last_message"], "CATALOG: no Save approvals pending.")
+        self.assertEqual(ctx.state_updates[-1]["last_details"], ["CATALOG: no Save approvals pending."])
+        self.assertNotIn("No Save conflicts are pending approval", json.dumps(response))
+
+    def test_resolve_conflict_errors_come_from_translation_catalog(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self, state, actual_conflicts=None):
+                self.run_lock = threading.Lock()
+                self.state = dict(state)
+                self.state_updates = []
+                self.actual_conflicts = list(actual_conflicts or [])
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def load_options(self):
+                return {"repo_branch": "main"}
+
+            def repo_checkout_path(self, _options):
+                return Path("/tmp/ha-ops-test-repo")
+
+            def git_conflict_paths(self, _repo_dir):
+                return list(self.actual_conflicts)
+
+        def invoke(ctx, body):
+            handler = server.web.create_handler(ctx)
+            request = handler.__new__(handler)
+            request.path = "/resolve-conflict"
+            request.rfile = io.BytesIO(body)
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Accept"] = "application/json"
+            request.headers["X-Requested-With"] = "fetch"
+            request.headers["Content-Length"] = str(len(body))
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+            request.do_POST()
+            return request
+
+        cases = [
+            (
+                "save invalid choice",
+                "error.invalid_conflict_choice",
+                {
+                    "last_status": "idle",
+                    "conflict_type": "save_unknown_base",
+                    "conflicts": ["homeassistant/configuration.yaml"],
+                    "save_conflict_resolutions": {},
+                },
+                None,
+                b"path=homeassistant/configuration.yaml&choice=bad",
+                "Invalid conflict choice",
+            ),
+            (
+                "save non-pending path",
+                "error.save_conflict_path_not_pending",
+                {
+                    "last_status": "idle",
+                    "conflict_type": "save_unknown_base",
+                    "conflicts": ["homeassistant/automations.yaml"],
+                    "save_conflict_resolutions": {},
+                },
+                None,
+                b"path=homeassistant/configuration.yaml&choice=ha",
+                "Save conflict path is not pending",
+            ),
+            (
+                "git invalid choice",
+                "error.invalid_conflict_choice",
+                {"last_status": "idle", "conflict_type": "git_rebase"},
+                ["homeassistant/configuration.yaml"],
+                b"path=homeassistant/configuration.yaml&choice=bad",
+                "Invalid conflict choice",
+            ),
+            (
+                "git non-pending path",
+                "error.git_conflict_path_not_pending",
+                {"last_status": "idle", "conflict_type": "git_rebase"},
+                ["homeassistant/automations.yaml"],
+                b"path=homeassistant/configuration.yaml&choice=ha",
+                "Git conflict path is not pending",
+            ),
+        ]
+
+        originals = {}
+        try:
+            for _name, key, *_rest in cases:
+                originals.setdefault(key, server.web.i18n.EN_TEXT[key])
+                server.web.i18n.EN_TEXT[key] = f"CATALOG: {key}"
+
+            for name, key, state, actual_conflicts, body, old_text in cases:
+                with self.subTest(name=name):
+                    ctx = FakeContext(state, actual_conflicts)
+                    request = invoke(ctx, body)
+                    response = json.loads(request.wfile.getvalue().decode())
+                    expected = f"CATALOG: {key}"
+
+                    self.assertEqual(request.responses[-1], 500)
+                    self.assertEqual(response, {"ok": False, "message": expected})
+                    self.assertEqual(ctx.state_updates[-1]["last_message"], expected)
+                    self.assertEqual(ctx.state_updates[-1]["last_details"], [expected])
+                    self.assertNotIn(old_text, json.dumps(response))
+        finally:
+            server.web.i18n.EN_TEXT.update(originals)
+
+    def test_preview_reserves_run_slot_before_background_worker_starts(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.calls = []
+                self.state_updates = []
+                self.state = {
+                    "last_status": "idle",
+                    "last_diff": "old apply preview",
+                    "last_preview_commit": "old-commit",
+                    "last_save_preview": "old save preview",
+                    "last_save_diff": "old save diff",
+                }
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def run_preview_job(self, lock_acquired=False):
+                try:
+                    self.calls.append(("preview", lock_acquired))
+                    self.write_state(
+                        {
+                            "last_status": "success",
+                            "last_action": "preview",
+                            "last_message": "preview complete",
+                        }
+                    )
+                finally:
+                    if lock_acquired:
+                        self.run_lock.release()
+
+            def run_save_job(self, lock_acquired=False):
+                try:
+                    self.calls.append(("save", lock_acquired))
+                    self.write_state(
+                        {
+                            "last_status": "success",
+                            "last_action": "save",
+                            "last_message": "save complete",
+                        }
+                    )
+                finally:
+                    if lock_acquired:
+                        self.run_lock.release()
+
+        ctx = FakeContext()
+        queued = []
+        original_start_background = server.web.start_background
+
+        def queue_background(target, *args, lock_acquired=False):
+            queued.append((target, args, {"lock_acquired": lock_acquired}))
+
+        handler = server.web.create_handler(ctx)
+
+        def invoke(path):
+            request = handler.__new__(handler)
+            request.path = path
+            request.rfile = io.BytesIO(b"")
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Accept"] = "application/json"
+            request.headers["X-Requested-With"] = "fetch"
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+            request.do_POST()
+            return request
+
+        server.web.start_background = queue_background
+        try:
+            preview_request = invoke("/preview")
+            self.assertEqual(preview_request.responses[-1], 200)
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(ctx.calls, [])
+            self.assertEqual(ctx.state["last_diff"], "")
+            self.assertIsNone(ctx.state["last_preview_commit"])
+            state_after_reserved_preview = dict(ctx.state)
+            update_count_after_reserved_preview = len(ctx.state_updates)
+
+            save_request = invoke("/save")
+            self.assertEqual(save_request.responses[-1], 409)
+            save_response = json.loads(save_request.wfile.getvalue().decode())
+            self.assertFalse(save_response["ok"])
+            self.assertIn("already running", save_response["message"])
+            self.assertEqual(ctx.state, state_after_reserved_preview)
+            self.assertEqual(len(ctx.state_updates), update_count_after_reserved_preview)
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(ctx.calls, [])
+
+            target, args, kwargs = queued.pop()
+            target(*args, **kwargs)
+            self.assertEqual(ctx.calls, [("preview", True)])
+            self.assertEqual(ctx.state["last_status"], "success")
+            self.assertEqual(ctx.state["last_action"], "preview")
+            self.assertNotEqual(ctx.state["last_status"], "busy")
+            self.assertTrue(ctx.run_lock.acquire(blocking=False))
+            ctx.run_lock.release()
+        finally:
+            server.web.start_background = original_start_background
+
+    def test_preview_state_mutations_reject_when_job_reserves_after_running_check(self):
+        server = load_server()
+
+        class InterleavingRunLock:
+            def __init__(self, owner):
+                self.owner = owner
+                self.locked = False
+
+            def acquire(self, blocking=False):
+                if self.locked:
+                    return False
+                self.locked = True
+                return True
+
+            def release(self):
+                if not self.locked:
+                    raise RuntimeError("run lock released while unlocked")
+                self.locked = False
+                if self.owner.interleave_on_next_release:
+                    self.owner.interleave_on_next_release = False
+                    self.owner.interleaved_reservations += 1
+                    self.locked = True
+
+        class FakeContext:
+            def __init__(self, state):
+                self.state = dict(state)
+                self.state_updates = []
+                self.calls = []
+                self.interleave_on_next_release = True
+                self.interleaved_reservations = 0
+                self.run_lock = InterleavingRunLock(self)
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def utc_now(self):
+                return "2026-06-15T12:00:00+00:00"
+
+            def run_save_job(self, lock_acquired=False):
+                self.calls.append(("save", lock_acquired))
+
+        def invoke(ctx, path, body=b""):
+            handler = server.web.create_handler(ctx)
+            request = handler.__new__(handler)
+            request.path = path
+            request.rfile = io.BytesIO(body)
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Accept"] = "application/json"
+            request.headers["X-Requested-With"] = "fetch"
+            if body:
+                request.headers["Content-Length"] = str(len(body))
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+            request.do_POST()
+            return request
+
+        original_approve = server.web.conflict_logic.approve_save_unknown_base_conflicts
+        original_resolve = server.web.conflict_logic.resolve_git_conflict
+
+        def fake_approve(handler_ctx):
+            handler_ctx.write_state({"save_conflict_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+            return "approved"
+
+        def fake_resolve(handler_ctx, path, choice):
+            handler_ctx.write_state({"resolved_conflict": {path: choice}})
+            return "resolved"
+
+        server.web.conflict_logic.approve_save_unknown_base_conflicts = fake_approve
+        server.web.conflict_logic.resolve_git_conflict = fake_resolve
+        try:
+            cases = [
+                (
+                    "/clear-preview",
+                    b"direction=apply",
+                    {
+                        "last_status": "idle",
+                        "last_diff": "apply preview",
+                        "last_preview_commit": "apply-commit",
+                    },
+                ),
+                (
+                    "/resolve-apply-preview",
+                    b"path=homeassistant/configuration.yaml&choice=git",
+                    {
+                        "last_status": "idle",
+                        "last_preview_paths": ["homeassistant/configuration.yaml"],
+                        "last_preview_conflicts": True,
+                        "apply_preview_resolutions": {},
+                    },
+                ),
+                (
+                    "/include-redundant-data",
+                    b"include_redundant_data=1",
+                    {
+                        "last_status": "idle",
+                        "include_redundant_data": False,
+                        "last_save_preview": "save preview",
+                        "conflict_type": "save_unknown_base",
+                        "conflicts": ["homeassistant/configuration.yaml"],
+                        "save_conflict_resolutions": {},
+                    },
+                ),
+                (
+                    "/approve-save-conflicts",
+                    b"",
+                    {
+                        "last_status": "idle",
+                        "conflict_type": "save_unknown_base",
+                        "conflicts": ["homeassistant/configuration.yaml"],
+                        "save_conflict_resolutions": {},
+                    },
+                ),
+                (
+                    "/resolve-conflict",
+                    b"path=homeassistant/configuration.yaml&choice=ha",
+                    {
+                        "last_status": "idle",
+                        "conflict_type": "save_unknown_base",
+                        "conflicts": ["homeassistant/configuration.yaml"],
+                        "save_conflict_resolutions": {},
+                    },
+                ),
+            ]
+
+            for path, body, initial_state in cases:
+                with self.subTest(path=path):
+                    ctx = FakeContext(initial_state)
+                    request = invoke(ctx, path, body)
+                    response = json.loads(request.wfile.getvalue().decode())
+
+                    self.assertEqual(request.responses[-1], 409)
+                    self.assertFalse(response["ok"])
+                    self.assertIn("already running", response["message"])
+                    self.assertEqual(ctx.state, initial_state)
+                    self.assertEqual(ctx.state_updates, [])
+                    self.assertEqual(ctx.calls, [])
+                    self.assertEqual(ctx.interleaved_reservations, 1)
+                    self.assertTrue(ctx.run_lock.locked)
+        finally:
+            server.web.conflict_logic.approve_save_unknown_base_conflicts = original_approve
+            server.web.conflict_logic.resolve_git_conflict = original_resolve
+
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()
 
@@ -2007,48 +3482,64 @@ class ServerTests(unittest.TestCase):
             def __init__(self):
                 self.calls = []
                 self.state_updates = []
+                self.state = {}
+                self.run_lock = threading.Lock()
 
-            def run_save_job(self):
-                self.calls.append("save")
+            def record_call(self, call, lock_acquired=False):
+                try:
+                    self.calls.append(call)
+                finally:
+                    if lock_acquired:
+                        self.run_lock.release()
 
-            def run_save_preview_job(self):
-                self.calls.append("save-preview")
+            def run_save_job(self, lock_acquired=False):
+                self.record_call("save", lock_acquired)
 
-            def run_preview_job(self):
-                self.calls.append("preview")
+            def run_save_preview_job(self, lock_acquired=False):
+                self.record_call("save-preview", lock_acquired)
 
-            def run_apply_job(self):
-                self.calls.append("apply")
+            def run_preview_job(self, lock_acquired=False):
+                self.record_call("preview", lock_acquired)
 
-            def run_deleted_devices_preview_job(self):
-                self.calls.append("deleted-devices-preview")
+            def run_apply_job(self, lock_acquired=False):
+                self.record_call("apply", lock_acquired)
 
-            def run_retained_devices_preview_job(self):
-                self.calls.append("retained-devices-preview")
+            def run_deleted_devices_preview_job(self, lock_acquired=False):
+                self.record_call("deleted-devices-preview", lock_acquired)
 
-            def run_internal_ids_preview_job(self):
-                self.calls.append("internal-ids-preview")
+            def run_retained_devices_preview_job(self, lock_acquired=False):
+                self.record_call("retained-devices-preview", lock_acquired)
 
-            def run_retained_devices_delete_job(self, selected):
-                self.calls.append(("retained-devices-delete", selected))
+            def run_internal_ids_preview_job(self, lock_acquired=False):
+                self.record_call("internal-ids-preview", lock_acquired)
 
-            def run_deleted_devices_delete_job(self):
-                self.calls.append("deleted-devices-delete")
+            def run_internal_ids_migrate_job(self, selected, lock_acquired=False):
+                self.record_call(("internal-ids-migrate", selected), lock_acquired)
 
-            def run_deleted_devices_confirm_job(self):
-                self.calls.append("deleted-devices-confirm")
+            def run_retained_devices_delete_job(self, selected, lock_acquired=False):
+                self.record_call(("retained-devices-delete", selected), lock_acquired)
 
-            def run_deleted_devices_revert_job(self):
-                self.calls.append("deleted-devices-revert")
+            def run_deleted_devices_delete_job(self, lock_acquired=False):
+                self.record_call("deleted-devices-delete", lock_acquired)
+
+            def run_deleted_devices_confirm_job(self, lock_acquired=False):
+                self.record_call("deleted-devices-confirm", lock_acquired)
+
+            def run_deleted_devices_revert_job(self, lock_acquired=False):
+                self.record_call("deleted-devices-revert", lock_acquired)
+
+            def run_rollback_job(self, release, lock_acquired=False):
+                self.record_call(("rollback", release), lock_acquired)
 
             def clear_display_state(self):
                 self.calls.append("clear-display")
 
             def write_state(self, updates):
                 self.state_updates.append(updates)
+                self.state.update(updates)
 
             def read_state(self):
-                return {}
+                return dict(self.state)
 
             def set_homeassistant_organizer_enabled(self, enabled):
                 self.calls.append(("organizer", enabled))
@@ -2308,6 +3799,260 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 400)
         self.assertIn("Invalid preview direction", post_request.wfile.getvalue().decode())
+
+        ctx.state["last_status"] = "running"
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        for path in ("/save", "/apply"):
+            post_request = invoke(
+                "do_POST",
+                path,
+                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            )
+            self.assertEqual(post_request.responses[-1], 409)
+            response = json.loads(post_request.wfile.getvalue().decode())
+            self.assertFalse(response["ok"])
+            self.assertIn("already running", response["message"])
+            self.assertEqual(ctx.state, expected_state)
+            self.assertEqual(len(ctx.state_updates), update_count)
+            self.assertEqual(ctx.calls, expected_calls)
+
+        ctx.state.update(
+            {
+                "last_status": "running",
+                "last_diff": "apply diff",
+                "last_diff_generated_at": "2026-06-15T12:00:00+00:00",
+                "last_preview_commit": "apply-commit",
+                "last_preview_fingerprint": "apply-fingerprint",
+                "last_preview_live_fingerprints": {"homeassistant/configuration.yaml": "live"},
+                "last_preview_paths": ["homeassistant/configuration.yaml"],
+                "last_preview_conflicts": True,
+                "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
+                "last_save_preview": "save preview",
+                "last_save_diff": "save diff",
+                "last_save_diff_generated_at": "2026-06-15T12:00:00+00:00",
+                "last_save_preview_commit": "save-commit",
+                "last_save_preview_fingerprint": "save-fingerprint",
+                "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                "last_save_preview_conflicts": True,
+                "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
+                "conflicts": ["homeassistant/.storage/core.device_registry"],
+                "conflict_type": "save_unknown_base",
+                "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
+            }
+        )
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        ctx.run_lock.acquire()
+        try:
+            for direction in ("save", "apply"):
+                post_request = invoke(
+                    "do_POST",
+                    "/clear-preview",
+                    body=f"direction={direction}".encode(),
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+        finally:
+            ctx.run_lock.release()
+        ctx.state["last_status"] = "idle"
+
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            post_request = invoke(
+                "do_POST",
+                "/include-redundant-data",
+                body=b"include_redundant_data=1",
+                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            )
+            self.assertEqual(post_request.responses[-1], 409)
+            response = json.loads(post_request.wfile.getvalue().decode())
+            self.assertFalse(response["ok"])
+            self.assertIn("already running", response["message"])
+            self.assertEqual(ctx.state, expected_state)
+            self.assertEqual(len(ctx.state_updates), update_count)
+            self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            for path in ("/save", "/apply"):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        ctx.state.update(
+            {
+                "last_preview_conflicts": False,
+                "apply_preview_resolutions": {},
+                "last_save_preview_conflicts": False,
+                "save_preview_resolutions": {},
+            }
+        )
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            for path, body in (
+                ("/resolve-save-preview", b"path=homeassistant/configuration.yaml&choice=ha"),
+                ("/resolve-apply-preview", b"path=homeassistant/configuration.yaml&choice=git"),
+            ):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    body=body,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            for path in (
+                "/preview",
+                "/save-preview",
+                "/deleted-devices-preview",
+                "/retained-devices-preview",
+                "/internal-ids-preview",
+            ):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            for path, body in (
+                ("/retained-devices-delete", b"candidate=0&candidate=2"),
+                ("/internal-ids-migrate", b"candidate=0&candidate=2"),
+                ("/deleted-devices-delete", b""),
+                ("/deleted-devices-confirm", b""),
+                ("/deleted-devices-revert", b""),
+                ("/rollback", b"release=0.8.13"),
+            ):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    body=body,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        ctx.state.update(
+            {
+                "last_status": "idle",
+                "conflict_type": "save_unknown_base",
+                "conflicts": ["homeassistant/configuration.yaml"],
+                "save_conflict_resolutions": {},
+            }
+        )
+        expected_state = dict(ctx.state)
+        update_count = len(ctx.state_updates)
+        expected_calls = list(ctx.calls)
+        ctx.run_lock.acquire()
+        try:
+            for path, body in (
+                ("/approve-save-conflicts", b""),
+                ("/resolve-conflict", b"path=homeassistant/configuration.yaml&choice=ha"),
+            ):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    body=body,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
+
+        original_resolve_git_conflict = server.web.conflict_logic.resolve_git_conflict
+        original_resolved_message = server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"]
+
+        def fake_resolve_git_conflict(handler_ctx, path, choice):
+            self.assertIs(handler_ctx, ctx)
+            self.assertEqual(path, "homeassistant/configuration.yaml")
+            self.assertEqual(choice, "ha")
+            return "fake conflict resolution"
+
+        server.web.conflict_logic.resolve_git_conflict = fake_resolve_git_conflict
+        server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"] = "CATALOG: {message}; client refresh pending."
+        try:
+            post_request = invoke(
+                "do_POST",
+                "/resolve-conflict",
+                body=b"path=homeassistant/configuration.yaml&choice=ha",
+                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+            )
+            self.assertEqual(post_request.responses[-1], 200)
+            response = json.loads(post_request.wfile.getvalue().decode())
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["message"], "CATALOG: fake conflict resolution; client refresh pending.")
+            self.assertNotIn("Refreshing...", response["message"])
+        finally:
+            server.web.conflict_logic.resolve_git_conflict = original_resolve_git_conflict
+            server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"] = original_resolved_message
 
         post_request = invoke(
             "do_POST",
@@ -3121,7 +4866,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("- homeassistant/configuration.yaml", details)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
             page = server.render_page()
-            self.assertIn('<div class="badge ">warning</div>', page)
+            self.assertIn('<div class="badge " data-status-code="warning">warning</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
             self.assertIn("Save Preview", page)
             self.assertIn("Confirm Save to Git", page)
@@ -6123,19 +7868,27 @@ class ServerTests(unittest.TestCase):
                 "stale": False,
                 "message": "Automatic backup at 2026-05-14T01:15:00+00:00 (19 hour(s) ago, 1 location(s)).",
             }
-            server.write_state(
-                {
-                    "last_status": "error",
-                    "last_action": "apply",
-                    "last_message": "No fresh system backup found within 24 hour(s): No system Home Assistant backups found.",
-                }
+            original_message = server.web.i18n.EN_TEXT["message.fresh_system_backup_available"]
+            server.web.i18n.EN_TEXT["message.fresh_system_backup_available"] = (
+                "CATALOG: fresh backup recovered. Run an action when ready."
             )
 
-            page = server.render_page()
+            try:
+                server.write_state(
+                    {
+                        "last_status": "error",
+                        "last_action": "apply",
+                        "last_message": "No fresh system backup found within 24 hour(s): No system Home Assistant backups found.",
+                    }
+                )
+
+                page = server.render_page()
+            finally:
+                server.web.i18n.EN_TEXT["message.fresh_system_backup_available"] = original_message
 
             self.assertNotIn(">error<", page)
             self.assertNotIn("No fresh system backup found", page)
-            self.assertIn("Fresh system backup is now available", page)
+            self.assertIn("CATALOG: fresh backup recovered", page)
 
     def test_render_page_suppresses_stale_successful_config_check_error(self):
         server = load_server()
@@ -6144,19 +7897,27 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
             server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
-            server.write_state(
-                {
-                    "last_status": "error",
-                    "last_action": "apply",
-                    "last_message": "Home Assistant config check failed: {'result': 'ok', 'data': {}}",
-                }
+            original_message = server.web.i18n.EN_TEXT["message.stale_config_check_cleared"]
+            server.web.i18n.EN_TEXT["message.stale_config_check_cleared"] = (
+                "CATALOG: stale config check cleared. Run an action when ready."
             )
 
-            page = server.render_page()
+            try:
+                server.write_state(
+                    {
+                        "last_status": "error",
+                        "last_action": "apply",
+                        "last_message": "Home Assistant config check failed: {'result': 'ok', 'data': {}}",
+                    }
+                )
+
+                page = server.render_page()
+            finally:
+                server.web.i18n.EN_TEXT["message.stale_config_check_cleared"] = original_message
 
             self.assertNotIn(">error<", page)
             self.assertNotIn("Home Assistant config check failed", page)
-            self.assertIn("Previous stale config-check error was cleared", page)
+            self.assertIn("CATALOG: stale config check cleared", page)
 
     def test_managed_addons_are_selected_in_targets_table(self):
         server = load_server()
@@ -6233,7 +7994,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("border-bottom: 0", page)
             self.assertIn(".action-flow", page)
             self.assertIn('<div class="details-header">', page)
-            self.assertLess(page.index("<h2>Log</h2>"), page.index('<div class="badge ">'))
+            self.assertLess(page.index("<h2>Log</h2>"), page.index('<div class="badge "'))
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)
@@ -7620,7 +9381,7 @@ devices:
 
             page = server.render_page()
 
-            self.assertIn('<div class="badge pending">pending decision</div>', page)
+            self.assertIn('<div class="badge pending" data-status-code="pending decision">pending decision</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)

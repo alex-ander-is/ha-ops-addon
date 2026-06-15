@@ -7,10 +7,29 @@ import threading
 
 import conflicts as conflict_logic
 import git_ops
+import i18n
 import manifest as manifest_logic
 import state as state_store
 import sync as sync_logic
 import ui
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
+
+
+STATUS_LABEL_KEYS = {
+    "busy": "status.busy",
+    "conflicts": "status.conflicts",
+    "error": "status.error",
+    "idle": "status.idle",
+    "interrupted": "status.interrupted",
+    "pending": "status.pending",
+    "pending decision": "status.pending_decision",
+    "running": "status.running",
+    "success": "status.done",
+    "warning": "status.warning",
+}
 
 
 def current_manifest_preview(ctx):
@@ -50,6 +69,49 @@ def current_manifest_preview(ctx):
         return []
 
 
+def job_is_running(ctx, state=None):
+    state = state if state is not None else ctx.read_state()
+    if state.get("last_status") == "running":
+        return True
+    run_lock = getattr(ctx, "run_lock", None)
+    if run_lock is None:
+        return False
+    if not run_lock.acquire(blocking=False):
+        return True
+    run_lock.release()
+    return False
+
+
+def reserve_action_slot(ctx):
+    run_lock = getattr(ctx, "run_lock", None)
+    if run_lock is None:
+        state = ctx.read_state()
+        return not state.get("last_status") == "running", state, False
+
+    if not run_lock.acquire(blocking=False):
+        return False, None, False
+    try:
+        state = ctx.read_state()
+        if state.get("last_status") == "running":
+            run_lock.release()
+            return False, None, False
+        return True, state, True
+    except Exception:
+        run_lock.release()
+        raise
+
+
+def release_action_slot(ctx, lock_acquired):
+    if lock_acquired:
+        ctx.run_lock.release()
+
+
+def reserve_mutation_slot(ctx):
+    if job_is_running(ctx):
+        return False, None, False
+    return reserve_action_slot(ctx)
+
+
 def addon_slug_value(addon):
     return addon.get("slug") or addon.get("name") or ""
 
@@ -78,23 +140,23 @@ def file_text(path):
     try:
         return Path(path).read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return f"Unable to read conflict file: {exc}"
+        return _("error.conflict_detail_unavailable", error=exc)
 
 
 def file_diff(ctx, left_label, left_path, right_label, right_path):
     left_path = Path(left_path)
     right_path = Path(right_path)
     if not left_path.exists():
-        return f"Diff unavailable: {left_label} file is missing: {left_path}"
+        return _("error.diff_unavailable_label_missing", label=left_label, path=left_path)
     if not right_path.exists():
-        return f"Diff unavailable: {right_label} file is missing: {right_path}"
+        return _("error.diff_unavailable_label_missing", label=right_label, path=right_path)
 
     result = ctx.run_command(["diff", "-u", "-L", left_label, "-L", right_label, str(left_path), str(right_path)])
     if result.returncode == 0:
-        return "No differences found."
+        return _("text.no_differences")
     if result.returncode == 1:
         return full_conflict_detail(result.stdout.strip())
-    return f"Diff unavailable:\n{(result.stderr or result.stdout).strip()}"
+    return f"{_('error.diff_unavailable')}\n{(result.stderr or result.stdout).strip()}"
 
 
 def normalized_save_conflict_file_diff(ctx, left_label, left_path, right_label, right_path):
@@ -125,7 +187,7 @@ def save_conflict_detail(ctx, repo_dir, targets, path, include_redundant_data=Fa
         if include_redundant_data:
             return file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
         return normalized_save_conflict_file_diff(ctx, f"Git: {safe_path}", repo_file, f"HA: {safe_path}", preview_file)
-    return f"Diff unavailable: no managed target found for {safe_path}."
+    return _("error.diff_unavailable_no_target", path=safe_path)
 
 
 def load_conflict_targets(ctx, options, state, repo_dir):
@@ -165,25 +227,25 @@ def conflict_items(ctx, state, options):
                 detail = full_conflict_detail(file_text(Path(repo_dir) / safe_path).strip())
         except Exception as exc:
             safe_path = str(path)
-            detail = f"Conflict detail unavailable: {exc}"
+            detail = _("error.conflict_detail_unavailable", error=exc)
         items.append({"path": safe_path, "detail": detail})
     return items
 
 
 def action_label(action):
     return {
-        "apply": "Apply Git to HA",
-        "preview": "Preview Git to HA",
-        "save": "Save HA to Git",
-        "save_preview": "Preview HA to Git",
-        "deleted_devices_preview": "Check deleted_devices",
-        "deleted_devices_delete": "Approve Deletion",
-        "deleted_devices_confirm": "Confirm Changes",
-        "deleted_devices_revert": "Revert Changes",
-        "internal_ids_preview": "Check actions IDs",
-        "internal_ids_migrate": "Migrate and Save to Git",
-        "rollback": "Rollback",
-    }.get(action or "", action or "None")
+        "apply": _("action.apply"),
+        "preview": _("action.preview_apply"),
+        "save": _("action.save"),
+        "save_preview": _("action.preview_save"),
+        "deleted_devices_preview": _("action.check_deleted_devices"),
+        "deleted_devices_delete": _("action.approve_deleted_devices"),
+        "deleted_devices_confirm": _("action.confirm_changes"),
+        "deleted_devices_revert": _("action.revert_changes"),
+        "internal_ids_preview": _("action.check_actions_ids"),
+        "internal_ids_migrate": _("action.migrate_and_save"),
+        "rollback": _("action.rollback"),
+    }.get(action or "", action or _("label.none"))
 
 
 def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollback_path):
@@ -192,42 +254,42 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
 
     if pending_deleted_devices and rollback_path:
         lines = [
-            "deleted_devices cleanup is waiting for your decision.",
+            _("message.deleted_devices_waiting"),
             "",
-            f"Previous action: {action_label(state.get('last_action'))}",
+            f"{_('label.previous_action')}: {action_label(state.get('last_action'))}",
         ]
         if message:
-            lines.append(f"Last result: {message}")
-        lines.extend(["", "Current state:"])
+            lines.append(f"{_('label.last_result')}: {message}")
+        lines.extend(["", _("text.current_state")])
         try:
             cleanup = ctx.deleted_devices_cleanup_status(rollback_path)
             lines.extend(
                 [
-                    f"- removed by this cleanup: {cleanup['removed']}",
-                    f"- currently in deleted_devices: {cleanup['current']}",
-                    f"- new deleted_devices after restart: {cleanup['added']}",
-                    f"- removed entries returned: {cleanup['returned']}",
+                    _("text.cleanup_removed", count=cleanup["removed"]),
+                    _("text.cleanup_current", count=cleanup["current"]),
+                    _("text.cleanup_added", count=cleanup["added"]),
+                    _("text.cleanup_returned", count=cleanup["returned"]),
                 ]
             )
         except Exception as exc:
-            lines.append(f"- rollback status unavailable: {exc}")
+            lines.append(_("text.rollback_status_unavailable", error=exc))
         lines.extend(
             [
-                "- rollback: available",
+                _("text.rollback_available"),
                 "",
-                "Confirm Changes: keep this cleanup. Entries removed by this cleanup stay removed. New deleted_devices entries are kept.",
-                "Revert Changes: restore only entries removed by this cleanup. Other registry changes and new deleted_devices entries are kept.",
+                _("notice.deleted_devices_confirm_effect"),
+                _("notice.deleted_devices_revert_effect"),
             ]
         )
         if details:
-            lines.extend(["", "Previous details:", *details])
+            lines.extend(["", _("label.previous_details"), *details])
         return "\n".join(lines)
 
     if details:
         return "\n".join(details)
     if message:
         return message
-    return "Running..." if last_status == "running" else "No log entries yet."
+    return _("state.running") if last_status == "running" else _("message.no_log_entries")
 
 
 def render_page(ctx):
@@ -245,7 +307,7 @@ def render_page(ctx):
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Fresh system backup is now available. Run an action when ready.",
+                "last_message": _("message.fresh_system_backup_available"),
             }
         )
     elif (
@@ -258,7 +320,7 @@ def render_page(ctx):
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Previous stale config-check error was cleared. Run an action when ready.",
+                "last_message": _("message.stale_config_check_cleared"),
             }
         )
     releases = ctx.list_releases()
@@ -269,13 +331,13 @@ def render_page(ctx):
         for target in manifest_preview
     )
     last_status = state.get("last_status", "idle")
+    job_running = job_is_running(ctx, state)
     has_conflicts = bool(state.get("conflicts"))
     deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
     deleted_devices_rollback_path = state.get("deleted_devices_rollback_path")
     pending_deleted_devices_decision = bool(deleted_devices_pending_confirmation and deleted_devices_rollback_path)
     display_status = "conflicts" if has_conflicts else "pending decision" if pending_deleted_devices_decision else last_status
-    if display_status == "success":
-        display_status = "done"
+    display_status_label = _(STATUS_LABEL_KEYS.get(display_status, display_status))
     details = log_text_for_state(
         ctx,
         state,
@@ -293,25 +355,25 @@ def render_page(ctx):
     save_preview_paths = [str(item) for item in (state.get("last_save_preview_paths") or []) if str(item)]
     save_preview_resolutions = dict(state.get("save_preview_resolutions") or {})
     save_preview_conflicts = bool(state.get("last_save_preview_conflicts"))
-    deleted_devices_preview_text = state.get("last_deleted_devices_preview") or "No deleted_devices preview yet."
+    deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
     internal_ids_rows = state.get("last_internal_ids_rows") or []
     save_details_text = save_diff_text or save_preview_text
     save_summary_text = save_preview_text if save_diff_text and save_diff_text != save_preview_text else ""
-    run_disabled = "disabled" if last_status == "running" else ""
+    run_disabled = "disabled" if job_running else ""
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     apply_action = "apply"
-    apply_button_text = "Apply Git to HA"
+    apply_button_text = _("action.apply")
     post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
     save_preview_button_class = "warning" if post_apply_save_recommended else "secondary"
-    save_preview_button_text = "Review Post-Apply HA Changes" if post_apply_save_recommended else "Preview HA to Git"
+    save_preview_button_text = _("action.review_post_apply_save") if post_apply_save_recommended else _("action.preview_save")
     post_apply_notice_html = ""
     if post_apply_save_recommended:
         post_apply_notice_html = (
             "<div class='post-apply-alert' role='alert'>"
-            "<strong>Post-apply HA changes may need saving.</strong>"
-            "<span>Run HA to Git preview before the next Git to HA apply so HA-created registry state is committed.</span>"
+            f"<strong>{_('notice.post_apply_save_title')}</strong>"
+            f"<span>{_('notice.post_apply_save')}</span>"
             "</div>"
         )
     deleted_devices_count = int(state.get("last_deleted_devices_count") or 0)
@@ -332,11 +394,11 @@ def render_page(ctx):
             "<div class='actions deletion-actions'>"
             "<div class='action-row'>"
             "<form method='post' action='deleted-devices-confirm' data-async-form='true'>"
-            f"<button type='submit' class='secondary' {confirm_deletion_disabled}>Confirm Changes</button>"
+            f"<button type='submit' class='secondary' {confirm_deletion_disabled}>{_('action.confirm_changes')}</button>"
             "</form>"
             "<form method='post' action='deleted-devices-revert' data-async-form='true' "
-            "data-confirm='Stop Home Assistant Core and revert deleted_devices cleanup?'>"
-            f"<button type='submit' {confirm_deletion_disabled}>Revert Changes</button>"
+            f"data-confirm='{html.escape(_('confirm.deleted_devices_revert'), quote=True)}'>"
+            f"<button type='submit' {confirm_deletion_disabled}>{_('action.revert_changes')}</button>"
             "</form>"
             "</div>"
             "</div>"
@@ -347,27 +409,27 @@ def render_page(ctx):
             "<div class='action-row'>"
             "<form method='post' action='deleted-devices-delete' data-async-form='true' "
             "data-preserve-display-state='true' "
-            "data-confirm='Stop Home Assistant Core and remove all deleted_devices from core.device_registry?'>"
-            f"<button type='submit' {deletion_disabled}>Approve Deletion</button>"
+            f"data-confirm='{html.escape(_('confirm.deleted_devices_delete'), quote=True)}'>"
+            f"<button type='submit' {deletion_disabled}>{_('action.approve_deleted_devices')}</button>"
             "</form>"
             "</div>"
             "</div>"
         )
     confirm_messages = []
     if not ctx.option_bool(options, "require_fresh_backup", True):
-        confirm_messages.append("Fresh system backup checks are disabled.")
+        confirm_messages.append(_("notice.apply_confirm_backup_disabled"))
     if ui.targets_allow_protected_storage(target_state):
-        confirm_messages.append("Protected .storage apply is enabled for at least one target.")
+        confirm_messages.append(_("notice.apply_confirm_protected_storage"))
     apply_confirm = ""
     if confirm_messages:
-        confirm_message = " ".join(confirm_messages) + " Continue?"
+        confirm_message = _("confirm.apply", message=" ".join(confirm_messages))
         apply_confirm = f"data-confirm='{html.escape(confirm_message, quote=True)}'"
     conflicts_section_html = ""
     if has_conflicts:
         conflicts_section_html = (
             "<section class='card wide'>"
-            "<h2>Git Conflicts</h2>"
-            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'))}"
+            f"<h2>{_('heading.git_conflicts')}</h2>"
+            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'), job_running)}"
             "</section>"
         )
     apply_preview_section_html = ""
@@ -377,19 +439,19 @@ def render_page(ctx):
             warning_items = "".join(f"<li>{html.escape(item)}</li>" for item in preview_warnings)
             apply_preview_warnings_html = (
                 "<div class='apply-preview-warning' role='alert'>"
-                "<strong>Warnings</strong>"
+                f"<strong>{_('heading.warnings')}</strong>"
                 f"<ul>{warning_items}</ul>"
                 "</div>"
             )
         apply_preview_section_html = (
             "<section class='card wide'>"
-            "<h2>Apply Preview</h2>"
-            "<p>Generated at "
+            f"<h2>{_('heading.apply_preview')}</h2>"
+            f"<p>{_('label.generated_at')} "
             f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
             "</p>"
             f"{apply_preview_warnings_html}"
             f"<div data-transient='apply-preview'>"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text)}"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text, actions_disabled=job_running)}"
             "</div>"
             "</section>"
         )
@@ -397,33 +459,33 @@ def render_page(ctx):
     if not has_conflicts and (state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text):
         save_preview_section_html = (
             "<section class='card wide'>"
-            "<h2>Save Preview</h2>"
-            "<p>Generated at "
+            f"<h2>{_('heading.save_preview')}</h2>"
+            f"<p>{_('label.generated_at')} "
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
             f"<div data-transient='save-preview'>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text)}"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running)}"
             "</div>"
             "</section>"
         )
     deleted_devices_section_html = ""
     if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
-        deleted_devices_heading = "Deletion of deleted_devices Preview"
+        deleted_devices_heading = _("heading.deleted_devices_preview")
         deleted_devices_generated_html = (
-            "<p>Generated at "
+            f"<p>{_('label.generated_at')} "
             f"<span data-transient='deleted-devices-generated'>{html.escape(ctx.format_time(state.get('last_deleted_devices_generated_at'), options))}</span>"
             "</p>"
         )
         if pending_deleted_devices_decision:
-            deleted_devices_heading = "Pending deleted_devices Diff"
+            deleted_devices_heading = _("heading.pending_deleted_devices_diff")
             deleted_devices_generated_html = ""
             try:
                 deleted_devices_preview_html = (
-                    "<p class='muted'>Confirm Changes accepts this diff. Revert Changes restores removed lines while keeping any new current entries.</p>"
+                    f"<p class='muted'>{_('notice.deleted_devices_pending')}</p>"
                     f"{ui.render_conflict_detail(ctx.deleted_devices_pending_diff(deleted_devices_rollback_path))}"
                 )
             except Exception as exc:
-                deleted_devices_preview_html = f"<p>Pending diff unavailable: {html.escape(str(exc))}</p>"
+                deleted_devices_preview_html = f"<p>{html.escape(_('error.pending_diff_unavailable', error=str(exc)))}</p>"
         else:
             deleted_devices_preview_html = (
                 ui.render_deleted_devices_table(deleted_devices_rows)
@@ -443,18 +505,18 @@ def render_page(ctx):
         retained_delete_disabled = "disabled" if run_disabled or not retained_devices_rows else ""
         retained_devices_section_html = (
             "<section class='card wide'>"
-            "<h2>Retained Devices Preview</h2>"
-            "<p class='muted'>These candidates come from stale retained Home Assistant MQTT discovery topics for Zigbee2MQTT devices missing from current Zigbee2MQTT files.</p>"
-            "<p class='muted'>Delete retained devices clears selected MQTT retained discovery topics only. It does not delete files, Home Assistant registry entries, or Zigbee2MQTT database records.</p>"
-            "<p>Generated at "
+            f"<h2>{_('heading.retained_devices_preview')}</h2>"
+            f"<p class='muted'>{_('notice.retained_devices_preview')}</p>"
+            f"<p class='muted'>{_('notice.retained_devices_delete')}</p>"
+            f"<p>{_('label.generated_at')} "
             f"<span data-transient='retained-devices-generated'>{html.escape(ctx.format_time(state.get('last_retained_devices_generated_at'), options))}</span>"
             "</p>"
             "<form method='post' action='retained-devices-delete' data-async-form='true' "
             "data-preserve-display-state='true' "
-            "data-confirm='Clear selected MQTT retained discovery topics only? This does not delete files or registry/database records.'>"
+            f"data-confirm='{html.escape(_('confirm.retained_devices_delete'), quote=True)}'>"
             f"<div data-transient='retained-devices-preview'>{ui.render_retained_devices_table(retained_devices_rows)}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
-            f"<button type='submit' {retained_delete_disabled}>Delete retained devices</button>"
+            f"<button type='submit' {retained_delete_disabled}>{_('action.delete_retained_devices')}</button>"
             "</div></div>"
             "</form>"
             "</section>"
@@ -470,26 +532,26 @@ def render_page(ctx):
         }
         internal_ids_summary_html = (
             "<p>"
-            f"Files: {internal_ids_changed_files}. "
-            f"Candidates: {internal_ids_totals['changes']}. "
-            f"Unresolved: {internal_ids_totals['unresolved']}."
+            f"{_('label.files')}: {internal_ids_changed_files}. "
+            f"{_('label.candidates')}: {internal_ids_totals['changes']}. "
+            f"{_('label.unresolved')}: {internal_ids_totals['unresolved']}."
             "</p>"
         )
         internal_ids_section_html = (
             "<section class='card wide'>"
-            "<h2>Internal IDs Migration Preview</h2>"
-            "<p class='muted'>This migrates only HA Ops YAML in the Git checkout. It does not change live Home Assistant until the normal Git to HA apply flow.</p>"
-            "<p class='muted'>After migrating, run Preview Git to HA before applying to live Home Assistant.</p>"
-            "<p>Generated at "
+            f"<h2>{_('heading.internal_ids_preview')}</h2>"
+            f"<p class='muted'>{_('notice.internal_ids_preview_scope')}</p>"
+            f"<p class='muted'>{_('notice.internal_ids_preview_apply')}</p>"
+            f"<p>{_('label.generated_at')} "
             f"<span data-transient='internal-ids-generated'>{html.escape(ctx.format_time(state.get('last_internal_ids_generated_at'), options))}</span>"
             "</p>"
             f"{internal_ids_summary_html}"
             "<form method='post' action='internal-ids-migrate' data-async-form='true' "
             "data-preserve-display-state='true' "
-            "data-confirm='Migrate selected HA Ops YAML files from internal ids to stable entity_id or Zigbee2MQTT MQTT references and save the result to Git?'>"
+            f"data-confirm='{html.escape(_('confirm.internal_ids_migrate'), quote=True)}'>"
             f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
-            f"<button type='submit' {internal_ids_migrate_disabled}>Migrate and Save to Git</button>"
+            f"<button type='submit' {internal_ids_migrate_disabled}>{_('action.migrate_and_save')}</button>"
             "</div></div>"
             "</form>"
             "</section>"
@@ -497,7 +559,8 @@ def render_page(ctx):
 
     return ui.render_page(
         {
-            "status": html.escape(display_status),
+            "status": html.escape(display_status_label),
+            "status_code": html.escape(display_status, quote=True),
             "badge_class": (
                 "conflicts"
                 if has_conflicts
@@ -514,7 +577,7 @@ def render_page(ctx):
             "last_run": html.escape(ctx.format_time(state.get("last_run_at"), options)),
             "last_release": html.escape(str(state.get("last_release"))),
             "last_backup_slug": html.escape(str(state.get("last_backup_slug"))),
-            "latest_backup": html.escape(backup_status.get("message", "Backup status unavailable.")),
+            "latest_backup": html.escape(backup_status.get("message", _("text.backup_status_unavailable"))),
             "repo_url": html.escape(options.get("repo_url", "")),
             "branch": html.escape(options.get("repo_branch", "main")),
             "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
@@ -548,16 +611,38 @@ def render_page(ctx):
                 ctx.addon_is_zigbee2mqtt,
             ),
             "organizer_html": ui.render_homeassistant_organizer(homeassistant_organizer_enabled),
-            "include_redundant_data_html": ui.render_include_redundant_data(bool(state.get("include_redundant_data"))),
+            "include_redundant_data_html": ui.render_include_redundant_data(
+                bool(state.get("include_redundant_data")),
+                job_running,
+            ),
             "releases_html": ui.render_releases(releases),
             "version": html.escape(ctx.addon_version()),
         }
     )
 
 
-def start_background(target, *args):
-    thread = threading.Thread(target=target, args=args, daemon=True)
+def start_background(target, *args, lock_acquired=False):
+    kwargs = {"lock_acquired": True} if lock_acquired else {}
+    thread = threading.Thread(target=target, args=args, kwargs=kwargs, daemon=True)
     thread.start()
+    return thread
+
+
+def start_reserved_background(ctx, target, *args, state_updates=None, lock_acquired=False):
+    if lock_acquired:
+        ok, reserved_lock = True, True
+    else:
+        ok, _state, reserved_lock = reserve_action_slot(ctx)
+    if not ok:
+        return False
+    try:
+        if state_updates:
+            ctx.write_state(state_updates)
+        start_background(target, *args, lock_acquired=reserved_lock)
+        return True
+    except Exception:
+        release_action_slot(ctx, reserved_lock)
+        raise
 
 
 def create_handler(ctx):
@@ -578,6 +663,19 @@ def create_handler(ctx):
             accept = self.headers.get("Accept", "")
             requested_with = self.headers.get("X-Requested-With", "")
             return "application/json" in accept or requested_with == "fetch"
+
+        def send_running_action(self):
+            message = _("error.running_action")
+            if self.wants_json():
+                self.send_json({"ok": False, "message": message}, status=409)
+            else:
+                self.send_html(render_page(ctx), status=409)
+
+        def start_job(self, target, *args, state_updates=None, lock_acquired=False):
+            if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
+                return True
+            self.send_running_action()
+            return False
 
         def do_GET(self):
             parsed = urlparse(self.path)
@@ -603,7 +701,7 @@ def create_handler(ctx):
                             "last_run_at": ctx.utc_now(),
                             "last_status": "idle",
                             "last_action": "generate_key",
-                            "last_message": "Generated a new deploy key. Add the public key to GitHub Deploy Keys.",
+                            "last_message": _("message.generated_deploy_key"),
                             "last_details": [public_key],
                         }
                     )
@@ -612,7 +710,7 @@ def create_handler(ctx):
                         self.send_json(
                             {
                                 "ok": True,
-                                "message": "Generated a new deploy key. Reloading UI.",
+                                "message": _("message.generated_deploy_key_reload"),
                                 "public_key": public_key,
                             }
                         )
@@ -637,7 +735,7 @@ def create_handler(ctx):
             if parsed.path == "/clear-display-state":
                 ctx.clear_display_state()
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Display state cleared."})
+                    self.send_json({"ok": True, "message": _("message.display_state_cleared")})
                 else:
                     self.send_response(204)
                     self.end_headers()
@@ -645,18 +743,25 @@ def create_handler(ctx):
 
             if parsed.path == "/clear-preview":
                 direction = body.get("direction", [""])[0]
-                if direction == "save":
-                    ctx.write_state(state_store.SAVE_PREVIEW_CLEAR_UPDATES)
-                    message = "Save preview cancelled."
-                elif direction == "apply":
-                    ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
-                    message = "Apply preview cancelled."
-                else:
-                    if self.wants_json():
-                        self.send_json({"ok": False, "message": "Invalid preview direction."}, status=400)
-                    else:
-                        self.send_html(render_page(ctx), status=400)
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
                     return
+                try:
+                    if direction == "save":
+                        ctx.write_state(state_store.SAVE_PREVIEW_CLEAR_UPDATES)
+                        message = _("message.save_preview_cancelled")
+                    elif direction == "apply":
+                        ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
+                        message = _("message.apply_preview_cancelled")
+                    else:
+                        if self.wants_json():
+                            self.send_json({"ok": False, "message": _("error.invalid_preview_direction")}, status=400)
+                        else:
+                            self.send_html(render_page(ctx), status=400)
+                        return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": message})
                 else:
@@ -664,28 +769,32 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/apply":
-                start_background(ctx.run_apply_job)
+                if not self.start_job(ctx.run_apply_job):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Apply Git to HA started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.apply_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path in {"/resolve-save-preview", "/resolve-apply-preview"}:
                 direction = "save" if parsed.path == "/resolve-save-preview" else "apply"
-                state = ctx.read_state()
+                ok, state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
+                    return
                 raw_path = body.get("path", [""])[0]
                 choice = body.get("choice", [""])[0]
                 try:
                     safe_path = git_ops.safe_repo_relative_path(raw_path)
                     if choice not in {"ha", "git"}:
-                        raise RuntimeError("Invalid preview choice")
+                        raise RuntimeError(_("error.invalid_preview_choice"))
                     paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
                     resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
                     conflicts_key = "last_save_preview_conflicts" if direction == "save" else "last_preview_conflicts"
                     paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
                     if safe_path not in paths:
-                        raise RuntimeError("Preview path is not pending")
+                        raise RuntimeError(_("error.preview_path_not_pending"))
                     resolutions = dict(state.get(resolutions_key) or {})
                     resolutions[safe_path] = choice
                     remaining = [path for path in paths if path not in resolutions]
@@ -696,14 +805,19 @@ def create_handler(ctx):
                             "last_status": "idle",
                             "last_action": f"resolve_{direction}_preview",
                             "last_message": (
-                                f"Resolved {safe_path}. {len(remaining)} preview file decision(s) remain."
+                                _("message.resolved_preview_file", path=safe_path, remaining=len(remaining))
                                 if remaining
-                                else f"Resolved all {direction} preview files. Confirm is enabled."
+                                else _("message.resolved_all_preview_files", direction=direction)
                             ),
                         }
                     )
                     if not remaining and not state.get(conflicts_key):
-                        start_background(ctx.run_save_job if direction == "save" else ctx.run_apply_job)
+                        if not self.start_job(
+                            ctx.run_save_job if direction == "save" else ctx.run_apply_job,
+                            lock_acquired=lock_acquired,
+                        ):
+                            return
+                        lock_acquired = False
                     if self.wants_json():
                         self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
                     else:
@@ -724,108 +838,122 @@ def create_handler(ctx):
                     else:
                         self.send_html(render_page(ctx), status=400)
                     return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/preview":
-                ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
-                start_background(ctx.run_preview_job)
+                if not self.start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Git to HA preview started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.apply_preview_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/save-preview":
-                ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
-                start_background(ctx.run_save_preview_job)
+                if not self.start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "HA to Git preview started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.save_preview_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/save":
-                start_background(ctx.run_save_job)
+                if not self.start_job(ctx.run_save_job):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Save HA to Git started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.save_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/deleted-devices-preview":
-                ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
-                start_background(ctx.run_deleted_devices_preview_job)
+                if not self.start_job(ctx.run_deleted_devices_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "deleted_devices check started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_check_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/retained-devices-preview":
-                ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
-                start_background(ctx.run_retained_devices_preview_job)
+                if not self.start_job(ctx.run_retained_devices_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Retained devices check started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.retained_devices_check_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/retained-devices-delete":
                 selected = body.get("candidate", [])
-                start_background(ctx.run_retained_devices_delete_job, selected)
+                if not self.start_job(ctx.run_retained_devices_delete_job, selected):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Retained devices deletion started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.retained_devices_delete_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/internal-ids-preview":
-                ctx.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
-                start_background(ctx.run_internal_ids_preview_job)
+                if not self.start_job(ctx.run_internal_ids_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Internal ids check started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.internal_ids_check_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/internal-ids-migrate":
                 selected = body.get("candidate", [])
-                start_background(ctx.run_internal_ids_migrate_job, selected)
+                if not self.start_job(ctx.run_internal_ids_migrate_job, selected):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Internal ids migration started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.internal_ids_migration_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/deleted-devices-delete":
-                start_background(ctx.run_deleted_devices_delete_job)
+                if not self.start_job(ctx.run_deleted_devices_delete_job):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "deleted_devices deletion started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_delete_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/deleted-devices-confirm":
-                start_background(ctx.run_deleted_devices_confirm_job)
+                if not self.start_job(ctx.run_deleted_devices_confirm_job):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "deleted_devices cleanup confirmation started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_confirm_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/deleted-devices-revert":
-                start_background(ctx.run_deleted_devices_revert_job)
+                if not self.start_job(ctx.run_deleted_devices_revert_job):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "deleted_devices cleanup revert started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_revert_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/approve-save-conflicts":
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
+                    return
                 try:
                     message = conflict_logic.approve_save_unknown_base_conflicts(ctx)
-                    start_background(ctx.run_save_job)
+                    if not self.start_job(ctx.run_save_job, lock_acquired=lock_acquired):
+                        return
+                    lock_acquired = False
                     if self.wants_json():
-                        self.send_json({"ok": True, "message": f"{message} Saving..."})
+                        self.send_json({"ok": True, "message": _("message.approve_save_conflicts_saving", message=message)})
                     else:
                         self.send_html(render_page(ctx))
                     return
@@ -844,12 +972,14 @@ def create_handler(ctx):
                     else:
                         self.send_html(render_page(ctx), status=500)
                     return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/addons":
                 selected = body.get("addon", [])
                 ctx.set_selected_addon_slugs(selected)
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Managed add-ons updated. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.addons_updated")})
                 else:
                     self.send_html(render_page(ctx))
                 return
@@ -858,35 +988,45 @@ def create_handler(ctx):
                 enabled = "homeassistant_organizer" in body
                 ctx.set_homeassistant_organizer_enabled(enabled)
                 if self.wants_json():
-                    message = "Home Assistant Git layout updated. Refreshing..."
+                    message = _("message.homeassistant_layout_updated")
                     self.send_json({"ok": True, "message": message})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/include-redundant-data":
-                enabled = "include_redundant_data" in body
-                state = ctx.read_state()
-                updates = {
-                    **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
-                    "include_redundant_data": enabled,
-                }
-                if state.get("conflict_type") == "save_unknown_base":
-                    updates.update({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
-                ctx.write_state(updates)
+                ok, state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
+                    return
+                try:
+                    enabled = "include_redundant_data" in body
+                    updates = {
+                        **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
+                        "include_redundant_data": enabled,
+                    }
+                    if state.get("conflict_type") == "save_unknown_base":
+                        updates.update({"conflicts": [], "conflict_type": None, "save_conflict_resolutions": {}})
+                    ctx.write_state(updates)
+                finally:
+                    release_action_slot(ctx, lock_acquired)
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": "Redundant data setting updated. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.redundant_data_updated")})
                 else:
                     self.send_html(render_page(ctx))
                 return
 
             if parsed.path == "/resolve-conflict":
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
+                    return
                 try:
                     path = body.get("path", [""])[0]
                     choice = body.get("choice", [""])[0]
                     message = conflict_logic.resolve_git_conflict(ctx, path, choice)
                     if self.wants_json():
-                        self.send_json({"ok": True, "message": f"{message} Refreshing..."})
+                        self.send_json({"ok": True, "message": _("message.resolved_conflict_refreshing", message=message)})
                     else:
                         self.send_html(render_page(ctx))
                     return
@@ -905,18 +1045,21 @@ def create_handler(ctx):
                     else:
                         self.send_html(render_page(ctx), status=500)
                     return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/rollback":
                 release = body.get("release", [""])[0]
                 if not release:
                     if self.wants_json():
-                        self.send_json({"ok": False, "message": "Missing release"}, status=400)
+                        self.send_json({"ok": False, "message": _("error.missing_release")}, status=400)
                     else:
-                        self.send_error(400, "Missing release")
+                        self.send_error(400, _("error.missing_release"))
                     return
-                start_background(ctx.run_rollback_job, release)
+                if not self.start_job(ctx.run_rollback_job, release):
+                    return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": f"Rollback to {release} started. Refreshing..."})
+                    self.send_json({"ok": True, "message": _("message.rollback_started", release=release)})
                 else:
                     self.send_html(render_page(ctx))
                 return

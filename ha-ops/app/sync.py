@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+import i18n
 import storage_managed
 import targets as target_model
 import organizer
@@ -14,6 +15,10 @@ import organizer
 
 HA_LIVE_BRANCH = "ha-ops/ha-live"
 HA_BASE_BRANCH = "ha-ops/base"
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
 
 
 @dataclass(frozen=True)
@@ -316,7 +321,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
     src = materialize_homeassistant_source(src, target, ctx)
     if not src.exists() or not has_managed_content(src):
         if details is not None:
-            ctx.add_detail(details, f"Skipping {target['id']} because Git has no Home Assistant config yet.")
+            ctx.add_detail(details, _("detail.skipped_homeassistant_no_git_config", target=target["id"]))
         return []
     reject_source_symlinks(target, ctx, src)
 
@@ -356,17 +361,17 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
     )
     managed_result = storage_managed.apply_core_config_entries_projection(src, dest)
     if copied and details is not None:
-        ctx.add_detail(details, f"Applied {copied} Home Assistant config path(s).")
+        ctx.add_detail(details, _("detail.applied_homeassistant_paths", count=copied))
     if zigbee2mqtt_count and details is not None:
-        ctx.add_detail(details, f"Applied {zigbee2mqtt_count} Zigbee2MQTT config path(s).")
+        ctx.add_detail(details, _("detail.applied_zigbee2mqtt_paths", count=zigbee2mqtt_count))
     if copied_count and details is not None:
-        ctx.add_detail(details, f"Applied {copied_count} allowlisted .storage config file(s).")
+        ctx.add_detail(details, _("detail.applied_storage_allowlist", count=copied_count))
     if managed_result["updated"] and details is not None:
-        ctx.add_detail(details, f"Applied {managed_result['updated']} managed .storage projection update(s).")
+        ctx.add_detail(details, _("detail.applied_managed_storage_projection", count=managed_result["updated"]))
     if managed_result.get("missing") and details is not None:
-        ctx.add_detail(details, "Skipped managed core.config_entries projection because live .storage/core.config_entries is missing.")
+        ctx.add_detail(details, _("detail.skipped_managed_config_entries_missing"))
     if skipped_protected and details is not None:
-        ctx.add_detail(details, f"Skipped protected .storage file(s): {', '.join(skipped_protected)}.")
+        ctx.add_detail(details, _("detail.skipped_protected_storage_files", paths=", ".join(skipped_protected)))
     return skipped_protected
 
 
@@ -1041,22 +1046,22 @@ def apply_targets(resolved_targets, details, ctx):
                 and target_model.stop_core_before_storage_apply(target)
                 and not core_stopped
             ):
-                ctx.add_detail(details, "Stopping Home Assistant Core before syncing .storage.")
+                ctx.add_detail(details, _("detail.stopping_core_before_storage_sync"))
                 ctx.core_stop()
                 core_stopped = True
             elif homeassistant_changes.changed_storage:
-                ctx.add_detail(details, "Warning: .storage will be written while Home Assistant Core is running.")
+                ctx.add_detail(details, _("detail.warning_storage_core_running"))
         elif target["type"] == "addon" and target.get("stop_addon_before_sync", False):
             slug = target["resolved_slug"]
-            ctx.add_detail(details, f"Stopping add-on {slug} before sync.")
+            ctx.add_detail(details, _("detail.stopping_addon_before_sync", slug=slug))
             addon_was_started = ctx.stop_addon_for_sync(slug)
 
-        ctx.add_detail(details, f"Syncing {target['id']} from {source_path} to {live_path}.")
+        ctx.add_detail(details, _("detail.syncing_target", target=target["id"], source=source_path, destination=live_path))
         if target["type"] == "homeassistant":
             apply_homeassistant_config(source_path, live_path, target, ctx, details)
         else:
             if not source_path.exists() or not has_managed_content(source_path):
-                ctx.add_detail(details, f"Skipping {target['id']} because Git has no config for this add-on yet.")
+                ctx.add_detail(details, _("detail.skipped_addon_no_git_config", target=target["id"]))
                 continue
             sync_tree(source_path, live_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
 
@@ -1064,10 +1069,10 @@ def apply_targets(resolved_targets, details, ctx):
             slug = target["resolved_slug"]
             if target.get("stop_addon_before_sync", False):
                 if addon_was_started:
-                    ctx.add_detail(details, f"Starting add-on {slug} after sync.")
+                    ctx.add_detail(details, _("detail.starting_addon_after_sync", slug=slug))
                     ctx.addon_action(slug, "start")
             else:
-                ctx.add_detail(details, f"Restarting add-on {slug}.")
+                ctx.add_detail(details, _("detail.restarting_addon", slug=slug))
                 ctx.restart_or_start_addon(slug)
 
     if homeassistant_target is None:
@@ -1075,7 +1080,7 @@ def apply_targets(resolved_targets, details, ctx):
     if not homeassistant_changes.any():
         return {"core_stopped": core_stopped}
 
-    ctx.add_detail(details, "Running Home Assistant config check.")
+    ctx.add_detail(details, _("detail.running_homeassistant_config_check"))
     try:
         ctx.do_core_check()
     except Exception as exc:
@@ -1084,20 +1089,20 @@ def apply_targets(resolved_targets, details, ctx):
 
     if core_stopped:
         if target_model.start_core_after_storage_apply(homeassistant_target):
-            ctx.add_detail(details, "Starting Home Assistant Core after sync.")
+            ctx.add_detail(details, _("detail.starting_core_after_sync"))
             try:
                 ctx.core_start()
             except Exception as exc:
                 setattr(exc, "core_stopped", True)
                 raise
         else:
-            ctx.add_detail(details, "Home Assistant Core was left stopped after .storage sync by policy.")
+            ctx.add_detail(details, _("detail.core_left_stopped_after_storage_sync"))
     else:
         if target_model.restart_core_after_apply(homeassistant_target):
-            ctx.add_detail(details, "Restarting Home Assistant Core.")
+            ctx.add_detail(details, _("detail.restarting_core"))
             ctx.core_restart()
         elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_apply(homeassistant_target):
-            ctx.add_detail(details, "Reloading Home Assistant YAML config.")
+            ctx.add_detail(details, _("detail.reloading_yaml_config"))
             ctx.core_reload_yaml()
     return {"core_stopped": False}
 
@@ -1110,26 +1115,26 @@ def build_save_export(resolved_targets, details, ctx):
         live_path = Path(target["live_path"])
         if not live_path.exists():
             if target.get("optional", False):
-                ctx.add_detail(details, f"Skipping optional target {target['id']} because {live_path} does not exist.")
+                ctx.add_detail(details, _("detail.skipped_optional_target_missing", target=target["id"], path=live_path))
                 continue
-            raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
+            raise i18n.error("error.live_path_missing", target=target["id"], path=live_path)
 
         export_path = export_root / target["id"]
         if target["type"] == "homeassistant":
-            ctx.add_detail(details, f"Exporting config-only {target['id']} from {live_path} to a temporary tree.")
+            ctx.add_detail(details, _("detail.exporting_config_only", target=target["id"], path=live_path))
             copied_count, zigbee2mqtt_count, storage_count, managed_storage_count = export_homeassistant_config(
                 live_path, export_path, target, ctx
             )
             organize_homeassistant_export(export_path, target, details, ctx)
-            ctx.add_detail(details, f"Exported {copied_count} Home Assistant config path(s).")
+            ctx.add_detail(details, _("detail.exported_homeassistant_paths", count=copied_count))
             if zigbee2mqtt_count:
-                ctx.add_detail(details, f"Exported {zigbee2mqtt_count} legacy Zigbee2MQTT config path(s).")
+                ctx.add_detail(details, _("detail.exported_legacy_zigbee2mqtt_paths", count=zigbee2mqtt_count))
             if storage_count:
-                ctx.add_detail(details, f"Exported {storage_count} allowlisted .storage config file(s).")
+                ctx.add_detail(details, _("detail.exported_storage_allowlist", count=storage_count))
             if managed_storage_count:
-                ctx.add_detail(details, f"Exported {managed_storage_count} managed .storage projection(s).")
+                ctx.add_detail(details, _("detail.exported_managed_storage_projection", count=managed_storage_count))
         else:
-            ctx.add_detail(details, f"Exporting {target['id']} from {live_path} to a temporary tree.")
+            ctx.add_detail(details, _("detail.exporting_target", target=target["id"], path=live_path))
             export_target_to_path(target, export_path, ctx)
         add_save_export_candidate_details(target, export_path, details, ctx)
 
@@ -1144,13 +1149,13 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
 
         source_path = Path(target["source_path"])
         if target["type"] == "homeassistant":
-            ctx.add_detail(details, f"Saving config-only {target['id']} to {source_path}.")
+            ctx.add_detail(details, _("detail.saving_config_only", target=target["id"], path=source_path))
             clean_homeassistant_export_destination(source_path, target, ctx)
             if not homeassistant_organizer_enabled(target):
                 organizer.clean_organized_root(source_path, organizer_cleanup_options(target))
             sync_tree(export_path, source_path, False, None, ctx.run_command)
         else:
-            ctx.add_detail(details, f"Saving {target['id']} to {source_path}.")
+            ctx.add_detail(details, _("detail.saving_target", target=target["id"], path=source_path))
             removed_count = clean_export_destination(
                 source_path,
                 ctx.clean_paths,
@@ -1158,7 +1163,7 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
                 ctx.clean_file_patterns,
             )
             if removed_count:
-                ctx.add_detail(details, f"Removed {removed_count} excluded item(s) from {target['id']} save destination.")
+                ctx.add_detail(details, _("detail.removed_excluded_save_items", count=removed_count, target=target["id"]))
             sync_tree(export_path, source_path, target_model.save_delete(target), None, ctx.run_command)
 
 
@@ -1205,7 +1210,7 @@ def restore_normalized_equal_save_files(repo_dir, dest_root, resolved_targets, d
             shutil.copy2(source_file, dest_file)
             restored.append(relative.as_posix())
     if restored:
-        ctx.add_detail(details, f"Ignored {len(restored)} registry noise-only Save change(s).")
+        ctx.add_detail(details, _("detail.ignored_registry_noise_save_changes", count=len(restored)))
     return restored
 
 
@@ -1237,10 +1242,10 @@ def restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, 
             continue
         checkout = ctx.run_command(["git", "checkout", "--", relative.as_posix()], cwd=repo_dir)
         if checkout.returncode != 0:
-            raise RuntimeError(f"git checkout normalized Save file failed:\n{checkout.stderr.strip()}")
+            raise i18n.error("error.normalized_save_checkout_failed", error=checkout.stderr.strip())
         restored.append(relative.as_posix())
     if restored:
-        ctx.add_detail(details, f"Ignored {len(restored)} registry noise-only Save change(s).")
+        ctx.add_detail(details, _("detail.ignored_registry_noise_save_changes", count=len(restored)))
     return restored
 
 
@@ -1454,8 +1459,14 @@ def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redu
 def merge_status_lines(repo_dir, ctx):
     result = ctx.run_command(["git", "diff", "--name-status", "HEAD"], cwd=repo_dir)
     if result.returncode != 0:
-        raise RuntimeError(f"git diff --name-status failed:\n{result.stderr.strip()}")
-    labels = {"A": "Added", "M": "Modified", "D": "Deleted", "R": "Renamed", "C": "Copied"}
+        raise i18n.error("error.git_diff_name_status_failed", error=result.stderr.strip())
+    labels = {
+        "A": _("preview.change_added"),
+        "M": _("preview.change_modified"),
+        "D": _("preview.change_deleted"),
+        "R": _("preview.change_renamed"),
+        "C": _("preview.change_copied"),
+    }
     lines = []
     paths = []
     for raw in result.stdout.splitlines():
@@ -1464,8 +1475,8 @@ def merge_status_lines(repo_dir, ctx):
         parts = raw.split("\t")
         status = parts[0]
         path = parts[-1]
-        label = labels.get(status[:1], "Modified")
-        lines.append(f"- {label}: {path}")
+        label = labels.get(status[:1], _("preview.change_modified"))
+        lines.append(_("preview.change_status_line", label=label, path=path))
         paths.append(path)
     return lines, sorted(set(paths))
 
@@ -1672,11 +1683,11 @@ def save_preview_status_lines(repo_dir, preview_repo, include_redundant_data=Fal
     lines = []
     for path in sorted(set(before) | set(after)):
         if path not in before:
-            lines.append(f"- Added: {path}")
+            lines.append(_("preview.change_status_line", label=_("preview.change_added"), path=path))
         elif path not in after:
-            lines.append(f"- Deleted: {path}")
+            lines.append(_("preview.change_status_line", label=_("preview.change_deleted"), path=path))
         elif (file_differs(after[path], before[path]) if include_redundant_data else save_file_differs(after[path], before[path])):
-            lines.append(f"- Modified: {path}")
+            lines.append(_("preview.change_status_line", label=_("preview.change_modified"), path=path))
     return lines
 
 
@@ -1875,7 +1886,9 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
         conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
-            summary = "\n".join([f"Save preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            summary = "\n".join(
+                [_("preview.save_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
+            )
             diff = merge_diff_for_save_preview(repo_dir, resolved_targets, include_redundant_data, ctx)
             return {
                 "summary": summary,
@@ -1886,7 +1899,11 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
             }
 
         status_lines, paths = merge_status_lines(repo_dir, ctx)
-        summary = "\n".join([f"Save preview changes ({len(status_lines)}):", *status_lines]) if status_lines else "No Save changes."
+        summary = (
+            "\n".join([_("preview.save_changes_title", count=len(status_lines)), *status_lines])
+            if status_lines
+            else _("preview.no_save_changes")
+        )
         if not status_lines:
             diff = ""
         else:
@@ -1931,7 +1948,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
         if not live_path.exists():
             if target.get("optional", False):
                 continue
-            raise RuntimeError(f"Live path does not exist for target '{target['id']}': {live_path}")
+            raise i18n.error("error.live_path_missing", target=target["id"], path=live_path)
         if not has_managed_content(source_path):
             continue
 
@@ -1968,7 +1985,7 @@ def save_unknown_base_conflicts(resolved_targets, repo_dir, resolutions, details
         )
 
     if conflicts:
-        ctx.add_detail(details, f"Found {len(conflicts)} unknown-base Save conflict(s).")
+        ctx.add_detail(details, _("detail.unknown_base_save_conflicts", count=len(conflicts)))
     return sorted(set(conflicts))
 
 
@@ -2066,7 +2083,7 @@ def add_save_export_candidate_details(target, export_path, details, ctx):
     paths = save_export_candidate_paths(target, export_path)
     if not paths:
         return
-    ctx.add_detail(details, "\n".join([f"Save export candidates for {target['id']} ({len(paths)}):", *[f"- {path}" for path in paths]]))
+    ctx.add_detail(details, "\n".join([_("detail.save_export_candidates", target=target["id"], count=len(paths)), *[f"- {path}" for path in paths]]))
 
 
 def restore_save_git_resolutions(repo_dir, resolutions, details, ctx):
@@ -2313,7 +2330,7 @@ def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
     live_fingerprints = {}
 
     for target in resolved_targets:
-        preview_progress(ctx, details, f"Preview {target['id']}: start")
+        preview_progress(ctx, details, _("text.preview_target_start", target=target["id"]))
         baseline_path = baseline_root / safe_preview_name(str(target["id"]))
         preview_path = preview_root / safe_preview_name(str(target["id"]))
         build_preview_baseline(target, baseline_path, ctx)
@@ -2324,7 +2341,7 @@ def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
         skipped = sync_to_preview(target, baseline_path, preview_path, ctx)
         if skipped:
             skipped_protected.extend(skipped)
-            chunks.append(f"Target {target['id']}: skipped protected .storage file(s): {', '.join(skipped)}.\n")
+            chunks.append(_("preview.skipped_protected_storage", target=target["id"], paths=", ".join(skipped)) + "\n")
         if target["type"] == "homeassistant":
             storage_change_paths.extend(
                 [f"{target['id']}/{path}" for path in managed_storage_change_paths(baseline_path, preview_path)]
@@ -2333,15 +2350,15 @@ def build_apply_preview_from_sources(resolved_targets, ctx, details=None):
                 warnings.append(warning)
                 if details is not None:
                     ctx.add_detail(details, warning)
-        preview_progress(ctx, details, f"Preview {target['id']}: counting deletions")
+        preview_progress(ctx, details, _("text.preview_target_counting_deletions", target=target["id"]))
         deletion_count += count_preview_deletions(baseline_path, preview_path)
-        preview_progress(ctx, details, f"Preview {target['id']}: building diff")
+        preview_progress(ctx, details, _("text.preview_target_building_diff", target=target["id"]))
         chunks.append(target_diff_normalized(target, baseline_path, preview_path, ctx))
-        preview_progress(ctx, details, f"Preview {target['id']}: done")
+        preview_progress(ctx, details, _("text.preview_target_done", target=target["id"]))
 
     diff_text = "\n".join(chunks).strip()
     if not diff_text:
-        diff_text = "No file changes."
+        diff_text = _("preview.no_file_changes")
 
     return {
         "diff": diff_text,
@@ -2523,7 +2540,9 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
         conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
-            summary = "\n".join([f"Apply preview conflicts ({len(conflicts)}):", *[f"- Conflict: {path}" for path in conflicts]])
+            summary = "\n".join(
+                [_("preview.apply_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
+            )
             diff = merge_diff_normalized(repo_dir, resolved_targets, ctx)
             full_diff = "\n\n".join([part for part in [summary, diff] if part])
             fingerprint = merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx)

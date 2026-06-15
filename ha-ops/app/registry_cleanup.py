@@ -6,6 +6,12 @@ import re
 import subprocess
 from pathlib import Path
 
+import i18n
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
+
 
 def device_registry_path(config_dir):
     return Path(config_dir) / ".storage" / "core.device_registry"
@@ -126,22 +132,20 @@ def stale_mqtt_discovery_candidates(config_dir, retained_topics=None):
 
 def build_stale_mqtt_discovery_preview(config_dir, retained_topics=None):
     preview = stale_mqtt_discovery_candidates(config_dir, retained_topics)
-    lines = [f"stale MQTT discovery candidates ({preview['count']}):"]
-    lines.append(
-        "These are retained Home Assistant MQTT discovery topics for Zigbee2MQTT devices that are no longer present in current Zigbee2MQTT files."
-    )
-    lines.append("Deleting retained devices clears MQTT retained discovery topics only; it does not delete files or registry/database records.")
+    lines = [_("preview.retained_title", count=preview["count"])]
+    lines.append(_("preview.retained_description"))
+    lines.append(_("preview.retained_effect"))
     if preview["scanned_paths"]:
-        lines.append(f"Scanned Zigbee2MQTT files: {', '.join(preview['scanned_paths'])}.")
+        lines.append(_("preview.retained_scanned_paths", paths=", ".join(preview["scanned_paths"])))
     else:
-        lines.append("No Zigbee2MQTT files were found; review candidates carefully.")
+        lines.append(_("preview.retained_no_zigbee2mqtt_files"))
     if not preview["candidates"]:
-        lines.append("No stale MQTT discovery candidates found.")
+        lines.append(_("preview.retained_none"))
     for item in preview["candidates"]:
         label = " | ".join(part for part in [item["name"], item["manufacturer"], item["model"], item["ieee"]] if part)
         lines.append(f"- {label}")
         for topic in item["retained_topics"]:
-            lines.append(f"  retained: {topic}")
+            lines.append(_("preview.retained_topic", topic=topic))
     return {**preview, "summary": "\n".join(lines)}
 
 
@@ -386,11 +390,11 @@ def deleted_device_rows(config_dir, devices):
 def build_deleted_devices_preview(config_dir):
     _path, text, data = read_device_registry(config_dir)
     devices = deleted_devices(data)
-    lines = [f"deleted_devices entries to remove ({len(devices)}):"]
+    lines = [_("preview.deleted_devices_title", count=len(devices))]
     if devices:
         lines.extend(f"- {deleted_device_label(device)}" for device in devices)
     else:
-        lines.append("No deleted_devices entries found.")
+        lines.append(_("preview.deleted_devices_none"))
     return {
         "count": len(devices),
         "fingerprint": fingerprint_text(text),

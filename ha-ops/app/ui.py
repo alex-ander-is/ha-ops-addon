@@ -1,4 +1,24 @@
 import html
+import json
+
+import i18n
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
+
+
+def js_string(value):
+    return (
+        json.dumps(str(value), ensure_ascii=False)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def js_t(key, **values):
+    return js_string(_(key, **values))
 
 
 def diff_line_class(line):
@@ -94,13 +114,13 @@ def render_conflict_detail(detail, include_wrap_control=True):
     wrap_control = (
         "<label class='diff-wrap-control'>"
         "<input type='checkbox' class='diff-wrap-toggle'>"
-        "<span>Wrap lines</span>"
+        f"<span>{_('button.wrap_lines_toggle')}</span>"
         "</label>"
         if include_wrap_control
         else ""
     )
     return (
-        "<div class='conflict-diff' role='region' aria-label='Conflict diff'>"
+        f"<div class='conflict-diff' role='region' aria-label='{_('title.conflict_diff')}'>"
         f"{wrap_control}"
         "<div class='diff-lines'>"
         f"{''.join(lines)}"
@@ -114,10 +134,10 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
     try:
         addons = sorted(get_installed_addons(), key=lambda addon: addon_display_name(addon).lower())
     except Exception as exc:
-        return f"<p>Add-on discovery unavailable: {html.escape(str(exc))}</p>"
+        return f"<p>{html.escape(_('error.addon_discovery', error=str(exc)))}</p>"
 
     if not addons:
-        return "<p>No installed add-ons found.</p>"
+        return f"<p>{_('text.no_installed_addons')}</p>"
 
     rows = []
     for addon in addons:
@@ -126,7 +146,7 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
             continue
         checked = "checked" if slug in selected else ""
         name = html.escape(addon_display_name(addon))
-        hint = "Zigbee2MQTT candidate" if addon_is_zigbee2mqtt(addon) else ""
+        hint = _("value.zigbee2mqtt_candidate") if addon_is_zigbee2mqtt(addon) else ""
         rows.append(
             "<label class='check-row'>"
             f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
@@ -151,37 +171,39 @@ def render_homeassistant_organizer(enabled):
         "<div class='check-list'>"
         "<label class='check-row'>"
         f"<input type='checkbox' name='homeassistant_organizer' value='1' {checked}>"
-        "<span>Split automations, scripts, and scenes by area in Git</span>"
-        "<small>Home Assistant keeps using its normal YAML files.</small>"
+        f"<span>{_('text.split_organizer')}</span>"
+        f"<small>{_('notice.organizer')}</small>"
         "</label>"
         "</div>"
         "</form>"
     )
 
 
-def render_include_redundant_data(enabled):
-    checked = "checked" if enabled else ""
+def render_include_redundant_data(enabled, disabled=False):
+    checked = " checked" if enabled else ""
+    disabled_attr = " disabled" if disabled else ""
     return (
         "<form method='post' action='include-redundant-data' data-auto-submit='change'>"
         "<div class='check-list'>"
         "<label class='check-row'>"
-        f"<input type='checkbox' name='include_redundant_data' value='1' {checked}>"
-        "<span>Include redundant data</span>"
-        "<small>Save HA to Git keeps registry noise exactly as Home Assistant writes it.</small>"
+        f"<input type='checkbox' name='include_redundant_data' value='1'{checked}{disabled_attr}>"
+        f"<span>{_('label.include_redundant_data')}</span>"
+        f"<small>{_('notice.include_redundant_data')}</small>"
         "</label>"
         "</div>"
         "</form>"
     )
 
 
-def render_conflicts(conflicts, conflict_type=None):
+def render_conflicts(conflicts, conflict_type=None, actions_disabled=False):
     if not conflicts:
-        return "<p>No unresolved Git conflicts.</p>"
+        return f"<p>{_('text.no_unresolved_git_conflicts')}</p>"
+    disabled = " disabled" if actions_disabled else ""
     approve_all = ""
     if conflict_type == "save_unknown_base":
         approve_all = (
             "<form method='post' action='approve-save-conflicts' data-async-form='true'>"
-            "<button type='submit'>Approve HA to Git</button>"
+            f"<button type='submit'{disabled}>{_('action.approve_ha_to_git')}</button>"
             "</form>"
         )
     rows = []
@@ -200,12 +222,12 @@ def render_conflicts(conflicts, conflict_type=None):
             "<form method='post' action='resolve-conflict' data-async-form='true'>"
             f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
             "<input type='hidden' name='choice' value='ha'>"
-            "<button type='submit' class='secondary'>Use HA Version</button>"
+            f"<button type='submit' class='secondary'{disabled}>{_('action.use_ha_version')}</button>"
             "</form>"
             "<form method='post' action='resolve-conflict' data-async-form='true'>"
             f"<input type='hidden' name='path' value='{html.escape(path, quote=True)}'>"
             "<input type='hidden' name='choice' value='git'>"
-            "<button type='submit' class='secondary'>Use Git Version</button>"
+            f"<button type='submit' class='secondary'{disabled}>{_('action.use_git_version')}</button>"
             "</form>"
             "</td>"
             "</tr>"
@@ -217,39 +239,41 @@ def render_conflicts(conflicts, conflict_type=None):
                 "</tr>"
             )
     return (
-        "<p class='muted'>HA Ops stopped before changing Git because these files differ between live "
-        "Home Assistant and the repository, and there is no trusted common base. Choose "
-        "<strong>Use HA Version</strong> to save the live Home Assistant file to Git, or choose "
-        "<strong>Use Git Version</strong> to keep the repository file unchanged.</p>"
+        "<p class='muted'>"
+        + html.escape(
+            _("notice.conflict_resolution", ha_choice=_("action.use_ha_version"), git_choice=_("action.use_git_version"))
+        )
+        + "</p>"
         f"{approve_all}"
         "<div class='table-scroll'>"
-        "<table class='conflicts-table'><thead><tr><th>File</th><th>Action</th></tr></thead>"
+        f"<table class='conflicts-table'><thead><tr><th>{_('label.file')}</th><th>{_('table.action')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</div>"
     )
 
 
-def preview_choice_buttons(path, direction, path_action):
+def preview_choice_buttons(path, direction, path_action, actions_disabled=False):
     escaped_path = html.escape(path, quote=True)
+    disabled = " disabled" if actions_disabled else ""
     if direction == "save":
         primary_choice = "ha"
-        primary_label = "Use HA Version"
+        primary_label = _("action.use_ha_version")
         keep_choice = "git"
     else:
         primary_choice = "git"
-        primary_label = "Use Git Version"
+        primary_label = _("action.use_git_version")
         keep_choice = "ha"
     return (
-        "<button type='button' class='secondary preview-wrap-button'>Wrap Lines</button>"
+        f"<button type='button' class='secondary preview-wrap-button'>{_('button.wrap_lines')}</button>"
         f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
         f"<input type='hidden' name='choice' value='{primary_choice}'>"
-        f"<button type='submit' class='secondary'>{primary_label}</button>"
+        f"<button type='submit' class='secondary'{disabled}>{primary_label}</button>"
         "</form>"
         f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
         f"<input type='hidden' name='choice' value='{keep_choice}'>"
-        "<button type='submit' class='secondary'>Keep Unchanged</button>"
+        f"<button type='submit' class='secondary'{disabled}>{_('action.keep_unchanged')}</button>"
         "</form>"
     )
 
@@ -380,12 +404,21 @@ def split_preview_diff_by_path(detail, paths):
     return {path: "\n".join(lines) for path, lines in chunks.items()}, "\n".join(summary).strip()
 
 
-def render_preview_decisions(paths, resolutions, direction, require_all=False, diff_text="", summary_text=""):
-    action_label = "Confirm Save to Git" if direction == "save" else "Confirm Apply to HA"
+def render_preview_decisions(
+    paths,
+    resolutions,
+    direction,
+    require_all=False,
+    diff_text="",
+    summary_text="",
+    actions_disabled=False,
+):
+    action_label = _("action.confirm_save") if direction == "save" else _("action.confirm_apply")
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
     all_action = "save" if direction == "save" else "apply"
     missing = [path for path in paths if path not in resolutions]
-    confirm_disabled = " disabled" if require_all and missing else ""
+    confirm_disabled = " disabled" if actions_disabled or (require_all and missing) else ""
+    cancel_disabled = " disabled" if actions_disabled else ""
     cancel_direction = "save" if direction == "save" else "apply"
     diff_by_path, diff_summary = split_preview_diff_by_path(diff_text or "", paths)
     change_labels = preview_change_labels_by_path(summary_text)
@@ -402,16 +435,16 @@ def render_preview_decisions(paths, resolutions, direction, require_all=False, d
         status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
         change_label = change_labels.get(path)
         change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
-        detail = diff_by_path.get(path) or "Diff detail unavailable for this file."
+        detail = diff_by_path.get(path) or _("text.diff_detail_unavailable")
         files.append(
             "<article class='preview-file' data-preview-file>"
             "<div class='preview-file-header'>"
             "<div class='preview-file-title'>"
-            "<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>Expand Diff</button>"
+            f"<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>{_('button.expand_diff')}</button>"
             f"{render_preview_path(path)}{change}{status}"
             "</div>"
             "<div class='preview-file-actions'>"
-            f"{preview_choice_buttons(path, direction, path_action)}"
+            f"{preview_choice_buttons(path, direction, path_action, actions_disabled=actions_disabled)}"
             "</div>"
             "</div>"
             "<div class='preview-file-detail' hidden>"
@@ -420,11 +453,11 @@ def render_preview_decisions(paths, resolutions, direction, require_all=False, d
             "</article>"
         )
     if not paths and not summary_parts:
-        summary_parts.append("<p class='muted'>No file changes.</p>")
+        summary_parts.append(f"<p class='muted'>{_('text.no_file_changes')}</p>")
     global_controls = (
         "<div class='preview-list-controls'>"
-        "<button type='button' class='secondary preview-expand-all'>Expand All</button>"
-        "<button type='button' class='secondary preview-collapse-all'>Collapse All</button>"
+        f"<button type='button' class='secondary preview-expand-all'>{_('button.expand_all')}</button>"
+        f"<button type='button' class='secondary preview-collapse-all'>{_('button.collapse_all')}</button>"
         "</div>"
         if paths
         else ""
@@ -438,14 +471,14 @@ def render_preview_decisions(paths, resolutions, direction, require_all=False, d
             "</form>"
             "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
             f"<input type='hidden' name='direction' value='{cancel_direction}'>"
-            "<button type='submit' class='secondary'>Cancel</button>"
+            f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
             "</form>"
             "</div>"
         )
     return (
         "<div class='preview-decisions'>"
         "<div class='preview-list-header'>"
-        "<h3>Список изменений</h3>"
+        f"<h3>{_('heading.change_list')}</h3>"
         f"{global_controls}"
         "</div>"
         f"{''.join(summary_parts)}"
@@ -457,7 +490,7 @@ def render_preview_decisions(paths, resolutions, direction, require_all=False, d
 
 def render_deleted_devices_table(rows):
     if not rows:
-        return "<p>No deleted_devices entries found.</p>"
+        return f"<p>{_('text.no_deleted_devices')}</p>"
     rendered_rows = []
     for row in rows:
         rendered_rows.append(
@@ -471,8 +504,8 @@ def render_deleted_devices_table(rows):
     return (
         "<div class='table-scroll'>"
         "<table class='deleted-devices-table'>"
-        "<thead><tr><th>Area</th><th>ID</th><th>Original Name</th>"
-        "<th>Original Device Class</th></tr></thead>"
+        f"<thead><tr><th>{_('label.area')}</th><th>ID</th><th>{_('label.original_name')}</th>"
+        f"<th>{_('label.original_device_class')}</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
         "</div>"
@@ -481,7 +514,7 @@ def render_deleted_devices_table(rows):
 
 def render_retained_devices_table(rows):
     if not rows:
-        return "<p>No retained devices candidates found.</p>"
+        return f"<p>{_('text.no_retained_devices')}</p>"
     rendered_rows = []
     for index, row in enumerate(rows):
         checked = "checked" if row.get("selected", True) else ""
@@ -503,8 +536,9 @@ def render_retained_devices_table(rows):
         "<div class='table-scroll'>"
         "<table class='retained-devices-table'>"
         "<colgroup><col class='checkbox-col'><col><col><col><col></colgroup>"
-        "<thead><tr><th class='checkbox-col' aria-label='Delete'></th><th>Identifiers</th><th>Name</th>"
-        "<th>Manufacturer | Model</th><th>Retained Discovery Topics</th></tr></thead>"
+        f"<thead><tr><th class='checkbox-col' aria-label='{_('label.delete')}'></th>"
+        f"<th>{_('label.identifiers')}</th><th>{_('label.name')}</th>"
+        f"<th>{_('label.manufacturer_model')}</th><th>{_('label.retained_discovery_topics')}</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
         "</div>"
@@ -513,7 +547,7 @@ def render_retained_devices_table(rows):
 
 def render_internal_ids_table(rows, render_diff):
     if not rows:
-        return "<p>No internal id migration candidates found.</p>"
+        return f"<p>{_('text.no_internal_id_migration_candidates')}</p>"
     rendered_rows = []
     for index, row in enumerate(rows):
         can_migrate = bool(row.get("changes"))
@@ -521,7 +555,7 @@ def render_internal_ids_table(rows, render_diff):
         migrate_control = (
             f"<input type='checkbox' name='candidate' value='{index}' {checked} onclick='event.stopPropagation()'>"
             if can_migrate
-            else "<span class='no-candidates' title='No safe candidates'>None</span>"
+            else f"<span class='no-candidates' title='{_('title.no_safe_candidates')}'>{_('label.none')}</span>"
         )
         path = html.escape(str(row.get("path") or ""))
         diff = str(row.get("diff") or "")
@@ -531,7 +565,7 @@ def render_internal_ids_table(rows, render_diff):
         elif unresolved_items:
             rendered_unresolved = []
             for item in unresolved_items:
-                reason = html.escape(str(item.get("reason") or "unsupported"))
+                reason = html.escape(str(item.get("reason") or _("text.unsupported")))
                 alias = html.escape(str(item.get("alias") or ""))
                 yaml_text = html.escape(str(item.get("yaml") or item.get("item") or ""))
                 rendered_unresolved.append(
@@ -542,7 +576,7 @@ def render_internal_ids_table(rows, render_diff):
                 )
             details_html = "".join(rendered_unresolved)
         else:
-            details_html = "<p>No internal id migration diff available.</p>"
+            details_html = f"<p>{_('text.no_internal_id_diff')}</p>"
         rendered_rows.append(
             "<details class='internal-id-row'>"
             "<summary>"
@@ -558,12 +592,13 @@ def render_internal_ids_table(rows, render_diff):
         )
     return (
         "<div class='action-row'>"
-        "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='all'>Select all</button>"
-        "<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='none'>Select none</button>"
+        f"<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='all'>{_('button.select_all')}</button>"
+        f"<button type='button' class='secondary' data-checkbox-scope='internal-ids' data-checkbox-action='none'>{_('button.select_none')}</button>"
         "</div>"
         "<div class='internal-ids-list' data-checkbox-scope='internal-ids'>"
         "<div class='internal-id-header'>"
-        "<span></span><span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>"
+        f"<span></span><span>{_('label.migrate')}</span><span>{_('label.file')}</span>"
+        f"<span>{_('label.candidates')}</span><span>{_('label.unresolved')}</span>"
         "</div>"
         f"{''.join(rendered_rows)}"
         "</div>"
@@ -621,7 +656,7 @@ def render_targets(
             addons = sorted(get_installed_addons(), key=lambda addon: addon_display_name(addon).lower())
         except Exception as exc:
             addons = []
-            addon_error = f"<p>Add-on discovery unavailable: {html.escape(str(exc))}</p>"
+            addon_error = f"<p>{html.escape(_('error.addon_discovery', error=str(exc)))}</p>"
         seen = set()
         for addon in addons:
             slug = addon_slug_value(addon)
@@ -640,7 +675,7 @@ def render_targets(
             )
             checked = "checked" if slug in selected_addons else ""
             checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
-            hint = "Zigbee2MQTT candidate" if addon_is_zigbee2mqtt(addon) else ""
+            hint = _("value.zigbee2mqtt_candidate") if addon_is_zigbee2mqtt(addon) else ""
             rows.append(render_target_row(item, checkbox, addon_display_name(addon), hint))
 
         for slug, item in sorted(addon_targets.items()):
@@ -657,23 +692,25 @@ def render_targets(
             rows.append(render_target_row(item, checkbox))
 
     if not rows:
-        return "<p>No target preview yet. Run an apply after configuring the repository.</p>"
+        return f"<p>{_('text.no_targets')}</p>"
 
     return (
         f"{addon_error}"
         "<form method='post' action='addons' data-auto-submit='change'>"
         "<table class='managed-targets-table'>"
         "<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>"
-        "<thead><tr><th class='checkbox-col'>Managed</th><th>Target</th><th>Type</th><th>Source</th><th>Add-on</th><th>Live Path</th></tr></thead>"
+        f"<thead><tr><th class='checkbox-col'>{_('label.managed')}</th><th>{_('label.target')}</th>"
+        f"<th>{_('label.type')}</th><th>{_('label.source')}</th><th>{_('label.addon')}</th>"
+        f"<th>{_('label.live_path')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
         "</form>"
     )
 
 
 def render_releases(releases):
-    intro = "<p>Snapshots let HA Ops roll back a Git-to-HA apply to a saved local state.</p>"
+    intro = f"<p>{_('notice.release_snapshots')}</p>"
     if not releases:
-        return f"{intro}<p>No local release snapshots yet.</p>"
+        return f"{intro}<p>{_('text.no_local_release_snapshots')}</p>"
 
     rows = []
     for release in releases[:12]:
@@ -688,7 +725,7 @@ def render_releases(releases):
             "<td>"
             f"<form method='post' action='rollback' data-async-form='true'>"
             f"<input type='hidden' name='release' value='{name}'>"
-            "<button type='submit' class='secondary'>Rollback</button>"
+            f"<button type='submit' class='secondary'>{_('action.rollback')}</button>"
             "</form>"
             "</td>"
             "</tr>"
@@ -696,7 +733,8 @@ def render_releases(releases):
 
     return (
         f"{intro}"
-        "<table><thead><tr><th>Release</th><th>Created</th><th>HA Backup</th><th>Action</th></tr></thead>"
+        f"<table><thead><tr><th>{_('label.release')}</th><th>{_('label.created')}</th>"
+        f"<th>{_('label.ha_backup')}</th><th>{_('table.action')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
 
@@ -712,33 +750,33 @@ def render_git_auth(options, git_auth_mode, load_generated_public_key):
     uses_ssh = repo_url.startswith("git@") or repo_url.startswith("ssh://")
 
     if mode == "manual":
-        status = "<p>Using the private key from <code>git_ssh_key</code> in add-on configuration.</p>"
+        status = f"<p>{_('notice.git_auth_manual')}</p>"
         key_block = ""
     elif mode == "generated":
-        status = "<p>Using the deploy key generated and stored inside HA Ops.</p>"
+        status = f"<p>{_('notice.git_auth_generated')}</p>"
         key_block = (
-            "<p>Add this public key to GitHub as a Deploy Key with write access for <code>ha-config</code>.</p>"
+            f"<p>{_('notice.git_auth_generated_hint')}</p>"
             f"<pre>{public_key}</pre>"
         )
     else:
-        status = "<p>No SSH key is configured yet.</p>"
+        status = f"<p>{_('notice.git_auth_no_key')}</p>"
         key_block = ""
 
     hint = ""
     if uses_ssh and mode == "none":
-        hint = "<p>Click <strong>Generate Deploy Key</strong>, then paste the public key into GitHub Deploy Keys.</p>"
+        hint = f"<p>{_('notice.git_auth_ssh_hint')}</p>"
     elif not uses_ssh:
-        hint = "<p>Your repository URL is not SSH-based, so a deploy key may not be needed.</p>"
+        hint = f"<p>{_('notice.git_auth_non_ssh')}</p>"
 
     action = (
         "<form method='post' action='generate-key' data-async-form='true'>"
-        "<button type='submit' class='secondary'>Generate Deploy Key</button>"
+        f"<button type='submit' class='secondary'>{_('action.generate_deploy_key')}</button>"
         "</form>"
     )
     if mode == "generated":
         action = (
             "<form method='post' action='generate-key' data-async-form='true'>"
-            "<button type='submit' class='secondary'>Regenerate Deploy Key</button>"
+            f"<button type='submit' class='secondary'>{_('action.regenerate_deploy_key')}</button>"
             "</form>"
         )
 
@@ -751,7 +789,7 @@ def render_page(data):
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>HA Ops</title>
+  <title>{_('title.site')}</title>
   <style>
     :root {{
       color-scheme: light dark;
@@ -1351,24 +1389,24 @@ def render_page(data):
   <main>
     <div class="top-grid">
       <section class="card control-card">
-        <h1>HA Ops</h1>
-        <p>Git-backed config deployer for Home Assistant, Mosquitto, and Zigbee2MQTT.</p>
+        <h1>{_('title.site')}</h1>
+        <p>{_('site.description')}</p>
         <dl>
-          <dt>Repo URL</dt>
-          <dd><code>{data['repo_url'] or "(not configured)"}</code></dd>
-          <dt>Branch</dt>
+          <dt>{_('field.repo_url')}</dt>
+          <dd><code>{data['repo_url'] or _('placeholder.not_configured')}</code></dd>
+          <dt>{_('field.branch')}</dt>
           <dd><code>{data['branch']}</code></dd>
-          <dt>Manifest</dt>
+          <dt>{_('field.manifest')}</dt>
           <dd><code>{data['manifest_path']}</code></dd>
-          <dt>Git auth</dt>
+          <dt>{_('field.auth_mode')}</dt>
           <dd><code>{data['auth_mode']}</code></dd>
-          <dt>Last run</dt>
+          <dt>{_('field.last_run')}</dt>
           <dd>{data['last_run']}</dd>
-          <dt>Release snapshot</dt>
+          <dt>{_('field.release_snapshot')}</dt>
           <dd><code>{data['last_release']}</code></dd>
-          <dt>HA backup</dt>
+          <dt>{_('field.ha_backup')}</dt>
           <dd><code>{data['last_backup_slug']}</code></dd>
-          <dt>Latest system backup</dt>
+          <dt>{_('field.latest_backup')}</dt>
           <dd>{data['latest_backup']}</dd>
         </dl>
         <p id="client-status" class="client-status"></p>
@@ -1376,7 +1414,7 @@ def render_page(data):
         {data['organizer_html']}
         <div class="actions">
           <section class="action-section">
-            <h2>HA to Git</h2>
+            <h2>{_('heading.ha_to_git')}</h2>
             <div class="action-row">
               <form method="post" action="save-preview" data-async-form="true">
                 <button type="submit" class="{data['save_preview_button_class']}" {data['action_disabled']}>{data['save_preview_button_text']}</button>
@@ -1387,46 +1425,46 @@ def render_page(data):
             </div>
           </section>
           <section class="action-section">
-            <h2>Git to HA</h2>
+            <h2>{_('heading.git_to_ha')}</h2>
             <div class="action-row">
               <form method="post" action="preview" data-async-form="true">
-                <button type="submit" class="secondary" {data['action_disabled']}>Preview Git to HA</button>
+                <button type="submit" class="secondary" {data['action_disabled']}>{_('action.preview_apply')}</button>
               </form>
             </div>
           </section>
           <section class="action-section">
-            <h2>Deleted Devices</h2>
+            <h2>{_('heading.deleted_devices')}</h2>
             <div class="action-row">
               <form method="post" action="deleted-devices-preview" data-async-form="true">
-                <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>Check deleted_devices</button>
+                <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>{_('action.check_deleted_devices')}</button>
               </form>
             </div>
-            <p class="action-flow">Previews deleted device registry entries. Delete clears that registry list only after approval, restart, and confirmation.</p>
+            <p class="action-flow">{_('text.deleted_devices_flow')}</p>
           </section>
           <section class="action-section">
-            <h2>Retained Devices</h2>
+            <h2>{_('heading.retained_devices')}</h2>
             <div class="action-row">
               <form method="post" action="retained-devices-preview" data-async-form="true">
-                <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>Check retained devices</button>
+                <button type="submit" class="secondary" {data['check_retained_devices_disabled']}>{_('action.check_retained_devices')}</button>
               </form>
             </div>
-            <p class="action-flow">Finds stale Zigbee2MQTT MQTT discovery topics. Delete clears selected retained MQTT topics only.</p>
+            <p class="action-flow">{_('notice.retained_devices_flow')}</p>
           </section>
           <section class="action-section">
-            <h2>Actions IDs</h2>
+            <h2>{_('heading.actions_ids')}</h2>
             <div class="action-row">
               <form method="post" action="internal-ids-preview" data-async-form="true">
-                <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>Check actions IDs</button>
+                <button type="submit" class="secondary" {data['check_internal_ids_disabled']}>{_('action.check_actions_ids')}</button>
               </form>
             </div>
-            <p class="action-flow">Previews Git-only rewrites from HA UI hash ids to stable entity_id or Zigbee2MQTT topic references. Migrate and save selected files to Git, then run Git to HA.</p>
+            <p class="action-flow">{_('notice.internal_ids_flow')}</p>
           </section>
         </div>
       </section>
       <section class="card details-card">
         <div class="details-header">
-          <h2>Log</h2>
-          <div class="badge {data['badge_class']}">{data['status']}</div>
+          <h2>{_('heading.log')}</h2>
+          <div class="badge {data['badge_class']}" data-status-code="{data['status_code']}">{data['status']}</div>
         </div>
         <pre data-transient="details">{data['details_html']}</pre>
       </section>
@@ -1445,20 +1483,20 @@ def render_page(data):
     {data['conflicts_section_html']}
 
     <section class="card wide">
-      <h2>Git Access</h2>
+      <h2>{_('heading.git_access')}</h2>
       {data['git_auth_html']}
     </section>
 
     <section class="card wide">
-      <h2>Managed Targets</h2>
+      <h2>{_('heading.managed_targets')}</h2>
       {data['targets_html']}
     </section>
 
     <section class="card wide">
-      <h2>Release Snapshots</h2>
+      <h2>{_('heading.release_snapshots')}</h2>
       {data['releases_html']}
     </section>
-    <footer>HA Ops {data['version']}</footer>
+    <footer>{_('footer.version', version=data['version'])}</footer>
   </main>
   <script>
     (() => {{
@@ -1474,7 +1512,7 @@ def render_page(data):
 
       function isRunning() {{
         const badge = document.querySelector(".badge");
-        return badge && badge.textContent.trim().toLowerCase() === "running";
+        return badge && badge.dataset.statusCode === "running";
       }}
 
       function clearTransientDisplay() {{
@@ -1486,7 +1524,7 @@ def render_page(data):
         const saveGenerated = document.querySelector("[data-transient='save-generated']");
         const deletedDevicesGenerated = document.querySelector("[data-transient='deleted-devices-generated']");
         if (details) {{
-          details.textContent = "No log entries yet.";
+          details.textContent = {js_t('message.no_log_entries')};
         }}
         if (applyPreview) {{
           applyPreview.textContent = "";
@@ -1613,9 +1651,9 @@ def render_page(data):
         const originalText = button ? button.textContent : "";
         if (button) {{
           button.disabled = true;
-          button.textContent = "Working...";
+          button.textContent = {js_t('message.working')};
         }}
-        setClientStatus("Working...");
+        setClientStatus({js_t('message.working')});
         const preserveDisplayState = form.getAttribute("data-preserve-display-state") === "true";
         if (!preserveDisplayState) {{
           clearTransientDisplay();
@@ -1639,14 +1677,14 @@ def render_page(data):
           }}
 
           if (!response.ok || payload.ok === false) {{
-            setClientStatus(payload.message || "Request failed.");
+            setClientStatus(payload.message || {js_t('error.request_failed')});
             reloadSoon(600);
           }} else {{
-            setClientStatus(payload.message || "Done. Refreshing...");
+            setClientStatus(payload.message || {js_t('message.done_refreshing')});
             reloadSoon(350);
           }}
         }} catch (error) {{
-          setClientStatus(error?.message || "Network error.");
+          setClientStatus(error?.message || {js_t('error.network')});
         }} finally {{
           if (button) {{
             button.disabled = false;
@@ -1691,7 +1729,7 @@ def render_page(data):
         }}
         if (toggle) {{
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-          toggle.textContent = expanded ? "Collapse Diff" : "Expand Diff";
+          toggle.textContent = expanded ? {js_t('button.collapse_diff')} : {js_t('button.expand_diff')};
         }}
       }}
 

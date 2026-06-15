@@ -1,7 +1,33 @@
 from dataclasses import dataclass
 from typing import Any
 
+import i18n
 import state as state_store
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
+
+
+def enter_run_lock(ctx, action, lock_acquired=False):
+    if lock_acquired:
+        return True
+    run_lock = ctx.run_lock
+    if not run_lock.acquire(blocking=False):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "busy",
+                "last_action": action,
+                "last_message": _("error.running_action"),
+            }
+        )
+        return False
+    return True
+
+
+def release_run_lock(ctx):
+    ctx.run_lock.release()
 
 
 @dataclass(frozen=True)
@@ -67,9 +93,10 @@ class JobContext:
     write_state: Any
 
 
-def conflict_status_message(state, default_message="Resolve Git conflicts before continuing."):
+def conflict_status_message(state, default_message=None):
+    default_message = default_message or _("message.resolve_git_conflicts")
     if state.get("conflict_type") == "save_unknown_base":
-        return "Resolve unknown-base Save conflicts before running Save HA to Git."
+        return _("message.resolve_unknown_base_save_conflicts")
     return default_message
 
 
@@ -89,7 +116,7 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
     if preview.get("conflicts"):
         missing = [path for path in paths if path not in stored]
         if missing:
-            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Save Preview conflict file(s) before saving.")
+            raise RuntimeError(_("message.choose_save_preview_conflicts", count=len(missing)))
         return {path: stored[path] for path in paths}
     if stored:
         return {path: stored.get(path, "ha") for path in paths}
@@ -97,7 +124,7 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
 
 
 def preview_changed_message():
-    return "State changed since this preview was created. Review the updated preview before continuing."
+    return _("message.preview_changed")
 
 
 def apply_preview_resolutions_for_current_preview(state, preview):
@@ -106,7 +133,7 @@ def apply_preview_resolutions_for_current_preview(state, preview):
     if preview.get("conflicts"):
         missing = [path for path in paths if path not in stored]
         if missing:
-            raise RuntimeError(f"Choose HA or Git version for {len(missing)} Apply Preview conflict file(s) before applying.")
+            raise RuntimeError(_("message.choose_apply_preview_conflicts", count=len(missing)))
         return {path: stored[path] for path in paths}
     if stored:
         return {path: stored.get(path, "git") for path in paths}
@@ -207,12 +234,12 @@ def commit_pending_internal_ids_migration(ctx, options, details):
         ensure_clean_checkout_for_pull(ctx, repo_dir, "pushing pending Internal IDs migration changes")
         ctx.git_pull_rebase(repo_dir, env, branch)
         ctx.push_branch(repo_dir, env, branch)
-    ctx.add_detail(details, f"Committed pending Internal IDs migration changes to Git: {commit}.")
+    ctx.add_detail(details, _("detail.committed_pending_internal_ids", commit=commit))
     return commit
 
 
 def pending_deleted_devices_message():
-    return "Confirm or revert the pending deleted_devices cleanup before running another HA Ops action."
+    return _("message.pending_deleted_devices")
 
 
 def write_pending_deleted_devices(ctx, action, details=None, targets=None):
@@ -266,23 +293,14 @@ def add_save_change_details(ctx, details, status):
     lines = save_change_lines(status)
     if not lines:
         return
-    ctx.add_detail(details, "\n".join([f"Git changes prepared for commit ({len(lines)}):", *lines]))
+    ctx.add_detail(details, "\n".join([_("detail.git_changes_prepared", count=len(lines)), *lines]))
 
 
-def run_save_job(ctx):
-    run_lock = ctx.run_lock
+def run_save_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "save",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "save", lock_acquired):
         return False
 
     details = []
@@ -298,7 +316,7 @@ def run_save_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "save",
-            "last_message": "Preparing save.",
+            "last_message": _("message.preparing_save"),
             "last_details": details,
         }
     )
@@ -322,28 +340,28 @@ def run_save_job(ctx):
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Using branch {branch} at commit {commit}.")
-        ctx.add_detail(details, f"Using manifest {manifest_path}.")
+        ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=commit))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
         if state.get("save_push_retry_pending") and ctx.git_has_unpushed_commits(repo_dir, branch):
-            ctx.add_detail(details, "Retrying push for previously committed Save.")
+            ctx.add_detail(details, _("detail.retried_save_push"))
             try:
                 ctx.push_branch(repo_dir, env, branch)
             except RuntimeError:
                 ctx.git_pull_rebase(repo_dir, env, branch)
                 ctx.push_branch(repo_dir, env, branch)
-            ctx.add_detail(details, f"Pushed to origin/{branch}.")
+            ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
             for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
                 try:
                     ctx.push_branch(repo_dir, env, service_branch)
-                    ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+                    ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
                 except RuntimeError as exc:
-                    ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
+                    ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
             write_state(
                 {
                     "last_run_at": utc_now(),
                     "last_status": "success",
                     "last_action": "save",
-                    "last_message": "Save finished successfully and pushed to Git.",
+                    "last_message": _("message.save_finished_pushed"),
                     "last_details": details,
                     "last_targets": resolved_targets,
                     "post_apply_save_recommended": False,
@@ -353,7 +371,7 @@ def run_save_job(ctx):
             return True
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
-            ctx.add_detail(details, "Including redundant registry data in Save.")
+            ctx.add_detail(details, _("detail.including_redundant_save"))
         current_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
         commit = ctx.git_head_or_unborn(repo_dir)
         if not save_preview_matches_state(state, commit, current_preview):
@@ -381,7 +399,7 @@ def run_save_job(ctx):
             return False
         save_resolutions = save_preview_resolutions_for_current_preview(state, commit, current_preview)
 
-        ctx.add_detail(details, "Merging live Home Assistant export into Git.")
+        ctx.add_detail(details, _("detail.merged_live_export"))
         checkout_dirty_for_save = True
         new_commit = ctx.commit_save_merge(
             repo_dir,
@@ -395,7 +413,7 @@ def run_save_job(ctx):
 
         if new_commit:
             save_commit_created = True
-            ctx.add_detail(details, f"Created commit {new_commit}.")
+            ctx.add_detail(details, _("detail.created_commit", commit=new_commit))
 
         if ctx.git_has_unpushed_commits(repo_dir, branch):
             try:
@@ -403,17 +421,17 @@ def run_save_job(ctx):
             except RuntimeError:
                 ctx.git_pull_rebase(repo_dir, env, branch)
                 ctx.push_branch(repo_dir, env, branch)
-            ctx.add_detail(details, f"Pushed to origin/{branch}.")
-            save_message = "Save finished successfully and pushed to Git."
+            ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
+            save_message = _("message.save_finished_pushed")
         else:
-            ctx.add_detail(details, "No live Home Assistant changes to save.")
-            save_message = "No live Home Assistant changes to save."
+            ctx.add_detail(details, _("detail.no_live_changes_to_save"))
+            save_message = _("message.no_live_changes_to_save")
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)
-                ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+                ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
             except RuntimeError as exc:
-                ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
+                ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
 
         write_state(
             {
@@ -442,9 +460,9 @@ def run_save_job(ctx):
         if repo_dir and checkout_dirty_for_save and not save_commit_created:
             try:
                 ctx.reset_repo_worktree(repo_dir)
-                details.append("Cleaned incomplete Save changes from the checkout.")
+                details.append(_("detail.cleaned_incomplete_save"))
             except Exception as cleanup_exc:
-                details.append(f"Failed to clean incomplete Save changes from the checkout: {cleanup_exc}")
+                details.append(_("detail.failed_to_clean_incomplete_save", error=cleanup_exc))
         try:
             repo_path = ctx.repo_checkout_path(options)
         except RuntimeError:
@@ -465,23 +483,14 @@ def run_save_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_save_preview_job(ctx):
-    run_lock = ctx.run_lock
+def run_save_preview_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "save_preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "save_preview", lock_acquired):
         return False
 
     details = []
@@ -494,7 +503,7 @@ def run_save_preview_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "save_preview",
-            "last_message": "Preparing save preview.",
+            "last_message": _("message.preparing_save_preview"),
             "last_details": details,
         }
     )
@@ -508,7 +517,7 @@ def run_save_preview_job(ctx):
             write_pending_conflicts(
                 ctx,
                 "save_preview",
-                conflict_status_message(state, "Resolve Git conflicts before running Preview HA to Git."),
+                conflict_status_message(state, _("message.resolve_git_conflicts_before_save_preview")),
                 details,
                 resolved_targets,
             )
@@ -523,28 +532,28 @@ def run_save_preview_job(ctx):
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Using branch {branch} at commit {ctx.git_head_or_unborn(repo_dir)}.")
-        ctx.add_detail(details, f"Using manifest {manifest_path}.")
-        ctx.add_detail(details, "Building save preview and updating service branches.")
+        ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=ctx.git_head_or_unborn(repo_dir)))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
+        ctx.add_detail(details, _("detail.building_save_preview"))
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
-            ctx.add_detail(details, "Including redundant registry data in Save preview.")
+            ctx.add_detail(details, _("detail.including_redundant_save_preview"))
         preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
         commit = ctx.git_head_or_unborn(repo_dir)
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
-        ctx.add_detail(details, "Pushed to origin/ha-ops/ha-live.")
+        ctx.add_detail(details, _("detail.pushed_ha_live"))
         try:
             ctx.push_branch(repo_dir, env, "ha-ops/base")
-            ctx.add_detail(details, "Pushed to origin/ha-ops/base.")
+            ctx.add_detail(details, _("detail.pushed_ha_base"))
         except RuntimeError as exc:
-            ctx.add_detail(details, f"Skipped pushing ha-ops/base: {exc}")
+            ctx.add_detail(details, _("detail.skipped_ha_base_push", error=exc))
 
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "save_preview",
-                "last_message": "Save preview finished successfully.",
+                "last_message": _("message.save_preview_finished"),
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "last_save_preview": preview["summary"],
@@ -573,23 +582,14 @@ def run_save_preview_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_deleted_devices_preview_job(ctx):
-    run_lock = ctx.run_lock
+def run_deleted_devices_preview_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "deleted_devices_preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "deleted_devices_preview", lock_acquired):
         return False
 
     details = []
@@ -601,7 +601,7 @@ def run_deleted_devices_preview_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_preview",
-            "last_message": "Checking deleted_devices.",
+            "last_message": _("message.checking_deleted_devices"),
             "last_details": details,
         }
     )
@@ -609,12 +609,12 @@ def run_deleted_devices_preview_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking again.")
-        ctx.add_detail(details, "Checking Home Assistant deleted_devices.")
+            raise i18n.error("error.deleted_devices_pending_before_check")
+        ctx.add_detail(details, _("detail.checking_deleted_devices"))
         preview = ctx.build_deleted_devices_preview()
         count = preview["count"]
         log_action(ctx, f"deleted_devices preview: found {count} deleted device(s)")
-        message = f"Found {count} deleted_devices entr{'y' if count == 1 else 'ies'}."
+        message = _("message.deleted_devices_found", count=count, entry_word="entry" if count == 1 else "entries")
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -649,7 +649,7 @@ def run_deleted_devices_preview_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
 def retained_device_rows(candidates):
@@ -670,20 +670,11 @@ def retained_device_rows(candidates):
     return rows
 
 
-def run_internal_ids_preview_job(ctx):
-    run_lock = ctx.run_lock
+def run_internal_ids_preview_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "internal_ids_preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "internal_ids_preview", lock_acquired):
         return False
 
     details = []
@@ -695,7 +686,7 @@ def run_internal_ids_preview_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "internal_ids_preview",
-            "last_message": "Checking internal ids.",
+            "last_message": _("message.checking_internal_ids"),
             "last_details": details,
         }
     )
@@ -703,11 +694,11 @@ def run_internal_ids_preview_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking internal ids.")
-        details.append("Checking HA Ops automations, scripts, and scenes for safe internal id migrations.")
+            raise i18n.error("error.deleted_devices_pending_before_internal_ids")
+        details.append(_("detail.checking_internal_ids"))
         preview = ctx.build_internal_ids_preview()
         count = int(preview["count"])
-        message = f"Found {count} internal id migration file{'s' if count != 1 else ''}."
+        message = _("message.internal_ids_found", count=count, suffix="" if count == 1 else "s")
         details.append(message)
         write_state(
             {
@@ -741,23 +732,14 @@ def run_internal_ids_preview_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_internal_ids_migrate_job(selected, ctx):
-    run_lock = ctx.run_lock
+def run_internal_ids_migrate_job(selected, ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "internal_ids_migrate",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "internal_ids_migrate", lock_acquired):
         return False
 
     details = []
@@ -767,7 +749,7 @@ def run_internal_ids_migrate_job(selected, ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "internal_ids_migrate",
-            "last_message": "Migrating internal ids.",
+            "last_message": _("message.migrating_internal_ids"),
             "last_details": details,
         }
     )
@@ -778,17 +760,17 @@ def run_internal_ids_migrate_job(selected, ctx):
         rows = state.get("last_internal_ids_rows") or []
         fingerprint = state.get("last_internal_ids_fingerprint")
         if not rows or not fingerprint:
-            raise RuntimeError("Run Check actions IDs before approving migration.")
+            raise i18n.error("error.internal_ids_preview_required")
         selected_indexes = {int(value) for value in selected}
         if not selected_indexes:
-            raise RuntimeError("Select at least one internal id migration file.")
+            raise i18n.error("error.internal_ids_selection_required")
         selected_paths = []
         for index, row in enumerate(rows):
             if index in selected_indexes and row.get("changes"):
                 selected_paths.append(row.get("path"))
         result = ctx.apply_internal_ids_migration(fingerprint, selected_paths)
         for row in result["changed"]:
-            ctx.add_detail(details, f"Migrated internal ids in {row['path']}.")
+            ctx.add_detail(details, _("detail.migrated_internal_ids_path", path=row["path"]))
         commit_pending_internal_ids_migration(ctx, options, details)
         preview = result["preview"]
         unresolved_count = len(preview.get("unresolved") or [])
@@ -797,10 +779,17 @@ def run_internal_ids_migrate_job(selected, ctx):
         if unresolved_count:
             item_word = "item" if unresolved_count == 1 else "items"
             verb = "remains" if unresolved_count == 1 else "remain"
-            message = f"Migrated {changed_count} {file_word}. {unresolved_count} unresolved {item_word} {verb}."
-            ctx.add_detail(details, f"{unresolved_count} unresolved {item_word} {verb}. Review unresolved device blocks.")
+            message = _(
+                "message.internal_ids_migrated_with_unresolved",
+                changed=changed_count,
+                file_word=file_word,
+                unresolved=unresolved_count,
+                item_word=item_word,
+                verb=verb,
+            )
+            ctx.add_detail(details, _("detail.unresolved_internal_ids", count=unresolved_count, item_word=item_word, verb=verb))
         else:
-            message = f"Migrated {changed_count} {file_word}."
+            message = _("message.internal_ids_migrated", changed=changed_count, file_word=file_word)
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -832,23 +821,14 @@ def run_internal_ids_migrate_job(selected, ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_retained_devices_preview_job(ctx):
-    run_lock = ctx.run_lock
+def run_retained_devices_preview_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "retained_devices_preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "retained_devices_preview", lock_acquired):
         return False
 
     details = []
@@ -860,7 +840,7 @@ def run_retained_devices_preview_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "retained_devices_preview",
-            "last_message": "Checking retained devices.",
+            "last_message": _("message.checking_retained_devices"),
             "last_details": details,
         }
     )
@@ -868,13 +848,13 @@ def run_retained_devices_preview_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before checking retained devices.")
-        ctx.add_detail(details, "Checking retained MQTT discovery against current Zigbee2MQTT files.")
+            raise i18n.error("error.deleted_devices_pending_before_retained")
+        ctx.add_detail(details, _("detail.checking_retained_devices"))
         preview = ctx.build_retained_devices_preview()
         rows = retained_device_rows(preview["candidates"])
         count = len(rows)
         log_action(ctx, f"retained devices preview: found {count} candidate(s)")
-        message = f"Found {count} retained device candidate{'s' if count != 1 else ''}."
+        message = _("message.retained_devices_found", count=count, suffix="" if count == 1 else "s")
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -905,23 +885,14 @@ def run_retained_devices_preview_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_retained_devices_delete_job(selected, ctx):
-    run_lock = ctx.run_lock
+def run_retained_devices_delete_job(selected, ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "retained_devices_delete",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "retained_devices_delete", lock_acquired):
         return False
 
     details = []
@@ -931,7 +902,7 @@ def run_retained_devices_delete_job(selected, ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "retained_devices_delete",
-            "last_message": "Deleting retained devices.",
+            "last_message": _("message.deleting_retained_devices"),
             "last_details": details,
         }
     )
@@ -940,29 +911,29 @@ def run_retained_devices_delete_job(selected, ctx):
         state = ctx.read_state()
         rows = state.get("last_retained_devices_rows") or []
         if not rows:
-            raise RuntimeError("Run Check retained devices before approving deletion.")
+            raise i18n.error("error.retained_devices_preview_required")
         selected_indexes = {int(value) for value in selected}
         if not selected_indexes:
-            raise RuntimeError("Select at least one retained device candidate to delete.")
+            raise i18n.error("error.retained_devices_selection_required")
         topics = []
         for index, row in enumerate(rows):
             if index not in selected_indexes:
                 continue
             topics.extend(row.get("retained_topics") or [])
         if not topics:
-            raise RuntimeError("Selected retained device candidates have no retained discovery topics.")
+            raise i18n.error("error.retained_devices_no_topics")
 
         cleared = []
         for topic in sorted(set(topics)):
             ctx.clear_retained_discovery_topic(topic)
             cleared.append(topic)
-            ctx.add_detail(details, f"Cleared retained MQTT discovery topic: {topic}")
+            ctx.add_detail(details, _("detail.cleared_retained_topic", topic=topic))
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "retained_devices_delete",
-                "last_message": f"Deleted retained discovery for {len(selected_indexes)} retained device candidate(s).",
+                "last_message": _("message.deleted_retained_devices", count=len(selected_indexes)),
                 "last_details": details,
                 **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
             }
@@ -983,23 +954,14 @@ def run_retained_devices_delete_job(selected, ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_deleted_devices_delete_job(ctx):
-    run_lock = ctx.run_lock
+def run_deleted_devices_delete_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "deleted_devices_delete",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "deleted_devices_delete", lock_acquired):
         return False
 
     details = []
@@ -1017,7 +979,7 @@ def run_deleted_devices_delete_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_delete",
-            "last_message": "Deleting deleted_devices.",
+            "last_message": _("message.deleting_deleted_devices"),
             "last_details": details,
         }
     )
@@ -1025,20 +987,20 @@ def run_deleted_devices_delete_job(ctx):
     try:
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("Confirm or revert the pending deleted_devices cleanup before approving another deletion.")
+            raise i18n.error("error.deleted_devices_pending_before_delete")
         fingerprint = state.get("last_deleted_devices_fingerprint")
         count = int(state.get("last_deleted_devices_count") or 0)
         if not fingerprint or count <= 0:
-            raise RuntimeError("Run Check deleted_devices before approving deletion.")
+            raise i18n.error("error.deleted_devices_preview_required")
         current_preview = ctx.build_deleted_devices_preview()
         if current_preview["fingerprint"] != fingerprint:
-            raise RuntimeError("Device registry changed since preview. Run Check deleted_devices again.")
+            raise i18n.error("error.deleted_devices_preview_changed")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
         current_preview = ctx.build_deleted_devices_preview()
         if current_preview["fingerprint"] != fingerprint:
-            raise RuntimeError("Device registry changed since preview. Run Check deleted_devices again.")
-        ctx.add_detail(details, "Stopping Home Assistant Core before updating core.device_registry.")
+            raise i18n.error("error.deleted_devices_preview_changed")
+        ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices"))
         ctx.core_stop()
         core_stopped = True
         rollback = ctx.create_deleted_devices_rollback(fingerprint)
@@ -1050,18 +1012,18 @@ def run_deleted_devices_delete_job(ctx):
                 "deleted_devices_applied_fingerprint": None,
             }
         )
-        ctx.add_detail(details, "Saved deleted_devices rollback snapshot.")
+        ctx.add_detail(details, _("detail.saved_deleted_devices_rollback"))
         result = ctx.clear_deleted_devices(fingerprint)
         registry_changed = True
         removed = result["removed"]
         log_action(ctx, f"deleted_devices delete: cleared {removed} deleted device(s)")
-        ctx.add_detail(details, f"Removed {removed} deleted_devices entr{'y' if removed == 1 else 'ies'}.")
-        ctx.add_detail(details, "Starting Home Assistant Core.")
+        ctx.add_detail(details, _("detail.removed_deleted_devices", count=removed, entry_word="entry" if removed == 1 else "entries"))
+        ctx.add_detail(details, _("detail.starting_core"))
         try:
             ctx.core_start()
         except Exception:
             if rollback:
-                ctx.add_detail(details, "Home Assistant Core failed to start. Reverting deleted_devices cleanup.")
+                ctx.add_detail(details, _("detail.homeassistant_core_failed_reverting_deleted_devices"))
                 try:
                     ctx.restore_deleted_devices_rollback(rollback["path"])
                     restored_preview = refresh_deleted_devices_preview_updates(ctx)
@@ -1071,7 +1033,7 @@ def run_deleted_devices_delete_job(ctx):
                 ctx.core_start()
                 core_stopped = False
                 ctx.discard_deleted_devices_rollback(rollback["path"])
-                details.append("Reverted deleted_devices cleanup because Home Assistant Core failed to start.")
+                details.append(_("detail.reverted_deleted_devices_after_core_failure"))
                 registry_changed = False
                 raise
         core_stopped = False
@@ -1082,10 +1044,14 @@ def run_deleted_devices_delete_job(ctx):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "deleted_devices_delete",
-                "last_message": f"Deleted {removed} deleted_devices entr{'y' if removed == 1 else 'ies'}. Confirm or revert the changes.",
+                "last_message": _(
+                    "message.deleted_deleted_devices",
+                    count=removed,
+                    entry_word="entry" if removed == 1 else "entries",
+                ),
                 "last_details": details,
                 "last_backup_slug": backup_slug,
-                "last_deleted_devices_preview": "No deleted_devices entries found.",
+                "last_deleted_devices_preview": _("text.no_deleted_devices"),
                 "last_deleted_devices_rows": [],
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_fingerprint": result["fingerprint"],
@@ -1103,21 +1069,21 @@ def run_deleted_devices_delete_job(ctx):
         if core_stopped:
             try:
                 ctx.core_start()
-                details.append("Started Home Assistant Core after deletion failure.")
+                details.append(_("detail.started_core_after_deletion_failure"))
             except Exception as start_exc:
-                details.append(f"Failed to start Home Assistant Core after deletion failure: {start_exc}")
+                details.append(_("detail.failed_start_core_after_deletion_failure", error=start_exc))
         if rollback and not registry_changed and not restored_preview:
             try:
                 ctx.discard_deleted_devices_rollback(rollback["path"])
             except Exception as rollback_exc:
-                details.append(f"Failed to discard unused deleted_devices rollback snapshot: {rollback_exc}")
+                details.append(_("detail.failed_discard_deleted_devices_rollback", error=rollback_exc))
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "error",
                 "last_action": "deleted_devices_delete",
                 "last_message": (
-                    "deleted_devices cleanup changed the registry and rollback restore failed. Manual recovery is required."
+                    _("message.deleted_devices_cleanup_manual_recovery")
                     if rollback_restore_failed
                     else str(exc)
                 ),
@@ -1126,7 +1092,7 @@ def run_deleted_devices_delete_job(ctx):
                 **(restored_preview or {}),
                 **(
                     {
-                        "last_deleted_devices_preview": "No deleted_devices entries found.",
+                        "last_deleted_devices_preview": _("text.no_deleted_devices"),
                         "last_deleted_devices_rows": [],
                         "last_deleted_devices_count": 0,
                         "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
@@ -1141,7 +1107,7 @@ def run_deleted_devices_delete_job(ctx):
                 ),
                 **(
                     {
-                        "last_deleted_devices_preview": "No deleted_devices entries found.",
+                        "last_deleted_devices_preview": _("text.no_deleted_devices"),
                         "last_deleted_devices_rows": [],
                         "last_deleted_devices_count": 0,
                         "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
@@ -1168,23 +1134,14 @@ def run_deleted_devices_delete_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_deleted_devices_confirm_job(ctx):
-    run_lock = ctx.run_lock
+def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "deleted_devices_confirm",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "deleted_devices_confirm", lock_acquired):
         return False
 
     details = []
@@ -1194,30 +1151,33 @@ def run_deleted_devices_confirm_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_confirm",
-            "last_message": "Confirming deleted_devices cleanup.",
+            "last_message": _("message.confirming_deleted_devices_cleanup"),
             "last_details": details,
         }
     )
     try:
         state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("No deleted_devices cleanup is pending confirmation.")
+            raise i18n.error("error.deleted_devices_cleanup_not_pending")
         rollback_path = state.get("deleted_devices_rollback_path")
         if not rollback_path:
-            raise RuntimeError("deleted_devices rollback snapshot is missing.")
+            raise i18n.error("error.deleted_devices_rollback_missing")
         applied_fingerprint = state.get("deleted_devices_applied_fingerprint")
         cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
         if cleanup_status["returned"] > 0:
-            raise RuntimeError("deleted_devices entries removed by this cleanup returned. Review manually before confirming.")
+            raise i18n.error("error.deleted_devices_removed_returned")
         if applied_fingerprint and cleanup_status["fingerprint"] != applied_fingerprint:
             if cleanup_status["added"] > 0:
                 details.append(
-                    f"Device registry contains {cleanup_status['added']} new deleted_devices entr"
-                    f"{'y' if cleanup_status['added'] == 1 else 'ies'}; keeping them."
+                    _(
+                        "detail.device_registry_new_deleted_devices",
+                        count=cleanup_status["added"],
+                        entry_word="entry" if cleanup_status["added"] == 1 else "entries",
+                    )
                 )
                 log_action(ctx, "deleted_devices confirm: new deleted_devices are present and preserved")
             else:
-                details.append("Device registry changed after deletion, but removed deleted_devices did not return.")
+                details.append(_("detail.device_registry_changed_after_deletion"))
                 log_action(ctx, "deleted_devices confirm: registry fingerprint changed, removed deleted_devices did not return")
         ctx.discard_deleted_devices_rollback(rollback_path)
         log_action(ctx, "deleted_devices confirm: confirmed and discarded rollback")
@@ -1226,7 +1186,7 @@ def run_deleted_devices_confirm_job(ctx):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "deleted_devices_confirm",
-                "last_message": "Confirmed deleted_devices cleanup.",
+                "last_message": _("message.confirmed_deleted_devices_cleanup"),
                 "last_details": details,
                 "deleted_devices_pending_confirmation": False,
                 "deleted_devices_rollback_path": None,
@@ -1236,36 +1196,28 @@ def run_deleted_devices_confirm_job(ctx):
         )
         return True
     except Exception as exc:
-        details.append(str(exc))
+        message = i18n.user_message(exc)
+        details.append(message)
         log_action(ctx, f"deleted_devices confirm: failed: {exc}")
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "error",
                 "last_action": "deleted_devices_confirm",
-                "last_message": str(exc),
+                "last_message": message,
                 "last_details": details,
             }
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_deleted_devices_revert_job(ctx):
-    run_lock = ctx.run_lock
+def run_deleted_devices_revert_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "deleted_devices_revert",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "deleted_devices_revert", lock_acquired):
         return False
 
     details = []
@@ -1280,7 +1232,7 @@ def run_deleted_devices_revert_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_revert",
-            "last_message": "Reverting deleted_devices cleanup.",
+            "last_message": _("message.reverting_deleted_devices_cleanup"),
             "last_details": details,
         }
     )
@@ -1288,22 +1240,22 @@ def run_deleted_devices_revert_job(ctx):
     try:
         state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
-            raise RuntimeError("No deleted_devices cleanup is pending confirmation.")
+            raise i18n.error("error.deleted_devices_cleanup_not_pending")
         rollback_path = state.get("deleted_devices_rollback_path")
         if not rollback_path:
-            raise RuntimeError("deleted_devices rollback snapshot is missing.")
+            raise i18n.error("error.deleted_devices_rollback_missing")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
-        ctx.add_detail(details, "Stopping Home Assistant Core before restoring deleted_devices.")
+        ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices_restore"))
         ctx.core_stop()
         core_stopped = True
         result = ctx.restore_deleted_devices_rollback(rollback_path)
         restore_applied = True
-        ctx.add_detail(details, f"Restored {result.get('restored', 0)} deleted_devices entry(s).")
+        ctx.add_detail(details, _("detail.restored_deleted_devices", count=result.get("restored", 0)))
         if result.get("preserved", 0) > 0:
-            ctx.add_detail(details, f"Preserved {result.get('preserved', 0)} current deleted_devices entry(s).")
-        ctx.add_detail(details, "Preserved other current core.device_registry changes.")
-        ctx.add_detail(details, "Starting Home Assistant Core.")
+            ctx.add_detail(details, _("detail.preserved_current_deleted_devices", count=result.get("preserved", 0)))
+        ctx.add_detail(details, _("detail.preserved_other_registry_changes"))
+        ctx.add_detail(details, _("detail.starting_core"))
         ctx.core_start()
         core_stopped = False
         ctx.discard_deleted_devices_rollback(rollback_path)
@@ -1315,7 +1267,7 @@ def run_deleted_devices_revert_job(ctx):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "deleted_devices_revert",
-                "last_message": "Reverted deleted_devices cleanup.",
+                "last_message": _("message.reverted_deleted_devices_cleanup"),
                 "last_details": details,
                 "last_backup_slug": backup_slug,
                 **preview_updates,
@@ -1332,9 +1284,9 @@ def run_deleted_devices_revert_job(ctx):
         if core_stopped:
             try:
                 ctx.core_start()
-                details.append("Started Home Assistant Core after revert failure.")
+                details.append(_("detail.started_core_after_revert_failure"))
             except Exception as start_exc:
-                details.append(f"Failed to start Home Assistant Core after revert failure: {start_exc}")
+                details.append(_("detail.failed_start_core_after_revert_failure", error=start_exc))
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -1360,23 +1312,14 @@ def run_deleted_devices_revert_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_apply_job(ctx):
-    run_lock = ctx.run_lock
+def run_apply_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "apply",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "apply", lock_acquired):
         return False
 
     details = []
@@ -1391,7 +1334,7 @@ def run_apply_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "apply",
-            "last_message": "Preparing apply.",
+            "last_message": _("message.preparing_apply"),
             "last_details": details,
         }
     )
@@ -1405,7 +1348,7 @@ def run_apply_job(ctx):
             write_pending_conflicts(
                 ctx,
                 "apply",
-                conflict_status_message(state, "Resolve Git conflicts before running Apply Git to HA."),
+                conflict_status_message(state, _("message.resolve_git_conflicts_before_apply")),
                 details,
                 resolved_targets,
             )
@@ -1419,9 +1362,9 @@ def run_apply_job(ctx):
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Fetched repository at commit {ctx.git_head_or_unborn(repo_dir)}.")
-        ctx.add_detail(details, f"Using manifest {manifest_path}.")
-        ctx.add_detail(details, "Rebuilding apply preview for safety checks.")
+        ctx.add_detail(details, _("detail.fetched_repository_commit", commit=ctx.git_head_or_unborn(repo_dir)))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
+        ctx.add_detail(details, _("detail.rebuilding_apply_preview"))
         preview = ctx.build_apply_preview(resolved_targets, details, repo_dir, branch)
         commit = ctx.git_head_or_unborn(repo_dir)
         try:
@@ -1468,18 +1411,18 @@ def run_apply_job(ctx):
         apply_commit = None
         if preview.get("paths") and not conflict_preview:
             resolved_targets = ctx.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths)
-            ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview file decision(s).")
+            ctx.add_detail(details, _("detail.approved_apply_preview_files", count=len(preview.get("paths") or [])))
         elif conflict_preview:
-            ctx.add_detail(details, f"Approved {len(preview.get('paths') or [])} Apply Preview conflict decision(s).")
+            ctx.add_detail(details, _("detail.approved_apply_preview_conflicts", count=len(preview.get("paths") or [])))
             if preview.get("storage_changes"):
                 resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
 
         if ctx.option_bool(options, "create_release_snapshot", True):
-            ctx.add_detail(details, "Creating local release snapshot.")
+            ctx.add_detail(details, _("detail.creating_release_snapshot"))
             release_name = ctx.create_release_snapshot(resolved_targets, commit, backup_slug)
-            ctx.add_detail(details, f"Created local release snapshot {release_name}.")
+            ctx.add_detail(details, _("detail.created_release_snapshot", release=release_name))
 
         if conflict_preview:
             apply_commit = ctx.commit_apply_merge(
@@ -1491,7 +1434,7 @@ def run_apply_job(ctx):
                 details,
             )
             if apply_commit:
-                ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
+                ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
 
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
@@ -1514,23 +1457,23 @@ def run_apply_job(ctx):
                 details,
             )
             if apply_commit:
-                ctx.add_detail(details, f"Updated ha-ops/ha-live at {apply_commit}.")
+                ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)
-                ctx.add_detail(details, f"Pushed to origin/{service_branch}.")
+                ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
             except RuntimeError as exc:
-                ctx.add_detail(details, f"Skipped pushing {service_branch}: {exc}")
+                ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
         pruned = ctx.prune_release_snapshots(options, protected_release=release_name)
         if pruned:
-            ctx.add_detail(details, f"Pruned {len(pruned)} old local release snapshot(s): {', '.join(pruned)}.")
+            ctx.add_detail(details, _("detail.pruned_release_snapshots", count=len(pruned), releases=", ".join(pruned)))
 
         write_state(
             {
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "apply",
-                "last_message": "Apply finished successfully.",
+                "last_message": _("message.apply_finished"),
                 "last_details": details,
                 "last_release": release_name,
                 "last_backup_slug": backup_slug,
@@ -1546,10 +1489,10 @@ def run_apply_job(ctx):
         core_stopped_for_apply = core_stopped_for_apply or bool(getattr(exc, "core_stopped", False))
         if release_name:
             try:
-                ctx.add_detail(details, f"Restoring local release snapshot {release_name} after failure.")
+                ctx.add_detail(details, _("detail.restoring_release_snapshot_after_failure", release=release_name))
                 ctx.restore_release_snapshot(release_name, details, core_already_stopped=core_stopped_for_apply)
             except Exception as rollback_exc:
-                details.append(f"Rollback from local release failed: {rollback_exc}")
+                details.append(_("detail.rollback_from_release_failed", error=rollback_exc))
 
         write_state(
             {
@@ -1565,23 +1508,14 @@ def run_apply_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_preview_job(ctx):
-    run_lock = ctx.run_lock
+def run_preview_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "preview",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "preview", lock_acquired):
         return False
 
     details = []
@@ -1594,7 +1528,7 @@ def run_preview_job(ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "preview",
-            "last_message": "Preparing apply preview.",
+            "last_message": _("message.preparing_apply_preview"),
             "last_details": details,
         }
     )
@@ -1608,7 +1542,7 @@ def run_preview_job(ctx):
             write_pending_conflicts(
                 ctx,
                 "preview",
-                conflict_status_message(state, "Resolve Git conflicts before running Preview Git to HA."),
+                conflict_status_message(state, _("message.resolve_git_conflicts_before_apply_preview")),
                 details,
                 resolved_targets,
             )
@@ -1622,23 +1556,23 @@ def run_preview_job(ctx):
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
 
-        ctx.add_detail(details, f"Fetched repository at commit {ctx.git_head_or_unborn(repo_dir)}.")
-        ctx.add_detail(details, f"Using manifest {manifest_path}.")
-        ctx.add_detail(details, "Building apply preview without changing live config.")
+        ctx.add_detail(details, _("detail.fetched_repository_commit", commit=ctx.git_head_or_unborn(repo_dir)))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
+        ctx.add_detail(details, _("detail.building_apply_preview"))
         preview = ctx.build_apply_preview(resolved_targets, details, repo_dir, branch)
         commit = ctx.git_head_or_unborn(repo_dir)
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
-        ctx.add_detail(details, "Pushed to origin/ha-ops/ha-live.")
+        ctx.add_detail(details, _("detail.pushed_ha_live"))
         try:
             ctx.push_branch(repo_dir, env, "ha-ops/base")
-            ctx.add_detail(details, "Pushed to origin/ha-ops/base.")
+            ctx.add_detail(details, _("detail.pushed_ha_base"))
         except RuntimeError as exc:
-            ctx.add_detail(details, f"Skipped pushing ha-ops/base: {exc}")
-        message = "Apply preview finished successfully."
+            ctx.add_detail(details, _("detail.skipped_ha_base_push", error=exc))
+        message = _("message.apply_preview_finished")
         if preview.get("storage_changes"):
             paths = preview.get("storage_change_paths") or []
-            ctx.add_detail(details, f"Confirm required for {len(paths)} .storage change(s) before Apply Git to HA.")
-            message = "Apply preview contains .storage changes. Confirm Apply Git to HA to continue."
+            ctx.add_detail(details, _("detail.confirm_apply_storage_changes", count=len(paths)))
+            message = _("message.apply_preview_storage_confirm")
 
         write_state(
             {
@@ -1677,23 +1611,14 @@ def run_preview_job(ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)
 
 
-def run_rollback_job(release_name, ctx):
-    run_lock = ctx.run_lock
+def run_rollback_job(release_name, ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not run_lock.acquire(blocking=False):
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "busy",
-                "last_action": "rollback",
-                "last_message": "Another HA Ops action is already running.",
-            }
-        )
+    if not enter_run_lock(ctx, "rollback", lock_acquired):
         return False
 
     details = []
@@ -1702,7 +1627,7 @@ def run_rollback_job(release_name, ctx):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "rollback",
-            "last_message": f"Rolling back release {release_name}.",
+            "last_message": _("message.rolling_back_release", release=release_name),
             "last_details": details,
         }
     )
@@ -1718,7 +1643,7 @@ def run_rollback_job(release_name, ctx):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "rollback",
-                "last_message": f"Rollback to {release_name} finished successfully.",
+                "last_message": _("message.rollback_finished", release=release_name),
                 "last_details": details,
                 "last_release": release_name,
                 "last_backup_slug": metadata.get("backup_slug"),
@@ -1739,4 +1664,4 @@ def run_rollback_job(release_name, ctx):
         )
         return False
     finally:
-        run_lock.release()
+        release_run_lock(ctx)

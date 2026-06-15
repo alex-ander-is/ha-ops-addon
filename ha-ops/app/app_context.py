@@ -15,6 +15,11 @@ import releases as release_logic
 import state as state_store
 import supervisor
 import sync as sync_logic
+import i18n
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
 
 
 class AppContext:
@@ -114,9 +119,9 @@ class AppContext:
         try:
             self.restore_deleted_devices_rollback(rollback_path)
             restored = True
-            details.append("Restored deleted_devices rollback snapshot after HA Ops restart.")
+            details.append(_("detail.restored_deleted_devices_after_restart"))
             self.core_start()
-            details.append("Started Home Assistant Core after restoring deleted_devices rollback snapshot.")
+            details.append(_("detail.started_core_after_restore"))
             self.discard_deleted_devices_rollback(rollback_path)
             preview = self.build_deleted_devices_preview()
             return self.write_state(
@@ -124,7 +129,7 @@ class AppContext:
                     "last_run_at": self.utc_now(),
                     "last_status": "interrupted",
                     "last_action": "deleted_devices_delete",
-                    "last_message": "Interrupted deleted_devices cleanup was reverted on startup.",
+                    "last_message": _("message.interrupted_deleted_devices_reverted"),
                     "last_details": details,
                     "last_deleted_devices_preview": preview["summary"],
                     "last_deleted_devices_rows": preview["rows"],
@@ -138,17 +143,17 @@ class AppContext:
                 }
             )
         except Exception as exc:
-            details.append(f"Startup deleted_devices recovery failed: {exc}")
+            details.append(_("detail.startup_deleted_devices_recovery_failed", error=exc))
             try:
                 self.core_start()
-                details.append("Started Home Assistant Core after failed deleted_devices startup recovery.")
+                details.append(_("detail.started_core_after_startup_recovery_failure"))
             except Exception as start_exc:
-                details.append(f"Failed to start Home Assistant Core after failed deleted_devices startup recovery: {start_exc}")
+                details.append(_("detail.failed_start_core_after_startup_recovery_failure", error=start_exc))
             updates = {
                 "last_run_at": self.utc_now(),
                 "last_status": "error",
                 "last_action": "deleted_devices_delete",
-                "last_message": "Interrupted deleted_devices cleanup needs manual recovery.",
+                "last_message": _("message.interrupted_deleted_devices_manual_recovery"),
                 "last_details": details,
                 "deleted_devices_pending_confirmation": bool(rollback_path and not restored),
             }
@@ -699,18 +704,16 @@ class AppContext:
         if add.returncode != 0:
             raise RuntimeError(f"git add allowlisted .storage failed:\n{add.stderr.strip()}")
 
-        self.add_detail(details, f"Staged {len(paths)} allowlisted .storage config file(s).")
+        self.add_detail(details, _("detail.staged_storage_allowlist", count=len(paths)))
         return len(paths)
 
     def ensure_preview_matches_state(self, state, commit, preview):
         if state.get("last_preview_commit") != commit:
-            raise RuntimeError("Run Preview Git to HA before Apply Git to HA. The preview commit does not match.")
+            raise i18n.error("error.preview_commit_mismatch")
         if state.get("last_preview_live_fingerprints") != preview.get("live_fingerprints", {}):
-            raise RuntimeError(
-                "Run Preview Git to HA again. Live Home Assistant automations/scripts/scenes changed since the last preview."
-            )
+            raise i18n.error("error.preview_live_changed")
         if state.get("last_preview_fingerprint") != preview["fingerprint"]:
-            raise RuntimeError("Run Preview Git to HA again. The live diff changed since the last preview.")
+            raise i18n.error("error.preview_diff_changed")
 
     def approve_storage_apply_targets(self, resolved_targets):
         approved = []
@@ -726,9 +729,7 @@ class AppContext:
     def enforce_apply_limits(self, options, preview):
         max_deletions = self.option_int(options, "max_apply_deletions", policies.DEFAULT_MAX_APPLY_DELETIONS, minimum=0)
         if preview["deletions"] > max_deletions:
-            raise RuntimeError(
-                f"Apply would delete {preview['deletions']} file(s), above the limit of {max_deletions}. Review the preview or raise max_apply_deletions."
-            )
+            raise i18n.error("error.apply_delete_limit", deletions=preview["deletions"], limit=max_deletions)
 
     def job_deps(self):
         return job_logic.JobContext(
@@ -793,44 +794,44 @@ class AppContext:
             write_state=self.write_state,
         )
 
-    def run_save_job(self):
-        return job_logic.run_save_job(self.job_deps())
+    def run_save_job(self, lock_acquired=False):
+        return job_logic.run_save_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_apply_job(self):
-        return job_logic.run_apply_job(self.job_deps())
+    def run_apply_job(self, lock_acquired=False):
+        return job_logic.run_apply_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_preview_job(self):
-        return job_logic.run_preview_job(self.job_deps())
+    def run_preview_job(self, lock_acquired=False):
+        return job_logic.run_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_save_preview_job(self):
-        return job_logic.run_save_preview_job(self.job_deps())
+    def run_save_preview_job(self, lock_acquired=False):
+        return job_logic.run_save_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_deleted_devices_preview_job(self):
-        return job_logic.run_deleted_devices_preview_job(self.job_deps())
+    def run_deleted_devices_preview_job(self, lock_acquired=False):
+        return job_logic.run_deleted_devices_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_retained_devices_preview_job(self):
-        return job_logic.run_retained_devices_preview_job(self.job_deps())
+    def run_retained_devices_preview_job(self, lock_acquired=False):
+        return job_logic.run_retained_devices_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_retained_devices_delete_job(self, selected):
-        return job_logic.run_retained_devices_delete_job(selected, self.job_deps())
+    def run_retained_devices_delete_job(self, selected, lock_acquired=False):
+        return job_logic.run_retained_devices_delete_job(selected, self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_internal_ids_preview_job(self):
-        return job_logic.run_internal_ids_preview_job(self.job_deps())
+    def run_internal_ids_preview_job(self, lock_acquired=False):
+        return job_logic.run_internal_ids_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_internal_ids_migrate_job(self, selected):
-        return job_logic.run_internal_ids_migrate_job(selected, self.job_deps())
+    def run_internal_ids_migrate_job(self, selected, lock_acquired=False):
+        return job_logic.run_internal_ids_migrate_job(selected, self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_deleted_devices_delete_job(self):
-        return job_logic.run_deleted_devices_delete_job(self.job_deps())
+    def run_deleted_devices_delete_job(self, lock_acquired=False):
+        return job_logic.run_deleted_devices_delete_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_deleted_devices_confirm_job(self):
-        return job_logic.run_deleted_devices_confirm_job(self.job_deps())
+    def run_deleted_devices_confirm_job(self, lock_acquired=False):
+        return job_logic.run_deleted_devices_confirm_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_deleted_devices_revert_job(self):
-        return job_logic.run_deleted_devices_revert_job(self.job_deps())
+    def run_deleted_devices_revert_job(self, lock_acquired=False):
+        return job_logic.run_deleted_devices_revert_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_rollback_job(self, release_name):
-        return job_logic.run_rollback_job(release_name, self.job_deps())
+    def run_rollback_job(self, release_name, lock_acquired=False):
+        return job_logic.run_rollback_job(release_name, self.job_deps(), lock_acquired=lock_acquired)
 
 
 def create_default_context():

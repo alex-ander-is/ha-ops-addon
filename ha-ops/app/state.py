@@ -4,7 +4,12 @@ import threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import i18n
 import policies
+
+
+def _(key, **values):
+    return i18n.t(key, **values)
 
 
 STATE_LOCK = threading.Lock()
@@ -125,7 +130,7 @@ def default_state():
         "last_run_at": None,
         "last_status": "idle",
         "last_action": None,
-        "last_message": "No runs yet.",
+        "last_message": _("message.no_runs_yet"),
         "last_details": [],
         "last_release": None,
         "last_backup_slug": None,
@@ -207,7 +212,7 @@ def clear_display_state(path):
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Previous transient status was cleared.",
+                "last_message": _("message.previous_transient_status_cleared"),
             }
         )
     return write_state(path, updates)
@@ -246,7 +251,7 @@ def repair_startup_state(path, now, addon_version=None):
                 {
                     "last_status": "idle",
                     "last_action": None,
-                    "last_message": f"HA Ops updated to {addon_version}. Previous transient status was cleared.",
+                    "last_message": _("message.addon_updated_status_cleared", version=addon_version),
                 }
             )
             return write_state(path, current)
@@ -261,7 +266,7 @@ def repair_startup_state(path, now, addon_version=None):
             {
                 "last_status": "idle",
                 "last_action": None,
-                "last_message": "Previous stale error was cleared. Run an action when ready.",
+                "last_message": _("message.previous_stale_error_cleared"),
             }
         )
     if current.get("last_status") != "running":
@@ -271,7 +276,7 @@ def repair_startup_state(path, now, addon_version=None):
         {
             "last_run_at": now,
             "last_status": "interrupted",
-            "last_message": "Previous action was interrupted by HA Ops restart.",
+            "last_message": _("message.previous_action_interrupted"),
         }
     )
     return write_state(path, current)
