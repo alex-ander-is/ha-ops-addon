@@ -49,6 +49,20 @@ def write_yaml(path, data):
         yaml.safe_dump(data, handle, sort_keys=False, allow_unicode=True)
 
 
+def ha_dump(data):
+    try:
+        dumper = yaml.CSafeDumper
+    except AttributeError:
+        dumper = yaml.SafeDumper
+    return yaml.dump(
+        data,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        Dumper=dumper,
+    ).replace(": null\n", ":\n")
+
+
 def area_registry():
     return {
         "version": 1,
@@ -414,6 +428,9 @@ class OrganizerContractTests(unittest.TestCase):
             self.assertEqual(data[0]["data"]["count"], 42)
             self.assertEqual(data[0]["data"]["hex"], 16)
 
+    def test_dump_uses_home_assistant_null_cleanup(self):
+        self.assertEqual(ORGANIZER.yaml_dump_text({"value": None}), "value:\n")
+
     def test_split_creates_area_first_git_view_from_live_heap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -449,24 +466,25 @@ class OrganizerContractTests(unittest.TestCase):
             self.assertEqual(Counter(item for item, area in script_locations), Counter(script_keys(script_super_set())))
             self.assertEqual(Counter(item for item, area in scene_locations), Counter(scene_identity(item) for item in scene_super_set()))
 
-    def test_split_quotes_single_line_template_scalars_like_repo_style(self):
+    def test_split_uses_home_assistant_style_for_single_line_template_scalars(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             live = root / "live"
             storage = live / ".storage"
             storage.mkdir(parents=True)
             long_template = "{{ trigger.payload_json.action in ['2_single', '2_double'] }}"
+            automations = [
+                {
+                    "id": "long_auto",
+                    "alias": "long_auto",
+                    "triggers": [{"topic": "z2m/button", "trigger": "mqtt"}],
+                    "conditions": [{"condition": "template", "value_template": long_template}],
+                    "actions": [{"action": "script.hallway_toggle_light"}],
+                }
+            ]
             write_yaml(
                 live / "automations.yaml",
-                [
-                    {
-                        "id": "long_auto",
-                        "alias": "long_auto",
-                        "triggers": [{"topic": "z2m/button", "trigger": "mqtt"}],
-                        "conditions": [{"condition": "template", "value_template": long_template}],
-                        "actions": [{"action": "script.hallway_toggle_light"}],
-                    }
-                ],
+                automations,
             )
             write_yaml(live / "scripts.yaml", {})
             write_yaml(live / "scenes.yaml", [])
@@ -482,12 +500,10 @@ class OrganizerContractTests(unittest.TestCase):
             )
 
             text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
-            self.assertIn(
-                "value_template: \"{{ trigger.payload_json.action in ['2_single', '2_double'] }}\"\n",
-                text,
-            )
+            self.assertEqual(text, ha_dump(automations))
+            self.assertIn("value_template: '{{ trigger.payload_json.action in [''2_single'', ''2_double'']\n", text)
 
-    def test_split_folds_multi_statement_jinja_scalars(self):
+    def test_split_uses_home_assistant_style_for_multi_statement_jinja_scalars(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             live = root / "live"
@@ -499,23 +515,24 @@ class OrganizerContractTests(unittest.TestCase):
                 "{% set maximum = state_attr('input_number.dining_room_dimmer_range', 'max') | float(100) %} "
                 "{{ [minimum, [fallback, maximum] | min] | max }}"
             )
+            automations = [
+                {
+                    "id": "brightness_auto",
+                    "alias": "brightness_auto",
+                    "triggers": [{"entity_id": "switch.dining_room_light", "trigger": "state"}],
+                    "conditions": [],
+                    "actions": [
+                        {
+                            "action": "light.turn_on",
+                            "data": {"brightness_pct": brightness_template},
+                            "target": {"entity_id": "light.dining_room_dimmer"},
+                        }
+                    ],
+                }
+            ]
             write_yaml(
                 live / "automations.yaml",
-                [
-                    {
-                        "id": "brightness_auto",
-                        "alias": "brightness_auto",
-                        "triggers": [{"entity_id": "switch.dining_room_light", "trigger": "state"}],
-                        "conditions": [],
-                        "actions": [
-                            {
-                                "action": "light.turn_on",
-                                "data": {"brightness_pct": brightness_template},
-                                "target": {"entity_id": "light.dining_room_dimmer"},
-                            }
-                        ],
-                    }
-                ],
+                automations,
             )
             write_yaml(live / "scripts.yaml", {})
             write_yaml(live / "scenes.yaml", [])
@@ -531,14 +548,53 @@ class OrganizerContractTests(unittest.TestCase):
             )
 
             text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
-            self.assertIn(
-                "brightness_pct: >-\n"
-                "        {% set fallback = 25 %}\n"
-                "        {% set minimum = state_attr('input_number.dining_room_dimmer_range', 'min') | float(0) %}\n"
-                "        {% set maximum = state_attr('input_number.dining_room_dimmer_range', 'max') | float(100) %}\n"
-                "        {{ [minimum, [fallback, maximum] | min] | max }}\n",
-                text,
+            self.assertEqual(text, ha_dump(automations))
+            self.assertIn("brightness_pct: '{% set fallback = 25 %}", text)
+
+    def test_split_uses_home_assistant_style_for_jinja_notification_titles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live = root / "live"
+            storage = live / ".storage"
+            storage.mkdir(parents=True)
+            title = "🛀 {{ now().strftime('%H:%M') }} Washing Machine"
+            automations = [
+                {
+                    "id": "laundry_auto",
+                    "alias": "laundry_auto",
+                    "triggers": [{"entity_id": "sensor.washing_machine", "trigger": "state"}],
+                    "conditions": [],
+                    "actions": [
+                        {
+                            "action": "notify.alex",
+                            "data": {
+                                "title": title,
+                                "message": "You most likely forgot your laundry",
+                            },
+                        }
+                    ],
+                }
+            ]
+            write_yaml(
+                live / "automations.yaml",
+                automations,
             )
+            write_yaml(live / "scripts.yaml", {})
+            write_yaml(live / "scenes.yaml", [])
+            write_json(storage / "core.area_registry", area_registry())
+            write_json(storage / "core.device_registry", device_registry())
+            write_json(storage / "core.entity_registry", entity_registry())
+
+            git = root / "git" / "homeassistant"
+            ORGANIZER.split_live_heaps_to_git(
+                live,
+                git,
+                options={"overrides": {"automations": {"laundry_auto": "home"}}},
+            )
+
+            text = (git / ".ha-ops" / "areas" / "home" / "automations.yaml").read_text()
+            self.assertEqual(text, ha_dump(automations))
+            self.assertIn('title: "\\U0001F6C0 {{ now().strftime(\'%H:%M\') }} Washing Machine"\n', text)
 
     def test_rejects_unsafe_organized_root_values(self):
         unsafe_values = [".", "../areas", "/tmp/areas"]

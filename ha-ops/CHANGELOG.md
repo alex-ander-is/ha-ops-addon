@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.15
+
+- Use the Home Assistant YAML dumper for organizer output instead of custom Jinja scalar formatting.
+
 ## 0.8.14
 
 - Normalize Home Assistant organizer Jinja YAML scalars to avoid quote-only Save preview diffs.

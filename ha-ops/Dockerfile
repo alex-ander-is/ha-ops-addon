@@ -2,7 +2,7 @@ ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
 FROM $BUILD_FROM
 
 RUN apk add --no-cache bash curl diffutils git mosquitto-clients openssh-client openssh-keygen py3-pip py3-yaml python3 rsync \
-    && pip3 install --no-cache-dir --break-system-packages rfc8785==0.1.4
+    && pip3 install --no-cache-dir --break-system-packages annotatedyaml==1.0.2 rfc8785==0.1.4
 
 WORKDIR /app
 

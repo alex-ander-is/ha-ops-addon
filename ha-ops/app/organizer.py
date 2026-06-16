@@ -12,6 +12,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     yaml = None
 
+try:
+    from annotatedyaml.dumper import dump as annotated_yaml_dump
+except ModuleNotFoundError:  # pragma: no cover
+    annotated_yaml_dump = None
+
 
 DEFAULT_ORGANIZED_ROOT = ".ha-ops/areas"
 INDEX_NAME = "organizer-index.json"
@@ -22,8 +27,6 @@ HEAP_FILES = {
     "scripts": "scripts.yaml",
     "scenes": "scenes.yaml",
 }
-YAML_DUMP_WIDTH = 4096
-JINJA_BLOCK_BOUNDARY_RE = re.compile(r"(%})\s+({[%{])")
 ENTITY_DOMAINS = [
     "automation",
     "binary_sensor",
@@ -67,12 +70,12 @@ class UniqueKeyLoader(yaml.SafeLoader if yaml is not None else object):
     pass
 
 
-class OrganizerDumper(yaml.SafeDumper if yaml is not None else object):
-    def ignore_aliases(self, data):
-        return True
-
-
 if yaml is not None:
+    try:
+        HACompatibleDumper = yaml.CSafeDumper
+    except AttributeError:  # pragma: no cover
+        HACompatibleDumper = yaml.SafeDumper
+
     YAML_INT_TAG = "tag:yaml.org,2002:int"
     YAML_INT_PATTERN_WITHOUT_SEXAGESIMAL = re.compile(
         r"""^(?:[-+]?0b[0-1_]+
@@ -103,59 +106,23 @@ if yaml is not None:
 
     UniqueKeyLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, construct_mapping)
 
-    def folded_jinja_template(value):
-        if "\n" in value:
-            return value
-        if "{%" not in value:
-            return None
-        folded = JINJA_BLOCK_BOUNDARY_RE.sub(r"\1\n\2", value)
-        return folded if folded != value else None
-
-    def represent_string(dumper, value):
-        folded = folded_jinja_template(value)
-        if folded is not None:
-            return dumper.represent_scalar("tag:yaml.org,2002:str", folded, style=">")
-        if ("{{" in value or "{%" in value) and "'" in value:
-            return dumper.represent_scalar("tag:yaml.org,2002:str", value, style='"')
-        return dumper.represent_scalar("tag:yaml.org,2002:str", value)
-
-    OrganizerDumper.add_representer(str, represent_string)
-
-
-def compact_jinja_folded_blocks(text):
-    lines = text.splitlines(keepends=True)
-    compacted = []
-    in_jinja_block = False
-    block_indent = None
-    pending_blank = None
-    for line in lines:
-        stripped = line.lstrip(" ")
-        indent = len(line) - len(stripped)
-        if stripped.startswith(("{%", "{{")) and in_jinja_block and indent >= block_indent:
-            pending_blank = None
-            compacted.append(line)
-            continue
-        if pending_blank is not None:
-            compacted.append(pending_blank)
-            pending_blank = None
-        compacted.append(line)
-        if stripped in {"\n", "\r\n"}:
-            pending_blank = compacted.pop()
-            continue
-        if in_jinja_block and indent < block_indent:
-            in_jinja_block = False
-            block_indent = None
-        if line.rstrip("\r\n").endswith(": >-"):
-            in_jinja_block = True
-            block_indent = indent + 2
-    if pending_blank is not None:
-        compacted.append(pending_blank)
-    return "".join(compacted)
-
 
 def require_yaml():
     if yaml is None:
         raise RuntimeError("PyYAML is required for HA Ops organizer. Install py3-yaml in the add-on image.")
+
+
+def yaml_dump_text(data):
+    require_yaml()
+    if annotated_yaml_dump is not None:
+        return annotated_yaml_dump(data)
+    return yaml.dump(
+        data,
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+        Dumper=HACompatibleDumper,
+    ).replace(": null\n", ":\n")
 
 
 def yaml_load(path, default):
@@ -172,8 +139,7 @@ def yaml_load(path, default):
 def yaml_dump(path, data):
     require_yaml()
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.dump(data, Dumper=OrganizerDumper, sort_keys=False, allow_unicode=True, width=YAML_DUMP_WIDTH)
-    path.write_text(compact_jinja_folded_blocks(text))
+    path.write_text(yaml_dump_text(data))
 
 
 def load_json(path, default):
