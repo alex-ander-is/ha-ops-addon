@@ -264,7 +264,6 @@ def preview_choice_buttons(path, direction, path_action, actions_disabled=False)
         primary_label = _("action.use_git_version")
         keep_choice = "ha"
     return (
-        f"<button type='button' class='secondary preview-wrap-button'>{_('button.wrap_lines')}</button>"
         f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
         f"<input type='hidden' name='choice' value='{primary_choice}'>"
@@ -276,6 +275,10 @@ def preview_choice_buttons(path, direction, path_action, actions_disabled=False)
         f"<button type='submit' class='secondary'{disabled}>{_('action.keep_unchanged')}</button>"
         "</form>"
     )
+
+
+def preview_wrap_button():
+    return f"<button type='button' class='secondary preview-wrap-button'>{_('button.wrap_lines')}</button>"
 
 
 def render_preview_path(path):
@@ -443,12 +446,15 @@ def render_preview_decisions(
             f"<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>{_('button.expand_diff')}</button>"
             f"{render_preview_path(path)}{change}{status}"
             "</div>"
-            "<div class='preview-file-actions'>"
-            f"{preview_choice_buttons(path, direction, path_action, actions_disabled=actions_disabled)}"
+            "<div class='preview-file-header-actions'>"
+            f"{preview_wrap_button()}"
             "</div>"
             "</div>"
             "<div class='preview-file-detail' hidden>"
             f"{render_conflict_detail(detail, include_wrap_control=False)}"
+            "<div class='preview-file-actions preview-file-detail-actions'>"
+            f"{preview_choice_buttons(path, direction, path_action, actions_disabled=actions_disabled)}"
+            "</div>"
             "</div>"
             "</article>"
         )
@@ -1013,6 +1019,7 @@ def render_page(data):
     }}
     .preview-list-controls,
     .preview-footer-actions,
+    .preview-file-header-actions,
     .preview-file-actions {{
       display: flex;
       justify-content: flex-end;
@@ -1057,6 +1064,11 @@ def render_page(data):
     }}
     .preview-file-detail {{
       border-top: 1px solid var(--ha-border);
+    }}
+    .preview-file-detail-actions {{
+      padding: 10px 12px;
+      border-top: 1px solid var(--ha-border);
+      background: var(--ha-card-bg);
     }}
     .preview-footer-actions {{
       margin-top: 4px;
@@ -1269,7 +1281,7 @@ def render_page(data):
       min-width: 0;
       overflow-x: auto;
       border: 1px solid var(--ha-border);
-      border-radius: calc(var(--ha-radius) - 2px);
+      border-radius: 0;
       background: var(--ha-code-bg);
       font-family: ui-monospace, monospace;
       font-size: 0.92rem;

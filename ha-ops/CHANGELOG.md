@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.16
+
+- Move per-file preview choice actions below expanded diffs and keep the wrap control in the file header.
+
 ## 0.8.15
 
 - Use the Home Assistant YAML dumper for organizer output instead of custom Jinja scalar formatting.

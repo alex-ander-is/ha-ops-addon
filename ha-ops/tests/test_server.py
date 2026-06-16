@@ -1345,6 +1345,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<h3>Change List</h3>", page)
             self.assertIn("preview-expand-all", page)
             self.assertIn("preview-collapse-all", page)
+            self.assertIn("border-radius: 0;", page)
             self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
             self.assertIn("<div class='preview-file-detail' hidden>", page)
             self.assertIn("homeassistant/<strong>configuration.yaml</strong>", page)
@@ -1357,6 +1358,10 @@ class ServerTests(unittest.TestCase):
                 page,
             )
             self.assertNotIn("Use Git Version", page)
+            detail = page.index("<div class='preview-file-detail' hidden>")
+            self.assertLess(page.index("Wrap Lines"), detail)
+            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Use HA Version", detail))
+            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Keep Unchanged", detail))
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
             self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
 
@@ -1400,6 +1405,10 @@ class ServerTests(unittest.TestCase):
                 page,
             )
             self.assertNotIn("Use HA Version", page)
+            detail = page.index("<div class='preview-file-detail' hidden>")
+            self.assertLess(page.index("Wrap Lines"), detail)
+            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Use Git Version", detail))
+            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Keep Unchanged", detail))
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
             self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
