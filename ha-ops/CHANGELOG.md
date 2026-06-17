@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.17
+
+- Show per-file preview choices as visible toggles, moving them below the diff when a file is expanded, and keep Confirm as the only Save or Apply trigger.
+
 ## 0.8.16
 
 - Move per-file preview choice actions below expanded diffs and keep the wrap control in the file header.

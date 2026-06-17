@@ -130,7 +130,8 @@ Non-conflict previews may keep the older default behavior:
 
 - Save defaults unresolved paths to HA.
 - Apply defaults unresolved paths to Git.
-- Resolving the final non-conflict path may auto-start Save or Apply.
+- Resolving a non-conflict path updates the selected side only. Save or Apply
+  starts only from the explicit Confirm action.
 
 Conflict previews must not hide cleanly merged changes. If a merge has one
 conflicted path and one cleanly merged path, the cleanly merged path still must

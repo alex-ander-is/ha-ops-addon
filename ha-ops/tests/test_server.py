@@ -1354,14 +1354,19 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<span class='preview-file-change'>Added</span>", page)
             self.assertIn("Use HA Version", page)
             self.assertIn(
-                "<input type='hidden' name='choice' value='git'><button type='submit' class='secondary'>Keep Unchanged</button>",
+                "<input type='radio' name='choice' value='ha' checked>",
                 page,
             )
+            self.assertIn("<input type='radio' name='choice' value='git'>", page)
+            self.assertIn("preview-choice-toggle", page)
+            self.assertIn("data-auto-submit='change'", page)
             self.assertNotIn("Use Git Version", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
             self.assertLess(page.index("Wrap Lines"), detail)
-            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Use HA Version", detail))
-            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Keep Unchanged", detail))
+            self.assertLess(page.index("Use HA Version"), detail)
+            self.assertLess(page.index("Keep Unchanged"), detail)
+            self.assertIn("data-preview-choice-slot='detail'></span>", page)
+            self.assertIn("(expanded ? detailSlot : headerSlot).appendChild(choice);", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
             self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
 
@@ -1401,14 +1406,17 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Wrap Lines", page)
             self.assertIn("Use Git Version", page)
             self.assertIn(
-                "<input type='hidden' name='choice' value='ha'><button type='submit' class='secondary'>Keep Unchanged</button>",
+                "<input type='radio' name='choice' value='git'>",
                 page,
             )
+            self.assertIn("<input type='radio' name='choice' value='ha'>", page)
+            self.assertIn("preview-choice-toggle", page)
             self.assertNotIn("Use HA Version", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
             self.assertLess(page.index("Wrap Lines"), detail)
-            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Use Git Version", detail))
-            self.assertLess(page.index("class='conflict-diff'", detail), page.index("Keep Unchanged", detail))
+            self.assertLess(page.index("Use Git Version"), detail)
+            self.assertLess(page.index("Keep Unchanged"), detail)
+            self.assertIn("data-preview-choice-slot='detail'></span>", page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
             self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
@@ -1446,9 +1454,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertEqual(page.count("<button type='submit' class='secondary' disabled>Cancel</button>"), 2)
-            self.assertIn("<button type='submit' class='secondary' disabled>Use HA Version</button>", page)
-            self.assertIn("<button type='submit' class='secondary' disabled>Use Git Version</button>", page)
-            self.assertEqual(page.count("<button type='submit' class='secondary' disabled>Keep Unchanged</button>"), 2)
+            self.assertIn("<input type='radio' name='choice' value='ha' checked disabled>", page)
+            self.assertIn("<input type='radio' name='choice' value='git' checked disabled>", page)
+            self.assertEqual(page.count("Keep Unchanged"), 2)
             self.assertIn(
                 "<input type='checkbox' name='include_redundant_data' value='1' disabled>",
                 page,
@@ -3483,6 +3491,64 @@ class ServerTests(unittest.TestCase):
         finally:
             server.web.conflict_logic.approve_save_unknown_base_conflicts = original_approve
             server.web.conflict_logic.resolve_git_conflict = original_resolve
+
+    def test_preview_choice_update_does_not_auto_start_apply(self):
+        server = load_server()
+
+        class FakeRunLock:
+            def acquire(self, blocking=False):
+                return True
+
+            def release(self):
+                pass
+
+        class FakeContext:
+            def __init__(self):
+                self.run_lock = FakeRunLock()
+                self.calls = []
+                self.state = {
+                    "last_status": "idle",
+                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_preview_conflicts": False,
+                    "apply_preview_resolutions": {},
+                }
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state.update(updates)
+
+            def utc_now(self):
+                return "2026-06-17T12:00:00+00:00"
+
+            def run_apply_job(self, lock_acquired=False):
+                self.calls.append(("apply", lock_acquired))
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+        request = handler.__new__(handler)
+        body = b"path=homeassistant/configuration.yaml&choice=ha"
+        request.path = "/resolve-apply-preview"
+        request.rfile = io.BytesIO(body)
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.headers["Accept"] = "application/json"
+        request.headers["X-Requested-With"] = "fetch"
+        request.headers["Content-Length"] = str(len(body))
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+
+        request.do_POST()
+
+        response = json.loads(request.wfile.getvalue().decode())
+        self.assertEqual(request.responses[-1], 200)
+        self.assertTrue(response["ok"])
+        self.assertEqual(ctx.state["apply_preview_resolutions"], {"homeassistant/configuration.yaml": "ha"})
+        self.assertEqual(ctx.calls, [])
 
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()

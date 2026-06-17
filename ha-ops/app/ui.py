@@ -252,9 +252,12 @@ def render_conflicts(conflicts, conflict_type=None, actions_disabled=False):
     )
 
 
-def preview_choice_buttons(path, direction, path_action, actions_disabled=False):
+def preview_default_choice(direction):
+    return "ha" if direction == "save" else "git"
+
+
+def preview_choice_control(path, direction, path_action, selected_choice=None, actions_disabled=False):
     escaped_path = html.escape(path, quote=True)
-    disabled = " disabled" if actions_disabled else ""
     if direction == "save":
         primary_choice = "ha"
         primary_label = _("action.use_ha_version")
@@ -263,16 +266,21 @@ def preview_choice_buttons(path, direction, path_action, actions_disabled=False)
         primary_choice = "git"
         primary_label = _("action.use_git_version")
         keep_choice = "ha"
+    disabled = " disabled" if actions_disabled else ""
+    primary_checked = " checked" if selected_choice == primary_choice else ""
+    keep_checked = " checked" if selected_choice == keep_choice else ""
     return (
-        f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
+        f"<form class='preview-choice-toggle' method='post' action='{path_action}' "
+        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
-        f"<input type='hidden' name='choice' value='{primary_choice}'>"
-        f"<button type='submit' class='secondary'{disabled}>{primary_label}</button>"
-        "</form>"
-        f"<form method='post' action='{path_action}' data-async-form='true' data-preserve-display-state='true'>"
-        f"<input type='hidden' name='path' value='{escaped_path}'>"
-        f"<input type='hidden' name='choice' value='{keep_choice}'>"
-        f"<button type='submit' class='secondary'{disabled}>{_('action.keep_unchanged')}</button>"
+        f"<label class='preview-choice-option'>"
+        f"<input type='radio' name='choice' value='{primary_choice}'{primary_checked}{disabled}>"
+        f"<span>{primary_label}</span>"
+        "</label>"
+        f"<label class='preview-choice-option'>"
+        f"<input type='radio' name='choice' value='{keep_choice}'{keep_checked}{disabled}>"
+        f"<span>{_('action.keep_unchanged')}</span>"
+        "</label>"
         "</form>"
     )
 
@@ -436,6 +444,7 @@ def render_preview_decisions(
     for path in paths:
         choice = resolutions.get(path)
         status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
+        selected_choice = choice or (preview_default_choice(direction) if not require_all else None)
         change_label = change_labels.get(path)
         change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
         detail = diff_by_path.get(path) or _("text.diff_detail_unavailable")
@@ -448,12 +457,15 @@ def render_preview_decisions(
             "</div>"
             "<div class='preview-file-header-actions'>"
             f"{preview_wrap_button()}"
+            "<span class='preview-choice-slot' data-preview-choice-slot='header'>"
+            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=actions_disabled)}"
+            "</span>"
             "</div>"
             "</div>"
             "<div class='preview-file-detail' hidden>"
             f"{render_conflict_detail(detail, include_wrap_control=False)}"
             "<div class='preview-file-actions preview-file-detail-actions'>"
-            f"{preview_choice_buttons(path, direction, path_action, actions_disabled=actions_disabled)}"
+            "<span class='preview-choice-slot' data-preview-choice-slot='detail'></span>"
             "</div>"
             "</div>"
             "</article>"
@@ -1019,8 +1031,8 @@ def render_page(data):
     }}
     .preview-list-controls,
     .preview-footer-actions,
-    .preview-file-header-actions,
-    .preview-file-actions {{
+    .preview-file-actions,
+    .preview-file-header-actions {{
       display: flex;
       justify-content: flex-end;
       align-items: center;
@@ -1069,6 +1081,51 @@ def render_page(data):
       padding: 10px 12px;
       border-top: 1px solid var(--ha-border);
       background: var(--ha-card-bg);
+    }}
+    .preview-choice-slot {{
+      display: inline-flex;
+    }}
+    .preview-choice-toggle {{
+      display: inline-grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      min-width: 280px;
+      border: 1px solid var(--ha-border);
+      border-radius: 999px;
+      overflow: hidden;
+      background: var(--ha-card-bg);
+    }}
+    .preview-choice-option {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 38px;
+      padding: 0 12px;
+      color: var(--ha-text);
+      cursor: pointer;
+      font-size: 0.92rem;
+      font-weight: 600;
+      white-space: nowrap;
+    }}
+    .preview-choice-option + .preview-choice-option {{
+      border-left: 1px solid var(--ha-border);
+    }}
+    .preview-choice-option input {{
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }}
+    .preview-choice-option:has(input:checked) {{
+      background: var(--ha-primary);
+      color: var(--ha-primary-contrast);
+    }}
+    .preview-choice-option:has(input:disabled) {{
+      background: #e5e7eb;
+      color: #6b7280;
+      cursor: default;
+    }}
+    .preview-choice-option:has(input:checked:disabled) {{
+      background: #d1d5db;
+      color: #4b5563;
     }}
     .preview-footer-actions {{
       margin-top: 4px;
@@ -1736,8 +1793,14 @@ def render_page(data):
       function setPreviewFileExpanded(file, expanded) {{
         const detail = file.querySelector(".preview-file-detail");
         const toggle = file.querySelector(".preview-file-toggle");
+        const choice = file.querySelector(".preview-choice-toggle");
+        const headerSlot = file.querySelector("[data-preview-choice-slot='header']");
+        const detailSlot = file.querySelector("[data-preview-choice-slot='detail']");
         if (detail) {{
           detail.hidden = !expanded;
+        }}
+        if (choice && headerSlot && detailSlot) {{
+          (expanded ? detailSlot : headerSlot).appendChild(choice);
         }}
         if (toggle) {{
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");

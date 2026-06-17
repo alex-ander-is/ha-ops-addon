@@ -811,13 +811,6 @@ def create_handler(ctx):
                             ),
                         }
                     )
-                    if not remaining and not state.get(conflicts_key):
-                        if not self.start_job(
-                            ctx.run_save_job if direction == "save" else ctx.run_apply_job,
-                            lock_acquired=lock_acquired,
-                        ):
-                            return
-                        lock_acquired = False
                     if self.wants_json():
                         self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
                     else:
