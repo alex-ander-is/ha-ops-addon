@@ -1362,11 +1362,15 @@ class ServerTests(unittest.TestCase):
             self.assertIn("data-auto-submit='change'", page)
             self.assertNotIn("Use Git Version", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
+            detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
+            detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
+            detail_choice_slot = page.index("data-preview-choice-slot='detail'", detail_actions)
             self.assertLess(page.index("Wrap Lines"), detail)
             self.assertLess(page.index("Use HA Version"), detail)
             self.assertLess(page.index("Keep Unchanged"), detail)
+            self.assertLess(detail_collapse, detail_choice_slot)
             self.assertIn("data-preview-choice-slot='detail'></span>", page)
-            self.assertIn("(expanded ? detailSlot : headerSlot).appendChild(choice);", page)
+            self.assertIn("for (const toggle of toggles)", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
             self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
 
@@ -1413,9 +1417,13 @@ class ServerTests(unittest.TestCase):
             self.assertIn("preview-choice-toggle", page)
             self.assertNotIn("Use HA Version", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
+            detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
+            detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
+            detail_choice_slot = page.index("data-preview-choice-slot='detail'", detail_actions)
             self.assertLess(page.index("Wrap Lines"), detail)
             self.assertLess(page.index("Use Git Version"), detail)
             self.assertLess(page.index("Keep Unchanged"), detail)
+            self.assertLess(detail_collapse, detail_choice_slot)
             self.assertIn("data-preview-choice-slot='detail'></span>", page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
@@ -2135,6 +2143,32 @@ class ServerTests(unittest.TestCase):
         self.assertIn("diff-add", content)
         self.assertIn("diff-changed", content)
         self.assertIn("0.4.1", content)
+
+    def test_diff_unicode_escape_hover_shows_character(self):
+        server = load_server()
+        table_setting = chr(0x1F37D)
+
+        content = server.ui.render_conflicts(
+            [
+                {
+                    "path": "homeassistant/.ha-ops/areas/dining_room/automations.yaml",
+                    "detail": "\n".join(
+                        [
+                            "--- Git",
+                            "+++ HA",
+                            "@@ -1 +1 @@",
+                            f"-title: {table_setting} {{{{ now().strftime('%H:%M') }}}} Dining Room",
+                            r'+title: "\U0001F37D {{ now().strftime(\'%H:%M\') }} Dining Room"',
+                        ]
+                    ),
+                }
+            ]
+        )
+
+        self.assertIn("unicode-escape", content)
+        self.assertIn(r"\U0001F37D", content)
+        self.assertIn(f"title='{table_setting}'", content)
+        self.assertIn(f"data-unicode-char='{table_setting}'", content)
 
     def test_save_conflict_ui_can_approve_all_as_ha_version(self):
         server = load_server()

@@ -115,14 +115,16 @@ def require_yaml():
 def yaml_dump_text(data):
     require_yaml()
     if annotated_yaml_dump is not None:
-        return annotated_yaml_dump(data)
-    return yaml.dump(
-        data,
-        default_flow_style=False,
-        allow_unicode=True,
-        sort_keys=False,
-        Dumper=HACompatibleDumper,
-    ).replace(": null\n", ":\n")
+        text = annotated_yaml_dump(data)
+    else:
+        text = yaml.dump(
+            data,
+            default_flow_style=False,
+            allow_unicode=True,
+            sort_keys=False,
+            Dumper=HACompatibleDumper,
+        )
+    return text.replace(": null\n", ":\n")
 
 
 def yaml_load(path, default):

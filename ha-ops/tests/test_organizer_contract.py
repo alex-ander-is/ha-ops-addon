@@ -431,6 +431,15 @@ class OrganizerContractTests(unittest.TestCase):
     def test_dump_uses_home_assistant_null_cleanup(self):
         self.assertEqual(ORGANIZER.yaml_dump_text({"value": None}), "value:\n")
 
+    def test_dump_cleans_annotatedyaml_null_values(self):
+        original_dump = ORGANIZER.annotated_yaml_dump
+        try:
+            ORGANIZER.annotated_yaml_dump = lambda data: "sequence:\n  thumbnail: null\n"
+
+            self.assertEqual(ORGANIZER.yaml_dump_text({"thumbnail": None}), "sequence:\n  thumbnail:\n")
+        finally:
+            ORGANIZER.annotated_yaml_dump = original_dump
+
     def test_split_creates_area_first_git_view_from_live_heap(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

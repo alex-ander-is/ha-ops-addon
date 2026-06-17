@@ -1,5 +1,6 @@
 import html
 import json
+import re
 
 import i18n
 
@@ -55,16 +56,51 @@ def changed_ranges(old_text, new_text):
     )
 
 
+UNICODE_ESCAPE_RE = re.compile(r"\\(?:U[0-9A-Fa-f]{8}|u[0-9A-Fa-f]{4})")
+
+
+def unicode_escape_character(value):
+    digits = value[2:]
+    codepoint = int(digits, 16)
+    if 0xD800 <= codepoint <= 0xDFFF:
+        return None
+    try:
+        return chr(codepoint)
+    except ValueError:
+        return None
+
+
+def render_diff_text(text):
+    parts = []
+    last = 0
+    for match in UNICODE_ESCAPE_RE.finditer(text):
+        parts.append(html.escape(text[last : match.start()]))
+        value = match.group(0)
+        character = unicode_escape_character(value)
+        if character is None:
+            parts.append(html.escape(value))
+        else:
+            escaped_character = html.escape(character, quote=True)
+            parts.append(
+                "<span class='unicode-escape' "
+                f"title='{escaped_character}' data-unicode-char='{escaped_character}'>"
+                f"{html.escape(value)}</span>"
+            )
+        last = match.end()
+    parts.append(html.escape(text[last:]))
+    return "".join(parts)
+
+
 def render_changed_text(text, changed_range):
     start, end = changed_range
     if start >= end:
-        return html.escape(text)
+        return render_diff_text(text)
     return (
-        html.escape(text[:start])
+        render_diff_text(text[:start])
         + "<span class='diff-changed'>"
-        + html.escape(text[start:end])
+        + render_diff_text(text[start:end])
         + "</span>"
-        + html.escape(text[end:])
+        + render_diff_text(text[end:])
     )
 
 
@@ -73,7 +109,7 @@ def render_diff_line(line, changed_range=None):
     if changed_range and class_name in {"diff-add", "diff-del"}:
         content = html.escape(line[:1]) + render_changed_text(line[1:], changed_range)
     else:
-        content = html.escape(line)
+        content = render_diff_text(line)
     return f"<span class='diff-line {class_name}'>{content}</span>"
 
 
@@ -465,6 +501,7 @@ def render_preview_decisions(
             "<div class='preview-file-detail' hidden>"
             f"{render_conflict_detail(detail, include_wrap_control=False)}"
             "<div class='preview-file-actions preview-file-detail-actions'>"
+            f"<button type='button' class='secondary preview-file-toggle preview-file-detail-toggle' aria-expanded='true'>{_('button.collapse_diff')}</button>"
             "<span class='preview-choice-slot' data-preview-choice-slot='detail'></span>"
             "</div>"
             "</div>"
@@ -1410,6 +1447,32 @@ def render_page(data):
       padding: 0 1px;
       font-weight: 700;
     }}
+    .unicode-escape {{
+      position: relative;
+      border-bottom: 1px dotted currentColor;
+      cursor: help;
+    }}
+    .unicode-escape:hover::after,
+    .unicode-escape:focus-visible::after {{
+      content: attr(data-unicode-char);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 6px);
+      transform: translateX(-50%);
+      z-index: 2;
+      min-width: 32px;
+      padding: 6px 8px;
+      border: 1px solid var(--ha-border);
+      border-radius: 6px;
+      background: var(--ha-card-bg);
+      color: var(--ha-text);
+      box-shadow: 0 8px 20px rgba(0, 0, 0, 0.16);
+      font-family: var(--ha-font);
+      font-size: 1.4rem;
+      line-height: 1;
+      text-align: center;
+      white-space: nowrap;
+    }}
     .diff-add .diff-changed {{
       background: color-mix(in srgb, var(--ha-success) 42%, transparent);
       box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--ha-success) 70%, transparent);
@@ -1803,7 +1866,7 @@ def render_page(data):
 
       function setPreviewFileExpanded(file, expanded) {{
         const detail = file.querySelector(".preview-file-detail");
-        const toggle = file.querySelector(".preview-file-toggle");
+        const toggles = file.querySelectorAll(".preview-file-toggle");
         const choice = file.querySelector(".preview-choice-toggle");
         const headerSlot = file.querySelector("[data-preview-choice-slot='header']");
         const detailSlot = file.querySelector("[data-preview-choice-slot='detail']");
@@ -1813,7 +1876,7 @@ def render_page(data):
         if (choice && headerSlot && detailSlot) {{
           (expanded ? detailSlot : headerSlot).appendChild(choice);
         }}
-        if (toggle) {{
+        for (const toggle of toggles) {{
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
           toggle.textContent = expanded ? {js_t('button.collapse_diff')} : {js_t('button.expand_diff')};
         }}
