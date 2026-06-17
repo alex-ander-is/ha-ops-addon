@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.20
+
+- Keep expanded preview files open after changing per-file preview choices.
+- Add explicit per-file preview selection so Save and Apply only process checked Change List rows.
+- Keep cleanly merged conflict-preview files under the same Change List selection rules.
+
 ## 0.8.19
 
 - Add a lower Collapse Diff button to expanded per-file preview diffs.

@@ -307,7 +307,8 @@ def preview_choice_control(path, direction, path_action, selected_choice=None, a
     keep_checked = " checked" if selected_choice == keep_choice else ""
     return (
         f"<form class='preview-choice-toggle' method='post' action='{path_action}' "
-        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true'>"
+        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true' "
+        "data-preserve-preview-expanded='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
         f"<label class='preview-choice-option'>"
         f"<input type='radio' name='choice' value='{primary_choice}'{primary_checked}{disabled}>"
@@ -317,6 +318,33 @@ def preview_choice_control(path, direction, path_action, selected_choice=None, a
         f"<input type='radio' name='choice' value='{keep_choice}'{keep_checked}{disabled}>"
         f"<span>{_('action.keep_unchanged')}</span>"
         "</label>"
+        "</form>"
+    )
+
+
+def preview_selection_control(path, direction, selected=False, actions_disabled=False):
+    action = "select-save-preview" if direction == "save" else "select-apply-preview"
+    escaped_path = html.escape(path, quote=True)
+    checked = " checked" if selected else ""
+    disabled = " disabled" if actions_disabled else ""
+    return (
+        f"<form class='preview-file-select-form' method='post' action='{action}' "
+        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true' "
+        "data-preserve-preview-expanded='true'>"
+        f"<input type='hidden' name='path' value='{escaped_path}'>"
+        f"<input type='checkbox' name='selected' value='1'{checked}{disabled}>"
+        "</form>"
+    )
+
+
+def preview_selection_button(direction, selection_action, label, actions_disabled=False):
+    action = "select-save-preview" if direction == "save" else "select-apply-preview"
+    disabled = " disabled" if actions_disabled else ""
+    return (
+        f"<form method='post' action='{action}' data-async-form='true' "
+        "data-preserve-display-state='true' data-preserve-preview-expanded='true'>"
+        f"<input type='hidden' name='selection_action' value='{selection_action}'>"
+        f"<button type='submit' class='secondary'{disabled}>{label}</button>"
         "</form>"
     )
 
@@ -459,20 +487,22 @@ def render_preview_decisions(
     diff_text="",
     summary_text="",
     actions_disabled=False,
+    selected_paths=None,
+    required_paths=None,
 ):
     action_label = _("action.confirm_save") if direction == "save" else _("action.confirm_apply")
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
     all_action = "save" if direction == "save" else "apply"
-    missing = [path for path in paths if path not in resolutions]
-    confirm_disabled = " disabled" if actions_disabled or (require_all and missing) else ""
+    selected_paths = set(selected_paths or [])
+    required_paths = set(required_paths if required_paths is not None else (paths if require_all else []))
+    selected_missing = [path for path in selected_paths if path in required_paths and path not in resolutions]
+    confirm_disabled = " disabled" if actions_disabled or not selected_paths or (require_all and selected_missing) else ""
     cancel_disabled = " disabled" if actions_disabled else ""
     cancel_direction = "save" if direction == "save" else "apply"
     diff_by_path, diff_summary = split_preview_diff_by_path(diff_text or "", paths)
     change_labels = preview_change_labels_by_path(summary_text)
     summary_parts = []
-    if summary_text:
-        summary_parts.append(f"<pre class='preview-summary'>{html.escape(summary_text)}</pre>")
-    elif diff_summary and not paths:
+    if diff_summary and not paths:
         summary_parts.append(render_conflict_detail(diff_summary, include_wrap_control=False))
     elif diff_summary:
         summary_parts.append(f"<pre class='preview-summary'>{html.escape(diff_summary)}</pre>")
@@ -480,21 +510,24 @@ def render_preview_decisions(
     for path in paths:
         choice = resolutions.get(path)
         status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
-        selected_choice = choice or (preview_default_choice(direction) if not require_all else None)
+        selected_choice = choice or (None if path in required_paths else preview_default_choice(direction))
         change_label = change_labels.get(path)
         change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
         detail = diff_by_path.get(path) or _("text.diff_detail_unavailable")
+        preview_key = html.escape(f"{direction}:{path}", quote=True)
+        selected = path in selected_paths
         files.append(
-            "<article class='preview-file' data-preview-file>"
+            f"<article class='preview-file' data-preview-file data-preview-key='{preview_key}'>"
             "<div class='preview-file-header'>"
             "<div class='preview-file-title'>"
+            f"{preview_selection_control(path, direction, selected, actions_disabled=actions_disabled)}"
             f"<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>{_('button.expand_diff')}</button>"
             f"{render_preview_path(path)}{change}{status}"
             "</div>"
             "<div class='preview-file-header-actions'>"
             f"{preview_wrap_button()}"
             "<span class='preview-choice-slot' data-preview-choice-slot='header'>"
-            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=actions_disabled)}"
+            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=actions_disabled or not selected)}"
             "</span>"
             "</div>"
             "</div>"
@@ -511,6 +544,9 @@ def render_preview_decisions(
         summary_parts.append(f"<p class='muted'>{_('text.no_file_changes')}</p>")
     global_controls = (
         "<div class='preview-list-controls'>"
+        f"{preview_selection_button(direction, 'all', _('button.select_all'), actions_disabled=actions_disabled)}"
+        f"{preview_selection_button(direction, 'none', _('button.select_none'), actions_disabled=actions_disabled)}"
+        "<span class='preview-list-control-spacer' aria-hidden='true'></span>"
         f"<button type='button' class='secondary preview-expand-all'>{_('button.expand_all')}</button>"
         f"<button type='button' class='secondary preview-collapse-all'>{_('button.collapse_all')}</button>"
         "</div>"
@@ -1076,6 +1112,12 @@ def render_page(data):
       gap: 8px;
       flex-wrap: wrap;
     }}
+    .preview-list-control-spacer {{
+      width: 1px;
+      height: 28px;
+      margin: 0 4px;
+      background: var(--ha-border);
+    }}
     .preview-file-list {{
       display: grid;
       gap: 8px;
@@ -1098,6 +1140,17 @@ def render_page(data):
       align-items: center;
       gap: 10px;
       min-width: 0;
+    }}
+    .preview-file-select-form {{
+      display: inline-flex;
+      align-items: center;
+      flex: 0 0 auto;
+      margin: 0;
+    }}
+    .preview-file-select-form input[type="checkbox"] {{
+      width: 18px;
+      height: 18px;
+      margin: 0;
     }}
     .preview-file-title code {{
       overflow-wrap: anywhere;
@@ -1750,6 +1803,46 @@ def render_page(data):
         }}, delay);
       }}
 
+      const previewExpandedStorageKey = "haOpsPreviewExpandedFiles";
+
+      function storePreviewExpandedState() {{
+        const keys = [];
+        for (const file of document.querySelectorAll("[data-preview-file]")) {{
+          const detail = file.querySelector(".preview-file-detail");
+          const key = file.getAttribute("data-preview-key");
+          if (key && detail && !detail.hidden) {{
+            keys.push(key);
+          }}
+        }}
+        try {{
+          if (keys.length) {{
+            sessionStorage.setItem(previewExpandedStorageKey, JSON.stringify(keys));
+          }} else {{
+            sessionStorage.removeItem(previewExpandedStorageKey);
+          }}
+        }} catch (_error) {{}}
+      }}
+
+      function restorePreviewExpandedState() {{
+        let keys = [];
+        try {{
+          keys = JSON.parse(sessionStorage.getItem(previewExpandedStorageKey) || "[]");
+          sessionStorage.removeItem(previewExpandedStorageKey);
+        }} catch (_error) {{
+          keys = [];
+        }}
+        if (!Array.isArray(keys) || !keys.length) {{
+          return;
+        }}
+        const wanted = new Set(keys);
+        for (const file of document.querySelectorAll("[data-preview-file]")) {{
+          const key = file.getAttribute("data-preview-key");
+          if (wanted.has(key)) {{
+            setPreviewFileExpanded(file, true);
+          }}
+        }}
+      }}
+
       function navigationType() {{
         const entries = performance.getEntriesByType
           ? performance.getEntriesByType("navigation")
@@ -1797,6 +1890,9 @@ def render_page(data):
           button.textContent = {js_t('message.working')};
         }}
         setClientStatus({js_t('message.working')});
+        if (form.getAttribute("data-preserve-preview-expanded") === "true") {{
+          storePreviewExpandedState();
+        }}
         const preserveDisplayState = form.getAttribute("data-preserve-display-state") === "true";
         if (!preserveDisplayState) {{
           clearTransientDisplay();
@@ -1927,6 +2023,8 @@ def render_page(data):
       if (isRunning()) {{
         reloadSoon(3000);
       }}
+
+      restorePreviewExpandedState();
     }})();
   </script>
 </body>

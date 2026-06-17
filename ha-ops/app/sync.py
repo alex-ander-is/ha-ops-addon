@@ -1886,6 +1886,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
         conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
+            paths = sorted(set(conflicts) | set(merge_change_paths(repo_dir, ctx)))
             summary = "\n".join(
                 [_("preview.save_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
             )
@@ -1893,7 +1894,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
             return {
                 "summary": summary,
                 "diff": diff or summary,
-                "paths": conflicts,
+                "paths": paths,
                 "conflicts": conflicts,
                 "fingerprint": merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx),
             }
@@ -2540,6 +2541,7 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
         conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
+            paths = sorted(set(conflicts) | set(merge_change_paths(repo_dir, ctx)))
             summary = "\n".join(
                 [_("preview.apply_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
             )
@@ -2552,7 +2554,7 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
             return {
                 "diff": full_diff,
                 "fingerprint": fingerprint,
-                "paths": conflicts,
+                "paths": paths,
                 "deletions": len(clean_git_delete_paths),
                 "clean_git_delete_paths": clean_git_delete_paths,
                 "conflict_git_delete_paths": conflict_git_delete_paths,

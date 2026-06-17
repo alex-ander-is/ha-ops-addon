@@ -113,6 +113,17 @@ Apply uses:
 - `last_preview_conflicts`
 - `apply_preview_resolutions`
 
+Both directions also track the preview paths selected for processing:
+
+- `save_preview_selected_paths`
+- `apply_preview_selected_paths`
+
+Fresh previews must initialize these selected-path lists to empty. Missing
+selected-path state must also behave as empty, not as select-all. This makes the
+UI default safe for large change sets: a file shown in the Change List is
+visible and inspectable, but it is not processed by Save or Apply until the user
+checks it.
+
 For conflict previews, fingerprints must include both sides of each conflicted
 path. A path-only fingerprint is unsafe because live HA or Git content can
 change while the path list stays the same.
@@ -122,11 +133,22 @@ Home Assistant heap files from changing after Preview and before Apply.
 
 ## Conflict Preview Rules
 
-Conflict previews require explicit HA/Git choices for every conflicted path.
-The UI disables Confirm until all conflict paths are resolved, and the server
-must reject direct Save or Apply submissions when conflict choices are missing.
+Conflict previews must put every changed file in the Change List, including
+cleanly merged files. They separately track the subset of conflicted paths that
+requires an explicit HA/Git choice.
 
-Non-conflict previews may keep the older default behavior:
+Conflict previews require explicit HA/Git choices for every selected conflicted
+path. The UI disables Confirm until all selected conflict paths are resolved,
+and the server must reject direct Save or Apply submissions when selected
+conflict choices are missing.
+
+Unselected preview paths must keep the current side and must not be processed:
+
+- Save keeps Git for unselected paths.
+- Apply keeps live HA for unselected paths.
+
+Selected non-conflict preview paths use these defaults unless the user chooses a
+different side:
 
 - Save defaults unresolved paths to HA.
 - Apply defaults unresolved paths to Git.

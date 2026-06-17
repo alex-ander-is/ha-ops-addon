@@ -112,15 +112,25 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
     if not paths or not save_preview_matches_state(state, commit, preview):
         return dict(state.get("save_conflict_resolutions", {}))
 
+    selected = selected_preview_paths(state, paths, "save_preview_selected_paths")
+    if not selected:
+        raise RuntimeError(_("message.select_preview_files"))
     stored = dict(state.get("save_preview_resolutions", {}))
+    selected_set = set(selected)
+    conflict_paths = set(preview.get("conflicts") or [])
     if preview.get("conflicts"):
-        missing = [path for path in paths if path not in stored]
+        missing = [path for path in selected if path in conflict_paths and path not in stored]
         if missing:
             raise RuntimeError(_("message.choose_save_preview_conflicts", count=len(missing)))
-        return {path: stored[path] for path in paths}
-    if stored:
-        return {path: stored.get(path, "ha") for path in paths}
-    return {path: "ha" for path in paths}
+    return {path: stored.get(path, "ha") if path in selected_set else "git" for path in paths}
+
+
+def selected_preview_paths(state, paths, key):
+    selected = state.get(key)
+    if selected is None:
+        return []
+    selected_set = {str(item) for item in selected if str(item)}
+    return [path for path in paths if path in selected_set]
 
 
 def preview_changed_message():
@@ -129,15 +139,17 @@ def preview_changed_message():
 
 def apply_preview_resolutions_for_current_preview(state, preview):
     paths = list(preview.get("paths") or [])
+    selected = selected_preview_paths(state, paths, "apply_preview_selected_paths")
+    if paths and not selected:
+        raise RuntimeError(_("message.select_preview_files"))
     stored = dict(state.get("apply_preview_resolutions", {}))
+    selected_set = set(selected)
+    conflict_paths = set(preview.get("conflicts") or [])
     if preview.get("conflicts"):
-        missing = [path for path in paths if path not in stored]
+        missing = [path for path in selected if path in conflict_paths and path not in stored]
         if missing:
             raise RuntimeError(_("message.choose_apply_preview_conflicts", count=len(missing)))
-        return {path: stored[path] for path in paths}
-    if stored:
-        return {path: stored.get(path, "git") for path in paths}
-    return {path: "git" for path in paths}
+    return {path: stored.get(path, "git") if path in selected_set else "ha" for path in paths}
 
 
 def write_pending_conflicts(ctx, action, message, details=None, targets=None):
@@ -392,7 +404,9 @@ def run_save_job(ctx, lock_acquired=False):
                     "last_save_preview_fingerprint": current_preview["fingerprint"],
                     "last_save_preview_paths": current_preview.get("paths", []),
                     "last_save_preview_conflicts": bool(current_preview.get("conflicts")),
+                    "last_save_preview_conflict_paths": current_preview.get("conflicts", []),
                     "save_preview_resolutions": {},
+                    "save_preview_selected_paths": [],
                     "post_apply_save_recommended": False,
                 }
             )
@@ -439,6 +453,8 @@ def run_save_job(ctx, lock_acquired=False):
                 "conflict_type": None,
                 "save_conflict_resolutions": {},
                 "save_preview_resolutions": {},
+                "save_preview_selected_paths": [],
+                "last_save_preview_conflict_paths": [],
                 "save_push_retry_pending": False,
             }
         )
@@ -563,7 +579,9 @@ def run_save_preview_job(ctx, lock_acquired=False):
                 "last_save_preview_fingerprint": preview["fingerprint"],
                 "last_save_preview_paths": preview.get("paths", []),
                 "last_save_preview_conflicts": bool(preview.get("conflicts")),
+                "last_save_preview_conflict_paths": preview.get("conflicts", []),
                 "save_preview_resolutions": {},
+                "save_preview_selected_paths": [],
                 "post_apply_save_recommended": False,
             }
         )
@@ -1391,29 +1409,37 @@ def run_apply_job(ctx, lock_acquired=False):
                     "last_preview_warnings": preview.get("warnings", []),
                     "last_preview_paths": preview.get("paths", []),
                     "last_preview_conflicts": bool(preview.get("conflicts")),
+                    "last_preview_conflict_paths": preview.get("conflicts", []),
                     "apply_preview_resolutions": {},
+                    "apply_preview_selected_paths": [],
                 }
             )
             return False
         apply_resolutions = apply_preview_resolutions_for_current_preview(state, preview)
+        apply_selected_paths = selected_preview_paths(state, list(preview.get("paths") or []), "apply_preview_selected_paths")
+        selected_clean_delete_paths = {
+            path
+            for path in preview.get("clean_git_delete_paths", [])
+            if apply_resolutions.get(path) == "git"
+        }
         if preview.get("conflicts"):
             selected_delete_paths = {
                 path
                 for path in preview.get("conflict_git_delete_paths", [])
                 if apply_resolutions.get(path) == "git"
             }
-            if selected_delete_paths:
+            if selected_clean_delete_paths or selected_delete_paths:
                 preview = dict(preview)
-                preview["deletions"] = len(set(preview.get("clean_git_delete_paths", [])) | selected_delete_paths)
+                preview["deletions"] = len(selected_clean_delete_paths | selected_delete_paths)
         ctx.enforce_apply_limits(options, preview)
         keep_ha_paths = [path for path, choice in apply_resolutions.items() if choice == "ha"]
         conflict_preview = bool(preview.get("conflicts"))
         apply_commit = None
         if preview.get("paths") and not conflict_preview:
             resolved_targets = ctx.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths)
-            ctx.add_detail(details, _("detail.approved_apply_preview_files", count=len(preview.get("paths") or [])))
+            ctx.add_detail(details, _("detail.approved_apply_preview_files", count=len(apply_selected_paths)))
         elif conflict_preview:
-            ctx.add_detail(details, _("detail.approved_apply_preview_conflicts", count=len(preview.get("paths") or [])))
+            ctx.add_detail(details, _("detail.approved_apply_preview_conflicts", count=len(apply_selected_paths)))
             if preview.get("storage_changes"):
                 resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
 
@@ -1445,7 +1471,7 @@ def run_apply_job(ctx, lock_acquired=False):
                 branch,
                 apply_resolutions,
                 details,
-                preview.get("clean_git_delete_paths", []),
+                sorted(selected_clean_delete_paths),
             )
         if not conflict_preview:
             apply_commit = ctx.commit_apply_merge(
@@ -1480,6 +1506,8 @@ def run_apply_job(ctx, lock_acquired=False):
                 "last_targets": resolved_targets,
                 "last_preview_deletions": preview["deletions"],
                 "apply_preview_resolutions": {},
+                "apply_preview_selected_paths": [],
+                "last_preview_conflict_paths": [],
                 "post_apply_save_recommended": True,
             }
         )
@@ -1593,7 +1621,9 @@ def run_preview_job(ctx, lock_acquired=False):
                 "last_preview_warnings": preview.get("warnings", []),
                 "last_preview_paths": preview.get("paths", []),
                 "last_preview_conflicts": bool(preview.get("conflicts")),
+                "last_preview_conflict_paths": preview.get("conflicts", []),
                 "apply_preview_resolutions": {},
+                "apply_preview_selected_paths": [],
             }
         )
         return True

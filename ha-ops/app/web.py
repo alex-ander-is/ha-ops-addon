@@ -366,12 +366,16 @@ def render_page(ctx):
     preview_warnings = [str(item) for item in (state.get("last_preview_warnings") or []) if str(item)]
     apply_preview_paths = [str(item) for item in (state.get("last_preview_paths") or []) if str(item)]
     apply_preview_resolutions = dict(state.get("apply_preview_resolutions") or {})
+    apply_preview_selected_paths = [str(item) for item in (state.get("apply_preview_selected_paths") or []) if str(item)]
     apply_preview_conflicts = bool(state.get("last_preview_conflicts"))
+    apply_preview_conflict_paths = [str(item) for item in (state.get("last_preview_conflict_paths") or []) if str(item)]
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
     save_preview_paths = [str(item) for item in (state.get("last_save_preview_paths") or []) if str(item)]
     save_preview_resolutions = dict(state.get("save_preview_resolutions") or {})
+    save_preview_selected_paths = [str(item) for item in (state.get("save_preview_selected_paths") or []) if str(item)]
     save_preview_conflicts = bool(state.get("last_save_preview_conflicts"))
+    save_preview_conflict_paths = [str(item) for item in (state.get("last_save_preview_conflict_paths") or []) if str(item)]
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
@@ -468,7 +472,7 @@ def render_page(ctx):
             "</p>"
             f"{apply_preview_warnings_html}"
             f"<div data-transient='apply-preview'>"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text, actions_disabled=job_running)}"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text, actions_disabled=job_running, selected_paths=apply_preview_selected_paths, required_paths=apply_preview_conflict_paths)}"
             "</div>"
             "</section>"
         )
@@ -481,7 +485,7 @@ def render_page(ctx):
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
             f"<div data-transient='save-preview'>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running)}"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths)}"
             "</div>"
             "</section>"
         )
@@ -808,13 +812,14 @@ def create_handler(ctx):
                         raise RuntimeError(_("error.invalid_preview_choice"))
                     paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
                     resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
-                    conflicts_key = "last_save_preview_conflicts" if direction == "save" else "last_preview_conflicts"
+                    conflict_paths_key = "last_save_preview_conflict_paths" if direction == "save" else "last_preview_conflict_paths"
                     paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
                     if safe_path not in paths:
                         raise RuntimeError(_("error.preview_path_not_pending"))
                     resolutions = dict(state.get(resolutions_key) or {})
                     resolutions[safe_path] = choice
-                    remaining = [path for path in paths if path not in resolutions]
+                    conflict_paths = [str(item) for item in (state.get(conflict_paths_key) or paths) if str(item)]
+                    remaining = [path for path in conflict_paths if path not in resolutions]
                     ctx.write_state(
                         {
                             resolutions_key: resolutions,
@@ -856,9 +861,60 @@ def create_handler(ctx):
                     return
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.apply_preview_started")})
+                    return
                 else:
                     self.send_html(render_page(ctx))
-                return
+                    return
+
+            if parsed.path in {"/select-save-preview", "/select-apply-preview"}:
+                direction = "save" if parsed.path == "/select-save-preview" else "apply"
+                ok, state, lock_acquired = reserve_mutation_slot(ctx)
+                if not ok:
+                    self.send_running_action()
+                    return
+                try:
+                    paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
+                    selected_key = "save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths"
+                    paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
+                    path_set = set(paths)
+                    action = body.get("selection_action", [""])[0]
+                    if action == "all":
+                        selected = paths
+                    elif action == "none":
+                        selected = []
+                    else:
+                        raw_path = body.get("path", [""])[0]
+                        safe_path = git_ops.safe_repo_relative_path(raw_path)
+                        if safe_path not in path_set:
+                            raise RuntimeError(_("error.preview_path_not_pending"))
+                        selected_set = {str(item) for item in (state.get(selected_key) or []) if str(item) in path_set}
+                        if body.get("selected", [""])[0] == "1":
+                            selected_set.add(safe_path)
+                        else:
+                            selected_set.discard(safe_path)
+                        selected = [path for path in paths if path in selected_set]
+                    ctx.write_state(
+                        {
+                            selected_key: selected,
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "idle",
+                            "last_action": f"select_{direction}_preview",
+                            "last_message": _("message.selected_preview_files", count=len(selected)),
+                        }
+                    )
+                    if self.wants_json():
+                        self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
+                    else:
+                        self.send_html(render_page(ctx))
+                    return
+                except Exception as exc:
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": str(exc)}, status=400)
+                    else:
+                        self.send_html(render_page(ctx), status=400)
+                    return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/save-preview":
                 if not self.start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
