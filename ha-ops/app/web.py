@@ -925,6 +925,15 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
+            if parsed.path == "/reset-git-state":
+                if not self.start_job(ctx.run_reset_git_state_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
+                    return
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": _("message.git_state_reset_started")})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
             if parsed.path == "/save":
                 if not self.start_job(ctx.run_save_job):
                     return

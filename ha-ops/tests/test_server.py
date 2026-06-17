@@ -3826,6 +3826,9 @@ class ServerTests(unittest.TestCase):
             def run_save_preview_job(self, lock_acquired=False):
                 self.record_call("save-preview", lock_acquired)
 
+            def run_reset_git_state_job(self, lock_acquired=False):
+                self.record_call("reset-git-state", lock_acquired)
+
             def run_preview_job(self, lock_acquired=False):
                 self.record_call("preview", lock_acquired)
 
@@ -3934,11 +3937,25 @@ class ServerTests(unittest.TestCase):
 
         post_request = invoke(
             "do_POST",
+            "/reset-git-state",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Git state reset started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state"])
+        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
+        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
+        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
+
+        post_request = invoke(
+            "do_POST",
             "/approve-apply",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 404)
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state"])
 
         post_request = invoke(
             "do_POST",
@@ -3947,7 +3964,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview"])
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -3964,7 +3981,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Retained devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "deleted-devices-preview", "retained-devices-preview"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview", "retained-devices-preview"])
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -3983,7 +4000,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Internal ids check started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
-            ["save", "save-preview", "preview", "deleted-devices-preview", "retained-devices-preview", "internal-ids-preview"],
+            ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview", "retained-devices-preview", "internal-ids-preview"],
         )
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
@@ -4008,6 +4025,7 @@ class ServerTests(unittest.TestCase):
                 "save",
                 "save-preview",
                 "preview",
+                "reset-git-state",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4037,6 +4055,7 @@ class ServerTests(unittest.TestCase):
                 "save",
                 "save-preview",
                 "preview",
+                "reset-git-state",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4059,6 +4078,7 @@ class ServerTests(unittest.TestCase):
                 "save",
                 "save-preview",
                 "preview",
+                "reset-git-state",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4082,6 +4102,7 @@ class ServerTests(unittest.TestCase):
                 "save",
                 "save-preview",
                 "preview",
+                "reset-git-state",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4400,6 +4421,7 @@ class ServerTests(unittest.TestCase):
                 "save",
                 "save-preview",
                 "preview",
+                "reset-git-state",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -5368,6 +5390,79 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/scripts.yaml"), "ha-scripts\n")
+
+    def test_reset_git_state_recovers_preview_after_old_partial_save_merge(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text("git-automations\n")
+            (seed / "homeassistant" / "scripts.yaml").write_text("git-scripts\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            self.git(["checkout", "-B", "ha-ops/ha-live", "main"], seed)
+            (seed / "homeassistant" / "configuration.yaml").write_text("ha-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text("ha-automations\n")
+            (seed / "homeassistant" / "scripts.yaml").write_text("ha-scripts\n")
+            self.git_commit_all(seed, "live export")
+            self.git(["branch", "-f", "ha-ops/base", "main"], seed)
+            self.git(["push", "origin", "ha-ops/ha-live", "ha-ops/base"], seed)
+
+            self.git(["checkout", "main"], seed)
+            self.git(["merge", "--no-commit", "--no-ff", "ha-ops/ha-live"], seed)
+            self.git(["checkout", "HEAD", "--", "homeassistant/configuration.yaml", "homeassistant/scripts.yaml"], seed)
+            self.git_commit_all(seed, "old partial save")
+            self.git(["push", "origin", "main"], seed)
+            bad_live = self.remote_rev(remote, "ha-ops/ha-live")
+            self.assertIn(bad_live, self.remote_parents(remote, "main"))
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
+            (server.CONFIG_DIR / "scripts.yaml").write_text("ha-scripts\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(server.read_state()["last_save_preview"], "No Save changes.")
+
+            self.assertTrue(server.run_reset_git_state_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "success")
+            self.assertEqual(state["last_message"], "Git state reset finished successfully.")
+            self.assertEqual(state["last_save_preview"], "")
+            reset_live = self.remote_rev(remote, "ha-ops/ha-live")
+            self.assertNotEqual(reset_live, bad_live)
+            self.assertEqual(self.remote_rev(remote, "main"), self.remote_rev(remote, "ha-ops/base"))
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_save_preview_paths"]),
+                {
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.assertNotIn("homeassistant/automations.yaml", state["last_save_preview"])
 
     def test_ha_to_git_merge_preserves_git_only_battery_attention_addition(self):
         server = load_server()
@@ -8579,6 +8674,8 @@ class ServerTests(unittest.TestCase):
             include_redundant = page.index("action='include-redundant-data'")
             git_to_ha_section = page.index("<h2>Git to HA</h2>")
             git_to_ha = page.index('action="preview"')
+            reset_git_state_section = page.index("<h2>Reset Git State</h2>")
+            reset_git_state = page.index('action="reset-git-state"')
             deleted_section = page.index("<h2>Deleted Devices</h2>")
             deleted = page.index('action="deleted-devices-preview"')
             retained_section = page.index("<h2>Retained Devices</h2>")
@@ -8589,7 +8686,9 @@ class ServerTests(unittest.TestCase):
             self.assertLess(ha_to_git, include_redundant)
             self.assertLess(include_redundant, git_to_ha_section)
             self.assertLess(git_to_ha_section, git_to_ha)
-            self.assertLess(git_to_ha, deleted_section)
+            self.assertLess(git_to_ha, reset_git_state_section)
+            self.assertLess(reset_git_state_section, reset_git_state)
+            self.assertLess(reset_git_state, deleted_section)
             self.assertLess(deleted_section, deleted)
             self.assertLess(deleted, retained_section)
             self.assertLess(retained_section, retained)
@@ -8600,8 +8699,10 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<button type="submit" >Save HA to Git</button>', page)
             self.assertNotIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn("Check deleted_devices", page)
+            self.assertIn("Reset Git State", page)
             self.assertIn("Check actions IDs", page)
             self.assertIn("Previews deleted device registry entries.", page)
+            self.assertIn("Rebuilds HA Ops service branches", page)
             self.assertIn("Finds stale Zigbee2MQTT MQTT discovery topics.", page)
             self.assertIn("Previews Git-only rewrites", page)
             self.assertIn("Migrate and save selected files to Git, then run Git to HA.", page)

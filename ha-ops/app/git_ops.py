@@ -202,6 +202,12 @@ def push_branch(repo_dir, env, branch, run_command):
         raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
 
 
+def push_branch_force_with_lease(repo_dir, env, branch, run_command):
+    push = run_command(["git", "push", "--force-with-lease", "-u", "origin", branch], env=env, cwd=repo_dir)
+    if push.returncode != 0:
+        raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
+
+
 def git_status_porcelain(repo_dir, run_command):
     result = run_command(["git", "status", "--porcelain"], cwd=repo_dir)
     if result.returncode != 0:

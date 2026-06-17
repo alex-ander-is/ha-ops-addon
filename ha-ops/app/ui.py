@@ -1656,6 +1656,15 @@ def render_page(data):
             </div>
           </section>
           <section class="action-section">
+            <h2>{_('heading.reset_git_state')}</h2>
+            <div class="action-row">
+              <form method="post" action="reset-git-state" data-async-form="true" data-confirm="{_('confirm.reset_git_state')}">
+                <button type="submit" class="secondary" {data['action_disabled']}>{_('action.reset_git_state')}</button>
+              </form>
+            </div>
+            <p class="action-flow">{_('text.reset_git_state')}</p>
+          </section>
+          <section class="action-section">
             <h2>{_('heading.deleted_devices')}</h2>
             <div class="action-row">
               <form method="post" action="deleted-devices-preview" data-async-form="true">

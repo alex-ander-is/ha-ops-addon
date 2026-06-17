@@ -25,6 +25,12 @@ Preview jobs may create commits on `ha-ops/ha-live` and push HA Ops service
 branches. That is expected. It changes Git service refs only; it must not write
 live Home Assistant config.
 
+Reset Git State is a recovery action for stale or inconsistent preview graphs.
+It must not rewrite `repo_branch` and must not write live Home Assistant config.
+It rebuilds `ha-ops/ha-live` from the current `repo_branch` plus a fresh live
+export, moves `ha-ops/base` to the resulting merge base, and force-with-lease
+pushes only those HA Ops service branches.
+
 Apply and Save jobs may leave the local checkout on a service branch after a
 service-branch commit. That is acceptable because the next normal job calls
 `ensure_repo(...)`, which checks out `repo_branch` again before user-branch work.

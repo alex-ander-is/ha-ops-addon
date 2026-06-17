@@ -71,10 +71,12 @@ class JobContext:
     option_bool: Any
     prune_release_snapshots: Any
     push_branch: Any
+    push_branch_force_with_lease: Any
     read_state: Any
     release_now: Any
     repo_checkout_path: Any
     reset_repo_worktree: Any
+    reset_service_branches_from_main: Any
     normalize_changed_save_registry_worktree: Any
     restore_normalized_equal_save_worktree: Any
     restore_save_git_resolutions: Any
@@ -617,6 +619,82 @@ def run_save_preview_job(ctx, lock_acquired=False):
                 "last_run_at": utc_now(),
                 "last_status": "error",
                 "last_action": "save_preview",
+                "last_message": str(exc),
+                "last_details": details,
+                "last_targets": resolved_targets,
+            }
+        )
+        return False
+    finally:
+        release_run_lock(ctx)
+
+
+def run_reset_git_state_job(ctx, lock_acquired=False):
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not enter_run_lock(ctx, "reset_git_state", lock_acquired):
+        return False
+
+    details = []
+    options = ctx.load_options()
+    resolved_targets = []
+
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "reset_git_state",
+            "last_message": _("message.resetting_git_state"),
+            "last_details": details,
+        }
+    )
+
+    try:
+        state = ctx.read_state()
+        if state.get("deleted_devices_pending_confirmation"):
+            write_pending_deleted_devices(ctx, "reset_git_state", details, resolved_targets)
+            return False
+        if state.get("conflicts"):
+            write_pending_conflicts(ctx, "reset_git_state", conflict_status_message(state), details, resolved_targets)
+            return False
+
+        prepare_repo_checkout_for_sync(ctx, options, details, "Reset Git State")
+        repo_dir = ctx.ensure_repo(options)
+        env = ctx.git_env(options)
+        branch = options.get("repo_branch", "main")
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+
+        ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=ctx.git_head_or_unborn(repo_dir)))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
+        ctx.add_detail(details, _("detail.resetting_git_state"))
+        ctx.reset_service_branches_from_main(resolved_targets, repo_dir, branch, details)
+        for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
+            ctx.push_branch_force_with_lease(repo_dir, env, service_branch)
+            ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
+
+        write_state(
+            {
+                **state_store.ALL_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "reset_git_state",
+                "last_message": _("message.git_state_reset"),
+                "last_details": details,
+                "last_targets": resolved_targets,
+                "post_apply_save_recommended": False,
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "reset_git_state",
                 "last_message": str(exc),
                 "last_details": details,
                 "last_targets": resolved_targets,

@@ -1281,6 +1281,13 @@ def git_ref_exists(repo_dir, ref, ctx):
     return result.returncode == 0
 
 
+def git_rev_parse(repo_dir, ref, ctx):
+    result = ctx.run_command(["git", "rev-parse", ref], cwd=repo_dir)
+    if result.returncode != 0:
+        raise RuntimeError(f"git rev-parse {ref} failed:\n{result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout.strip()
+
+
 def git_has_head(repo_dir, ctx):
     return git_ref_exists(repo_dir, "HEAD", ctx)
 
@@ -1494,6 +1501,34 @@ def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redu
     if commit and details is not None:
         ctx.add_detail(details, f"Updated {HA_LIVE_BRANCH} at {commit}.")
     return commit
+
+
+def reset_service_branches_from_main(resolved_targets, repo_dir, main_branch, details, ctx, include_redundant_data=False):
+    repo_dir = Path(repo_dir)
+    git_checkout(repo_dir, main_branch, ctx)
+    git_abort_merge(repo_dir, ctx)
+    git_reset_hard(repo_dir, ctx)
+
+    export_root = build_save_export(resolved_targets, details, ctx)
+    checkout = ctx.run_command(["git", "checkout", "-B", HA_LIVE_BRANCH, main_branch], cwd=repo_dir)
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout {HA_LIVE_BRANCH} failed:\n{checkout.stderr.strip() or checkout.stdout.strip()}")
+
+    apply_save_export(resolved_targets, export_root, details, ctx)
+    if not include_redundant_data:
+        restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, ctx)
+        normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details, ctx)
+    stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
+    git_commit_if_needed(repo_dir, "Reset HA live export", ctx)
+    live_commit = git_rev_parse(repo_dir, HA_LIVE_BRANCH, ctx)
+    base = update_base_branch(repo_dir, main_branch, ctx)
+    if details is not None:
+        ctx.add_detail(details, f"Reset {HA_LIVE_BRANCH} to {live_commit}.")
+        if base:
+            ctx.add_detail(details, f"Reset {HA_BASE_BRANCH} to {base}.")
+    git_checkout(repo_dir, main_branch, ctx)
+    git_reset_hard(repo_dir, ctx)
+    return {"ha_live": live_commit, "ha_base": base}
 
 
 def merge_status_lines(repo_dir, ctx):

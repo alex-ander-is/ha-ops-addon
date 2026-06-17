@@ -351,6 +351,9 @@ class AppContext:
     def push_branch(self, repo_dir, env, branch):
         return git_ops.push_branch(repo_dir, env, branch, self.run_command)
 
+    def push_branch_force_with_lease(self, repo_dir, env, branch):
+        return git_ops.push_branch_force_with_lease(repo_dir, env, branch, self.run_command)
+
     def selected_addon_slugs(self):
         return manifest_logic.selected_addon_slugs(self.read_state)
 
@@ -451,6 +454,16 @@ class AppContext:
             message,
             details,
             self.sync_deps(),
+        )
+
+    def reset_service_branches_from_main(self, resolved_targets, repo_dir, main_branch, details, include_redundant_data=False):
+        return sync_logic.reset_service_branches_from_main(
+            resolved_targets,
+            repo_dir,
+            main_branch,
+            details,
+            self.sync_deps(),
+            include_redundant_data=include_redundant_data,
         )
 
     def commit_apply_merge(self, repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details):
@@ -771,10 +784,12 @@ class AppContext:
             option_bool=self.option_bool,
             prune_release_snapshots=self.prune_release_snapshots,
             push_branch=self.push_branch,
+            push_branch_force_with_lease=self.push_branch_force_with_lease,
             read_state=self.read_state,
             release_now=self.release_now,
             repo_checkout_path=self.repo_checkout_path,
             reset_repo_worktree=self.reset_repo_worktree,
+            reset_service_branches_from_main=self.reset_service_branches_from_main,
             normalize_changed_save_registry_worktree=self.normalize_changed_save_registry_worktree,
             restore_normalized_equal_save_worktree=self.restore_normalized_equal_save_worktree,
             restore_save_git_resolutions=self.restore_save_git_resolutions,
@@ -804,6 +819,9 @@ class AppContext:
 
     def run_save_preview_job(self, lock_acquired=False):
         return job_logic.run_save_preview_job(self.job_deps(), lock_acquired=lock_acquired)
+
+    def run_reset_git_state_job(self, lock_acquired=False):
+        return job_logic.run_reset_git_state_job(self.job_deps(), lock_acquired=lock_acquired)
 
     def run_deleted_devices_preview_job(self, lock_acquired=False):
         return job_logic.run_deleted_devices_preview_job(self.job_deps(), lock_acquired=lock_acquired)
