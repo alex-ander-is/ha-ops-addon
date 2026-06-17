@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.21
+
+- Explain disabled preview Confirm actions when no Change List files are selected.
+- Update README preview selection, storage approval, and Git deletion behavior.
+
 ## 0.8.20
 
 - Keep expanded preview files open after changing per-file preview choices.

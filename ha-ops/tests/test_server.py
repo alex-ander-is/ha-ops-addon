@@ -1392,6 +1392,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn('sessionStorage.removeItem(previewExpandedStorageKey);', page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
             self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
+            self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
             self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
 
             server.write_state({"save_preview_selected_paths": ["homeassistant/configuration.yaml"]})
@@ -1401,6 +1402,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<input type='radio' name='choice' value='ha' checked>", selected_page)
             self.assertIn("<input type='radio' name='choice' value='git'>", selected_page)
             self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
+            self.assertNotIn("Select files to continue.", selected_page)
 
     def test_apply_preview_renders_collapsed_change_list_with_apply_choices_and_footer_actions(self):
         server = load_server()
@@ -1462,6 +1464,7 @@ class ServerTests(unittest.TestCase):
             self.assertLess(detail_collapse, detail_choice_slot)
             self.assertIn("data-preview-choice-slot='detail'></span>", page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
+            self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
             self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
 
@@ -1477,6 +1480,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<input type='radio' name='choice' value='git' checked>", selected_page)
             self.assertIn("<input type='radio' name='choice' value='ha'>", selected_page)
             self.assertIn("<button type='submit'>Confirm Apply to HA</button>", selected_page)
+            self.assertNotIn("Select files to continue.", selected_page)
 
     def test_running_preview_disables_save_and_apply_cancel_actions(self):
         server = load_server()

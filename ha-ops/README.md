@@ -5,9 +5,9 @@ HA Ops manages Home Assistant config with Git-backed previews and service branch
 ## Actions
 
 - `Preview HA to Git`: export live Home Assistant config, update service branches, and show the merge result before Save.
-- `Save HA to Git`: commit the confirmed HA to Git merge into `repo_branch` and push.
+- `Save HA to Git`: commit selected preview files from the confirmed HA to Git merge into `repo_branch` and push.
 - `Preview Git to HA`: export current live Home Assistant config to `ha-ops/ha-live`, push service branches, and show the merge diff before Apply.
-- `Apply Git to HA`: apply Git config after matching preview and safety checks.
+- `Apply Git to HA`: apply selected preview files after matching preview and safety checks.
 - `Rollback`: restore a saved local release snapshot.
 
 ## Repository Model
@@ -74,6 +74,11 @@ Example conversion:
 Home Assistant is the source of truth for `Save HA to Git`. Export is config-only:
 HA Ops writes allowlisted live config, including allowlisted `.storage`, to Git.
 
+After a preview, the Change List starts with no files selected. Check the files
+you want to process, or use `Select All`; unchecked files stay unchanged in Git.
+For selected non-conflict files, Save defaults to the HA version unless you
+choose `Keep Unchanged`.
+
 Saved:
 
 - root `*.yaml` and `*.yml`, except `secrets.yaml`
@@ -96,7 +101,7 @@ Note:
 
 - Save exports the full `.storage` allowlist. Protected files such as device and entity registries and `person` are saved to Git by design.
 - Sensitive raw `.storage` files such as auth, sessions, tokens, secrets, and raw `core.config_entries` are not saved. `core.config_entries` is represented only by the managed projection.
-- If fresh HA config conflicts with the Git checkout and there is no trusted common base, HA Ops stops, shows a per-file diff, and lets the user approve overwriting Git with the live HA version.
+- If fresh HA config conflicts with the Git checkout and there is no trusted common base, HA Ops stops, shows a per-file diff, and lets the user choose HA or Git for each selected conflicted file.
 
 Skipped:
 
@@ -111,15 +116,15 @@ Skipped:
 ## Apply Policy
 
 - Git config is applied as an overlay, not as a destructive mirror.
-- Missing files in Git do not delete live Home Assistant files.
+- Missing files in Git do not delete live Home Assistant files during normal overlay apply. In conflict previews, a selected Git-side deletion can remove the matching live file.
 - Selected add-on config is applied as an overlay by default.
 - Selected add-on runtime files such as databases and logs are ignored on apply, even when present in Git.
 - Empty Git source is a no-op.
 - Home Assistant directories that exist in Git are applied as overlays.
 - `Preview Git to HA` always shows the full diff for allowlisted `.storage`, including protected registry and instance files.
-- `Apply Git to HA` requires explicit approval whenever the preview contains any `.storage` change, even if there is no Git conflict.
-- After approval, the matching preview can be applied once and protected allowlisted `.storage` files are written from Git to HA.
-- YAML-only and other non-`.storage` changes do not require this extra approval when the preview matches.
+- After a preview, the Change List starts with no files selected. Check the files you want to process, or use `Select All`; unchecked files stay unchanged in live HA.
+- For selected non-conflict files, Apply defaults to the Git version unless you choose `Keep Unchanged`.
+- The preview decision plus `Confirm Apply to HA` is the explicit approval for selected `.storage` changes. Protected allowlisted `.storage` files are written from Git to HA only through this matching preview decision flow.
 - Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
 - Apply requires a fresh system backup visible in Home Assistant Backups and stored in a configured backup location by default.
 - Apply must match the last `Preview Git to HA` commit and diff fingerprint.

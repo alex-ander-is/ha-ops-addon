@@ -496,6 +496,7 @@ def render_preview_decisions(
     selected_paths = set(selected_paths or [])
     required_paths = set(required_paths if required_paths is not None else (paths if require_all else []))
     selected_missing = [path for path in selected_paths if path in required_paths and path not in resolutions]
+    needs_file_selection = bool(paths and not selected_paths and not actions_disabled)
     confirm_disabled = " disabled" if actions_disabled or not selected_paths or (require_all and selected_missing) else ""
     cancel_disabled = " disabled" if actions_disabled else ""
     cancel_direction = "save" if direction == "save" else "apply"
@@ -555,8 +556,11 @@ def render_preview_decisions(
     )
     footer = ""
     if paths:
+        confirm_hint = f"<span class='preview-confirm-hint'>{_('message.select_preview_files_to_continue')}</span>" if needs_file_selection else "<span></span>"
         footer = (
             "<div class='preview-footer-actions'>"
+            f"{confirm_hint}"
+            "<div class='preview-confirm-actions'>"
             f"<form method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
             f"<button type='submit'{confirm_disabled}>{action_label}</button>"
             "</form>"
@@ -564,6 +568,7 @@ def render_preview_decisions(
             f"<input type='hidden' name='direction' value='{cancel_direction}'>"
             f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
             "</form>"
+            "</div>"
             "</div>"
         )
     return (
@@ -1103,7 +1108,7 @@ def render_page(data):
       font-size: 1rem;
     }}
     .preview-list-controls,
-    .preview-footer-actions,
+    .preview-confirm-actions,
     .preview-file-actions,
     .preview-file-header-actions {{
       display: flex;
@@ -1111,6 +1116,18 @@ def render_page(data):
       align-items: center;
       gap: 8px;
       flex-wrap: wrap;
+    }}
+    .preview-footer-actions {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }}
+    .preview-confirm-hint {{
+      color: var(--ha-muted);
+      font-weight: 700;
+      text-align: left;
     }}
     .preview-list-control-spacer {{
       width: 1px;

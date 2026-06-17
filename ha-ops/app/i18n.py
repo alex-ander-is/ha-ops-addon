@@ -301,6 +301,7 @@ EN_TEXT = {
     "message.save_preview_started": "HA to Git preview started. Refreshing...",
     "message.selected_preview_files": "Selected {count} preview file(s).",
     "message.select_preview_files": "Select at least one preview file before confirming.",
+    "message.select_preview_files_to_continue": "Select files to continue.",
     "message.save_conflicts_resolved_rerun": "Save conflicts resolved. Run Save HA to Git again.",
     "message.save_finished_pushed": "Save finished successfully and pushed to Git.",
     "message.save_started": "Save HA to Git started. Refreshing...",
