@@ -387,6 +387,30 @@ def run_save_job(ctx, lock_acquired=False):
         current_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
         commit = ctx.git_head_or_unborn(repo_dir)
         if not save_preview_matches_state(state, commit, current_preview):
+            if not current_preview.get("paths"):
+                ctx.add_detail(details, _("detail.no_live_changes_to_save"))
+                write_state(
+                    {
+                        "last_run_at": utc_now(),
+                        "last_status": "success",
+                        "last_action": "save",
+                        "last_message": _("message.no_live_changes_to_save"),
+                        "last_details": details,
+                        "last_targets": resolved_targets,
+                        "last_save_preview": current_preview["summary"],
+                        "last_save_diff": current_preview["diff"],
+                        "last_save_diff_generated_at": utc_now(),
+                        "last_save_preview_commit": commit,
+                        "last_save_preview_fingerprint": current_preview["fingerprint"],
+                        "last_save_preview_paths": [],
+                        "last_save_preview_conflicts": False,
+                        "last_save_preview_conflict_paths": [],
+                        "save_preview_resolutions": {},
+                        "save_preview_selected_paths": [],
+                        "post_apply_save_recommended": False,
+                    }
+                )
+                return True
             message = preview_changed_message()
             details.append(message)
             write_state(

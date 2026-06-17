@@ -1386,8 +1386,10 @@ class ServerTests(unittest.TestCase):
             self.assertLess(page.index("Use HA Version"), detail)
             self.assertLess(page.index("Keep Unchanged"), detail)
             self.assertLess(detail_collapse, detail_choice_slot)
+            self.assertIn(".preview-file-detail-actions {\n      justify-content: space-between;", page)
             self.assertIn("data-preview-choice-slot='detail'></span>", page)
             self.assertIn("for (const toggle of toggles)", page)
+            self.assertIn('nextFile.scrollIntoView({block: "start", inline: "nearest"});', page)
             self.assertIn('sessionStorage.setItem(previewExpandedStorageKey, JSON.stringify(keys));', page)
             self.assertIn('sessionStorage.removeItem(previewExpandedStorageKey);', page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
@@ -1462,7 +1464,9 @@ class ServerTests(unittest.TestCase):
             self.assertLess(page.index("Use Git Version"), detail)
             self.assertLess(page.index("Keep Unchanged"), detail)
             self.assertLess(detail_collapse, detail_choice_slot)
+            self.assertIn(".preview-file-detail-actions {\n      justify-content: space-between;", page)
             self.assertIn("data-preview-choice-slot='detail'></span>", page)
+            self.assertIn('nextFile.scrollIntoView({block: "start", inline: "nearest"});', page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
@@ -2222,6 +2226,31 @@ class ServerTests(unittest.TestCase):
         self.assertIn(r"\U0001F37D", content)
         self.assertIn(f"title='{table_setting}'", content)
         self.assertIn(f"data-unicode-char='{table_setting}'", content)
+
+    def test_diff_unicode_escape_hover_keeps_full_code_when_changed_range_splits_it(self):
+        server = load_server()
+        desktop = chr(0x1F5A5)
+
+        content = server.ui.render_conflicts(
+            [
+                {
+                    "path": "homeassistant/.ha-ops/areas/office/automations.yaml",
+                    "detail": "\n".join(
+                        [
+                            "--- Git",
+                            "+++ HA",
+                            "@@ -1 +1 @@",
+                            f"-  topic: z2m/{desktop} office_7_buttons",
+                            r'+  topic: "z2m/\U0001F5A5 office_7_buttons"',
+                        ]
+                    ),
+                }
+            ]
+        )
+
+        self.assertIn(r"\U0001F5A5</span>", content)
+        self.assertNotIn(r"\U0001F5A</span>5", content)
+        self.assertIn(f"data-unicode-char='{desktop}'", content)
 
     def test_save_conflict_ui_can_approve_all_as_ha_version(self):
         server = load_server()
@@ -5267,6 +5296,79 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
 
+    def test_partial_save_keeps_unselected_files_in_later_save_preview(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text("git-automations\n")
+            (seed / "homeassistant" / "scripts.yaml").write_text("git-scripts\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text("ha-automations\n")
+            (server.CONFIG_DIR / "scripts.yaml").write_text("ha-scripts\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(
+                set(server.read_state()["last_save_preview_paths"]),
+                {
+                    "homeassistant/automations.yaml",
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            server.write_state({"save_preview_selected_paths": ["homeassistant/automations.yaml"]})
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            first_save_parents = self.remote_parents(remote, "main")
+            self.assertEqual(len(first_save_parents), 1)
+            self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/scripts.yaml"), "git-scripts\n")
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_save_preview_paths"]),
+                {
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.assertNotIn("homeassistant/automations.yaml", state["last_save_preview"])
+            server.write_state(
+                {
+                    "save_preview_selected_paths": [
+                        "homeassistant/configuration.yaml",
+                        "homeassistant/scripts.yaml",
+                    ]
+                }
+            )
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha-config\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/scripts.yaml"), "ha-scripts\n")
+
     def test_ha_to_git_merge_preserves_git_only_battery_attention_addition(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5330,6 +5432,49 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "warning")
             self.assertIn("State changed since this preview was created", state["last_message"])
             self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
+
+    def test_save_without_matching_preview_succeeds_when_rebuilt_preview_is_empty(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_save_preview": "stale save preview",
+                    "last_save_diff": "stale save diff",
+                    "last_save_preview_commit": "stale-save-commit",
+                    "last_save_preview_fingerprint": "stale-save-fingerprint",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
+                    "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+                }
+            )
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "success")
+            self.assertEqual(state["last_message"], "No live Home Assistant changes to save.")
+            self.assertEqual(state["last_save_preview"], "No Save changes.")
+            self.assertEqual(state["last_save_diff"], "")
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertEqual(state["save_preview_resolutions"], {})
+            self.assertEqual(state["save_preview_selected_paths"], [])
+            self.assertNotIn("State changed since this preview was created", "\n".join(state["last_details"]))
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
 
     def test_save_error_before_state_read_is_reported(self):

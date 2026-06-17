@@ -91,8 +91,17 @@ def render_diff_text(text):
     return "".join(parts)
 
 
+def expand_changed_range_for_unicode_escapes(text, start, end):
+    for match in UNICODE_ESCAPE_RE.finditer(text):
+        if match.start() < end and start < match.end():
+            start = min(start, match.start())
+            end = max(end, match.end())
+    return start, end
+
+
 def render_changed_text(text, changed_range):
     start, end = changed_range
+    start, end = expand_changed_range_for_unicode_escapes(text, start, end)
     if start >= end:
         return render_diff_text(text)
     return (
@@ -1185,6 +1194,7 @@ def render_page(data):
       border-top: 1px solid var(--ha-border);
     }}
     .preview-file-detail-actions {{
+      justify-content: space-between;
       padding: 10px 12px;
       border-top: 1px solid var(--ha-border);
       background: var(--ha-card-bg);
@@ -2001,7 +2011,14 @@ def render_page(data):
           if (!file) {{
             return;
           }}
-          setPreviewFileExpanded(file, button.getAttribute("aria-expanded") !== "true");
+          const expanded = button.getAttribute("aria-expanded") !== "true";
+          const nextFile = expanded ? null : file.nextElementSibling;
+          setPreviewFileExpanded(file, expanded);
+          if (nextFile && nextFile.matches("[data-preview-file]")) {{
+            requestAnimationFrame(() => {{
+              nextFile.scrollIntoView({{block: "start", inline: "nearest"}});
+            }});
+          }}
         }});
       }}
 

@@ -43,6 +43,12 @@ checkout repo_branch
 merge --no-commit ha-ops/ha-live
 ```
 
+When Save accepts every previewed path from HA, the resulting user-branch commit
+may be a merge commit with `ha-ops/ha-live` as a parent. When Save keeps any
+previewed path unchanged from Git, the resulting user-branch commit must be a
+single-parent commit based on `repo_branch` only. Otherwise Git marks the full
+live export as merged and later Save previews hide the unselected HA changes.
+
 Conflict stage meanings for Save:
 
 - stage 2 is Git, from `repo_branch`
@@ -52,8 +58,10 @@ Choosing HA for a Save conflict means stage 3. Choosing Git means stage 2 or a
 delete when the Git side deleted the path.
 
 Save must rebuild the preview before writing to `repo_branch`. If the stored
-preview commit or fingerprint no longer matches, Save must write an updated
-warning preview to state and stop without committing to `repo_branch`.
+preview commit or fingerprint no longer matches and the rebuilt preview still
+has changes, Save must write an updated warning preview to state and stop
+without committing to `repo_branch`. If the rebuilt preview is empty, Save must
+finish as a no-op and clear stale preview selections.
 
 `save_push_retry_pending` is intentional. If Save already created the
 user-branch commit but push failed, the next Save should retry the push instead

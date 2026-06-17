@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.22
+
+- Align expanded preview Collapse Diff controls left while keeping the preview choice toggle on the right.
+- Scroll to the next preview file after collapsing an expanded diff.
+- Keep unicode escape hover spans intact when inline diff highlighting cuts through an escape code.
+- Treat stale Save previews that rebuild to no changes as a successful no-op instead of asking for review.
+- Keep unselected HA-to-Git Save files visible in later previews after a partial Save.
+
 ## 0.8.21
 
 - Explain disabled preview Confirm actions when no Change List files are selected.

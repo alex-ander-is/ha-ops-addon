@@ -1431,6 +1431,46 @@ def git_commit_if_needed(repo_dir, message, ctx):
     return rev.stdout.strip()
 
 
+def git_commit_index_as_single_parent_if_needed(repo_dir, message, ctx):
+    diff = ctx.run_command(["git", "diff", "--cached", "--quiet", "HEAD", "--"], cwd=repo_dir)
+    if diff.returncode == 0:
+        git_abort_merge(repo_dir, ctx)
+        git_reset_hard(repo_dir, ctx)
+        return None
+    if diff.returncode != 1:
+        raise RuntimeError(f"git diff --cached failed:\n{diff.stderr.strip() or diff.stdout.strip()}")
+
+    tree = ctx.run_command(["git", "write-tree"], cwd=repo_dir)
+    if tree.returncode != 0:
+        raise RuntimeError(f"git write-tree failed:\n{tree.stderr.strip() or tree.stdout.strip()}")
+    parent = ctx.run_command(["git", "rev-parse", "HEAD"], cwd=repo_dir)
+    if parent.returncode != 0:
+        raise RuntimeError(f"git rev-parse HEAD failed:\n{parent.stderr.strip() or parent.stdout.strip()}")
+    commit = ctx.run_command(
+        [
+            "git",
+            "-c",
+            "user.name=HA Ops",
+            "-c",
+            "user.email=ha-ops@local",
+            "commit-tree",
+            tree.stdout.strip(),
+            "-p",
+            parent.stdout.strip(),
+            "-m",
+            message,
+        ],
+        cwd=repo_dir,
+    )
+    if commit.returncode != 0:
+        raise RuntimeError(f"git commit-tree failed:\n{commit.stderr.strip() or commit.stdout.strip()}")
+    new_commit = commit.stdout.strip()
+    reset = ctx.run_command(["git", "reset", "--hard", new_commit], cwd=repo_dir)
+    if reset.returncode != 0:
+        raise RuntimeError(f"git reset failed:\n{reset.stderr.strip() or reset.stdout.strip()}")
+    return new_commit
+
+
 def ensure_live_branch_available(repo_dir, ctx, prefer_local=False):
     if prefer_local and git_ref_exists(repo_dir, f"refs/heads/{HA_LIVE_BRANCH}", ctx):
         git_checkout(repo_dir, HA_LIVE_BRANCH, ctx)
@@ -1657,7 +1697,12 @@ def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, mess
         git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
 
     stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
-    commit = git_commit_if_needed(repo_dir, message, ctx)
+    partial_save = any(choice == "git" for choice in (resolutions or {}).values())
+    commit = (
+        git_commit_index_as_single_parent_if_needed(repo_dir, message, ctx)
+        if partial_save
+        else git_commit_if_needed(repo_dir, message, ctx)
+    )
     base = update_base_branch(repo_dir, main_branch, ctx)
     if base and details is not None:
         ctx.add_detail(details, f"Updated {HA_BASE_BRANCH} at {base}.")
