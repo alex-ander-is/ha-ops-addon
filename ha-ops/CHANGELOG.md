@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.18
+
+- Keep the Managed Targets checkbox header from overlapping the Target column.
+- Repair stale running UI state when no HA Ops job is active.
+
 ## 0.8.17
 
 - Show per-file preview choices as visible toggles, moving them below the diff when a file is expanded, and keep Confirm as the only Save or Apply trigger.

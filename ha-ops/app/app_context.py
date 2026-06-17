@@ -203,7 +203,6 @@ class AppContext:
         self.write_state(
             {
                 "last_run_at": self.utc_now(),
-                "last_status": "running",
                 "last_details": details,
             }
         )

@@ -71,15 +71,34 @@ def current_manifest_preview(ctx):
 
 def job_is_running(ctx, state=None):
     state = state if state is not None else ctx.read_state()
-    if state.get("last_status") == "running":
-        return True
     run_lock = getattr(ctx, "run_lock", None)
     if run_lock is None:
-        return False
+        return state.get("last_status") == "running"
     if not run_lock.acquire(blocking=False):
         return True
     run_lock.release()
     return False
+
+
+def repair_stale_running_state(ctx, state):
+    if state.get("last_status") != "running":
+        return state
+    run_lock = getattr(ctx, "run_lock", None)
+    if run_lock is None or not run_lock.acquire(blocking=False):
+        return state
+    try:
+        current = ctx.read_state()
+        if current.get("last_status") != "running":
+            return current
+        return ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "interrupted",
+                "last_message": _("message.previous_action_interrupted"),
+            }
+        )
+    finally:
+        run_lock.release()
 
 
 def reserve_action_slot(ctx):
@@ -92,9 +111,6 @@ def reserve_action_slot(ctx):
         return False, None, False
     try:
         state = ctx.read_state()
-        if state.get("last_status") == "running":
-            run_lock.release()
-            return False, None, False
         return True, state, True
     except Exception:
         run_lock.release()
@@ -330,6 +346,7 @@ def render_page(ctx):
         target.get("type") == "homeassistant" and target.get("organizer_enabled")
         for target in manifest_preview
     )
+    state = repair_stale_running_state(ctx, state)
     last_status = state.get("last_status", "idle")
     job_running = job_is_running(ctx, state)
     has_conflicts = bool(state.get("conflicts"))

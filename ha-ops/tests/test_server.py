@@ -1449,7 +1449,11 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
+            server.context().run_lock.acquire()
+            try:
+                page = server.render_page()
+            finally:
+                server.context().run_lock.release()
 
             self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
             self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
@@ -1476,7 +1480,11 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
+            server.context().run_lock.acquire()
+            try:
+                page = server.render_page()
+            finally:
+                server.context().run_lock.release()
 
             self.assertIn("<button type='submit' disabled>Approve HA to Git</button>", page)
             self.assertIn("<button type='submit' class='secondary' disabled>Use HA Version</button>", page)
@@ -1884,6 +1892,22 @@ class ServerTests(unittest.TestCase):
             self.assertIn('<div class="badge " data-status-code="success">done</div>', page)
             self.assertNotIn('<div class="badge ">success</div>', page)
 
+    def test_stale_running_status_is_repaired_when_lock_is_free(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state({"last_status": "running", "last_message": "Preparing save preview."})
+
+            page = server.render_page()
+            state = server.read_state()
+
+            self.assertEqual(state["last_status"], "interrupted")
+            self.assertIn('<div class="badge interrupted" data-status-code="interrupted">interrupted</div>', page)
+            self.assertIn('action="preview"', page)
+            self.assertIn('<button type="submit" class="secondary" >Preview Git to HA</button>', page)
+
     def test_status_badge_labels_come_from_translation_catalog(self):
         server = load_server()
         i18n = server.web.i18n
@@ -1901,11 +1925,15 @@ class ServerTests(unittest.TestCase):
                 server.get_installed_addons = lambda: []
 
                 server.write_state({"last_status": "running"})
-                running_page = server.render_page()
-                self.assertIn(
-                    '<div class="badge running" data-status-code="running">CATALOG: running sentinel</div>',
-                    running_page,
-                )
+                server.context().run_lock.acquire()
+                try:
+                    running_page = server.render_page()
+                    self.assertIn(
+                        '<div class="badge running" data-status-code="running">CATALOG: running sentinel</div>',
+                        running_page,
+                    )
+                finally:
+                    server.context().run_lock.release()
                 self.assertNotIn(">running</div>", running_page)
 
                 server.write_state(
@@ -3879,19 +3907,23 @@ class ServerTests(unittest.TestCase):
         expected_state = dict(ctx.state)
         update_count = len(ctx.state_updates)
         expected_calls = list(ctx.calls)
-        for path in ("/save", "/apply"):
-            post_request = invoke(
-                "do_POST",
-                path,
-                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-            )
-            self.assertEqual(post_request.responses[-1], 409)
-            response = json.loads(post_request.wfile.getvalue().decode())
-            self.assertFalse(response["ok"])
-            self.assertIn("already running", response["message"])
-            self.assertEqual(ctx.state, expected_state)
-            self.assertEqual(len(ctx.state_updates), update_count)
-            self.assertEqual(ctx.calls, expected_calls)
+        ctx.run_lock.acquire()
+        try:
+            for path in ("/save", "/apply"):
+                post_request = invoke(
+                    "do_POST",
+                    path,
+                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+                )
+                self.assertEqual(post_request.responses[-1], 409)
+                response = json.loads(post_request.wfile.getvalue().decode())
+                self.assertFalse(response["ok"])
+                self.assertIn("already running", response["message"])
+                self.assertEqual(ctx.state, expected_state)
+                self.assertEqual(len(ctx.state_updates), update_count)
+                self.assertEqual(ctx.calls, expected_calls)
+        finally:
+            ctx.run_lock.release()
 
         ctx.state.update(
             {
@@ -8008,7 +8040,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<h2>Managed Targets</h2>", page)
             self.assertIn("<table class='managed-targets-table'>", page)
             self.assertIn("<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>", page)
-            self.assertIn("<th class='checkbox-col'>Managed</th>", page)
+            self.assertIn("<th class='checkbox-col'><span class='sr-only'>Managed</span></th>", page)
+            self.assertIn(".sr-only", page)
             self.assertIn("<td class='checkbox-col'><input type='checkbox'", page)
             self.assertIn(".managed-targets-table .checkbox-col", page)
             self.assertIn("Zigbee2MQTT (local_zigbee2mqtt)", page)
@@ -8868,6 +8901,29 @@ devices:
 
             self.assertEqual(state["last_message"], "Preparing save preview.")
             self.assertEqual(state["last_details"], ["Committed pending Internal IDs migration changes to Git: abc123."])
+
+    def test_add_detail_does_not_restore_running_after_terminal_status(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_status": "success",
+                    "last_message": "Save preview finished successfully.",
+                    "last_details": ["Pushed to origin/ha-ops/base."],
+                }
+            )
+            details = ["Pushed to origin/ha-ops/base."]
+
+            server.context().add_detail(details, "Late detail from completed save preview.")
+            state = server.read_state()
+
+            self.assertEqual(state["last_status"], "success")
+            self.assertEqual(
+                state["last_details"],
+                ["Pushed to origin/ha-ops/base.", "Late detail from completed save preview."],
+            )
 
     def test_pending_internal_ids_migration_changes_are_committed_before_repo_actions(self):
         server = load_server()

@@ -717,7 +717,7 @@ def render_targets(
         "<form method='post' action='addons' data-auto-submit='change'>"
         "<table class='managed-targets-table'>"
         "<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>"
-        f"<thead><tr><th class='checkbox-col'>{_('label.managed')}</th><th>{_('label.target')}</th>"
+        f"<thead><tr><th class='checkbox-col'><span class='sr-only'>{_('label.managed')}</span></th><th>{_('label.target')}</th>"
         f"<th>{_('label.type')}</th><th>{_('label.source')}</th><th>{_('label.addon')}</th>"
         f"<th>{_('label.live_path')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
@@ -1213,6 +1213,17 @@ def render_page(data):
       max-width: 100%;
       overflow-x: auto;
       min-width: 0;
+    }}
+    .sr-only {{
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
     }}
     table {{
       width: 100%;
