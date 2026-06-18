@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.26
+
+- Show stale HA Ops internal Git branch push failures as warnings with Reset Git State guidance.
+- Keep Apply preview organizer diffs anchored to the Git organized YAML so added files keep their area path and block scalar formatting.
+
 ## 0.8.25
 
 - Keep the Log scrolled to the newest line by default while preserving manual scrollback.

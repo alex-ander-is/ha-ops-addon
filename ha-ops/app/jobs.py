@@ -30,6 +30,33 @@ def release_run_lock(ctx):
     ctx.run_lock.release()
 
 
+def service_branch_push_out_of_date(branch, error):
+    if branch != "ha-ops/base":
+        return False
+    text = str(error).lower()
+    return any(
+        token in text
+        for token in (
+            "non-fast-forward",
+            "updates were rejected",
+            "fetch first",
+            "behind its remote",
+            "[rejected]",
+        )
+    )
+
+
+def record_service_branch_push_failure(ctx, details, branch, error):
+    if branch == "ha-ops/base":
+        ctx.add_detail(details, _("detail.skipped_ha_base_push", error=error))
+    else:
+        ctx.add_detail(details, _("detail.skipped_branch_push", branch=branch, error=error))
+    out_of_date = service_branch_push_out_of_date(branch, error)
+    if out_of_date:
+        ctx.add_detail(details, _("detail.git_state_out_of_date_reset"))
+    return out_of_date
+
+
 @dataclass(frozen=True)
 class JobContext:
     add_detail: Any
@@ -366,18 +393,26 @@ def run_save_job(ctx, lock_acquired=False):
             ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
             retry_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, bool(state.get("include_redundant_data")))
             retry_commit = ctx.git_head_or_unborn(repo_dir)
+            git_state_out_of_date = False
             for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
                 try:
                     ctx.push_branch(repo_dir, env, service_branch)
                     ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
                 except RuntimeError as exc:
-                    ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
+                    git_state_out_of_date = (
+                        record_service_branch_push_failure(ctx, details, service_branch, exc)
+                        or git_state_out_of_date
+                    )
             write_state(
                 {
                     "last_run_at": utc_now(),
-                    "last_status": "success",
+                    "last_status": "warning" if git_state_out_of_date else "success",
                     "last_action": "save",
-                    "last_message": _("message.save_finished_pushed"),
+                    "last_message": (
+                        _("message.git_state_out_of_date")
+                        if git_state_out_of_date
+                        else _("message.save_finished_pushed")
+                    ),
                     "last_details": details,
                     "last_targets": resolved_targets,
                     "last_save_preview": retry_preview["summary"],
@@ -480,12 +515,16 @@ def run_save_job(ctx, lock_acquired=False):
             save_message = _("message.no_live_changes_to_save")
         post_save_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
         post_save_commit = ctx.git_head_or_unborn(repo_dir)
+        git_state_out_of_date = False
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)
                 ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
             except RuntimeError as exc:
-                ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
+                git_state_out_of_date = (
+                    record_service_branch_push_failure(ctx, details, service_branch, exc)
+                    or git_state_out_of_date
+                )
 
         write_state(
             {
@@ -501,9 +540,9 @@ def run_save_job(ctx, lock_acquired=False):
         write_state(
             {
                 "last_run_at": utc_now(),
-                "last_status": "success",
+                "last_status": "warning" if git_state_out_of_date else "success",
                 "last_action": "save",
-                "last_message": save_message,
+                "last_message": _("message.git_state_out_of_date") if git_state_out_of_date else save_message,
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "last_save_preview": post_save_preview["summary"],
@@ -605,18 +644,23 @@ def run_save_preview_job(ctx, lock_acquired=False):
         commit = ctx.git_head_or_unborn(repo_dir)
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
         ctx.add_detail(details, _("detail.pushed_ha_live"))
+        git_state_out_of_date = False
         try:
             ctx.push_branch(repo_dir, env, "ha-ops/base")
             ctx.add_detail(details, _("detail.pushed_ha_base"))
         except RuntimeError as exc:
-            ctx.add_detail(details, _("detail.skipped_ha_base_push", error=exc))
+            git_state_out_of_date = record_service_branch_push_failure(ctx, details, "ha-ops/base", exc)
 
         write_state(
             {
                 "last_run_at": utc_now(),
-                "last_status": "success",
+                "last_status": "warning" if git_state_out_of_date else "success",
                 "last_action": "save_preview",
-                "last_message": _("message.save_preview_finished"),
+                "last_message": (
+                    _("message.git_state_out_of_date")
+                    if git_state_out_of_date
+                    else _("message.save_preview_finished")
+                ),
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "last_save_preview": preview["summary"],
@@ -1607,12 +1651,16 @@ def run_apply_job(ctx, lock_acquired=False):
             )
             if apply_commit:
                 ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
+        git_state_out_of_date = False
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)
                 ctx.add_detail(details, _("detail.pushed_branch", branch=service_branch))
             except RuntimeError as exc:
-                ctx.add_detail(details, _("detail.skipped_branch_push", branch=service_branch, error=exc))
+                git_state_out_of_date = (
+                    record_service_branch_push_failure(ctx, details, service_branch, exc)
+                    or git_state_out_of_date
+                )
         pruned = ctx.prune_release_snapshots(options, protected_release=release_name)
         if pruned:
             ctx.add_detail(details, _("detail.pruned_release_snapshots", count=len(pruned), releases=", ".join(pruned)))
@@ -1620,9 +1668,13 @@ def run_apply_job(ctx, lock_acquired=False):
         write_state(
             {
                 "last_run_at": utc_now(),
-                "last_status": "success",
+                "last_status": "warning" if git_state_out_of_date else "success",
                 "last_action": "apply",
-                "last_message": _("message.apply_finished"),
+                "last_message": (
+                    _("message.git_state_out_of_date")
+                    if git_state_out_of_date
+                    else _("message.apply_finished")
+                ),
                 "last_details": details,
                 "last_release": release_name,
                 "last_backup_slug": backup_slug,
@@ -1714,21 +1766,24 @@ def run_preview_job(ctx, lock_acquired=False):
         commit = ctx.git_head_or_unborn(repo_dir)
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
         ctx.add_detail(details, _("detail.pushed_ha_live"))
+        git_state_out_of_date = False
         try:
             ctx.push_branch(repo_dir, env, "ha-ops/base")
             ctx.add_detail(details, _("detail.pushed_ha_base"))
         except RuntimeError as exc:
-            ctx.add_detail(details, _("detail.skipped_ha_base_push", error=exc))
+            git_state_out_of_date = record_service_branch_push_failure(ctx, details, "ha-ops/base", exc)
         message = _("message.apply_preview_finished")
         if preview.get("storage_changes"):
             paths = preview.get("storage_change_paths") or []
             ctx.add_detail(details, _("detail.confirm_apply_storage_changes", count=len(paths)))
             message = _("message.apply_preview_storage_confirm")
+        if git_state_out_of_date:
+            message = _("message.git_state_out_of_date")
 
         write_state(
             {
                 "last_run_at": utc_now(),
-                "last_status": "success",
+                "last_status": "warning" if git_state_out_of_date else "success",
                 "last_action": "preview",
                 "last_message": message,
                 "last_details": details,

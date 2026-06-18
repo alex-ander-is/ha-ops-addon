@@ -1804,7 +1804,21 @@ def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
         write_normalized_storage_file(preview_file, preview_file)
 
 
-def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target):
+def restore_source_organized_view_for_apply_diff(preview_copy, target, ctx):
+    options = organizer_options(target)
+    if options is None:
+        return False
+    source_path = Path(target.get("source_path") or "")
+    if not organizer.has_organized_view(source_path, options):
+        return False
+
+    source_root = organizer.organized_root(source_path, options)
+    preview_root = organizer.organized_root(preview_copy, options)
+    sync_tree(source_root, preview_root, True, None, ctx.run_command)
+    return True
+
+
+def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target, ctx):
     options = organizer_options(target)
     if options is None:
         return False
@@ -1812,6 +1826,7 @@ def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target):
         return False
     organizer.split_live_heaps_to_git(baseline_copy, baseline_copy, options=options)
     organizer.split_live_heaps_to_git(preview_copy, preview_copy, options=options)
+    restore_source_organized_view_for_apply_diff(preview_copy, target, ctx)
     normalize_organizer_index_for_diff(baseline_copy, options)
     normalize_organizer_index_for_diff(preview_copy, options)
     return True
@@ -2247,7 +2262,7 @@ def target_diff_normalized(target, baseline_path, preview_path, ctx):
     clear_tree(diff_root, ctx.work_dir, ctx.run_command)
     sync_tree(baseline_path, baseline_copy, True, [".git/"], ctx.run_command)
     sync_tree(preview_path, preview_copy, True, [".git/"], ctx.run_command)
-    normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target)
+    normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target, ctx)
     normalize_save_preview_diff_files(baseline_copy, preview_copy, registry_paths)
     return target_diff(target, baseline_copy, preview_copy, ctx.run_command)
 

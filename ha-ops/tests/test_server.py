@@ -4953,6 +4953,71 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("wardrobe_auto", preview["diff"])
             self.assertNotIn("bathroom_auto", preview["diff"])
 
+    def test_apply_preview_organizer_diff_uses_git_organized_yaml_for_added_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / "automations.yaml").write_text("[]\n")
+            (live / "scripts.yaml").write_text("{}\n")
+            (live / "scenes.yaml").write_text("[]\n")
+            (live / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
+            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (live / ".storage" / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            scripts = source / ".ha-ops" / "areas" / "home" / "scripts.yaml"
+            scripts.parent.mkdir(parents=True)
+            scripts.write_text(
+                "\n".join(
+                    [
+                        "battery_attention_scan:",
+                        "  alias: battery_attention_scan",
+                        "  sequence:",
+                        "  - variables:",
+                        "      current_silent_json: >-",
+                        "        {%- set ns = namespace(items=[]) -%}",
+                        "        {%- for item in states.sensor",
+                        "            if item.entity_id.startswith('sensor.')",
+                        "            and item.entity_id.endswith('_last_seen') -%}",
+                        "          {{ item.entity_id }}",
+                        "        {%- endfor -%}",
+                        "        {{ ns.items | to_json }}",
+                        "",
+                    ]
+                )
+            )
+            (source / ".ha-ops" / "areas" / "organizer-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "automations": {"count": 0, "ids": []},
+                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
+                        "scenes": {"count": 0, "ids": []},
+                    }
+                )
+            )
+
+            preview = server.build_apply_preview(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(live),
+                        "delete": False,
+                        "organizer": {"enabled": True},
+                    }
+                ]
+            )
+
+            self.assertIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
+            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", preview["diff"])
+            self.assertIn("current_silent_json: >-", preview["diff"])
+            self.assertNotIn('current_silent_json: "{%-', preview["diff"])
+            self.assertNotIn("\\n", preview["diff"])
+
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7410,6 +7475,62 @@ class ServerTests(unittest.TestCase):
             server.write_state({"apply_preview_selected_paths": state["last_preview_paths"]})
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "git-storage\n")
+
+    def test_apply_preview_warns_when_internal_git_state_is_out_of_date(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            original_push_branch = server.push_branch
+
+            def push_branch(repo_dir, env, branch):
+                if branch == "ha-ops/base":
+                    raise RuntimeError(
+                        "git push failed:\n"
+                        " ! [rejected]        ha-ops/base -> ha-ops/base (non-fast-forward)\n"
+                        "error: failed to push some refs"
+                    )
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = push_branch
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            details = "\n".join(state["last_details"])
+            self.assertEqual(state["last_status"], "warning")
+            self.assertEqual(state["last_message"], "HA Ops internal Git state is out of date.")
+            self.assertTrue(state["last_preview_storage_changes"])
+            self.assertIn("Skipped pushing ha-ops/base", details)
+            self.assertIn("Use Reset Git State", details)
+            self.assertIn("Confirm required for 1 .storage change(s)", details)
 
     def test_apply_preview_per_file_choice_keeps_ha_version(self):
         server = load_server()
