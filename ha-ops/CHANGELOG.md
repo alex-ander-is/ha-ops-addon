@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.25
+
+- Keep the Log scrolled to the newest line by default while preserving manual scrollback.
+
 ## 0.8.24
 
 - Refresh the Save Preview Change List after a successful Save so committed files disappear immediately.

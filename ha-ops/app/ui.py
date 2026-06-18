@@ -1778,6 +1778,50 @@ def render_page(data):
         }}
       }}
 
+      const logScrollStorageKey = "haOpsLogScrollState";
+
+      function logIsScrolledToBottom(details) {{
+        return details.scrollHeight - details.scrollTop - details.clientHeight <= 4;
+      }}
+
+      function readLogScrollState() {{
+        try {{
+          return JSON.parse(sessionStorage.getItem(logScrollStorageKey) || "null");
+        }} catch (_error) {{
+          return null;
+        }}
+      }}
+
+      function writeLogScrollState(details) {{
+        try {{
+          sessionStorage.setItem(logScrollStorageKey, JSON.stringify({{
+            sticky: logIsScrolledToBottom(details),
+            scrollTop: details.scrollTop
+          }}));
+        }} catch (_error) {{}}
+      }}
+
+      function restoreLogScrollState() {{
+        const details = document.querySelector("[data-transient='details']");
+        if (!details) {{
+          return;
+        }}
+        const state = readLogScrollState();
+        const restore = () => {{
+          if (!state || state.sticky !== false) {{
+            details.scrollTop = details.scrollHeight;
+          }} else if (Number.isFinite(state.scrollTop)) {{
+            const maxScrollTop = Math.max(0, details.scrollHeight - details.clientHeight);
+            details.scrollTop = Math.min(state.scrollTop, maxScrollTop);
+          }}
+          writeLogScrollState(details);
+        }};
+        requestAnimationFrame(restore);
+        details.addEventListener("scroll", () => {{
+          writeLogScrollState(details);
+        }}, {{passive: true}});
+      }}
+
       function syncDetailsHeight() {{
         if (!controlCard || !detailsCard) {{
           return;
@@ -2068,6 +2112,7 @@ def render_page(data):
       }}
 
       restorePreviewExpandedState();
+      restoreLogScrollState();
     }})();
   </script>
 </body>

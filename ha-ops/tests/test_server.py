@@ -970,6 +970,24 @@ class ServerTests(unittest.TestCase):
         for value in replacements.values():
             self.assertNotIn(f'"{value}"', script)
 
+    def test_log_scroll_sticks_to_bottom_unless_user_scrolls_up(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        self.assertIn('const logScrollStorageKey = "haOpsLogScrollState";', script)
+        self.assertIn("return details.scrollHeight - details.scrollTop - details.clientHeight <= 4;", script)
+        self.assertIn("if (!state || state.sticky !== false)", script)
+        self.assertIn("details.scrollTop = details.scrollHeight;", script)
+        self.assertIn("details.scrollTop = Math.min(state.scrollTop, maxScrollTop);", script)
+        self.assertIn('details.addEventListener("scroll", () => {', script)
+        self.assertIn("restoreLogScrollState();", script)
+
     def configure_paths(self, server, root):
         server.DATA_DIR = root / "data"
         server.WORK_DIR = server.DATA_DIR / "work"
