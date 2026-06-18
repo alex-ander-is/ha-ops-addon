@@ -364,6 +364,8 @@ def run_save_job(ctx, lock_acquired=False):
                 ctx.git_pull_rebase(repo_dir, env, branch)
                 ctx.push_branch(repo_dir, env, branch)
             ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
+            retry_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, bool(state.get("include_redundant_data")))
+            retry_commit = ctx.git_head_or_unborn(repo_dir)
             for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
                 try:
                     ctx.push_branch(repo_dir, env, service_branch)
@@ -378,6 +380,16 @@ def run_save_job(ctx, lock_acquired=False):
                     "last_message": _("message.save_finished_pushed"),
                     "last_details": details,
                     "last_targets": resolved_targets,
+                    "last_save_preview": retry_preview["summary"],
+                    "last_save_diff": retry_preview["diff"],
+                    "last_save_diff_generated_at": utc_now(),
+                    "last_save_preview_commit": retry_commit,
+                    "last_save_preview_fingerprint": retry_preview["fingerprint"],
+                    "last_save_preview_paths": retry_preview.get("paths", []),
+                    "last_save_preview_conflicts": bool(retry_preview.get("conflicts")),
+                    "last_save_preview_conflict_paths": retry_preview.get("conflicts", []),
+                    "save_preview_resolutions": {},
+                    "save_preview_selected_paths": [],
                     "post_apply_save_recommended": False,
                     "save_push_retry_pending": False,
                 }
@@ -466,6 +478,8 @@ def run_save_job(ctx, lock_acquired=False):
         else:
             ctx.add_detail(details, _("detail.no_live_changes_to_save"))
             save_message = _("message.no_live_changes_to_save")
+        post_save_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
+        post_save_commit = ctx.git_head_or_unborn(repo_dir)
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
                 ctx.push_branch(repo_dir, env, service_branch)
@@ -480,7 +494,6 @@ def run_save_job(ctx, lock_acquired=False):
                 "save_conflict_resolutions": {},
                 "save_preview_resolutions": {},
                 "save_preview_selected_paths": [],
-                "last_save_preview_conflict_paths": [],
                 "save_push_retry_pending": False,
             }
         )
@@ -493,6 +506,14 @@ def run_save_job(ctx, lock_acquired=False):
                 "last_message": save_message,
                 "last_details": details,
                 "last_targets": resolved_targets,
+                "last_save_preview": post_save_preview["summary"],
+                "last_save_diff": post_save_preview["diff"],
+                "last_save_diff_generated_at": utc_now(),
+                "last_save_preview_commit": post_save_commit,
+                "last_save_preview_fingerprint": post_save_preview["fingerprint"],
+                "last_save_preview_paths": post_save_preview.get("paths", []),
+                "last_save_preview_conflicts": bool(post_save_preview.get("conflicts")),
+                "last_save_preview_conflict_paths": post_save_preview.get("conflicts", []),
                 "post_apply_save_recommended": False,
             }
         )

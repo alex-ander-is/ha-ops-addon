@@ -5267,6 +5267,9 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             state = server.read_state()
             self.assertNotEqual(state["last_status"], "conflicts")
+            self.assertEqual(state["last_save_preview"], "No Save changes.")
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertEqual(state["save_preview_selected_paths"], [])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
 
     def test_save_preview_per_file_choice_keeps_git_version(self):
@@ -5315,6 +5318,11 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
+            self.assertIn("homeassistant/configuration.yaml", state["last_save_preview"])
+            self.assertNotIn("homeassistant/automations.yaml", state["last_save_preview"])
+            self.assertEqual(state["save_preview_selected_paths"], [])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
 
@@ -5368,7 +5376,16 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "ha-automations\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/scripts.yaml"), "git-scripts\n")
-
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_save_preview_paths"]),
+                {
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.assertNotIn("homeassistant/automations.yaml", state["last_save_preview"])
+            self.assertEqual(state["save_preview_selected_paths"], [])
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             state = server.read_state()
             self.assertEqual(
@@ -5388,6 +5405,7 @@ class ServerTests(unittest.TestCase):
                 }
             )
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertEqual(server.read_state()["last_save_preview"], "No Save changes.")
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha-config\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/scripts.yaml"), "ha-scripts\n")
 
@@ -6789,6 +6807,10 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job())
             self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
             self.assertGreaterEqual(calls["count"], 2)
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview"], "No Save changes.")
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertEqual(state["save_preview_selected_paths"], [])
 
     def test_save_push_retry_preserves_merge_commit_after_remote_advances(self):
         server = load_server()
@@ -6838,6 +6860,9 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             parents = self.remote_parents(remote, "main")
             self.assertEqual(len(parents), 2)
+            state = server.read_state()
+            self.assertNotIn("homeassistant/packages/new.yaml", state["last_save_preview_paths"])
+            self.assertEqual(state["save_preview_selected_paths"], [])
             self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
             self.assertEqual(self.remote_file(remote, "homeassistant/remote.yaml"), "remote\n")
 

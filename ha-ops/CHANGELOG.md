@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.24
+
+- Refresh the Save Preview Change List after a successful Save so committed files disappear immediately.
+
 ## 0.8.23
 
 - Add a Reset Git State recovery action that rebuilds HA Ops service branches from current main and live Home Assistant export.

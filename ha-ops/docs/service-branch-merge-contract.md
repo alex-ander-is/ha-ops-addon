@@ -69,6 +69,10 @@ has changes, Save must write an updated warning preview to state and stop
 without committing to `repo_branch`. If the rebuilt preview is empty, Save must
 finish as a no-op and clear stale preview selections.
 
+After a successful Save, the stored Save preview must be rebuilt and written to
+state. Files committed by the Save must disappear from the Change List
+immediately, while unselected live changes remain visible for a later Save.
+
 `save_push_retry_pending` is intentional. If Save already created the
 user-branch commit but push failed, the next Save should retry the push instead
 of exporting live HA again and creating a second commit.
