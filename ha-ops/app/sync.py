@@ -307,6 +307,7 @@ def materialize_homeassistant_source(src, target, ctx):
     clear_tree(temp, ctx.work_dir, ctx.run_command)
     sync_tree(Path(src), temp, True, None, ctx.run_command)
     organizer.compose_git_view_to_live(temp, temp, options=options)
+    organizer.clean_organized_root(temp, options)
     return temp
 
 
@@ -1812,9 +1813,12 @@ def restore_source_organized_view_for_apply_diff(preview_copy, target, ctx):
     if not organizer.has_organized_view(source_path, options):
         return False
 
-    source_root = organizer.organized_root(source_path, options)
-    preview_root = organizer.organized_root(preview_copy, options)
-    sync_tree(source_root, preview_root, True, None, ctx.run_command)
+    organizer.clean_organized_root(preview_copy, options, preserve_unmanaged=True)
+    for relative in organizer.generated_organized_relative_files(source_path, options):
+        source_file = source_path / relative
+        preview_file = preview_copy / relative
+        ensure_dir(preview_file.parent)
+        shutil.copy2(source_file, preview_file)
     return True
 
 

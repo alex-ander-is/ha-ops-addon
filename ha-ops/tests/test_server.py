@@ -1396,6 +1396,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("data-auto-submit='change'", page)
             self.assertNotIn("Use Git Version", page)
             self.assertNotIn("Save preview changes (2):", page)
+            self.assertNotIn("preview-summary", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
             detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
             detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
@@ -1474,6 +1475,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<input type='radio' name='choice' value='ha' disabled>", page)
             self.assertIn("preview-choice-toggle", page)
             self.assertNotIn("Use HA Version", page)
+            self.assertNotIn("## homeassistant", page)
+            self.assertNotIn("preview-summary", page)
             detail = page.index("<div class='preview-file-detail' hidden>")
             detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
             detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
@@ -4969,6 +4972,7 @@ class ServerTests(unittest.TestCase):
             (live / ".storage" / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
             scripts = source / ".ha-ops" / "areas" / "home" / "scripts.yaml"
             scripts.parent.mkdir(parents=True)
+            (scripts.parent / "lighting-contract.md").write_text("# Contract\n")
             scripts.write_text(
                 "\n".join(
                     [
@@ -5014,6 +5018,8 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
             self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", preview["diff"])
+            self.assertNotIn("lighting-contract.md", preview["diff"])
+            self.assertNotIn("lighting-contract.md", preview["paths"])
             self.assertIn("current_silent_json: >-", preview["diff"])
             self.assertNotIn('current_silent_json: "{%-', preview["diff"])
             self.assertNotIn("\\n", preview["diff"])

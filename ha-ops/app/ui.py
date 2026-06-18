@@ -514,8 +514,6 @@ def render_preview_decisions(
     summary_parts = []
     if diff_summary and not paths:
         summary_parts.append(render_conflict_detail(diff_summary, include_wrap_control=False))
-    elif diff_summary:
-        summary_parts.append(f"<pre class='preview-summary'>{html.escape(diff_summary)}</pre>")
     files = []
     for path in paths:
         choice = resolutions.get(path)
@@ -1512,9 +1510,6 @@ def render_page(data):
     }}
     .diff-lines .diff-line:last-child {{
       padding-bottom: 10px;
-    }}
-    .preview-summary {{
-      margin: 0 0 12px;
     }}
     .diff-add {{
       background: color-mix(in srgb, var(--ha-success) 17%, transparent);

@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.27
+
+- Remove the duplicate textual preview summary above the interactive Change List.
+- Keep unmanaged organizer area files out of Git-to-HA previews and apply trees.
+
 ## 0.8.26
 
 - Show stale HA Ops internal Git branch push failures as warnings with Reset Git State guidance.

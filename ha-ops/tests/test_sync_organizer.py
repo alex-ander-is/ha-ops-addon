@@ -234,11 +234,9 @@ class SyncOrganizerTests(unittest.TestCase):
                 source / ".ha-ops" / "areas" / "organizer-index.json",
                 {
                     "version": 1,
-                    "kinds": {
-                        "automations": {"input_count": 1, "output_count": 1},
-                        "scripts": {"input_count": 0, "output_count": 0},
-                        "scenes": {"input_count": 0, "output_count": 0},
-                    },
+                    "automations": {"count": 1, "ids": ["live_auto"]},
+                    "scripts": {"count": 0, "ids": []},
+                    "scenes": {"count": 0, "ids": []},
                 },
             )
 
@@ -251,6 +249,41 @@ class SyncOrganizerTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "organizer view exists in Git"):
                 sync.materialize_homeassistant_source(source, target, self.context(sync, work))
+
+    def test_apply_materialize_organizer_source_excludes_unmanaged_area_files(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            live = root / "live"
+            work = root / "work"
+            live.mkdir(parents=True)
+            work.mkdir()
+            write_yaml_text(source / ".ha-ops" / "areas" / "home" / "automations.yaml", "- id: live_auto\n")
+            write_yaml_text(source / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md", "# Contract\n")
+            write_json(
+                source / ".ha-ops" / "areas" / "organizer-index.json",
+                {
+                    "version": 1,
+                    "automations": {"count": 1, "ids": ["live_auto"]},
+                    "scripts": {"count": 0, "ids": []},
+                    "scenes": {"count": 0, "ids": []},
+                },
+            )
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "organizer": {"enabled": True},
+            }
+
+            materialized = sync.materialize_homeassistant_source(source, target, self.context(sync, work))
+
+            self.assertEqual((materialized / "automations.yaml").read_text(), "- id: live_auto\n")
+            self.assertFalse((materialized / ".ha-ops" / "areas").exists())
+            self.assertFalse((materialized / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md").exists())
 
     def test_save_with_organizer_disabled_converts_git_back_to_heap_view(self):
         sync = load_sync()
