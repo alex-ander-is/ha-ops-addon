@@ -1694,8 +1694,16 @@ def run_apply_job(ctx, lock_acquired=False):
             try:
                 ctx.add_detail(details, _("detail.restoring_release_snapshot_after_failure", release=release_name))
                 ctx.restore_release_snapshot(release_name, details, core_already_stopped=core_stopped_for_apply)
+                core_stopped_for_apply = False
             except Exception as rollback_exc:
                 details.append(_("detail.rollback_from_release_failed", error=rollback_exc))
+        if core_stopped_for_apply:
+            try:
+                ctx.add_detail(details, _("detail.starting_core_after_apply_failure"))
+                ctx.core_start()
+                core_stopped_for_apply = False
+            except Exception as start_exc:
+                details.append(_("detail.start_core_after_apply_failure_failed", error=start_exc))
 
         write_state(
             {

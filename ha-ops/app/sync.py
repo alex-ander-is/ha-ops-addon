@@ -318,7 +318,7 @@ def managed_ha_heaps_fingerprint(path):
     return organizer.fingerprint_heaps(path)
 
 
-def apply_homeassistant_config(src, dest, target, ctx, details=None):
+def apply_homeassistant_config(src, dest, target, ctx, details=None, validate_protected_storage=False):
     src = materialize_homeassistant_source(src, target, ctx)
     if not src.exists() or not has_managed_content(src):
         if details is not None:
@@ -359,6 +359,7 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None):
         ctx.storage_allowlist,
         ctx.protected_storage_files,
         allow_protected=target_model.allow_protected_storage(target),
+        validate_protected_registry=validate_protected_storage,
     )
     managed_result = storage_managed.apply_core_config_entries_projection(src, dest)
     if copied and details is not None:
@@ -461,7 +462,14 @@ def restore_homeassistant_config(src, dest, target, ctx):
             safe_remove_path(dest_path)
 
 
-def sync_storage_allowlist(src, dest, storage_allowlist, protected_storage_files, allow_protected=False):
+def sync_storage_allowlist(
+    src,
+    dest,
+    storage_allowlist,
+    protected_storage_files,
+    allow_protected=False,
+    validate_protected_registry=False,
+):
     src_storage = src / ".storage"
     if not src_storage.exists():
         return 0, []
@@ -479,7 +487,7 @@ def sync_storage_allowlist(src, dest, storage_allowlist, protected_storage_files
             continue
         dest_path = dest_storage / name
         ensure_dir(dest_path.parent)
-        write_storage_apply_file(src_path, dest_path)
+        write_storage_apply_file(src_path, dest_path, validate_protected_registry=validate_protected_registry)
         copied += 1
     return copied, skipped_protected
 
@@ -527,6 +535,16 @@ ENTITY_REGISTRY_METADATA_FIELDS = {
     "translation_key",
     "unit_of_measurement",
 }
+REGISTRY_APPLY_REQUIRED_FIELDS = {
+    "core.device_registry": {
+        "devices": ("modified_at",),
+        "deleted_devices": ("modified_at",),
+    },
+    "core.entity_registry": {
+        "entities": ("modified_at", "suggested_object_id", "supported_features"),
+        "deleted_entities": ("modified_at",),
+    },
+}
 
 
 def stable_json_key(value):
@@ -556,6 +574,43 @@ def registry_item_label(item):
     if not isinstance(item, dict):
         return stable_json_key(item)
     return str(item.get("entity_id") or item.get("name") or item.get("unique_id") or item.get("id") or stable_json_key(item))
+
+
+def registry_apply_missing_fields(name, text):
+    required = REGISTRY_APPLY_REQUIRED_FIELDS.get(name)
+    if not required:
+        return []
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Refusing to apply protected Home Assistant registry with invalid JSON: {name}: {exc}") from exc
+    root = data.get("data")
+    if not isinstance(root, dict):
+        return []
+    missing = []
+    for collection, fields in required.items():
+        items = root.get(collection)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_missing = [field for field in fields if field not in item]
+            if item_missing:
+                missing.append(
+                    f"{name} {collection} {registry_item_label(item)} missing {', '.join(item_missing)}"
+                )
+    return missing
+
+
+def validate_registry_apply_text(name, text, path):
+    missing = registry_apply_missing_fields(name, text)
+    if not missing:
+        return
+    preview = "; ".join(missing[:5])
+    if len(missing) > 5:
+        preview += f"; and {len(missing) - 5} more"
+    raise RuntimeError(f"Refusing to apply protected Home Assistant registry with missing metadata in {path}: {preview}")
 
 
 def sort_json_list(value):
@@ -800,7 +855,7 @@ def merged_normalized_storage_apply_text(name, live_text, git_text):
     return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
 
 
-def write_storage_apply_file(src_path, dest_path):
+def registry_apply_text_for_write(src_path, dest_path):
     src_path = Path(src_path)
     dest_path = Path(dest_path)
     if src_path.name in NORMALIZED_STORAGE_FILES and dest_path.exists() and dest_path.is_file():
@@ -809,8 +864,22 @@ def write_storage_apply_file(src_path, dest_path):
         except (OSError, UnicodeDecodeError):
             merged = None
         if merged is not None:
-            dest_path.write_text(merged)
-            return
+            return merged
+    try:
+        return src_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def write_storage_apply_file(src_path, dest_path, validate_protected_registry=False):
+    src_path = Path(src_path)
+    dest_path = Path(dest_path)
+    text = registry_apply_text_for_write(src_path, dest_path)
+    if validate_protected_registry and text is not None:
+        validate_registry_apply_text(src_path.name, text, src_path)
+    if text is not None and src_path.name in NORMALIZED_STORAGE_FILES and dest_path.exists() and dest_path.is_file():
+        dest_path.write_text(text)
+        return
     shutil.copy2(src_path, dest_path)
 
 
@@ -1026,6 +1095,28 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
     return changes
 
 
+def validate_homeassistant_storage_apply_source(src, dest, target, ctx):
+    src = materialize_homeassistant_source(src, target, ctx)
+    if not src.exists() or not has_managed_content(src):
+        return
+
+    src_storage = src / ".storage"
+    if not src_storage.exists():
+        return
+
+    dest_storage = Path(dest) / ".storage"
+    allow_protected = target_model.allow_protected_storage(target)
+    for name in ctx.storage_allowlist:
+        if name in ctx.protected_storage_files and not allow_protected:
+            continue
+        src_path = src_storage / name
+        if not src_path.exists() or not src_path.is_file():
+            continue
+        text = registry_apply_text_for_write(src_path, dest_storage / name)
+        if text is not None:
+            validate_registry_apply_text(name, text, src_path)
+
+
 def apply_targets(resolved_targets, details, ctx):
     homeassistant_target = None
     core_stopped = False
@@ -1042,6 +1133,8 @@ def apply_targets(resolved_targets, details, ctx):
         if target["type"] == "homeassistant":
             homeassistant_target = target
             homeassistant_changes = homeassistant_change_set(source_path, live_path, target, ctx, mode="apply")
+            if homeassistant_changes.changed_storage:
+                validate_homeassistant_storage_apply_source(source_path, live_path, target, ctx)
             if (
                 homeassistant_changes.changed_storage
                 and target_model.stop_core_before_storage_apply(target)
@@ -1059,7 +1152,7 @@ def apply_targets(resolved_targets, details, ctx):
 
         ctx.add_detail(details, _("detail.syncing_target", target=target["id"], source=source_path, destination=live_path))
         if target["type"] == "homeassistant":
-            apply_homeassistant_config(source_path, live_path, target, ctx, details)
+            apply_homeassistant_config(source_path, live_path, target, ctx, details, validate_protected_storage=True)
         else:
             if not source_path.exists() or not has_managed_content(source_path):
                 ctx.add_detail(details, _("detail.skipped_addon_no_git_config", target=target["id"]))
@@ -2381,12 +2474,10 @@ def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
     for target in resolved_targets:
         target_id = str(target["id"])
         safe_id = safe_preview_name(target_id)
-        diff_root = ctx.work_dir / "apply-preview-diff" / safe_id
-        baseline_path = diff_root / "baseline"
-        preview_path = diff_root / "preview"
+        baseline_path = ctx.work_dir / "apply-preview-baseline" / safe_id
+        preview_path = ctx.work_dir / "apply-preview" / safe_id
         if not preview_path.exists():
-            baseline_path = ctx.work_dir / "apply-preview-baseline" / safe_id
-            preview_path = ctx.work_dir / "apply-preview" / safe_id
+            raise RuntimeError(f"Raw apply preview for target '{target_id}' is missing; run Preview Git to HA again.")
         selected_path = selected_root / safe_id
         sync_tree(preview_path, selected_path, True, [".git/"], ctx.run_command)
         restore_preview_paths_from_baseline(selected_path, baseline_path, keep_by_target.get(target_id, []))

@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.28
+
+- Keep Git-to-HA Apply writes on raw previews so registry diff normalization cannot remove Home Assistant metadata.
+- Reject invalid or incomplete protected registry storage before stopping Home Assistant Core.
+- Try to start Home Assistant Core if Apply fails after a storage sync stop.
+
 ## 0.8.27
 
 - Remove the duplicate textual preview summary above the interactive Change List.
