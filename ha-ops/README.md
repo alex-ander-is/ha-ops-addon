@@ -143,6 +143,13 @@ Skipped:
 - Zigbee2MQTT is detected from installed add-on metadata instead of a hard-coded slug.
 - If Zigbee2MQTT stores config under `/config/zigbee2mqtt`, HA Ops can use that existing path instead of assuming `/addon_configs/<slug>`.
 
+## Disk Usage
+
+- `Check disk usage` is read-only and prints a storage summary to the Log.
+- The report includes HA Ops mapped paths, Supervisor host disk fields when available, and Docker `/system/df` diagnostics.
+- HA Ops declares `docker_api: true` only so this report can read Docker disk usage. The Docker API capability is broad; HA Ops uses it for the read-only `/system/df` endpoint.
+- If Supervisor, Docker, or journal diagnostics are unavailable, the report marks that section as unavailable and keeps the rest of the summary.
+
 ## Add-on Options
 
 - `repo_url`: Git URL of the private config repository.

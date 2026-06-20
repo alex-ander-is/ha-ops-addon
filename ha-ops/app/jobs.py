@@ -62,6 +62,7 @@ class JobContext:
     add_detail: Any
     apply_targets: Any
     build_deleted_devices_preview: Any
+    build_disk_usage_summary: Any
     build_internal_ids_preview: Any
     build_retained_devices_preview: Any
     build_apply_preview: Any
@@ -763,6 +764,52 @@ def run_reset_git_state_job(ctx, lock_acquired=False):
                 "last_message": str(exc),
                 "last_details": details,
                 "last_targets": resolved_targets,
+            }
+        )
+        return False
+    finally:
+        release_run_lock(ctx)
+
+
+def run_disk_usage_job(ctx, lock_acquired=False):
+    write_state = ctx.write_state
+    utc_now = ctx.utc_now
+
+    if not enter_run_lock(ctx, "disk_usage", lock_acquired):
+        return False
+
+    details = []
+    write_state(
+        {
+            "last_run_at": utc_now(),
+            "last_status": "running",
+            "last_action": "disk_usage",
+            "last_message": _("message.checking_disk_usage"),
+            "last_details": details,
+        }
+    )
+
+    try:
+        details.extend(ctx.build_disk_usage_summary())
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "success",
+                "last_action": "disk_usage",
+                "last_message": _("message.disk_usage_finished"),
+                "last_details": details,
+            }
+        )
+        return True
+    except Exception as exc:
+        details.append(str(exc))
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "disk_usage",
+                "last_message": str(exc),
+                "last_details": details,
             }
         )
         return False

@@ -211,6 +211,8 @@ def _legacy_func(name):
         return lambda: web.start_background(_CTX.run_save_preview_job)
     if name == "start_reset_git_state":
         return lambda: web.start_background(_CTX.run_reset_git_state_job)
+    if name == "start_disk_usage":
+        return lambda: web.start_background(_CTX.run_disk_usage_job)
     if name == "start_save":
         return lambda: web.start_background(_CTX.run_save_job)
     if name == "start_deleted_devices_preview":

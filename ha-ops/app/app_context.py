@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 import backups as backup_policy
+import disk_usage
 import git_auth
 import git_ops
 import jobs as job_logic
@@ -175,7 +176,7 @@ class AppContext:
                     pass
             return self.write_state(updates)
 
-    def run_command(self, command, env=None, cwd=None):
+    def run_command(self, command, env=None, cwd=None, timeout=None):
         return subprocess.run(
             command,
             cwd=str(cwd) if cwd else None,
@@ -183,6 +184,7 @@ class AppContext:
             text=True,
             capture_output=True,
             check=False,
+            timeout=timeout,
         )
 
     def log(self, message):
@@ -239,8 +241,14 @@ class AppContext:
             self.log,
         )
 
-    def call_supervisor(self, method, path, payload=None):
-        return supervisor.call_supervisor(method, path, payload, self.run_command)
+    def call_supervisor(self, method, path, payload=None, timeout=None):
+        if timeout is None:
+            return supervisor.call_supervisor(method, path, payload, self.run_command)
+
+        def run_command(command):
+            return self.run_command(command, timeout=timeout)
+
+        return supervisor.call_supervisor(method, path, payload, run_command)
 
     def get_installed_addons(self):
         return supervisor.get_installed_addons(self.call_supervisor)
@@ -749,6 +757,7 @@ class AppContext:
             add_detail=self.add_detail,
             apply_targets=self.apply_targets,
             build_apply_preview=self.build_apply_preview,
+            build_disk_usage_summary=self.build_disk_usage_summary,
             build_save_preview=self.build_save_preview,
             build_deleted_devices_preview=self.build_deleted_devices_preview,
             build_internal_ids_preview=self.build_internal_ids_preview,
@@ -823,6 +832,19 @@ class AppContext:
 
     def run_reset_git_state_job(self, lock_acquired=False):
         return job_logic.run_reset_git_state_job(self.job_deps(), lock_acquired=lock_acquired)
+
+    def build_disk_usage_summary(self):
+        return disk_usage.build_disk_usage_summary(
+            self.config_dir,
+            self.data_dir,
+            self.addon_configs_dir,
+            Path("/backup"),
+            self.run_command,
+            self.call_supervisor,
+        )
+
+    def run_disk_usage_job(self, lock_acquired=False):
+        return job_logic.run_disk_usage_job(self.job_deps(), lock_acquired=lock_acquired)
 
     def run_deleted_devices_preview_job(self, lock_acquired=False):
         return job_logic.run_deleted_devices_preview_job(self.job_deps(), lock_acquired=lock_acquired)

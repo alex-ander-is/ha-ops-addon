@@ -258,6 +258,7 @@ def action_label(action):
         "deleted_devices_delete": _("action.approve_deleted_devices"),
         "deleted_devices_confirm": _("action.confirm_changes"),
         "deleted_devices_revert": _("action.revert_changes"),
+        "disk_usage": _("action.check_disk_usage"),
         "internal_ids_preview": _("action.check_actions_ids"),
         "internal_ids_migrate": _("action.migrate_and_save"),
         "rollback": _("action.rollback"),
@@ -405,6 +406,7 @@ def render_page(ctx):
         and state.get("last_deleted_devices_fingerprint")
     )
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    check_disk_usage_disabled = "disabled" if run_disabled else ""
     check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
     deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
@@ -614,6 +616,7 @@ def render_page(ctx):
             "save_preview_button_class": save_preview_button_class,
             "save_preview_button_text": save_preview_button_text,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
+            "check_disk_usage_disabled": check_disk_usage_disabled,
             "check_retained_devices_disabled": check_retained_devices_disabled,
             "check_internal_ids_disabled": check_internal_ids_disabled,
             "deletion_disabled": deletion_disabled,
@@ -930,6 +933,15 @@ def create_handler(ctx):
                     return
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.git_state_reset_started")})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/disk-usage":
+                if not self.start_job(ctx.run_disk_usage_job):
+                    return
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": _("message.disk_usage_started")})
                 else:
                     self.send_html(render_page(ctx))
                 return

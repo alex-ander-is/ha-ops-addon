@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.30
+
+- Add a read-only Disk Usage action that prints mapped HA Ops storage sizes, Supervisor host disk fields, and Docker `/system/df` diagnostics to the Log.
+- Declare `docker_api: true` for read-only Docker `/system/df` diagnostics; this Home Assistant add-on capability is broad.
+
 ## 0.8.29
 
 - Complete required Home Assistant entity registry metadata before Git-to-HA Apply writes reduced registry data.

@@ -1660,6 +1660,15 @@ def render_page(data):
             <p class="action-flow">{_('text.reset_git_state')}</p>
           </section>
           <section class="action-section">
+            <h2>{_('heading.disk_usage')}</h2>
+            <div class="action-row">
+              <form method="post" action="disk-usage" data-async-form="true">
+                <button type="submit" class="secondary" {data['check_disk_usage_disabled']}>{_('action.check_disk_usage')}</button>
+              </form>
+            </div>
+            <p class="action-flow">{_('text.disk_usage_flow')}</p>
+          </section>
+          <section class="action-section">
             <h2>{_('heading.deleted_devices')}</h2>
             <div class="action-row">
               <form method="post" action="deleted-devices-preview" data-async-form="true">

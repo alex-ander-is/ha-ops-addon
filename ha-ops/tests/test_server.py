@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -3850,6 +3851,9 @@ class ServerTests(unittest.TestCase):
             def run_reset_git_state_job(self, lock_acquired=False):
                 self.record_call("reset-git-state", lock_acquired)
 
+            def run_disk_usage_job(self, lock_acquired=False):
+                self.record_call("disk-usage", lock_acquired)
+
             def run_preview_job(self, lock_acquired=False):
                 self.record_call("preview", lock_acquired)
 
@@ -3972,11 +3976,20 @@ class ServerTests(unittest.TestCase):
 
         post_request = invoke(
             "do_POST",
+            "/disk-usage",
+            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
+        )
+        self.assertEqual(post_request.responses[-1], 200)
+        self.assertIn("Disk usage check started", post_request.wfile.getvalue().decode())
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage"])
+
+        post_request = invoke(
+            "do_POST",
             "/approve-apply",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 404)
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage"])
 
         post_request = invoke(
             "do_POST",
@@ -3985,7 +3998,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview"])
+        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage", "deleted-devices-preview"])
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -4002,7 +4015,18 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Retained devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview", "retained-devices-preview"])
+        self.assertEqual(
+            ctx.calls,
+            [
+                "save",
+                "save-preview",
+                "preview",
+                "reset-git-state",
+                "disk-usage",
+                "deleted-devices-preview",
+                "retained-devices-preview",
+            ],
+        )
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -4021,7 +4045,16 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Internal ids check started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
-            ["save", "save-preview", "preview", "reset-git-state", "deleted-devices-preview", "retained-devices-preview", "internal-ids-preview"],
+            [
+                "save",
+                "save-preview",
+                "preview",
+                "reset-git-state",
+                "disk-usage",
+                "deleted-devices-preview",
+                "retained-devices-preview",
+                "internal-ids-preview",
+            ],
         )
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
@@ -4047,6 +4080,7 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "reset-git-state",
+                "disk-usage",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4077,6 +4111,7 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "reset-git-state",
+                "disk-usage",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4100,6 +4135,7 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "reset-git-state",
+                "disk-usage",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4124,6 +4160,7 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "reset-git-state",
+                "disk-usage",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -4443,6 +4480,7 @@ class ServerTests(unittest.TestCase):
                 "save-preview",
                 "preview",
                 "reset-git-state",
+                "disk-usage",
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
@@ -9482,6 +9520,8 @@ class ServerTests(unittest.TestCase):
             git_to_ha = page.index('action="preview"')
             reset_git_state_section = page.index("<h2>Reset Git State</h2>")
             reset_git_state = page.index('action="reset-git-state"')
+            disk_usage_section = page.index("<h2>Disk Usage</h2>")
+            disk_usage = page.index('action="disk-usage"')
             deleted_section = page.index("<h2>Deleted Devices</h2>")
             deleted = page.index('action="deleted-devices-preview"')
             retained_section = page.index("<h2>Retained Devices</h2>")
@@ -9494,7 +9534,9 @@ class ServerTests(unittest.TestCase):
             self.assertLess(git_to_ha_section, git_to_ha)
             self.assertLess(git_to_ha, reset_git_state_section)
             self.assertLess(reset_git_state_section, reset_git_state)
-            self.assertLess(reset_git_state, deleted_section)
+            self.assertLess(reset_git_state, disk_usage_section)
+            self.assertLess(disk_usage_section, disk_usage)
+            self.assertLess(disk_usage, deleted_section)
             self.assertLess(deleted_section, deleted)
             self.assertLess(deleted, retained_section)
             self.assertLess(retained_section, retained)
@@ -9506,9 +9548,11 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn('<button type="submit" >Apply Git to HA</button>', page)
             self.assertIn("Check deleted_devices", page)
             self.assertIn("Reset Git State", page)
+            self.assertIn("Check disk usage", page)
             self.assertIn("Check actions IDs", page)
             self.assertIn("Previews deleted device registry entries.", page)
             self.assertIn("Rebuilds HA Ops service branches", page)
+            self.assertIn("Prints a read-only disk usage summary to the Log", page)
             self.assertIn("Finds stale Zigbee2MQTT MQTT discovery topics.", page)
             self.assertIn("Previews Git-only rewrites", page)
             self.assertIn("Migrate and save selected files to Git, then run Git to HA.", page)
@@ -9537,6 +9581,339 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("Approve Deletion", page)
             self.assertNotIn("Confirm Changes", page)
             self.assertNotIn("Revert Changes", page)
+
+    def test_disk_usage_job_writes_read_only_summary_to_log(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            (server.CONFIG_DIR / "home-assistant_v2.db").write_bytes(b"x" * 2048)
+            (server.CONFIG_DIR / "zigbee2mqtt").mkdir()
+            (server.CONFIG_DIR / "zigbee2mqtt" / "state.json").write_bytes(b"x" * 1024)
+            (server.DATA_DIR / "state.json").write_text("{}")
+            (server.ADDON_CONFIGS_DIR / "9336c2b0_zigbee2mqtt").mkdir()
+            (server.ADDON_CONFIGS_DIR / "9336c2b0_zigbee2mqtt" / "configuration.yaml").write_bytes(b"x" * 512)
+
+            def fake_run_command(command, env=None, cwd=None):
+                if command[0] == "df":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "Filesystem Size Used Avail Use% Mounted on\n/dev/test 10G 6G 4G 60% /data\n",
+                        "",
+                    )
+                if command[0] == "docker":
+                    return subprocess.CompletedProcess(command, 127, "", "docker: not found\n")
+                if command[0] == "journalctl":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "Archived and active journals take up 12.0M in the file system.\n",
+                        "",
+                    )
+                return subprocess.CompletedProcess(command, 1, "", "unexpected command\n")
+
+            server.context().run_command = fake_run_command
+
+            self.assertTrue(server.run_disk_usage_job())
+            state = server.read_state()
+            details = "\n".join(state["last_details"])
+
+            self.assertEqual(state["last_action"], "disk_usage")
+            self.assertEqual(state["last_status"], "success")
+            self.assertIn("Disk usage summary (read-only).", details)
+            self.assertIn("Filesystems:", details)
+            self.assertIn("HA Ops mapped paths:", details)
+            self.assertIn("Home Assistant config", details)
+            self.assertIn("home-assistant_v2.db", details)
+            self.assertIn("zigbee2mqtt", details)
+            self.assertIn("Add-on configs", details)
+            self.assertIn("Docker: unavailable from HA Ops add-on", details)
+            self.assertIn("System journal:", details)
+            self.assertIn("12.0M", details)
+            self.assertIn("Disk usage summary finished.", details)
+
+    def test_disk_usage_reads_supervisor_host_and_docker_socket_diagnostics(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "homeassistant"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon_configs"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+            docker_payload = {
+                "LayersSize": 8 * 1024**3,
+                "Images": [{"RepoTags": ["homeassistant/aarch64-addon:latest"], "Size": 512 * 1024**2}],
+                "Containers": [{"SizeRw": 128 * 1024**2}],
+                "Volumes": [{"Name": "zigbee2mqtt-data", "UsageData": {"Size": 256 * 1024**2}}],
+                "BuildCache": [{"Size": 64 * 1024**2}],
+            }
+
+            def fake_run_command(command, env=None, cwd=None):
+                if command[0] == "df":
+                    return subprocess.CompletedProcess(command, 0, "Filesystem Size Used Avail Use% Mounted on\n", "")
+                if command[0] == "journalctl":
+                    return subprocess.CompletedProcess(command, 127, "", "journalctl: not found\n")
+                return subprocess.CompletedProcess(command, 1, "", "unexpected command\n")
+
+            def fake_call_supervisor(method, path, payload=None):
+                self.assertEqual((method, path), ("GET", "/host/info"))
+                return {"data": {"disk_total": "13.6 GB", "disk_used": "11.9 GB", "disk_free": "1.1 GB"}}
+
+            lines = server.app_context.disk_usage.build_disk_usage_summary(
+                config_dir,
+                data_dir,
+                addon_configs_dir,
+                backup_dir,
+                fake_run_command,
+                fake_call_supervisor,
+                root / "unused-docker.sock",
+                lambda: docker_payload,
+            )
+            details = "\n".join(lines)
+
+            self.assertIn("Host:", details)
+            self.assertIn("disk_used: 11.9 GB", details)
+            self.assertIn("Docker:", details)
+            self.assertIn("Layers: 8.0 GB", details)
+            self.assertIn("Images: 1 image(s), 512.0 MB total image size.", details)
+            self.assertIn("homeassistant/aarch64-addon:latest", details)
+            self.assertIn("Containers: 1 container(s), 128.0 MB writable.", details)
+            self.assertIn("Volumes: 1 volume(s), 256.0 MB.", details)
+            self.assertIn("Build cache: 1 item(s), 64.0 MB.", details)
+
+    def test_disk_usage_mapped_path_summary_reports_partial_when_walk_is_bounded(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "homeassistant"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon_configs"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+            for index in range(5):
+                (config_dir / f"file-{index}.txt").write_bytes(b"x" * 1024)
+
+            def fake_run_command(command, env=None, cwd=None):
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            lines = server.app_context.disk_usage.build_disk_usage_summary(
+                config_dir,
+                data_dir,
+                addon_configs_dir,
+                backup_dir,
+                fake_run_command,
+                docker_socket_path=root / "missing-docker.sock",
+                path_walk_max_entries=2,
+            )
+            details = "\n".join(lines)
+
+            self.assertIn("Home Assistant config", details)
+            self.assertIn("partial: stopped before full traversal", details)
+            self.assertIn("(entries)", details)
+
+    def test_disk_usage_optional_sections_time_out_individually(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "homeassistant"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon_configs"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+
+            def slow_run_command(command, env=None, cwd=None):
+                time.sleep(0.2)
+                return subprocess.CompletedProcess(command, 0, f"{command[0]} completed\n", "")
+
+            def slow_call_supervisor(method, path, payload=None):
+                time.sleep(0.2)
+                return {"data": {"disk_used": "11.9 GB"}}
+
+            started = time.monotonic()
+            lines = server.app_context.disk_usage.build_disk_usage_summary(
+                config_dir,
+                data_dir,
+                addon_configs_dir,
+                backup_dir,
+                slow_run_command,
+                slow_call_supervisor,
+                root / "missing-docker.sock",
+                lambda: {"LayersSize": 0, "Images": [], "Containers": [], "Volumes": [], "BuildCache": []},
+                optional_timeout_seconds=0.01,
+            )
+            elapsed = time.monotonic() - started
+            details = "\n".join(lines)
+
+            self.assertLess(elapsed, 0.15)
+            self.assertIn("Filesystems unavailable: timed out after 0.01s", details)
+            self.assertIn("Host: unavailable from HA Ops add-on (timed out after 0.01s).", details)
+            self.assertIn("System journal: unavailable from HA Ops add-on (timed out after 0.01s).", details)
+
+    def test_disk_usage_treats_docker_socket_errors_as_optional(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "homeassistant"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon_configs"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+
+            def fake_run_command(command, env=None, cwd=None):
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            original_docker_system_df = server.app_context.disk_usage._docker_system_df
+            server.app_context.disk_usage._docker_system_df = lambda socket_path: (_ for _ in ()).throw(
+                PermissionError("socket denied")
+            )
+            try:
+                lines = server.app_context.disk_usage.build_disk_usage_summary(
+                    config_dir,
+                    data_dir,
+                    addon_configs_dir,
+                    backup_dir,
+                    fake_run_command,
+                )
+            finally:
+                server.app_context.disk_usage._docker_system_df = original_docker_system_df
+            details = "\n".join(lines)
+
+            self.assertIn("Disk usage summary (read-only).", details)
+            self.assertIn("Docker: unavailable from HA Ops add-on (socket denied).", details)
+
+    def test_disk_usage_treats_unexpected_docker_payload_as_optional(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "homeassistant"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon_configs"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+
+            def fake_run_command(command, env=None, cwd=None):
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            lines = server.app_context.disk_usage.build_disk_usage_summary(
+                config_dir,
+                data_dir,
+                addon_configs_dir,
+                backup_dir,
+                fake_run_command,
+                docker_system_df=lambda: {"Images": "not-a-list"},
+            )
+            details = "\n".join(lines)
+
+            self.assertIn("Disk usage summary (read-only).", details)
+            self.assertIn(
+                "Docker: unavailable from HA Ops add-on (Docker API response has an unexpected schema.).",
+                details,
+            )
+
+    def test_docker_socket_connection_has_short_timeout(self):
+        server = load_server()
+
+        connection = server.app_context.disk_usage._UnixSocketHTTPConnection(Path("/tmp/docker.sock"))
+
+        self.assertEqual(connection.timeout, 5)
+
+    def test_disk_usage_action_is_disabled_while_job_is_running(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+
+            server.context().run_lock.acquire()
+            try:
+                page = server.render_page()
+            finally:
+                server.context().run_lock.release()
+
+            disk_form_start = page.index('action="disk-usage"')
+            disk_form = page[disk_form_start : page.index("</form>", disk_form_start)]
+            self.assertIn('<button type="submit" class="secondary" disabled>Check disk usage</button>', disk_form)
+
+    def test_disk_usage_post_is_rejected_while_job_is_running(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.calls = []
+                self.state = {"last_status": "running", "last_message": "Another job is active."}
+                self.state_updates = []
+                self.run_lock = threading.Lock()
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def run_disk_usage_job(self, lock_acquired=False):
+                self.calls.append(("disk-usage", lock_acquired))
+                if lock_acquired:
+                    self.run_lock.release()
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+        request = handler.__new__(handler)
+        request.path = "/disk-usage"
+        request.rfile = io.BytesIO(b"")
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.headers["Accept"] = "application/json"
+        request.headers["X-Requested-With"] = "fetch"
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+
+        expected_state = dict(ctx.state)
+        ctx.run_lock.acquire()
+        try:
+            request.do_POST()
+        finally:
+            ctx.run_lock.release()
+
+        self.assertEqual(request.responses[-1], 409)
+        self.assertEqual(ctx.calls, [])
+        self.assertEqual(ctx.state, expected_state)
+        self.assertEqual(ctx.state_updates, [])
+        response = json.loads(request.wfile.getvalue().decode())
+        self.assertFalse(response["ok"])
+        self.assertIn("already running", response["message"])
+
+    def test_disk_usage_action_stays_enabled_during_pending_deleted_devices(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(root / "missing-rollback"),
+                }
+            )
+
+            page = server.render_page()
+
+            disk_form_start = page.index('action="disk-usage"')
+            disk_form = page[disk_form_start : page.index("</form>", disk_form_start)]
+            deleted_form_start = page.index('action="deleted-devices-preview"')
+            deleted_form = page[deleted_form_start : page.index("</form>", deleted_form_start)]
+            self.assertNotIn("disabled", disk_form)
+            self.assertIn("disabled", deleted_form)
 
     def test_deleted_devices_preview_lists_entities_as_table(self):
         server = load_server()
@@ -9841,9 +10218,13 @@ class ServerTests(unittest.TestCase):
 
     def test_addon_declares_homeassistant_api_access(self):
         config = (ROOT / "config.yaml").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("hassio_api: true", config)
         self.assertIn("homeassistant_api: true", config)
+        self.assertIn("docker_api: true", config)
+        self.assertIn("Docker API capability is broad", readme)
+        self.assertIn("/system/df", readme)
 
     def test_internal_ids_preview_and_migrate_use_z2m_friendly_name(self):
         server = load_server()
