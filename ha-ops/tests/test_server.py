@@ -6756,6 +6756,8 @@ class ServerTests(unittest.TestCase):
             source = root / "repo" / "homeassistant"
             (source / ".storage").mkdir(parents=True)
             (source / ".storage" / "input_boolean").write_text("{}\n")
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (server.CONFIG_DIR / ".storage" / "input_boolean").write_text("live-storage\n")
             events = []
             server.core_stop = lambda: events.append("stop")
 
@@ -6782,8 +6784,9 @@ class ServerTests(unittest.TestCase):
                 )
 
             self.assertEqual(events, ["stop", "check"])
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
 
-    def test_apply_rejects_entity_registry_missing_required_fields_before_core_stop(self):
+    def test_apply_completes_entity_registry_missing_required_fields_before_core_stop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -6812,25 +6815,164 @@ class ServerTests(unittest.TestCase):
             )
             events = []
             server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
 
-            with self.assertRaisesRegex(RuntimeError, "missing metadata.*input_datetime.time_battery_report"):
-                server.apply_targets(
-                    [
-                        {
-                            "id": "homeassistant",
-                            "type": "homeassistant",
-                            "source_path": str(source),
-                            "live_path": str(server.CONFIG_DIR),
-                            "allow_protected_storage": True,
-                            "stop_core_before_sync_if_storage": True,
-                            "restart_after_sync": True,
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "allow_protected_storage": True,
+                        "stop_core_before_sync_if_storage": True,
+                        "restart_after_sync": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["stop", "check", "start"])
+            live_data = json.loads((live_storage / "core.entity_registry").read_text())
+            [entity] = live_data["data"]["entities"]
+            self.assertEqual(entity["entity_id"], "input_datetime.time_battery_report")
+            self.assertIn("modified_at", entity)
+            self.assertIsNone(entity["suggested_object_id"])
+            self.assertEqual(entity["supported_features"], 0)
+
+    def test_apply_completes_missing_entity_registry_required_fields_for_new_live_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            source_storage.mkdir(parents=True)
+            (server.CONFIG_DIR / ".storage").mkdir(parents=True)
+            (source_storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "input_datetime.time_battery_report_evening",
+                                    "platform": "input_datetime",
+                                    "unique_id": "battery_report_time_evening",
+                                }
+                            ]
                         }
-                    ],
-                    [],
+                    }
                 )
+            )
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
 
-            self.assertEqual(events, [])
-            self.assertEqual(json.loads((live_storage / "core.entity_registry").read_text()), {"data": {"entities": []}})
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "allow_protected_storage": True,
+                        "stop_core_before_sync_if_storage": True,
+                        "restart_after_sync": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["stop", "check", "start"])
+            live_data = json.loads((server.CONFIG_DIR / ".storage" / "core.entity_registry").read_text())
+            [entity] = live_data["data"]["entities"]
+            self.assertEqual(entity["entity_id"], "input_datetime.time_battery_report_evening")
+            self.assertIn("modified_at", entity)
+            self.assertIsNone(entity["suggested_object_id"])
+            self.assertEqual(entity["supported_features"], 0)
+
+    def test_apply_commit_records_completed_entity_registry_required_fields(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / ".storage" / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "id": "entity-1",
+                                    "entity_id": "input_datetime.time_battery_report_evening",
+                                    "platform": "input_datetime",
+                                    "unique_id": "battery_report_time_evening",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "restart_after_apply": True,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            self.select_all_apply_preview_files(server)
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+
+            live_data = json.loads((live_storage / "core.entity_registry").read_text())
+            service_branch_data = json.loads(
+                subprocess.run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(remote),
+                        "show",
+                        "ha-ops/ha-live:homeassistant/.storage/core.entity_registry",
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout
+            )
+            [live_entity] = live_data["data"]["entities"]
+            [service_branch_entity] = service_branch_data["data"]["entities"]
+            self.assertIn("modified_at", live_entity)
+            self.assertIn("modified_at", service_branch_entity)
+            self.assertIsNone(service_branch_entity["suggested_object_id"])
+            self.assertEqual(service_branch_entity["supported_features"], 0)
 
     def test_apply_rejects_invalid_entity_registry_json_before_core_stop(self):
         server = load_server()
@@ -8338,6 +8480,134 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(saved["data"]["devices"][0]["name"], "git-storage")
             self.assertEqual(saved["data"]["devices"][0]["modified_at"], "ha-modified-at")
 
+    def test_apply_preview_entity_registry_conflict_records_completed_git_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            registry = seed / "homeassistant" / ".storage" / "core.entity_registry"
+            registry.parent.mkdir(parents=True)
+            registry.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "input_datetime.time_battery_report_evening",
+                                    "id": "entity-1",
+                                    "modified_at": "base-modified-at",
+                                    "name": "base-storage",
+                                    "platform": "input_datetime",
+                                    "suggested_object_id": "base_time_battery_report_evening",
+                                    "supported_features": 0,
+                                    "unique_id": "battery_report_time_evening",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            self.git_commit_all(seed, "base entity registry")
+            self.git(["push", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / ".storage" / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "input_datetime.time_battery_report_evening",
+                                    "id": "entity-1",
+                                    "name": "git-storage",
+                                    "platform": "input_datetime",
+                                    "unique_id": "battery_report_time_evening",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            self.git_commit_all(updater, "git entity registry")
+            self.git(["push", "origin", "main"], updater)
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "input_datetime.time_battery_report_evening",
+                                    "id": "entity-1",
+                                    "modified_at": "ha-modified-at",
+                                    "name": "ha-storage",
+                                    "platform": "input_datetime",
+                                    "suggested_object_id": "ha_time_battery_report_evening",
+                                    "supported_features": 0,
+                                    "unique_id": "battery_report_time_evening",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertTrue(state["last_preview_storage_changes"])
+            self.assertEqual(state["last_preview_storage_paths"], ["homeassistant/.storage/core.entity_registry"])
+            self.select_all_apply_preview_files(server)
+            server.write_state({"apply_preview_resolutions": {"homeassistant/.storage/core.entity_registry": "git"}})
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            saved = json.loads((live_storage / "core.entity_registry").read_text())
+            service_branch = json.loads(
+                subprocess.run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(remote),
+                        "show",
+                        "ha-ops/ha-live:homeassistant/.storage/core.entity_registry",
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout
+            )
+            live_entity = saved["data"]["entities"][0]
+            service_branch_entity = service_branch["data"]["entities"][0]
+            self.assertEqual(live_entity["name"], "git-storage")
+            self.assertEqual(live_entity["modified_at"], "ha-modified-at")
+            self.assertEqual(live_entity["suggested_object_id"], "ha_time_battery_report_evening")
+            self.assertEqual(service_branch_entity["name"], "git-storage")
+            self.assertEqual(service_branch_entity["modified_at"], "ha-modified-at")
+            self.assertEqual(service_branch_entity["suggested_object_id"], "ha_time_battery_report_evening")
+
     def test_apply_preview_modify_delete_conflict_can_apply_git_delete(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -8572,6 +8842,79 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(entries["workday-id"]["data"], {"keep": "live"})
             self.assertEqual(entries["google-id"]["data"]["token"]["access_token"], "live-token")
             self.assertEqual(entries["google-id"]["options"]["calendar_access"], "read_write")
+
+    def test_failed_apply_rolls_back_managed_config_entries_projection(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            (live / ".storage").mkdir(parents=True)
+            (source / ".storage_managed").mkdir(parents=True)
+            raw = {
+                "version": 1,
+                "data": {
+                    "entries": [
+                        {
+                            "domain": "workday",
+                            "entry_id": "workday-id",
+                            "source": "user",
+                            "title": "Workday",
+                            "unique_id": None,
+                            "data": {},
+                            "options": {"country": "US", "language": "en"},
+                        }
+                    ]
+                },
+            }
+            projection = {
+                "version": 1,
+                "source": "core.config_entries",
+                "entries": [
+                    {
+                        "domain": "workday",
+                        "entry_id": "workday-id",
+                        "source": "user",
+                        "title": "Workday",
+                        "unique_id": None,
+                        "apply": "update",
+                        "data": {},
+                        "options": {"country": "CZ"},
+                    }
+                ],
+            }
+            (live / ".storage" / "core.config_entries").write_text(json.dumps(raw))
+            (source / ".storage_managed" / "core.config_entries.json").write_text(json.dumps(projection))
+            events = []
+            server.core_stop = lambda: events.append("stop")
+
+            def fail_check():
+                events.append("check")
+                raise RuntimeError("bad config")
+
+            server.do_core_check = fail_check
+
+            with self.assertRaises(RuntimeError):
+                server.apply_targets(
+                    [
+                        {
+                            "id": "homeassistant",
+                            "type": "homeassistant",
+                            "source_path": str(source),
+                            "live_path": str(live),
+                            "stop_core_before_storage_apply": True,
+                            "start_core_after_storage_apply": True,
+                        }
+                    ],
+                    [],
+                )
+
+            self.assertEqual(events, ["stop", "check"])
+            restored = json.loads((live / ".storage" / "core.config_entries").read_text())
+            [entry] = restored["data"]["entries"]
+            self.assertEqual(entry["options"]["country"], "US")
+            self.assertEqual(entry["options"]["language"], "en")
 
     def test_noop_managed_config_entries_projection_does_not_stop_core(self):
         server = load_server()
@@ -8893,6 +9236,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
             self.select_all_apply_preview_files(server)
             self.assertFalse(server.run_apply_job())
+            self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
             self.assertEqual(events, ["stop", "check", "start"])
             self.assertIn("Starting Home Assistant Core after failed Apply.", "\n".join(server.read_state()["last_details"]))
 

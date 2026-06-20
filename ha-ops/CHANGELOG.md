@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.29
+
+- Complete required Home Assistant entity registry metadata before Git-to-HA Apply writes reduced registry data.
+- Roll back Home Assistant config files and managed storage projections when Apply or config check fails.
+- Keep HA Ops service branches aligned with live normalized storage after successful Apply.
+
 ## 0.8.28
 
 - Keep Git-to-HA Apply writes on raw previews so registry diff normalization cannot remove Home Assistant metadata.

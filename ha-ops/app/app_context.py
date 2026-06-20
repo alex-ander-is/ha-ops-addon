@@ -466,7 +466,7 @@ class AppContext:
             include_redundant_data=include_redundant_data,
         )
 
-    def commit_apply_merge(self, repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details):
+    def commit_apply_merge(self, repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, sync_applied_storage=False):
         return sync_logic.commit_apply_merge(
             repo_dir,
             main_branch,
@@ -475,6 +475,7 @@ class AppContext:
             message,
             details,
             self.sync_deps(),
+            sync_applied_storage=sync_applied_storage,
         )
 
     def delete_apply_conflict_live_deletions(

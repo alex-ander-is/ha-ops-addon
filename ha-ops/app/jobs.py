@@ -1648,6 +1648,7 @@ def run_apply_job(ctx, lock_acquired=False):
                 keep_ha_paths,
                 f"Apply Git config to Home Assistant {ctx.release_now()}",
                 details,
+                sync_applied_storage=True,
             )
             if apply_commit:
                 ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))

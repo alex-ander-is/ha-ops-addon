@@ -460,6 +460,7 @@ def restore_homeassistant_config(src, dest, target, ctx):
             shutil.copy2(src_path, dest_path)
         elif dest_path.exists() or dest_path.is_symlink():
             safe_remove_path(dest_path)
+    storage_managed.apply_core_config_entries_projection(src, dest)
 
 
 def sync_storage_allowlist(
@@ -545,6 +546,11 @@ REGISTRY_APPLY_REQUIRED_FIELDS = {
         "deleted_entities": ("modified_at",),
     },
 }
+ENTITY_REGISTRY_APPLY_DEFAULT_FIELDS = {
+    "modified_at": "1970-01-01T00:00:00+00:00",
+    "suggested_object_id": None,
+    "supported_features": 0,
+}
 
 
 def stable_json_key(value):
@@ -611,6 +617,29 @@ def validate_registry_apply_text(name, text, path):
     if len(missing) > 5:
         preview += f"; and {len(missing) - 5} more"
     raise RuntimeError(f"Refusing to apply protected Home Assistant registry with missing metadata in {path}: {preview}")
+
+
+def complete_entity_registry_apply_text(name, text):
+    if name != "core.entity_registry":
+        return text
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+    entities = data.get("data", {}).get("entities")
+    if not isinstance(entities, list):
+        return text
+    changed = False
+    for item in entities:
+        if not isinstance(item, dict):
+            continue
+        for field, value in ENTITY_REGISTRY_APPLY_DEFAULT_FIELDS.items():
+            if field not in item:
+                item[field] = deepcopy(value)
+                changed = True
+    if not changed:
+        return text
+    return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
 
 
 def sort_json_list(value):
@@ -875,9 +904,11 @@ def write_storage_apply_file(src_path, dest_path, validate_protected_registry=Fa
     src_path = Path(src_path)
     dest_path = Path(dest_path)
     text = registry_apply_text_for_write(src_path, dest_path)
+    if text is not None:
+        text = complete_entity_registry_apply_text(src_path.name, text)
     if validate_protected_registry and text is not None:
         validate_registry_apply_text(src_path.name, text, src_path)
-    if text is not None and src_path.name in NORMALIZED_STORAGE_FILES and dest_path.exists() and dest_path.is_file():
+    if text is not None and src_path.name in NORMALIZED_STORAGE_FILES:
         dest_path.write_text(text)
         return
     shutil.copy2(src_path, dest_path)
@@ -1114,91 +1145,127 @@ def validate_homeassistant_storage_apply_source(src, dest, target, ctx):
             continue
         text = registry_apply_text_for_write(src_path, dest_storage / name)
         if text is not None:
+            text = complete_entity_registry_apply_text(name, text)
             validate_registry_apply_text(name, text, src_path)
+
+
+def create_homeassistant_apply_rollback(live_path, target, ctx):
+    rollback_path = ctx.work_dir / "apply-rollback" / safe_preview_name(str(target["id"]))
+    export_homeassistant_config(live_path, rollback_path, target, ctx)
+    return rollback_path
+
+
+def restore_homeassistant_apply_rollback(rollback_path, live_path, target, ctx, details):
+    if details is not None:
+        ctx.add_detail(details, _("detail.restoring_apply_rollback"))
+    restore_homeassistant_config(rollback_path, live_path, target, ctx)
 
 
 def apply_targets(resolved_targets, details, ctx):
     homeassistant_target = None
     core_stopped = False
     homeassistant_changes = ChangeSet()
+    homeassistant_rollback_path = None
+    homeassistant_rollback_live_path = None
+    homeassistant_apply_started = False
 
-    for target in resolved_targets:
-        source_path = Path(target["source_path"])
-        live_path = Path(target["live_path"])
-        addon_was_started = False
-
-        if source_path.exists() and has_managed_content(source_path):
-            reject_source_symlinks(target, ctx)
-
-        if target["type"] == "homeassistant":
-            homeassistant_target = target
-            homeassistant_changes = homeassistant_change_set(source_path, live_path, target, ctx, mode="apply")
-            if homeassistant_changes.changed_storage:
-                validate_homeassistant_storage_apply_source(source_path, live_path, target, ctx)
-            if (
-                homeassistant_changes.changed_storage
-                and target_model.stop_core_before_storage_apply(target)
-                and not core_stopped
-            ):
-                ctx.add_detail(details, _("detail.stopping_core_before_storage_sync"))
-                ctx.core_stop()
-                core_stopped = True
-            elif homeassistant_changes.changed_storage:
-                ctx.add_detail(details, _("detail.warning_storage_core_running"))
-        elif target["type"] == "addon" and target.get("stop_addon_before_sync", False):
-            slug = target["resolved_slug"]
-            ctx.add_detail(details, _("detail.stopping_addon_before_sync", slug=slug))
-            addon_was_started = ctx.stop_addon_for_sync(slug)
-
-        ctx.add_detail(details, _("detail.syncing_target", target=target["id"], source=source_path, destination=live_path))
-        if target["type"] == "homeassistant":
-            apply_homeassistant_config(source_path, live_path, target, ctx, details, validate_protected_storage=True)
-        else:
-            if not source_path.exists() or not has_managed_content(source_path):
-                ctx.add_detail(details, _("detail.skipped_addon_no_git_config", target=target["id"]))
-                continue
-            sync_tree(source_path, live_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
-
-        if target["type"] == "addon" and target.get("restart_after_sync", True):
-            slug = target["resolved_slug"]
-            if target.get("stop_addon_before_sync", False):
-                if addon_was_started:
-                    ctx.add_detail(details, _("detail.starting_addon_after_sync", slug=slug))
-                    ctx.addon_action(slug, "start")
-            else:
-                ctx.add_detail(details, _("detail.restarting_addon", slug=slug))
-                ctx.restart_or_start_addon(slug)
-
-    if homeassistant_target is None:
-        return {"core_stopped": core_stopped}
-    if not homeassistant_changes.any():
-        return {"core_stopped": core_stopped}
-
-    ctx.add_detail(details, _("detail.running_homeassistant_config_check"))
     try:
-        ctx.do_core_check()
+        for target in resolved_targets:
+            source_path = Path(target["source_path"])
+            live_path = Path(target["live_path"])
+            addon_was_started = False
+
+            if source_path.exists() and has_managed_content(source_path):
+                reject_source_symlinks(target, ctx)
+
+            if target["type"] == "homeassistant":
+                homeassistant_target = target
+                homeassistant_changes = homeassistant_change_set(source_path, live_path, target, ctx, mode="apply")
+                if homeassistant_changes.changed_storage:
+                    validate_homeassistant_storage_apply_source(source_path, live_path, target, ctx)
+                if homeassistant_changes.any():
+                    homeassistant_rollback_path = create_homeassistant_apply_rollback(live_path, target, ctx)
+                    homeassistant_rollback_live_path = live_path
+                if (
+                    homeassistant_changes.changed_storage
+                    and target_model.stop_core_before_storage_apply(target)
+                    and not core_stopped
+                ):
+                    ctx.add_detail(details, _("detail.stopping_core_before_storage_sync"))
+                    ctx.core_stop()
+                    core_stopped = True
+                elif homeassistant_changes.changed_storage:
+                    ctx.add_detail(details, _("detail.warning_storage_core_running"))
+            elif target["type"] == "addon" and target.get("stop_addon_before_sync", False):
+                slug = target["resolved_slug"]
+                ctx.add_detail(details, _("detail.stopping_addon_before_sync", slug=slug))
+                addon_was_started = ctx.stop_addon_for_sync(slug)
+
+            ctx.add_detail(details, _("detail.syncing_target", target=target["id"], source=source_path, destination=live_path))
+            if target["type"] == "homeassistant":
+                homeassistant_apply_started = True
+                apply_homeassistant_config(source_path, live_path, target, ctx, details, validate_protected_storage=True)
+            else:
+                if not source_path.exists() or not has_managed_content(source_path):
+                    ctx.add_detail(details, _("detail.skipped_addon_no_git_config", target=target["id"]))
+                    continue
+                sync_tree(source_path, live_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
+
+            if target["type"] == "addon" and target.get("restart_after_sync", True):
+                slug = target["resolved_slug"]
+                if target.get("stop_addon_before_sync", False):
+                    if addon_was_started:
+                        ctx.add_detail(details, _("detail.starting_addon_after_sync", slug=slug))
+                        ctx.addon_action(slug, "start")
+                else:
+                    ctx.add_detail(details, _("detail.restarting_addon", slug=slug))
+                    ctx.restart_or_start_addon(slug)
+
+        if homeassistant_target is None:
+            return {"core_stopped": core_stopped}
+        if not homeassistant_changes.any():
+            return {"core_stopped": core_stopped}
+
+        ctx.add_detail(details, _("detail.running_homeassistant_config_check"))
+        try:
+            ctx.do_core_check()
+        except Exception as exc:
+            setattr(exc, "core_stopped", core_stopped)
+            raise
+
+        if core_stopped:
+            if target_model.start_core_after_storage_apply(homeassistant_target):
+                ctx.add_detail(details, _("detail.starting_core_after_sync"))
+                try:
+                    ctx.core_start()
+                except Exception as exc:
+                    setattr(exc, "core_stopped", True)
+                    raise
+            else:
+                ctx.add_detail(details, _("detail.core_left_stopped_after_storage_sync"))
+        else:
+            if target_model.restart_core_after_apply(homeassistant_target):
+                ctx.add_detail(details, _("detail.restarting_core"))
+                ctx.core_restart()
+            elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_apply(homeassistant_target):
+                ctx.add_detail(details, _("detail.reloading_yaml_config"))
+                ctx.core_reload_yaml()
+        return {"core_stopped": False}
     except Exception as exc:
+        if homeassistant_apply_started and homeassistant_rollback_path is not None and homeassistant_rollback_live_path is not None:
+            try:
+                restore_homeassistant_apply_rollback(
+                    homeassistant_rollback_path,
+                    homeassistant_rollback_live_path,
+                    homeassistant_target,
+                    ctx,
+                    details,
+                )
+            except Exception as rollback_exc:
+                if details is not None:
+                    details.append(_("detail.apply_rollback_failed", error=rollback_exc))
         setattr(exc, "core_stopped", core_stopped)
         raise
-
-    if core_stopped:
-        if target_model.start_core_after_storage_apply(homeassistant_target):
-            ctx.add_detail(details, _("detail.starting_core_after_sync"))
-            try:
-                ctx.core_start()
-            except Exception as exc:
-                setattr(exc, "core_stopped", True)
-                raise
-        else:
-            ctx.add_detail(details, _("detail.core_left_stopped_after_storage_sync"))
-    else:
-        if target_model.restart_core_after_apply(homeassistant_target):
-            ctx.add_detail(details, _("detail.restarting_core"))
-            ctx.core_restart()
-        elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_apply(homeassistant_target):
-            ctx.add_detail(details, _("detail.reloading_yaml_config"))
-            ctx.core_reload_yaml()
-    return {"core_stopped": False}
 
 
 def build_save_export(resolved_targets, details, ctx):
@@ -1472,6 +1539,13 @@ def git_head_tree_empty(repo_dir, ctx):
     return not result.stdout.strip()
 
 
+def target_repo_source_relative(repo_dir, target):
+    try:
+        return Path(target["source_path"]).relative_to(repo_dir)
+    except ValueError:
+        return Path(target.get("source") or Path(target["source_path"]).name)
+
+
 def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
     add = ctx.run_command(["git", "add", "-A"], cwd=repo_dir)
     if add.returncode != 0:
@@ -1482,10 +1556,7 @@ def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
     for target in resolved_targets:
         if target.get("type") != "homeassistant":
             continue
-        try:
-            source_relative = Path(target["source_path"]).relative_to(repo_dir)
-        except ValueError:
-            source_relative = Path(target.get("source") or Path(target["source_path"]).name)
+        source_relative = target_repo_source_relative(repo_dir, target)
         storage = repo_dir / source_relative / ".storage"
         if not storage.exists():
             continue
@@ -1498,6 +1569,52 @@ def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
         forced = ctx.run_command(["git", "add", "-f", "--", *storage_paths], cwd=repo_dir)
         if forced.returncode != 0:
             raise RuntimeError(f"git add allowlisted .storage failed:\n{forced.stderr.strip()}")
+
+
+def sync_applied_normalized_storage_to_repo_worktree(repo_dir, resolved_targets, ctx):
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        if target.get("type") != "homeassistant":
+            continue
+        source_root = materialize_homeassistant_source(Path(target["source_path"]), target, ctx)
+        source_storage = source_root / ".storage"
+        live_storage = Path(target["live_path"]) / ".storage"
+        repo_storage = repo_dir / target_repo_source_relative(repo_dir, target) / ".storage"
+        for name in NORMALIZED_STORAGE_FILES:
+            source_path = source_storage / name
+            live_path = live_storage / name
+            repo_path = repo_storage / name
+            if not source_path.exists() or not live_path.exists():
+                continue
+            ensure_dir(repo_path.parent)
+            shutil.copy2(live_path, repo_path)
+
+
+def merge_apply_normalized_storage_metadata_into_repo_worktree(repo_dir, resolved_targets, ctx):
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        if target.get("type") != "homeassistant":
+            continue
+        repo_storage = repo_dir / target_repo_source_relative(repo_dir, target) / ".storage"
+        for name in NORMALIZED_STORAGE_FILES:
+            repo_path = repo_storage / name
+            if not repo_path.exists() or not repo_path.is_file():
+                continue
+            try:
+                current_text = repo_path.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            relative = repo_path.relative_to(repo_dir).as_posix()
+            head = ctx.run_command(["git", "show", f"HEAD:{relative}"], cwd=repo_dir)
+            if head.returncode == 0:
+                text = merged_normalized_storage_apply_text(name, head.stdout, current_text)
+            else:
+                text = None
+            if text is None:
+                text = current_text
+            text = complete_entity_registry_apply_text(name, text)
+            if text != current_text:
+                repo_path.write_text(text)
 
 
 def git_status_porcelain(repo_dir, ctx):
@@ -2696,7 +2813,7 @@ def delete_apply_conflict_live_deletions(
     return deleted
 
 
-def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx):
+def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, message, details, ctx, sync_applied_storage=False):
     conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx, prefer_local_live=True)
     keep_ha = set(keep_ha_paths or [])
     if conflicts:
@@ -2711,6 +2828,9 @@ def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, m
             continue
         git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
 
+    merge_apply_normalized_storage_metadata_into_repo_worktree(repo_dir, resolved_targets, ctx)
+    if sync_applied_storage:
+        sync_applied_normalized_storage_to_repo_worktree(repo_dir, resolved_targets, ctx)
     stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
     commit = git_commit_if_needed(repo_dir, message, ctx)
     base = update_base_branch(repo_dir, main_branch, ctx)
