@@ -5064,6 +5064,165 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("wardrobe_auto", preview["diff"])
             self.assertNotIn("bathroom_auto", preview["diff"])
 
+    def test_apply_preview_organizer_diff_ignores_route_only_items(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            areas = source / ".ha-ops" / "areas"
+            home = areas / "home"
+            home.mkdir(parents=True)
+            live.joinpath("automations.yaml").write_text(
+                "\n".join(
+                    [
+                        "- id: battery_attention",
+                        "  alias: Battery Attention",
+                        "  trigger: []",
+                        "  condition: []",
+                        "  action:",
+                        "  - service: script.battery_attention_scan",
+                        "",
+                    ]
+                )
+            )
+            live.joinpath("scripts.yaml").write_text(
+                "\n".join(
+                    [
+                        "battery_attention_scan:",
+                        "  alias: Battery Attention Scan",
+                        "  sequence:",
+                        "  - service: notify.mobile_app",
+                        "    data:",
+                        "      message: Battery attention needed",
+                        "",
+                    ]
+                )
+            )
+            live.joinpath("scenes.yaml").write_text("[]\n")
+            (live / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.area_registry").write_text(
+                json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}})
+            )
+            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (live / ".storage" / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "automation.battery_attention",
+                                    "unique_id": "battery_attention",
+                                },
+                                {
+                                    "entity_id": "script.battery_attention_scan",
+                                    "unique_id": "battery_attention_scan",
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+            (home / "automations.yaml").write_text((live / "automations.yaml").read_text())
+            (home / "scripts.yaml").write_text((live / "scripts.yaml").read_text())
+            (areas / "organizer-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "automations": {"count": 1, "ids": ["battery_attention"]},
+                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
+                        "scenes": {"count": 0, "ids": []},
+                    }
+                )
+            )
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "delete": False,
+                "organizer": {"enabled": True},
+            }
+
+            preview = server.build_apply_preview([target])
+
+            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
+            self.assertEqual(preview["paths"], [])
+            self.assertNotIn(".ha-ops/areas/.unknown/automations.yaml", preview["diff"])
+            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", preview["diff"])
+            self.assertNotIn(".ha-ops/areas/home/automations.yaml", preview["diff"])
+            self.assertNotIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
+
+            (home / "scripts.yaml").write_text(
+                "\n".join(
+                    [
+                        "battery_attention_scan:",
+                        "  alias: Battery Attention Scan",
+                        "  sequence:",
+                        "  - service: notify.mobile_app",
+                        "    data:",
+                        "      message: Battery attention changed",
+                        "",
+                    ]
+                )
+            )
+
+            preview = server.build_apply_preview([target])
+
+            self.assertIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
+            self.assertIn("Battery attention changed", preview["diff"])
+            self.assertIn("homeassistant/.ha-ops/areas/home/scripts.yaml", preview["paths"])
+
+    def test_apply_preview_organizer_diff_rejects_nested_heap_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            nested = source / ".ha-ops" / "areas" / "home" / "nested" / "automations.yaml"
+            (live / "automations.yaml").write_text("[]\n")
+            (live / "scripts.yaml").write_text("{}\n")
+            (live / "scenes.yaml").write_text("[]\n")
+            (live / ".storage").mkdir(parents=True)
+            (live / ".storage" / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
+            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (live / ".storage" / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
+            nested.parent.mkdir(parents=True)
+            nested.write_text(
+                "\n".join(
+                    [
+                        "- id: battery_attention",
+                        "  alias: Battery Attention",
+                        "  trigger: []",
+                        "  action: []",
+                        "",
+                    ]
+                )
+            )
+            (source / ".ha-ops" / "areas" / "organizer-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "automations": {"count": 0, "ids": []},
+                        "scripts": {"count": 0, "ids": []},
+                        "scenes": {"count": 0, "ids": []},
+                    }
+                )
+            )
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "delete": False,
+                "organizer": {"enabled": True},
+            }
+
+            with self.assertRaisesRegex(RuntimeError, "unreferenced organizer file.*home/nested/automations.yaml"):
+                server.build_apply_preview([target])
+
     def test_apply_preview_organizer_diff_uses_git_organized_yaml_for_added_files(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

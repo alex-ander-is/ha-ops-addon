@@ -223,6 +223,23 @@ def generated_organized_relative_files(root, options=None):
     )
 
 
+def validate_no_unreferenced_heap_files(git_root, options=None):
+    root = organized_root(git_root, options)
+    if not root.exists():
+        return
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.name not in HEAP_FILES.values():
+            continue
+        relative = path.relative_to(root)
+        if len(relative.parts) == 2:
+            continue
+        display_path = path.relative_to(git_root).as_posix()
+        raise RuntimeError(
+            f"unreferenced organizer file: {display_path}. "
+            "Organizer heap files must be direct children of an area directory."
+        )
+
+
 def normalize_area(value):
     value = str(value or "").strip()
     if not value:
@@ -581,6 +598,7 @@ def split_live_heaps_to_git(live_root, git_root, options=None):
 
 def read_organized_heaps(git_root, options=None):
     options = organizer_options(options)
+    validate_no_unreferenced_heap_files(git_root, options)
     root = organized_root(git_root, options)
     automations = []
     scripts = {}

@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.35
+
+- Hide Git-to-HA Apply organizer route-only changes when the composed automation, script, and scene heap semantics are unchanged.
+- Reject nested organizer heap files before Git-to-HA Apply preview can hide them as route-only no-op changes.
+
 ## 0.8.34
 
 - Make partial Git-to-HA Apply converge for organizer-backed Home Assistant automations and scripts by materializing selected area YAML changes into the live heap files while leaving unselected organizer and storage diffs pending.

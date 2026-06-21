@@ -2032,15 +2032,28 @@ def restore_source_organized_view_for_apply_diff(preview_copy, target, ctx):
     return True
 
 
+def mirror_organizer_generated_view_for_apply_diff(source_root, dest_root, options):
+    organizer.clean_organized_root(dest_root, options, preserve_unmanaged=True)
+    for relative in organizer.generated_organized_relative_files(source_root, options):
+        source_file = source_root / relative
+        dest_file = dest_root / relative
+        ensure_dir(dest_file.parent)
+        shutil.copy2(source_file, dest_file)
+
+
 def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target, ctx):
     options = organizer_options(target)
     if options is None:
         return False
     if not organizer.has_heap_files(baseline_copy) and not organizer.has_heap_files(preview_copy):
         return False
+    baseline_fingerprint = organizer.fingerprint_heaps(baseline_copy) if organizer.has_heap_files(baseline_copy) else None
+    preview_fingerprint = organizer.fingerprint_heaps(preview_copy) if organizer.has_heap_files(preview_copy) else None
     organizer.split_live_heaps_to_git(baseline_copy, baseline_copy, options=options)
     organizer.split_live_heaps_to_git(preview_copy, preview_copy, options=options)
     restore_source_organized_view_for_apply_diff(preview_copy, target, ctx)
+    if baseline_fingerprint and baseline_fingerprint == preview_fingerprint:
+        mirror_organizer_generated_view_for_apply_diff(preview_copy, baseline_copy, options)
     normalize_organizer_index_for_diff(baseline_copy, options)
     normalize_organizer_index_for_diff(preview_copy, options)
     return True

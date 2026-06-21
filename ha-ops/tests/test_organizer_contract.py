@@ -841,6 +841,27 @@ class OrganizerContractTests(unittest.TestCase):
                 ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
             self.assertFalse((composed / "automations.yaml").exists())
 
+    def test_integrity_rejects_unreferenced_nested_heap_file_before_writing_live(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git = root / "git" / "homeassistant"
+            composed = root / "composed"
+            nested = git / ".ha-ops" / "areas" / "home" / "nested" / "automations.yaml"
+            write_yaml(nested, [{"id": "hidden", "alias": "Hidden"}])
+            write_json(
+                git / ".ha-ops" / "areas" / "organizer-index.json",
+                {
+                    "version": 1,
+                    "automations": {"count": 0, "ids": []},
+                    "scripts": {"count": 0, "ids": []},
+                    "scenes": {"count": 0, "ids": []},
+                },
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "unreferenced organizer file.*home/nested/automations.yaml"):
+                ORGANIZER.compose_git_view_to_live(git, composed, options=self.options())
+            self.assertFalse((composed / "automations.yaml").exists())
+
     def test_compose_allows_source_deletions_relative_to_old_index(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
