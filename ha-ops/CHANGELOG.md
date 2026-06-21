@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.32
+
+- Add inline help under the highlighted post-apply HA-to-Git review button so users understand it is still the normal preview action.
+
 ## 0.8.31
 
 - Rework Disk Usage into a single read-only Storage tree with inferred System, App data, Home Assistant, and Free space categories.

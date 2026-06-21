@@ -391,6 +391,7 @@ EN_TEXT = {
     "notice.internal_ids_preview_scope": "This migrates only HA Ops YAML in the Git checkout. It does not change live Home Assistant until the normal Git to HA apply flow.",
     "notice.organizer": "Home Assistant keeps using its normal YAML files.",
     "notice.post_apply_save": "Run HA to Git preview before the next Git to HA apply so HA-created registry state is committed.",
+    "notice.post_apply_save_button": "This is still HA to Git preview. It is highlighted because the last Git to HA apply may have made Home Assistant generate registry metadata that should be reviewed and saved.",
     "notice.post_apply_save_title": "Post-apply HA changes may need saving.",
     "notice.release_snapshots": "Snapshots let HA Ops roll back a Git-to-HA apply to a saved local state.",
     "notice.retained_devices_delete": "Delete retained devices clears selected MQTT retained discovery topics only. It does not delete files, Home Assistant registry entries, or Zigbee2MQTT database records.",

@@ -390,6 +390,9 @@ def render_page(ctx):
     post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
     save_preview_button_class = "warning" if post_apply_save_recommended else "secondary"
     save_preview_button_text = _("action.review_post_apply_save") if post_apply_save_recommended else _("action.preview_save")
+    save_preview_hint_html = ""
+    if post_apply_save_recommended:
+        save_preview_hint_html = f"<p class='action-hint'>{_('notice.post_apply_save_button')}</p>"
     post_apply_notice_html = ""
     if post_apply_save_recommended:
         post_apply_notice_html = (
@@ -615,6 +618,7 @@ def render_page(ctx):
             "post_apply_notice_html": post_apply_notice_html,
             "save_preview_button_class": save_preview_button_class,
             "save_preview_button_text": save_preview_button_text,
+            "save_preview_hint_html": save_preview_hint_html,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "check_disk_usage_disabled": check_disk_usage_disabled,
             "check_retained_devices_disabled": check_retained_devices_disabled,

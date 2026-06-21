@@ -1057,6 +1057,13 @@ def render_page(data):
       gap: 12px;
       flex-wrap: wrap;
     }}
+    .action-hint {{
+      margin: -2px 0 0;
+      color: var(--ha-muted);
+      font-size: 0.88rem;
+      line-height: 1.4;
+      max-width: 44rem;
+    }}
     .action-flow {{
       margin: -2px 0 0;
       color: var(--ha-muted);
@@ -1638,6 +1645,7 @@ def render_page(data):
                 <button type="submit" class="{data['save_preview_button_class']}" {data['action_disabled']}>{data['save_preview_button_text']}</button>
               </form>
             </div>
+            {data['save_preview_hint_html']}
             <div class="action-row">
               {data['include_redundant_data_html']}
             </div>

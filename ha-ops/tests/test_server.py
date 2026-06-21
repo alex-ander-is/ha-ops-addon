@@ -1915,6 +1915,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("Post-apply HA changes may need saving.", page)
             self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
+            self.assertIn("This is still HA to Git preview.", page)
 
             server.clear_display_state()
             state = server.read_state()
@@ -1923,6 +1924,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["post_apply_save_recommended"])
             self.assertIn("Post-apply HA changes may need saving.", page)
             self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
+            self.assertIn("This is still HA to Git preview.", page)
 
     def test_post_apply_save_notice_clears_on_version_update(self):
         server = load_server()
