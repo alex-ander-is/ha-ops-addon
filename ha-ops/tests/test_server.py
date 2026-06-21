@@ -8095,6 +8095,170 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_commit"], main_commit)
             self.assertNotEqual(state["last_preview_commit"], live_commit)
 
+    def test_partial_apply_organizer_paths_materializes_selected_heap_items_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            areas = seed / "homeassistant" / ".ha-ops" / "areas"
+            (areas / "home").mkdir(parents=True)
+            (areas / ".unknown").mkdir(parents=True)
+            (areas / "home" / "automations.yaml").write_text(
+                "- id: home_auto\n  alias: Git Home Auto\n  trigger: []\n  condition: []\n  action: []\n"
+            )
+            (areas / ".unknown" / "automations.yaml").write_text(
+                "- id: unknown_auto\n  alias: Git Unknown Auto\n  trigger: []\n  condition: []\n  action: []\n"
+            )
+            (areas / "home" / "scripts.yaml").write_text("home_script:\n  alias: Git Home Script\n  sequence: []\n")
+            (areas / ".unknown" / "scripts.yaml").write_text(
+                "unknown_script:\n  alias: Git Unknown Script\n  sequence: []\n"
+            )
+            (areas / "organizer-index.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "automations": {"count": 2, "ids": ["home_auto", "unknown_auto"]},
+                        "scripts": {"count": 2, "ids": ["home_script", "unknown_script"]},
+                        "scenes": {"count": 0, "ids": []},
+                    }
+                )
+            )
+            (seed / "homeassistant" / ".storage").mkdir(parents=True)
+            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+
+            (server.CONFIG_DIR / "automations.yaml").write_text(
+                "\n".join(
+                    [
+                        "- id: home_auto",
+                        "  alias: Live Home Auto",
+                        "  trigger: []",
+                        "  condition: []",
+                        "  action: []",
+                        "- id: unknown_auto",
+                        "  alias: Live Unknown Auto",
+                        "  trigger: []",
+                        "  condition: []",
+                        "  action: []",
+                        "",
+                    ]
+                )
+            )
+            (server.CONFIG_DIR / "scripts.yaml").write_text(
+                "\n".join(
+                    [
+                        "home_script:",
+                        "  alias: Live Home Script",
+                        "  sequence: []",
+                        "unknown_script:",
+                        "  alias: Live Unknown Script",
+                        "  sequence: []",
+                        "",
+                    ]
+                )
+            )
+            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir(parents=True)
+            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}}))
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [
+                                {
+                                    "entity_id": "automation.home_auto",
+                                    "unique_id": "home_auto",
+                                    "area_id": "home",
+                                },
+                                {
+                                    "entity_id": "script.home_script",
+                                    "unique_id": "home_script",
+                                    "area_id": "home",
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+            (storage / "input_boolean").write_text("live-storage\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            server.set_homeassistant_organizer_enabled(True)
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {
+                    "homeassistant/.ha-ops/areas/.unknown/automations.yaml",
+                    "homeassistant/.ha-ops/areas/.unknown/scripts.yaml",
+                    "homeassistant/.ha-ops/areas/home/automations.yaml",
+                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
+                    "homeassistant/.ha-ops/areas/organizer-index.json",
+                    "homeassistant/.storage/input_boolean",
+                },
+            )
+            server.write_state(
+                {
+                    "apply_preview_selected_paths": [
+                        "homeassistant/.ha-ops/areas/.unknown/scripts.yaml",
+                        "homeassistant/.ha-ops/areas/home/automations.yaml",
+                    ]
+                }
+            )
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {
+                    "homeassistant/.ha-ops/areas/.unknown/automations.yaml",
+                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
+                    "homeassistant/.ha-ops/areas/organizer-index.json",
+                    "homeassistant/.storage/input_boolean",
+                },
+            )
+            self.assertNotIn("Git Home Auto", state["last_diff"])
+            self.assertNotIn("Git Unknown Script", state["last_diff"])
+            self.assertIn("Git Unknown Auto", state["last_diff"])
+            self.assertIn("Git Home Script", state["last_diff"])
+            self.assertEqual((storage / "input_boolean").read_text(), "live-storage\n")
+            automations_text = (server.CONFIG_DIR / "automations.yaml").read_text()
+            scripts_text = (server.CONFIG_DIR / "scripts.yaml").read_text()
+            self.assertIn("Git Home Auto", automations_text)
+            self.assertIn("Live Unknown Auto", automations_text)
+            self.assertIn("Live Home Script", scripts_text)
+            self.assertIn("Git Unknown Script", scripts_text)
+            self.assertEqual(state["apply_preview_selected_paths"], [])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+
     def test_apply_preview_conflict_uses_fresh_live_branch(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

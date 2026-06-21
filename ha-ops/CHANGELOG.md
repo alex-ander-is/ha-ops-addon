@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.34
+
+- Make partial Git-to-HA Apply converge for organizer-backed Home Assistant automations and scripts by materializing selected area YAML changes into the live heap files while leaving unselected organizer and storage diffs pending.
+
 ## 0.8.33
 
 - Refresh the Git-to-HA Apply Change List after a successful partial Apply so applied files disappear, unselected files remain visible, and the refreshed preview commit tracks the repo branch.

@@ -2578,6 +2578,47 @@ def restore_preview_paths_from_baseline(preview_path, baseline_path, keep_paths)
             safe_remove_path(preview_file)
 
 
+def is_organizer_generated_relative(path, options):
+    relative = Path(path)
+    organized_root = Path(organizer.organized_root_name(options))
+    try:
+        under_root = relative.relative_to(organized_root)
+    except ValueError:
+        return False
+    return len(under_root.parts) >= 1 and relative.name in {*organizer.HEAP_FILES.values(), organizer.INDEX_NAME}
+
+
+def apply_organizer_preview_path_decisions(selected_path, baseline_path, preview_path, target, keep_paths, ctx):
+    options = organizer_options(target)
+    if options is None:
+        return False
+    if not organizer.has_heap_files(baseline_path) and not organizer.has_heap_files(preview_path):
+        return False
+
+    organizer_keep_paths = [
+        Path(path)
+        for path in keep_paths
+        if is_organizer_generated_relative(path, options)
+    ]
+    if not organizer_keep_paths:
+        return False
+
+    safe_id = safe_preview_name(str(target["id"]))
+    decision_root = ctx.work_dir / "apply-preview-selected-organizer" / safe_id
+    baseline_organized = decision_root / "baseline"
+    selected_organized = decision_root / "selected"
+    clear_tree(decision_root, ctx.work_dir, ctx.run_command)
+    sync_tree(baseline_path, baseline_organized, True, [".git/"], ctx.run_command)
+    sync_tree(preview_path, selected_organized, True, [".git/"], ctx.run_command)
+
+    organizer.split_live_heaps_to_git(baseline_organized, baseline_organized, options=options)
+    organizer.split_live_heaps_to_git(selected_organized, selected_organized, options=options)
+    restore_source_organized_view_for_apply_diff(selected_organized, target, ctx)
+    restore_preview_paths_from_baseline(selected_organized, baseline_organized, organizer_keep_paths)
+    organizer.compose_git_view_to_live(selected_organized, selected_path, options=options)
+    return True
+
+
 def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
     selected_root = ctx.work_dir / "apply-preview-selected"
     clear_tree(selected_root, ctx.work_dir, ctx.run_command)
@@ -2597,7 +2638,17 @@ def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
             raise RuntimeError(f"Raw apply preview for target '{target_id}' is missing; run Preview Git to HA again.")
         selected_path = selected_root / safe_id
         sync_tree(preview_path, selected_path, True, [".git/"], ctx.run_command)
-        restore_preview_paths_from_baseline(selected_path, baseline_path, keep_by_target.get(target_id, []))
+        keep_paths = keep_by_target.get(target_id, [])
+        restore_preview_paths_from_baseline(selected_path, baseline_path, keep_paths)
+        if target.get("type") == "homeassistant":
+            apply_organizer_preview_path_decisions(
+                selected_path,
+                baseline_path,
+                preview_path,
+                target,
+                keep_paths,
+                ctx,
+            )
         updated = dict(target)
         updated["source_path"] = str(selected_path)
         if updated.get("type") == "homeassistant":
