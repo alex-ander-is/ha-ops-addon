@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.31
+
+- Rework Disk Usage into a single read-only Storage tree with inferred System, App data, Home Assistant, and Free space categories.
+- Deduplicate repeated filesystem rows by backing filesystem totals and keep Home Assistant config child details in the report.
+- Keep filesystem, Docker, Supervisor, journal, and path traversal diagnostics bounded with explicit partial or unavailable messages.
+
 ## 0.8.30
 
 - Add a read-only Disk Usage action that prints mapped HA Ops storage sizes, Supervisor host disk fields, and Docker `/system/df` diagnostics to the Log.

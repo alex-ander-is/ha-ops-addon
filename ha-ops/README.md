@@ -146,9 +146,12 @@ Skipped:
 ## Disk Usage
 
 - `Check disk usage` is read-only and prints a storage summary to the Log.
-- The report includes HA Ops mapped paths, Supervisor host disk fields when available, and Docker `/system/df` diagnostics.
+- The report starts with a single Storage tree: total used storage, inferred System storage, visible App data, visible Home Assistant config, and Free space.
+- The Home Assistant branch keeps useful child details such as the database, Zigbee2MQTT, `custom_components`, `.storage`, `www`, and logs when those paths are visible.
+- Filesystem rows and top-level totals are deduplicated by backing filesystem totals so repeated mapped paths on the same device are counted once.
+- System storage is inferred from filesystem used space minus paths the add-on can read. If HA Ops cannot account for host-only paths, the report marks that part as partial or unavailable instead of pretending it inspected the host.
 - HA Ops declares `docker_api: true` only so this report can read Docker disk usage. The Docker API capability is broad; HA Ops uses it for the read-only `/system/df` endpoint.
-- If Supervisor, Docker, or journal diagnostics are unavailable, the report marks that section as unavailable and keeps the rest of the summary.
+- Path traversal and optional diagnostics are bounded. If Supervisor, Docker, journal, or filesystem diagnostics time out or are unavailable, the report marks that section as unavailable and keeps the rest of the summary.
 
 ## Add-on Options
 

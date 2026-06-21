@@ -2,6 +2,7 @@ import http.client
 import inspect
 import json
 import queue
+import re
 import socket
 import subprocess
 import threading
@@ -28,10 +29,89 @@ def format_size(size):
     return f"{value:.1f} {unit}"
 
 
+def _parse_size(value):
+    text = str(value).strip()
+    match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([A-Za-z]*)", text)
+    if not match:
+        raise ValueError(f"invalid size: {value}")
+    number, unit = match.groups()
+    multiplier = DF_SIZE_UNITS.get(unit.upper())
+    if multiplier is None:
+        raise ValueError(f"invalid size unit: {value}")
+    return int(float(number) * multiplier)
+
+
+def _dedupe_df_rows(rows):
+    deduped = []
+    seen = set()
+    for row in rows:
+        key = (row["filesystem"], row["total"], row["used"], row["available"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _parse_df_output(lines):
+    rows = []
+    for line in lines:
+        if line.lower().startswith("filesystem "):
+            continue
+        parts = line.split(maxsplit=5)
+        if len(parts) != 6:
+            continue
+        filesystem, total, used, available, percent, mount = parts
+        try:
+            rows.append(
+                {
+                    "filesystem": filesystem,
+                    "total": _parse_size(total),
+                    "used": _parse_size(used),
+                    "available": _parse_size(available),
+                    "percent": percent,
+                    "mount": mount,
+                }
+            )
+        except ValueError:
+            continue
+    return _dedupe_df_rows(rows)
+
+
+def _storage_totals(filesystems):
+    return {
+        "total": sum(row["total"] for row in filesystems),
+        "used": sum(row["used"] for row in filesystems),
+        "available": sum(row["available"] for row in filesystems),
+    }
+
+
 PATH_WALK_MAX_SECONDS = 2
 PATH_WALK_MAX_ENTRIES = 5000
 PATH_WALK_MAX_DEPTH = 8
 OPTIONAL_COMMAND_TIMEOUT_SECONDS = 3
+
+DF_SIZE_UNITS = {
+    "": 1,
+    "B": 1,
+    "K": 1024,
+    "KB": 1024,
+    "M": 1024**2,
+    "MB": 1024**2,
+    "G": 1024**3,
+    "GB": 1024**3,
+    "T": 1024**4,
+    "TB": 1024**4,
+}
+
+HOMEASSISTANT_DETAIL_GROUPS = (
+    ("DB", ("home-assistant_v2.db", "home-assistant_v2.db-shm", "home-assistant_v2.db-wal")),
+    ("zigbee2mqtt", ("zigbee2mqtt",)),
+    ("custom_components", ("custom_components",)),
+    (".storage", (".storage",)),
+    ("www", ("www",)),
+    ("logs", ("logs", "home-assistant.log", "home-assistant.log.1", "home-assistant.log.fault")),
+)
 
 
 class _PathWalkBudget:
@@ -144,6 +224,140 @@ def _path_summary(
             break
     sized.sort(key=lambda item: item[1], reverse=True)
     return total, sized[:limit], budget.partial_reason()
+
+
+def _filesystem_rows(paths, run_command, timeout):
+    if not paths:
+        return [], _("detail.disk_usage_no_mapped_paths")
+    output, error = _command_lines(run_command, ["df", "-B1", "-P", *[str(path) for path in paths]], timeout)
+    if output is None:
+        return None, error
+    rows = _parse_df_output(output)
+    if not rows:
+        return None, _("detail.disk_usage_filesystems_empty")
+    return rows, None
+
+
+def _summarize_path(
+    title,
+    path,
+    limit=8,
+    max_seconds=PATH_WALK_MAX_SECONDS,
+    max_entries=PATH_WALK_MAX_ENTRIES,
+    max_depth=PATH_WALK_MAX_DEPTH,
+):
+    path = Path(path)
+    if not path.exists():
+        return {
+            "title": title,
+            "path": path,
+            "available": False,
+            "size": 0,
+            "entries": [],
+            "partial_reason": None,
+            "max_seconds": max_seconds,
+            "max_entries": max_entries,
+            "max_depth": max_depth,
+        }
+    total, entries, partial_reason = _path_summary(
+        path,
+        limit=limit,
+        max_seconds=max_seconds,
+        max_entries=max_entries,
+        max_depth=max_depth,
+    )
+    return {
+        "title": title,
+        "path": path,
+        "available": True,
+        "size": total,
+        "entries": entries,
+        "partial_reason": partial_reason,
+        "max_seconds": max_seconds,
+        "max_entries": max_entries,
+        "max_depth": max_depth,
+    }
+
+
+def _path_label(summary):
+    return _("detail.disk_usage_path_label", title=summary["title"], path=summary["path"])
+
+
+def _append_partial_line(lines, summary, indent="    "):
+    if not summary["partial_reason"]:
+        return
+    lines.append(
+        _(
+            "detail.disk_usage_path_partial",
+            indent=indent,
+            entries=summary["max_entries"],
+            seconds=summary["max_seconds"],
+            depth=summary["max_depth"],
+            reason=summary["partial_reason"],
+        )
+    )
+
+
+def _append_app_data_details(lines, summaries):
+    for summary in summaries:
+        if not summary["available"]:
+            lines.append(_("detail.disk_usage_tree_unavailable", indent="    ", title=_path_label(summary)))
+            continue
+        lines.append(_("detail.disk_usage_tree_item", indent="    ", title=_path_label(summary), size=format_size(summary["size"])))
+        _append_partial_line(lines, summary, indent="      ")
+
+
+def _homeassistant_detail_entries(summary):
+    if not summary["available"]:
+        return []
+    entries = dict(summary["entries"])
+    used_names = set()
+    details = []
+    for title, names in HOMEASSISTANT_DETAIL_GROUPS:
+        size = 0
+        matched = False
+        for name in names:
+            if name not in entries:
+                continue
+            matched = True
+            used_names.add(name)
+            size += entries[name]
+        if matched:
+            details.append((title, size))
+    for name, size in summary["entries"]:
+        if name in used_names:
+            continue
+        details.append((name, size))
+        if len(details) >= 8:
+            break
+    return details
+
+
+def _append_homeassistant_details(lines, summary):
+    if not summary["available"]:
+        lines.append(_("detail.disk_usage_tree_unavailable", indent="    ", title=_path_label(summary)))
+        return
+    _append_partial_line(lines, summary, indent="    ")
+    for name, size in _homeassistant_detail_entries(summary):
+        lines.append(_("detail.disk_usage_tree_item", indent="    ", title=name, size=format_size(size)))
+
+
+def _append_filesystem_details(lines, filesystems):
+    if not filesystems:
+        return
+    lines.append("")
+    lines.append(_("detail.disk_usage_filesystems_deduped"))
+    for row in filesystems:
+        lines.append(
+            _(
+                "detail.disk_usage_filesystem_row",
+                mount=row["mount"],
+                filesystem=row["filesystem"],
+                used=format_size(row["used"]),
+                total=format_size(row["total"]),
+                available=format_size(row["available"]),
+            )
+        )
 
 
 def _call_with_timeout(func, args=(), kwargs=None, timeout=OPTIONAL_COMMAND_TIMEOUT_SECONDS):
@@ -263,15 +477,18 @@ def _docker_ref(image):
     return image.get("Id") or _("label.unknown")
 
 
-def _docker_usage_lines(socket_path, docker_system_df=None):
+def _docker_usage_lines(socket_path, docker_system_df=None, timeout=OPTIONAL_COMMAND_TIMEOUT_SECONDS):
     if docker_system_df is None:
         try:
-            payload, error = _docker_system_df(socket_path)
+            if _supports_timeout_argument(_docker_system_df):
+                payload, error = _docker_system_df(socket_path, timeout=timeout)
+            else:
+                payload, error = _call_with_timeout(_docker_system_df, (socket_path,), timeout=timeout)
         except Exception as exc:
             payload, error = None, str(exc)
     else:
         try:
-            payload = docker_system_df()
+            payload = _call_with_timeout(docker_system_df, timeout=timeout)
             error = None
         except Exception as exc:
             payload, error = None, str(exc)
@@ -323,38 +540,6 @@ def _docker_usage_lines(socket_path, docker_system_df=None):
         return None, str(exc)
 
 
-def _append_path_section(
-    lines,
-    title,
-    path,
-    max_seconds=PATH_WALK_MAX_SECONDS,
-    max_entries=PATH_WALK_MAX_ENTRIES,
-    max_depth=PATH_WALK_MAX_DEPTH,
-):
-    if not path.exists():
-        lines.append(_("detail.disk_usage_path_unavailable", title=title, path=path))
-        return
-    total, top_entries, partial_reason = _path_summary(
-        path,
-        max_seconds=max_seconds,
-        max_entries=max_entries,
-        max_depth=max_depth,
-    )
-    lines.append(_("detail.disk_usage_path_total", title=title, path=path, size=format_size(total)))
-    if partial_reason:
-        lines.append(
-            _(
-                "detail.disk_usage_path_partial",
-                entries=max_entries,
-                seconds=max_seconds,
-                depth=max_depth,
-                reason=partial_reason,
-            )
-        )
-    for name, size in top_entries:
-        lines.append(_("detail.disk_usage_path_entry", name=name, size=format_size(size)))
-
-
 def build_disk_usage_summary(
     config_dir,
     data_dir,
@@ -383,36 +568,77 @@ def build_disk_usage_summary(
             seen.add(path)
 
     lines = [_("detail.disk_usage_summary_title")]
-    if existing_paths:
-        output, error = _command_lines(
-            run_command,
-            ["df", "-h", *[str(path) for path in existing_paths]],
-            optional_timeout_seconds,
-        )
-        if output:
-            lines.append(_("detail.disk_usage_filesystems"))
-            lines.extend(output)
-        else:
-            lines.append(_("detail.disk_usage_filesystems_unavailable", error=error))
-    else:
-        lines.append(_("detail.disk_usage_no_mapped_paths"))
+    filesystems, filesystem_error = _filesystem_rows(existing_paths, run_command, optional_timeout_seconds)
+    storage_totals = _storage_totals(filesystems) if filesystems else None
 
-    lines.append("")
-    lines.append(_("detail.disk_usage_mapped_paths"))
-    for title, path in (
-        (_("label.homeassistant_config"), Path(config_dir)),
-        (_("label.ha_ops_data"), Path(data_dir)),
-        (_("label.addon_configs"), Path(addon_configs_dir)),
-        (_("label.backups"), Path(backup_dir)),
-    ):
-        _append_path_section(
-            lines,
-            title,
-            path,
-            path_walk_max_seconds,
-            path_walk_max_entries,
-            path_walk_max_depth,
+    homeassistant_summary = _summarize_path(
+        _("label.homeassistant_config"),
+        Path(config_dir),
+        limit=64,
+        max_seconds=path_walk_max_seconds,
+        max_entries=path_walk_max_entries,
+        max_depth=path_walk_max_depth,
+    )
+    app_summaries = [
+        _summarize_path(
+            _("label.ha_ops_data"),
+            Path(data_dir),
+            max_seconds=path_walk_max_seconds,
+            max_entries=path_walk_max_entries,
+            max_depth=path_walk_max_depth,
+        ),
+        _summarize_path(
+            _("label.addon_configs"),
+            Path(addon_configs_dir),
+            max_seconds=path_walk_max_seconds,
+            max_entries=path_walk_max_entries,
+            max_depth=path_walk_max_depth,
+        ),
+        _summarize_path(
+            _("label.backups"),
+            Path(backup_dir),
+            max_seconds=path_walk_max_seconds,
+            max_entries=path_walk_max_entries,
+            max_depth=path_walk_max_depth,
+        ),
+    ]
+    app_size = sum(summary["size"] for summary in app_summaries if summary["available"])
+    homeassistant_size = homeassistant_summary["size"] if homeassistant_summary["available"] else 0
+
+    if storage_totals:
+        system_size = max(0, storage_totals["used"] - app_size - homeassistant_size)
+        lines.append(
+            _(
+                "detail.disk_usage_storage_title",
+                used=format_size(storage_totals["used"]),
+                total=format_size(storage_totals["total"]),
+            )
         )
+        lines.append(_("detail.disk_usage_tree_item", indent="  ", title=_("label.system"), size=format_size(system_size)))
+        lines.append(_("detail.disk_usage_system_partial"))
+    else:
+        lines.append(_("detail.disk_usage_storage_unavailable", error=filesystem_error))
+        lines.append(_("detail.disk_usage_tree_unavailable", indent="  ", title=_("label.system")))
+
+    lines.append(_("detail.disk_usage_tree_item", indent="  ", title=_("label.app_data"), size=format_size(app_size)))
+    _append_app_data_details(lines, app_summaries)
+    lines.append(
+        _("detail.disk_usage_tree_item", indent="  ", title=_("label.homeassistant"), size=format_size(homeassistant_size))
+    )
+    _append_homeassistant_details(lines, homeassistant_summary)
+    if storage_totals:
+        lines.append(
+            _(
+                "detail.disk_usage_tree_item",
+                indent="  ",
+                title=_("label.free_space"),
+                size=format_size(storage_totals["available"]),
+            )
+        )
+    else:
+        lines.append(_("detail.disk_usage_tree_unavailable", indent="  ", title=_("label.free_space")))
+
+    _append_filesystem_details(lines, filesystems or [])
 
     lines.append("")
     lines.append(_("detail.disk_usage_optional_diagnostics"))
@@ -424,7 +650,7 @@ def build_disk_usage_summary(
         lines.append(_("detail.disk_usage_optional_title", title=_("label.host")))
         lines.extend(host_output)
 
-    docker_output, docker_error = _docker_usage_lines(Path(docker_socket_path), docker_system_df)
+    docker_output, docker_error = _docker_usage_lines(Path(docker_socket_path), docker_system_df, optional_timeout_seconds)
     if docker_output is None:
         lines.append(_("detail.disk_usage_optional_unavailable", title=_("label.docker"), error=docker_error))
     else:

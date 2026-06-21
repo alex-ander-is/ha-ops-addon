@@ -9590,6 +9590,13 @@ class ServerTests(unittest.TestCase):
             (server.CONFIG_DIR / "home-assistant_v2.db").write_bytes(b"x" * 2048)
             (server.CONFIG_DIR / "zigbee2mqtt").mkdir()
             (server.CONFIG_DIR / "zigbee2mqtt" / "state.json").write_bytes(b"x" * 1024)
+            (server.CONFIG_DIR / ".storage").mkdir()
+            (server.CONFIG_DIR / ".storage" / "core.config").write_bytes(b"x" * 256)
+            (server.CONFIG_DIR / "custom_components").mkdir()
+            (server.CONFIG_DIR / "custom_components" / "demo.py").write_bytes(b"x" * 128)
+            (server.CONFIG_DIR / "www").mkdir()
+            (server.CONFIG_DIR / "www" / "dashboard.js").write_bytes(b"x" * 64)
+            (server.CONFIG_DIR / "home-assistant.log").write_bytes(b"x" * 32)
             (server.DATA_DIR / "state.json").write_text("{}")
             (server.ADDON_CONFIGS_DIR / "9336c2b0_zigbee2mqtt").mkdir()
             (server.ADDON_CONFIGS_DIR / "9336c2b0_zigbee2mqtt" / "configuration.yaml").write_bytes(b"x" * 512)
@@ -9599,7 +9606,14 @@ class ServerTests(unittest.TestCase):
                     return subprocess.CompletedProcess(
                         command,
                         0,
-                        "Filesystem Size Used Avail Use% Mounted on\n/dev/test 10G 6G 4G 60% /data\n",
+                        "\n".join(
+                            [
+                                "Filesystem 1B-blocks Used Available Use% Mounted on",
+                                "/dev/test 10G 6G 4G 60% /data",
+                                "/dev/test 10G 6G 4G 60% /data",
+                                "",
+                            ]
+                        ),
                         "",
                     )
                 if command[0] == "docker":
@@ -9622,11 +9636,19 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_action"], "disk_usage")
             self.assertEqual(state["last_status"], "success")
             self.assertIn("Disk usage summary (read-only).", details)
-            self.assertIn("Filesystems:", details)
-            self.assertIn("HA Ops mapped paths:", details)
-            self.assertIn("Home Assistant config", details)
-            self.assertIn("home-assistant_v2.db", details)
+            self.assertIn("Storage: 6.0 GB of 10.0 GB", details)
+            self.assertIn("  - System: 6.0 GB", details)
+            self.assertIn("  - App data:", details)
+            self.assertIn("  - Home Assistant:", details)
+            self.assertIn("  - Free space: 4.0 GB", details)
+            self.assertIn("Visible filesystems (deduplicated):", details)
+            self.assertEqual(details.count("/data on /dev/test"), 1)
+            self.assertIn("DB", details)
             self.assertIn("zigbee2mqtt", details)
+            self.assertIn(".storage", details)
+            self.assertIn("custom_components", details)
+            self.assertIn("www", details)
+            self.assertIn("logs", details)
             self.assertIn("Add-on configs", details)
             self.assertIn("Docker: unavailable from HA Ops add-on", details)
             self.assertIn("System journal:", details)
@@ -9684,6 +9706,51 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Volumes: 1 volume(s), 256.0 MB.", details)
             self.assertIn("Build cache: 1 item(s), 64.0 MB.", details)
 
+    def test_disk_usage_counts_shared_backing_filesystem_once(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "config"
+            data_dir = root / "data"
+            addon_configs_dir = root / "addon"
+            backup_dir = root / "backup"
+            for path in (config_dir, data_dir, addon_configs_dir, backup_dir):
+                path.mkdir()
+
+            def fake_run_command(command, env=None, cwd=None):
+                if command[0] == "df":
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        "\n".join(
+                            [
+                                "Filesystem 1B-blocks Used Available Use% Mounted on",
+                                "/dev/root 100G 60G 40G 60% /config",
+                                "/dev/root 100G 60G 40G 60% /data",
+                                "/dev/root 100G 60G 40G 60% /addon",
+                                "/dev/root 100G 60G 40G 60% /backup",
+                                "",
+                            ]
+                        ),
+                        "",
+                    )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            lines = server.app_context.disk_usage.build_disk_usage_summary(
+                config_dir,
+                data_dir,
+                addon_configs_dir,
+                backup_dir,
+                fake_run_command,
+                docker_socket_path=root / "missing-docker.sock",
+            )
+            details = "\n".join(lines)
+
+            self.assertIn("Storage: 60.0 GB of 100.0 GB", details)
+            self.assertIn("  - Free space: 40.0 GB", details)
+            self.assertNotIn("Storage: 240.0 GB of 400.0 GB", details)
+            self.assertEqual(details.count(" on /dev/root:"), 1)
+
     def test_disk_usage_mapped_path_summary_reports_partial_when_walk_is_bounded(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -9711,7 +9778,7 @@ class ServerTests(unittest.TestCase):
             )
             details = "\n".join(lines)
 
-            self.assertIn("Home Assistant config", details)
+            self.assertIn("  - Home Assistant:", details)
             self.assertIn("partial: stopped before full traversal", details)
             self.assertIn("(entries)", details)
 
@@ -9734,6 +9801,10 @@ class ServerTests(unittest.TestCase):
                 time.sleep(0.2)
                 return {"data": {"disk_used": "11.9 GB"}}
 
+            def slow_docker_system_df():
+                time.sleep(0.2)
+                return {"LayersSize": 0, "Images": [], "Containers": [], "Volumes": [], "BuildCache": []}
+
             started = time.monotonic()
             lines = server.app_context.disk_usage.build_disk_usage_summary(
                 config_dir,
@@ -9743,15 +9814,16 @@ class ServerTests(unittest.TestCase):
                 slow_run_command,
                 slow_call_supervisor,
                 root / "missing-docker.sock",
-                lambda: {"LayersSize": 0, "Images": [], "Containers": [], "Volumes": [], "BuildCache": []},
+                slow_docker_system_df,
                 optional_timeout_seconds=0.01,
             )
             elapsed = time.monotonic() - started
             details = "\n".join(lines)
 
             self.assertLess(elapsed, 0.15)
-            self.assertIn("Filesystems unavailable: timed out after 0.01s", details)
+            self.assertIn("Storage: unavailable from HA Ops add-on (timed out after 0.01s).", details)
             self.assertIn("Host: unavailable from HA Ops add-on (timed out after 0.01s).", details)
+            self.assertIn("Docker: unavailable from HA Ops add-on (timed out after 0.01s).", details)
             self.assertIn("System journal: unavailable from HA Ops add-on (timed out after 0.01s).", details)
 
     def test_disk_usage_treats_docker_socket_errors_as_optional(self):
