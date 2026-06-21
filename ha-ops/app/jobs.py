@@ -87,6 +87,7 @@ class JobContext:
     export_targets: Any
     get_installed_addons: Any
     git_conflict_paths: Any
+    git_commit: Any
     git_env: Any
     git_has_unpushed_commits: Any
     git_head_or_unborn: Any
@@ -1593,6 +1594,7 @@ def run_apply_job(ctx, lock_acquired=False):
         addons = ctx.get_installed_addons()
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+        preview_targets = [dict(target) for target in resolved_targets]
 
         ctx.add_detail(details, _("detail.fetched_repository_commit", commit=ctx.git_head_or_unborn(repo_dir)))
         ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
@@ -1699,6 +1701,14 @@ def run_apply_job(ctx, lock_acquired=False):
             )
             if apply_commit:
                 ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
+        post_apply_preview = ctx.build_apply_preview(
+            preview_targets,
+            details,
+            repo_dir,
+            branch,
+            prefer_local_live=True,
+        )
+        post_apply_commit = ctx.git_commit(repo_dir, branch)
         git_state_out_of_date = False
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             try:
@@ -1727,10 +1737,20 @@ def run_apply_job(ctx, lock_acquired=False):
                 "last_release": release_name,
                 "last_backup_slug": backup_slug,
                 "last_targets": resolved_targets,
-                "last_preview_deletions": preview["deletions"],
+                "last_diff": post_apply_preview["diff"],
+                "last_diff_generated_at": utc_now(),
+                "last_preview_commit": post_apply_commit,
+                "last_preview_fingerprint": post_apply_preview["fingerprint"],
+                "last_preview_deletions": post_apply_preview["deletions"],
+                "last_preview_storage_changes": post_apply_preview.get("storage_changes", False),
+                "last_preview_storage_paths": post_apply_preview.get("storage_change_paths", []),
+                "last_preview_live_fingerprints": post_apply_preview.get("live_fingerprints", {}),
+                "last_preview_warnings": post_apply_preview.get("warnings", []),
+                "last_preview_paths": post_apply_preview.get("paths", []),
+                "last_preview_conflicts": bool(post_apply_preview.get("conflicts")),
+                "last_preview_conflict_paths": post_apply_preview.get("conflicts", []),
                 "apply_preview_resolutions": {},
                 "apply_preview_selected_paths": [],
-                "last_preview_conflict_paths": [],
                 "post_apply_save_recommended": True,
             }
         )

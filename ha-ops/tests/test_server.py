@@ -7980,6 +7980,121 @@ class ServerTests(unittest.TestCase):
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
             self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), "git-automations\n")
 
+    def test_partial_apply_rebuilds_preview_with_unselected_files_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir(parents=True)
+            (seed / "homeassistant" / "configuration.yaml").write_text("git-config\n")
+            (seed / "homeassistant" / "automations.yaml").write_text(
+                "- id: git_auto\n  alias: Git Auto\n  trigger: []\n  condition: []\n  action: []\n"
+            )
+            (seed / "homeassistant" / "scripts.yaml").write_text("git_script:\n  sequence: []\n")
+            (seed / "homeassistant" / "scenes.yaml").write_text("- id: git_scene\n  name: Git Scene\n  entities: {}\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha-config\n")
+            (server.CONFIG_DIR / "automations.yaml").write_text(
+                "- id: ha_auto\n  alias: HA Auto\n  trigger: []\n  condition: []\n  action: []\n"
+            )
+            (server.CONFIG_DIR / "scripts.yaml").write_text("ha_script:\n  sequence: []\n")
+            (server.CONFIG_DIR / "scenes.yaml").write_text("- id: ha_scene\n  name: HA Scene\n  entities: {}\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {
+                    "homeassistant/automations.yaml",
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scenes.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            old_fingerprint = state["last_preview_fingerprint"]
+            old_live_fingerprints = state["last_preview_live_fingerprints"]
+            server.write_state({"apply_preview_selected_paths": ["homeassistant/automations.yaml"]})
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scenes.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.assertNotIn("homeassistant/automations.yaml", state["last_diff"])
+            self.assertNotEqual(state["last_preview_fingerprint"], old_fingerprint)
+            self.assertNotEqual(state["last_preview_live_fingerprints"], old_live_fingerprints)
+            self.assertEqual(state["apply_preview_selected_paths"], [])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            repo_dir = root / "data" / "ha-config"
+            main_commit = self.git(["rev-parse", "main"], repo_dir).stdout.strip()
+            live_commit = self.git(["rev-parse", "ha-ops/ha-live"], repo_dir).stdout.strip()
+            self.assertEqual(state["last_preview_commit"], main_commit)
+            self.assertNotEqual(state["last_preview_commit"], live_commit)
+            page = server.render_page()
+            self.assertIn("data-preview-key='apply:homeassistant/configuration.yaml'", page)
+            self.assertNotIn("data-preview-key='apply:homeassistant/automations.yaml'", page)
+            self.assertIn("git_auto", (server.CONFIG_DIR / "automations.yaml").read_text())
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
+            self.assertIn("ha_script", (server.CONFIG_DIR / "scripts.yaml").read_text())
+            self.assertIn("ha_scene", (server.CONFIG_DIR / "scenes.yaml").read_text())
+
+            server.write_state({"apply_preview_selected_paths": ["homeassistant/configuration.yaml"]})
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            details = "\n".join(state["last_details"])
+            self.assertNotEqual(state["last_message"], "State changed since this preview was created. Review the updated preview before continuing.")
+            self.assertNotIn("State changed since this preview was created", details)
+            self.assertEqual(state["last_status"], "success")
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git-config\n")
+            self.assertIn("git_auto", (server.CONFIG_DIR / "automations.yaml").read_text())
+            self.assertIn("ha_script", (server.CONFIG_DIR / "scripts.yaml").read_text())
+            self.assertIn("ha_scene", (server.CONFIG_DIR / "scenes.yaml").read_text())
+            self.assertEqual(
+                set(state["last_preview_paths"]),
+                {
+                    "homeassistant/scenes.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.assertNotIn("homeassistant/configuration.yaml", state["last_diff"])
+            main_commit = self.git(["rev-parse", "main"], repo_dir).stdout.strip()
+            live_commit = self.git(["rev-parse", "ha-ops/ha-live"], repo_dir).stdout.strip()
+            self.assertEqual(state["last_preview_commit"], main_commit)
+            self.assertNotEqual(state["last_preview_commit"], live_commit)
+
     def test_apply_preview_conflict_uses_fresh_live_branch(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

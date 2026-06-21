@@ -1700,9 +1700,9 @@ def ensure_live_branch_available(repo_dir, ctx, prefer_local=False):
         return
 
 
-def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
+def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data=False, prefer_local_live=False):
     export_root = build_save_export(resolved_targets, details, ctx)
-    ensure_live_branch_available(repo_dir, ctx)
+    ensure_live_branch_available(repo_dir, ctx, prefer_local=prefer_local_live)
     apply_save_export(resolved_targets, export_root, details, ctx)
     if not include_redundant_data:
         restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, ctx)
@@ -2839,7 +2839,7 @@ def commit_apply_merge(repo_dir, main_branch, resolved_targets, keep_ha_paths, m
     return commit
 
 
-def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main_branch="main"):
+def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main_branch="main", prefer_local_live=False):
     if repo_dir is None:
         return build_apply_preview_from_sources(resolved_targets, ctx, details)
 
@@ -2847,7 +2847,7 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
     original_branch = git_current_branch(repo_dir, ctx) or main_branch
     try:
         git_ensure_head(repo_dir, ctx, details)
-        update_ha_live_branch(resolved_targets, repo_dir, details, ctx)
+        update_ha_live_branch(resolved_targets, repo_dir, details, ctx, prefer_local_live=prefer_local_live)
         conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:

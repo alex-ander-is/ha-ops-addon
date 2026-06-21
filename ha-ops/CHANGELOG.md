@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.33
+
+- Refresh the Git-to-HA Apply Change List after a successful partial Apply so applied files disappear, unselected files remain visible, and the refreshed preview commit tracks the repo branch.
+
 ## 0.8.32
 
 - Add inline help under the highlighted post-apply HA-to-Git review button so users understand it is still the normal preview action.

@@ -326,6 +326,9 @@ class AppContext:
     def git_head_or_unborn(self, repo_dir):
         return git_ops.git_head_or_unborn(repo_dir, self.run_command)
 
+    def git_commit(self, repo_dir, ref):
+        return git_ops.git_commit(repo_dir, ref, self.run_command)
+
     def git_has_unpushed_commits(self, repo_dir, branch):
         return git_ops.git_has_unpushed_commits(repo_dir, branch, self.run_command)
 
@@ -505,8 +508,15 @@ class AppContext:
             clean_git_delete_paths,
         )
 
-    def build_apply_preview(self, resolved_targets, details=None, repo_dir=None, main_branch="main"):
-        return sync_logic.build_apply_preview(resolved_targets, self.sync_deps(), details, repo_dir, main_branch)
+    def build_apply_preview(self, resolved_targets, details=None, repo_dir=None, main_branch="main", prefer_local_live=False):
+        return sync_logic.build_apply_preview(
+            resolved_targets,
+            self.sync_deps(),
+            details,
+            repo_dir,
+            main_branch,
+            prefer_local_live=prefer_local_live,
+        )
 
     def save_unknown_base_conflicts(self, resolved_targets, repo_dir, resolutions, details, include_redundant_data=False):
         return sync_logic.save_unknown_base_conflicts(
@@ -784,6 +794,7 @@ class AppContext:
             get_installed_addons=self.get_installed_addons,
             git_conflict_paths=self.git_conflict_paths,
             git_env=self.git_env,
+            git_commit=self.git_commit,
             git_has_unpushed_commits=self.git_has_unpushed_commits,
             git_head_or_unborn=self.git_head_or_unborn,
             git_pull_rebase=self.git_pull_rebase,
