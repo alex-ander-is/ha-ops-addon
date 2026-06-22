@@ -2,6 +2,19 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.38
+
+- Suppress HA-to-Git Save organizer route-only item moves inside multi-item area files when the composed Home Assistant heap content is unchanged.
+
+## 0.8.37
+
+- Render stale-service-branch HA-to-Git Save organizer index conflicts as reviewable preview conflicts instead of crashing while normalizing the diff.
+
+## 0.8.36
+
+- Hide HA-to-Git Save organizer route-only additions when live and Git contain the same automation, script, or scene item through different organizer area paths.
+- Keep hidden organizer route-only additions out of unrelated Save commits while preserving still-live items when a selected organizer file also contains a real deletion.
+
 ## 0.8.35
 
 - Hide Git-to-HA Apply organizer route-only changes when the composed automation, script, and scene heap semantics are unchanged.

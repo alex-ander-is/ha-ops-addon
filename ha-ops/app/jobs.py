@@ -153,7 +153,18 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
         missing = [path for path in selected if path in conflict_paths and path not in stored]
         if missing:
             raise RuntimeError(_("message.choose_save_preview_conflicts", count=len(missing)))
-    return {path: stored.get(path, "ha") if path in selected_set else "git" for path in paths}
+    resolutions = {path: stored.get(path, "ha") if path in selected_set else "git" for path in paths}
+    preserve_triggers = preview.get("suppressed_preserve_triggers") or {}
+    for path in preview.get("suppressed_paths") or []:
+        triggers = preserve_triggers.get(path) or []
+        selected_ha_triggers = [
+            trigger
+            for trigger in triggers
+            if trigger in selected_set and stored.get(trigger, "ha") == "ha"
+        ]
+        preserve_from_ha = bool(selected_ha_triggers)
+        resolutions.setdefault(path, "ha" if preserve_from_ha else "git")
+    return resolutions
 
 
 def selected_preview_paths(state, paths, key):
@@ -486,6 +497,30 @@ def run_save_job(ctx, lock_acquired=False):
                 }
             )
             return False
+        if not current_preview.get("paths") and current_preview.get("suppressed_paths"):
+            ctx.add_detail(details, _("detail.no_live_changes_to_save"))
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "success",
+                    "last_action": "save",
+                    "last_message": _("message.no_live_changes_to_save"),
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                    "last_save_preview": current_preview["summary"],
+                    "last_save_diff": current_preview["diff"],
+                    "last_save_diff_generated_at": utc_now(),
+                    "last_save_preview_commit": commit,
+                    "last_save_preview_fingerprint": current_preview["fingerprint"],
+                    "last_save_preview_paths": [],
+                    "last_save_preview_conflicts": False,
+                    "last_save_preview_conflict_paths": [],
+                    "save_preview_resolutions": {},
+                    "save_preview_selected_paths": [],
+                    "post_apply_save_recommended": False,
+                }
+            )
+            return True
         save_resolutions = save_preview_resolutions_for_current_preview(state, commit, current_preview)
 
         ctx.add_detail(details, _("detail.merged_live_export"))
