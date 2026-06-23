@@ -615,6 +615,7 @@ def render_page(ctx):
             "retained_devices_section_html": retained_devices_section_html,
             "internal_ids_section_html": internal_ids_section_html,
             "action_disabled": action_disabled,
+            "job_running_json": "true" if job_running else "false",
             "post_apply_notice_html": post_apply_notice_html,
             "save_preview_button_class": save_preview_button_class,
             "save_preview_button_text": save_preview_button_text,

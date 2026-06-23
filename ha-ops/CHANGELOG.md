@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.41
+
+- Keep HA Ops pages refreshing while a background job is still running so long Save and Apply operations do not leave stale disabled preview controls on screen.
+
 ## 0.8.40
 
 - Create both normalized Save preview diff roots before comparing HA-only additions so HA-to-Git preview does not fail on directory-only `diff` inputs.

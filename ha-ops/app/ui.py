@@ -1898,6 +1898,11 @@ def render_page(data):
         }}, delay);
       }}
 
+      const pageRenderedRunning = {data['job_running_json']};
+      if (pageRenderedRunning) {{
+        reloadSoon(2000);
+      }}
+
       const previewExpandedStorageKey = "haOpsPreviewExpandedFiles";
 
       function storePreviewExpandedState() {{
@@ -2120,10 +2125,6 @@ def render_page(data):
             diff.classList.toggle("wrap-lines", toggle.checked);
           }}
         }});
-      }}
-
-      if (isRunning()) {{
-        reloadSoon(3000);
       }}
 
       restorePreviewExpandedState();

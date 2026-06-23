@@ -2096,6 +2096,21 @@ class ServerTests(unittest.TestCase):
         self.assertIn("clearTransientDisplay();", submit_setup)
         self.assertNotIn("clearDisplayState();", submit_setup)
 
+    def test_running_page_auto_refreshes_until_job_finishes(self):
+        server = load_server()
+
+        class PageData(dict):
+            def __missing__(self, key):
+                return ""
+
+        idle_page = server.ui.render_page(PageData(job_running_json="false"))
+        self.assertIn("const pageRenderedRunning = false;", idle_page)
+
+        running_page = server.ui.render_page(PageData(job_running_json="true"))
+        self.assertIn("const pageRenderedRunning = true;", running_page)
+        self.assertIn("reloadSoon(2000);", running_page)
+        self.assertNotIn("if (isRunning())", running_page)
+
     def test_startup_clears_empty_error_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
