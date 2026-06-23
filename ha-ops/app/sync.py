@@ -2289,6 +2289,8 @@ def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=Tr
     before_root = diff_root / "before"
     after_root = diff_root / "after"
     clear_tree(diff_root, ctx.work_dir, ctx.run_command)
+    ensure_dir(before_root)
+    ensure_dir(after_root)
     for raw_path in paths:
         relative = Path(raw_path)
         if relative.is_absolute() or ".." in relative.parts:

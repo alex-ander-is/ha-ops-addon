@@ -2618,6 +2618,61 @@ class ServerTests(unittest.TestCase):
             self.assertIn("git-modified-at", preview["diff"])
             self.assertIn("live-modified-at", preview["diff"])
 
+    def test_save_preview_diff_creates_roots_for_ha_only_additions(self):
+        server = load_server()
+
+        class StrictDirectoryDiffContext(server.app_context.AppContext):
+            def run_command(self, command, env=None, cwd=None, timeout=None):
+                if command[:4] == ["diff", "-ruN", "-x", ".git"]:
+                    before = Path(command[4])
+                    after = Path(command[5])
+                    if not before.is_dir() or not after.is_dir():
+                        missing = before if not before.exists() else after
+                        return subprocess.CompletedProcess(
+                            command,
+                            2,
+                            stdout="",
+                            stderr=f"diff: {missing}: Is a directory",
+                        )
+                return super().run_command(command, env=env, cwd=cwd, timeout=timeout)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            (repo / "README.md").write_text("base\n")
+            self.git_commit_all(repo, "base")
+            self.git(["checkout", "-b", "ha-ops/ha-live"], repo)
+            live_path = repo / "homeassistant" / "configuration.yaml"
+            live_path.parent.mkdir(parents=True)
+            live_path.write_text("homeassistant:\n")
+            self.git_commit_all(repo, "live addition")
+            self.git(["checkout", "main"], repo)
+            self.git(["merge", "--no-commit", "--no-ff", "ha-ops/ha-live"], repo)
+
+            ctx = StrictDirectoryDiffContext(
+                data_dir=server.DATA_DIR,
+                config_dir=server.CONFIG_DIR,
+                addon_configs_dir=server.ADDON_CONFIGS_DIR,
+            )
+            preview = server.sync_logic.merge_preview_for_save(
+                repo,
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(repo / "homeassistant"),
+                    }
+                ],
+                False,
+                ctx,
+            )
+
+            self.assertEqual(preview["paths"], ["homeassistant/configuration.yaml"])
+            self.assertIn("homeassistant/configuration.yaml", preview["diff"])
+
     def test_save_preview_job_toggle_controls_registry_noise(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

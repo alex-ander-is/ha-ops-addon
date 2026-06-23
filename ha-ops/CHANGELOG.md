@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.40
+
+- Create both normalized Save preview diff roots before comparing HA-only additions so HA-to-Git preview does not fail on directory-only `diff` inputs.
+
 ## 0.8.39
 
 - Keep disabled organizer Save and Apply flows on Home Assistant heap YAML files, remove stale `.ha-ops/areas` metadata, and verify immediate round trips stay no-diff.
