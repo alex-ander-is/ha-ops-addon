@@ -1,7 +1,9 @@
 # Home Assistant Organizer Contract
 
-Status: implemented contract. The implementation must keep matching this
-document.
+Status: design contract for the next organizer implementation. The previous
+implementation was removed to `app/organizer_legacy_area_split_backup.py` while
+the round-trip model is redesigned. See
+`ha-ops/docs/organizer-roundtrip-todo/README.md`.
 
 ## Goal
 
