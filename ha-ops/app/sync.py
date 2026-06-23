@@ -248,14 +248,16 @@ def organizer_options(target):
         return None
     value = target.get("organizer")
     if value is False:
-        return None
+        return {"enabled": False}
     if value is True:
         return {}
     if not isinstance(value, dict):
         return None
     enabled = value.get("enabled", False)
     if not enabled:
-        return None
+        options = dict(value)
+        options["enabled"] = False
+        return options
     options = dict(value)
     options.pop("enabled", None)
     return options
@@ -271,18 +273,27 @@ def organizer_cleanup_options(target):
 
 
 def homeassistant_organizer_enabled(target):
-    return organizer_options(target) is not None
+    options = organizer_options(target)
+    return options is not None and organizer.organizer_projection_enabled(options)
+
+
+def require_homeassistant_organizer_projection_available(target):
+    if target and target.get("type") == "homeassistant":
+        organizer.require_projection_available(organizer_options(target))
 
 
 def ensure_organized_view_is_enabled(src, target):
-    if not target or target.get("type") != "homeassistant" or organizer_options(target) is not None:
+    options = organizer_options(target)
+    if not target or target.get("type") != "homeassistant" or organizer.organizer_projection_enabled(options):
         return
-    options = organizer_cleanup_options(target)
+    options = options or organizer_cleanup_options(target)
     if organizer.has_organized_view(src, options):
         root_name = organizer.organized_root_name(options)
         raise RuntimeError(
-            f"Home Assistant organizer view exists in Git at {root_name}, but the organizer is disabled. "
-            "Enable the Home Assistant Git layout toggle or save HA to Git with the toggle off to convert Git back to heap YAML files."
+            f"Home Assistant organizer view exists in Git at {root_name}, but the .ha-ops/areas "
+            "projection rewrite is pending and the organizer must stay disabled. Use Save HA to Git "
+            "with the organizer disabled to convert Git back to heap YAML files, or remove the stale "
+            ".ha-ops/areas view from Git."
         )
 
 
@@ -290,15 +301,22 @@ def organize_homeassistant_export(path, target, details, ctx):
     options = organizer_options(target)
     if options is None or not organizer.has_heap_files(path):
         return None
+    projection_enabled = organizer.organizer_projection_enabled(options)
     summary = organizer.split_live_heaps_to_git(path, path, options=options)
     total = sum(summary[kind]["output_count"] for kind in ("automations", "scripts", "scenes"))
     if total and details is not None:
-        ctx.add_detail(details, f"Organized {total} Home Assistant automation/script/scene item(s) for Git.")
+        message = (
+            f"Organized {total} Home Assistant automation/script/scene item(s) for Git."
+            if projection_enabled
+            else f"Preserved {total} Home Assistant automation/script/scene item(s) as heap YAML for Git."
+        )
+        ctx.add_detail(details, message)
     return summary
 
 
 def materialize_homeassistant_source(src, target, ctx):
     options = organizer_options(target)
+    require_homeassistant_organizer_projection_available(target)
     ensure_organized_view_is_enabled(src, target)
     if options is None or not organizer.has_organized_view(src, options):
         return Path(src)
@@ -374,6 +392,8 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None, validate_pr
         ctx.add_detail(details, _("detail.skipped_managed_config_entries_missing"))
     if skipped_protected and details is not None:
         ctx.add_detail(details, _("detail.skipped_protected_storage_files", paths=", ".join(skipped_protected)))
+    if not homeassistant_organizer_enabled(target):
+        organizer.clean_organized_root(dest, organizer_cleanup_options(target))
     return skipped_protected
 
 
@@ -1282,6 +1302,7 @@ def build_save_export(resolved_targets, details, ctx):
 
         export_path = export_root / target["id"]
         if target["type"] == "homeassistant":
+            require_homeassistant_organizer_projection_available(target)
             ctx.add_detail(details, _("detail.exporting_config_only", target=target["id"], path=live_path))
             copied_count, zigbee2mqtt_count, storage_count, managed_storage_count = export_homeassistant_config(
                 live_path, export_path, target, ctx

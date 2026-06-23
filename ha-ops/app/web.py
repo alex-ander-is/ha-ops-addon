@@ -1077,6 +1077,13 @@ def create_handler(ctx):
 
             if parsed.path == "/homeassistant-organizer":
                 enabled = "homeassistant_organizer" in body
+                if enabled and not manifest_logic.ORGANIZER_PROJECTION_AVAILABLE:
+                    message = _("message.homeassistant_organizer_blocked")
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": message}, status=400)
+                    else:
+                        self.send_html(render_page(ctx), status=400)
+                    return
                 ctx.set_homeassistant_organizer_enabled(enabled)
                 if self.wants_json():
                     message = _("message.homeassistant_layout_updated")

@@ -1058,6 +1058,33 @@ class ServerTests(unittest.TestCase):
         )
         return result.stdout
 
+    def write_heap_yaml_set(self, root, label):
+        root.mkdir(parents=True, exist_ok=True)
+        normalized = label.lower().replace(" ", "_")
+        (root / "configuration.yaml").write_text(f"{normalized}:\n")
+        (root / "automations.yaml").write_text(f"- id: {normalized}_auto\n  alias: {label} Auto\n")
+        (root / "scripts.yaml").write_text(f"{normalized}_script:\n  sequence: []\n")
+        (root / "scenes.yaml").write_text(f"- id: {normalized}_scene\n  name: {label} Scene\n  entities: {{}}\n")
+
+    def write_stale_organizer_view(self, root):
+        area = root / ".ha-ops" / "areas" / "home"
+        area.mkdir(parents=True, exist_ok=True)
+        (area / "automations.yaml").write_text("- id: stale_auto\n")
+        (area / "scripts.yaml").write_text("stale_script:\n  sequence: []\n")
+        (root / ".ha-ops" / "areas" / "organizer-index.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "automations": {"count": 1, "ids": ["stale_auto"]},
+                    "scripts": {"count": 1, "ids": ["stale_script"]},
+                    "scenes": {"count": 0, "ids": []},
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
     def remote_parents(self, remote, ref):
         result = subprocess.run(
             ["git", "--git-dir", str(remote), "rev-list", "--parents", "-n", "1", ref],
@@ -4473,8 +4500,10 @@ class ServerTests(unittest.TestCase):
             body=b"homeassistant_organizer=1",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Home Assistant Git layout updated", post_request.wfile.getvalue().decode())
+        self.assertEqual(post_request.responses[-1], 400)
+        response = json.loads(post_request.wfile.getvalue().decode())
+        self.assertFalse(response["ok"])
+        self.assertIn("projection rewrite is pending", response["message"])
         self.assertEqual(
             ctx.calls,
             [
@@ -4491,7 +4520,6 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
                 "clear-display",
-                ("organizer", True),
             ],
         )
 
@@ -4567,6 +4595,32 @@ class ServerTests(unittest.TestCase):
             (live / "configuration.yaml").write_text("homeassistant:\n")
             server.apply_homeassistant_config(root / "missing", live, {"id": "homeassistant"})
             self.assertEqual((live / "configuration.yaml").read_text(), "homeassistant:\n")
+
+    def test_apply_rejects_enabled_organizer_heap_source_before_heap_mode_copy(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live = server.CONFIG_DIR
+            source = root / "repo" / "homeassistant"
+            self.write_heap_yaml_set(source, "Git")
+            (live / "configuration.yaml").write_text("live_only:\n")
+            self.write_stale_organizer_view(live)
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "organizer": {"enabled": True},
+            }
+
+            error = server.sync_logic.organizer.OrganizerRemovedError
+            with self.assertRaisesRegex(error, "projection rewrite is pending"):
+                server.apply_homeassistant_config(source, live, target)
+
+            self.assertEqual((live / "configuration.yaml").read_text(), "live_only:\n")
 
     def test_apply_preview_shows_protected_storage_changes(self):
         server = load_server()
@@ -4989,6 +5043,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("git_object", preview["diff"])
             self.assertNotIn("live_object", preview["diff"])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_apply_preview_organizer_diff_ignores_heap_order_rewrite(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5064,6 +5119,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("wardrobe_auto", preview["diff"])
             self.assertNotIn("bathroom_auto", preview["diff"])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_apply_preview_organizer_diff_ignores_route_only_items(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5174,6 +5230,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Battery attention changed", preview["diff"])
             self.assertIn("homeassistant/.ha-ops/areas/home/scripts.yaml", preview["paths"])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_apply_preview_organizer_diff_rejects_nested_heap_file(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5223,6 +5280,7 @@ class ServerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unreferenced organizer file.*home/nested/automations.yaml"):
                 server.build_apply_preview([target])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_apply_preview_organizer_diff_uses_git_organized_yaml_for_added_files(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5304,7 +5362,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(targets[1]["source"], "addons/local_zigbee2mqtt")
             self.assertFalse(targets[1]["delete"])
 
-    def test_default_manifest_uses_homeassistant_organizer_ui_preference(self):
+    def test_default_manifest_ignores_blocked_homeassistant_organizer_ui_preference(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5313,15 +5371,63 @@ class ServerTests(unittest.TestCase):
             manifest = server.default_manifest({"apply_path": "homeassistant"})
             self.assertNotIn("organizer", manifest["targets"][0])
 
-            server.set_homeassistant_organizer_enabled(True)
+            server.write_state({"homeassistant_organizer_enabled": True})
             manifest = server.default_manifest({"apply_path": "homeassistant"})
-            self.assertEqual(manifest["targets"][0]["organizer"], {"enabled": True})
+            self.assertNotIn("organizer", manifest["targets"][0])
 
             server.set_homeassistant_organizer_enabled(False)
             manifest = server.default_manifest({"apply_path": "homeassistant"})
             self.assertFalse(manifest["targets"][0]["organizer"])
 
-    def test_loaded_manifest_keeps_organizer_until_ui_preference_is_set(self):
+    def test_set_homeassistant_organizer_rejects_enabled_while_projection_is_blocked(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+
+            with self.assertRaisesRegex(RuntimeError, "projection rewrite is pending"):
+                server.set_homeassistant_organizer_enabled(True)
+
+            self.assertIsNone(server.read_state().get("homeassistant_organizer_enabled"))
+
+    def test_homeassistant_organizer_control_is_disabled_while_projection_is_blocked(self):
+        server = load_server()
+
+        html = server.ui.render_homeassistant_organizer(True)
+
+        self.assertIn("Area split organizer paused", html)
+        self.assertIn(".ha-ops/areas projection is rewritten", html)
+        self.assertIn("<input type='checkbox' name='homeassistant_organizer' value='1' disabled>", html)
+        self.assertNotIn("checked", html)
+        self.assertNotIn("Split automations, scripts, and scenes by area in Git", html)
+
+    def test_loaded_manifest_ignores_stale_organizer_ui_preference(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "ha-ops.json").write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "targets": [
+                            {
+                                "id": "homeassistant",
+                                "type": "homeassistant",
+                                "source": "homeassistant",
+                            }
+                        ],
+                    }
+                )
+            )
+
+            server.write_state({"homeassistant_organizer_enabled": True})
+            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
+            self.assertNotIn("organizer", manifest["targets"][0])
+
+    def test_loaded_manifest_keeps_organizer_until_disabled_ui_preference_is_set(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5353,13 +5459,6 @@ class ServerTests(unittest.TestCase):
             server.set_homeassistant_organizer_enabled(False)
             manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
             self.assertFalse(manifest["targets"][0]["organizer"])
-
-            server.set_homeassistant_organizer_enabled(True)
-            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
-            self.assertEqual(
-                manifest["targets"][0]["organizer"],
-                {"enabled": True, "organized_root": ".custom"},
-            )
 
     def test_policy_booleans_are_centralized_for_manifest_and_targets(self):
         server = load_server()
@@ -5428,6 +5527,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertIn("homeassistant/configuration.yaml", result.stdout)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_ha_to_git_uses_homeassistant_organizer_ui_toggle(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5487,6 +5587,129 @@ class ServerTests(unittest.TestCase):
             self.assertIn("homeassistant/.ha-ops/areas/home/automations.yaml", result.stdout)
             self.assertNotIn("homeassistant/automations.yaml", result.stdout)
 
+    def test_disabled_organizer_save_heap_view_then_apply_is_noop(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            self.git(["init", "--bare", str(remote)], root)
+            self.write_heap_yaml_set(server.CONFIG_DIR, "Live")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            server.set_homeassistant_organizer_enabled(False)
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            result = self.git(["--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"], root)
+
+            self.assertIn("homeassistant/configuration.yaml", result.stdout)
+            self.assertIn("homeassistant/automations.yaml", result.stdout)
+            self.assertIn("homeassistant/scripts.yaml", result.stdout)
+            self.assertIn("homeassistant/scenes.yaml", result.stdout)
+            self.assertNotIn("homeassistant/.ha-ops/areas", result.stdout)
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("no file changes", state["last_diff"].lower())
+            self.assertEqual(state["last_preview_paths"], [])
+
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("no file changes", state["last_diff"].lower())
+            self.assertEqual(state["last_preview_paths"], [])
+            self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), self.remote_file(remote, "homeassistant/automations.yaml"))
+            self.assertFalse((server.CONFIG_DIR / ".ha-ops" / "areas").exists())
+
+    def test_disabled_organizer_apply_heap_view_then_save_is_noop(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            self.write_heap_yaml_set(seed / "homeassistant", "Git")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+            self.write_stale_organizer_view(server.CONFIG_DIR)
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            server.do_core_check = lambda: None
+            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            server.set_homeassistant_organizer_enabled(False)
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            self.assertEqual(
+                set(server.read_state()["last_preview_paths"]),
+                {
+                    "homeassistant/automations.yaml",
+                    "homeassistant/configuration.yaml",
+                    "homeassistant/scenes.yaml",
+                    "homeassistant/scripts.yaml",
+                },
+            )
+            self.select_all_apply_preview_files(server)
+            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
+
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), self.remote_file(remote, "homeassistant/configuration.yaml"))
+            self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), self.remote_file(remote, "homeassistant/automations.yaml"))
+            self.assertEqual((server.CONFIG_DIR / "scripts.yaml").read_text(), self.remote_file(remote, "homeassistant/scripts.yaml"))
+            self.assertEqual((server.CONFIG_DIR / "scenes.yaml").read_text(), self.remote_file(remote, "homeassistant/scenes.yaml"))
+            self.assertFalse((server.CONFIG_DIR / ".ha-ops" / "areas").exists())
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("no file changes", state["last_diff"].lower())
+            self.assertEqual(state["last_preview_paths"], [])
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertIn("no save changes", state["last_save_preview"].lower())
+            self.assertEqual(state["last_save_preview_paths"], [])
+            result = self.git(["--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"], root)
+            self.assertNotIn("homeassistant/.ha-ops/areas", result.stdout)
+
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_preserves_organizer_contract_docs(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5876,6 +6099,7 @@ class ServerTests(unittest.TestCase):
                 "battery_attention_scan:\n  alias: battery_attention_scan\n",
             )
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_diff_ignores_route_only_battery_attention(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5957,6 +6181,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_empty_save_preview_organizer_route_only_battery_attention_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6039,6 +6264,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview_paths"], [])
             self.assertEqual(state["save_preview_selected_paths"], [])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_mixed_home_file_route_only_move_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6165,6 +6391,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_real_addition_does_not_duplicate_route_only_item(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6273,6 +6500,7 @@ class ServerTests(unittest.TestCase):
             saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
             self.assertEqual(saved_index["scripts"], {"count": 2, "ids": ["battery_attention_scan", "new_script"]})
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_include_redundant_data_hides_route_only_battery_attention(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6367,6 +6595,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_mixed_route_only_item_and_real_deletion_preserves_live_item(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6476,6 +6705,7 @@ class ServerTests(unittest.TestCase):
             saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
             self.assertEqual(saved_index["scripts"], {"count": 1, "ids": ["battery_attention_scan"]})
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_selected_file_keeps_unchecked_index_at_git(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6586,6 +6816,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "success")
             self.assertEqual(state["save_preview_selected_paths"], [])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_organizer_diff_keeps_changed_battery_attention_payload(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6653,6 +6884,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview_paths"])
             self.assertIn("Battery attention changed", state["last_save_diff"])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_modified_route_only_battery_attention_removes_old_route(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6735,6 +6967,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(saved_scripts.count("battery_attention_scan:"), 1)
             self.assertIn("Battery attention changed", saved_scripts)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_preview_stale_service_branch_conflicted_organizer_index_does_not_crash(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -9182,6 +9415,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_commit"], main_commit)
             self.assertNotEqual(state["last_preview_commit"], live_commit)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_partial_apply_organizer_paths_materializes_selected_heap_items_only(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -13356,7 +13590,7 @@ devices:
             self.assertIn("Old Button", state["last_deleted_devices_preview"])
             self.assertIn("start failed", state["last_message"])
 
-    def test_homeassistant_organizer_toggle_is_in_main_action_card(self):
+    def test_homeassistant_organizer_blocked_control_is_in_main_action_card(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13370,7 +13604,9 @@ devices:
             managed_targets = page.index("<h2>Managed Targets</h2>")
             self.assertLess(toggle, actions)
             self.assertLess(toggle, managed_targets)
-            self.assertIn("Split automations, scripts, and scenes by area in Git", page)
+            self.assertIn("Area split organizer paused", page)
+            self.assertIn("name='homeassistant_organizer' value='1' disabled", page)
+            self.assertNotIn("Split automations, scripts, and scenes by area in Git", page)
 
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()

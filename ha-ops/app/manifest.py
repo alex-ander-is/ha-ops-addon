@@ -4,6 +4,7 @@ import policies
 
 
 HOMEASSISTANT_ORGANIZER_STATE_KEY = "homeassistant_organizer_enabled"
+ORGANIZER_PROJECTION_AVAILABLE = False
 
 
 def selected_addon_slugs(read_state):
@@ -24,6 +25,8 @@ def homeassistant_organizer_preference(read_state):
 
 def set_homeassistant_organizer_enabled(enabled, write_state):
     value = bool(enabled)
+    if value and not ORGANIZER_PROJECTION_AVAILABLE:
+        raise RuntimeError("Home Assistant organizer area split is paused while the projection rewrite is pending.")
     write_state({HOMEASSISTANT_ORGANIZER_STATE_KEY: value})
     return value
 
@@ -58,6 +61,8 @@ def with_homeassistant_organizer_preference(target, organizer_enabled):
 
 def apply_homeassistant_organizer_preference(manifest, organizer_enabled):
     if organizer_enabled is None:
+        return manifest
+    if organizer_enabled and not ORGANIZER_PROJECTION_AVAILABLE:
         return manifest
     effective = dict(manifest)
     effective["targets"] = [

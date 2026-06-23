@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.39
+
+- Keep disabled organizer Save and Apply flows on Home Assistant heap YAML files, remove stale `.ha-ops/areas` metadata, and verify immediate round trips stay no-diff.
+- Mark the enabled `.ha-ops/areas` organizer projection as blocked pending the round-trip rewrite; disabled organizer Save and Apply remain production-safe.
+
 ## 0.8.38
 
 - Suppress HA-to-Git Save organizer route-only item moves inside multi-item area files when the composed Home Assistant heap content is unchanged.

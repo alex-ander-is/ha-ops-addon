@@ -23,24 +23,28 @@ HA Ops manages Home Assistant config with Git-backed previews and service branch
 
 HA Ops has an opt-in contract for a virtual split of Home Assistant UI-managed
 automations, scripts, and scenes. Live Home Assistant keeps the normal heap
-files, while enabled Git targets expose an area-first view under
-`homeassistant/.ha-ops/areas/<area>/`. See `docs/organizer-contract.md` for
-activation, precedence, conflict semantics, and safety invariants.
+files. The enabled area-first projection under
+`homeassistant/.ha-ops/areas/<area>/` is currently blocked pending the
+round-trip rewrite described in `docs/organizer-roundtrip-todo/README.md`.
+Keep organizer disabled for production Save and Apply flows; disabled targets
+use the heap files directly and remove stale generated `.ha-ops/areas`
+metadata. See `docs/organizer-contract.md` for the future activation,
+precedence, conflict semantics, and safety invariants.
 
 ## Stable Entity References
 
 When editing Home Assistant automations, scripts, and scenes in Git, keep them
-independent of Home Assistant registry UUIDs. This applies to both the organizer
-split view under `homeassistant/.ha-ops/areas/<area>/` and the heap files
+independent of Home Assistant registry UUIDs. This applies to both the future
+organizer split view under `homeassistant/.ha-ops/areas/<area>/` and the heap files
 `homeassistant/automations.yaml`, `homeassistant/scripts.yaml`, and
 `homeassistant/scenes.yaml` when those files are present. Convert opaque
 `entity_id` registry ids to real stable `entity_id` values, remove `device_id`
 usage, and prefer state, numeric state, MQTT, or service actions. See
 `docs/stable-entity-references.md`.
 
-Organizer service buckets are dot-prefixed: `.unknown` for unrouted items and
-`.mixed` for equally plausible area routes. Real areas, including an area named
-`Unknown`, use normal non-dot directory names.
+Future organizer service buckets are dot-prefixed: `.unknown` for unrouted
+items and `.mixed` for equally plausible area routes. Real areas, including an
+area named `Unknown`, use normal non-dot directory names.
 
 Suggested request for agents:
 

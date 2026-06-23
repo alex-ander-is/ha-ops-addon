@@ -209,15 +209,18 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
     )
 
 
-def render_homeassistant_organizer(enabled):
-    checked = "checked" if enabled else ""
+def render_homeassistant_organizer(enabled, projection_available=False):
+    checked = " checked" if enabled and projection_available else ""
+    disabled = "" if projection_available else " disabled"
+    label_key = "text.split_organizer" if projection_available else "text.split_organizer_blocked"
+    notice_key = "notice.organizer" if projection_available else "notice.organizer_blocked"
     return (
         "<form method='post' action='homeassistant-organizer' data-auto-submit='change'>"
         "<div class='check-list'>"
         "<label class='check-row'>"
-        f"<input type='checkbox' name='homeassistant_organizer' value='1' {checked}>"
-        f"<span>{_('text.split_organizer')}</span>"
-        f"<small>{_('notice.organizer')}</small>"
+        f"<input type='checkbox' name='homeassistant_organizer' value='1'{checked}{disabled}>"
+        f"<span>{_(label_key)}</span>"
+        f"<small>{_(notice_key)}</small>"
         "</label>"
         "</div>"
         "</form>"

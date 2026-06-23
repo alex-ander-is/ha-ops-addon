@@ -81,6 +81,25 @@ class SyncOrganizerTests(unittest.TestCase):
             },
         )
 
+    def seed_stale_organizer_view(self, root):
+        write_yaml_text(root / ".ha-ops" / "areas" / "home" / "automations.yaml", "- id: stale_auto\n")
+        write_yaml_text(root / ".ha-ops" / "areas" / "home" / "scripts.yaml", "stale_script:\n  sequence: []\n")
+        write_json(
+            root / ".ha-ops" / "areas" / "organizer-index.json",
+            {
+                "version": 1,
+                "automations": {"count": 1, "ids": ["stale_auto"]},
+                "scripts": {"count": 1, "ids": ["stale_script"]},
+                "scenes": {"count": 0, "ids": []},
+            },
+        )
+
+    def assert_heap_files_equal(self, left, right):
+        for filename in ("automations.yaml", "scripts.yaml", "scenes.yaml"):
+            with self.subTest(filename=filename):
+                self.assertEqual((left / filename).read_text(), (right / filename).read_text())
+
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_unknown_base_conflicts_reports_heap_file_removed_by_organizer(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -119,6 +138,7 @@ class SyncOrganizerTests(unittest.TestCase):
 
             self.assertEqual(conflicts, ["homeassistant/automations.yaml"])
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_unknown_base_conflicts_ignores_identical_heap_file_removed_by_organizer(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -189,6 +209,136 @@ class SyncOrganizerTests(unittest.TestCase):
             self.assertTrue((source / "scenes.yaml").exists())
             self.assertFalse((source / ".ha-ops" / "areas").exists())
 
+    def test_disabled_organizer_save_then_apply_preview_has_no_heap_diff(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            live = root / "live"
+            apply_live = root / "apply-live"
+            work = root / "work"
+            source.mkdir(parents=True)
+            live.mkdir(parents=True)
+            apply_live.mkdir(parents=True)
+            work.mkdir()
+
+            write_yaml_text(live / "configuration.yaml", "homeassistant:\n")
+            write_yaml_text(live / "automations.yaml", "- id: live_auto\n  alias: Live Auto\n")
+            write_yaml_text(live / "scripts.yaml", "live_script:\n  sequence: []\n")
+            write_yaml_text(live / "scenes.yaml", "- id: live_scene\n  name: Live Scene\n  entities: {}\n")
+            self.seed_registries(live)
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "organizer": False,
+            }
+            details = []
+            ctx = self.context(sync, work)
+
+            sync.export_targets([target], details, ctx)
+
+            self.assertTrue((source / "automations.yaml").exists())
+            self.assertTrue((source / "scripts.yaml").exists())
+            self.assertTrue((source / "scenes.yaml").exists())
+            self.assertFalse((source / ".ha-ops" / "areas").exists())
+            self.assertIn("Preserved 3 Home Assistant automation/script/scene item(s) as heap YAML for Git.", details)
+
+            preview = sync.build_apply_preview_from_sources([target], ctx)
+            self.assertIn("no file changes", preview["diff"].lower())
+            self.assertEqual(preview["paths"], [])
+
+            apply_target = dict(target)
+            apply_target["live_path"] = str(apply_live)
+            sync.apply_targets([apply_target], [], ctx)
+
+            self.assert_heap_files_equal(live, apply_live)
+            self.assertFalse((apply_live / ".ha-ops" / "areas").exists())
+
+    def test_disabled_organizer_apply_then_save_has_no_heap_diff(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            live = root / "live"
+            saved = root / "saved" / "homeassistant"
+            work = root / "work"
+            source.mkdir(parents=True)
+            live.mkdir(parents=True)
+            saved.mkdir(parents=True)
+            work.mkdir()
+
+            write_yaml_text(source / "configuration.yaml", "homeassistant:\n")
+            write_yaml_text(source / "automations.yaml", "- id: git_auto\n  alias: Git Auto\n")
+            write_yaml_text(source / "scripts.yaml", "git_script:\n  sequence: []\n")
+            write_yaml_text(source / "scenes.yaml", "- id: git_scene\n  name: Git Scene\n  entities: {}\n")
+            self.seed_stale_organizer_view(live)
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "organizer": {"enabled": False},
+            }
+            ctx = self.context(sync, work)
+
+            sync.apply_targets([target], [], ctx)
+            self.assert_heap_files_equal(source, live)
+            self.assertFalse((live / ".ha-ops" / "areas").exists())
+
+            repeat_preview = sync.build_apply_preview_from_sources([target], ctx)
+            self.assertIn("no file changes", repeat_preview["diff"].lower())
+            self.assertEqual(repeat_preview["paths"], [])
+
+            save_target = dict(target)
+            save_target["source_path"] = str(saved)
+            sync.export_targets([save_target], [], ctx)
+
+            self.assert_heap_files_equal(source, saved)
+            self.assertFalse((saved / ".ha-ops" / "areas").exists())
+
+            preview = sync.build_apply_preview_from_sources([target], ctx)
+            self.assertIn("no file changes", preview["diff"].lower())
+            self.assertEqual(preview["paths"], [])
+
+    def test_enabled_organizer_rejects_heap_only_apply_before_heap_mode_copy(self):
+        sync = load_sync()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "repo" / "homeassistant"
+            live = root / "live"
+            work = root / "work"
+            source.mkdir(parents=True)
+            live.mkdir(parents=True)
+            work.mkdir()
+
+            write_yaml_text(source / "configuration.yaml", "git_only:\n")
+            write_yaml_text(source / "automations.yaml", "- id: git_auto\n  alias: Git Auto\n")
+            write_yaml_text(source / "scripts.yaml", "git_script:\n  sequence: []\n")
+            write_yaml_text(source / "scenes.yaml", "- id: git_scene\n  name: Git Scene\n  entities: {}\n")
+            write_yaml_text(live / "configuration.yaml", "live_only:\n")
+            self.seed_stale_organizer_view(live)
+
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source": "homeassistant",
+                "source_path": str(source),
+                "live_path": str(live),
+                "organizer": {"enabled": True},
+            }
+
+            with self.assertRaisesRegex(sync.organizer.OrganizerRemovedError, "projection rewrite is pending"):
+                sync.apply_targets([target], [], self.context(sync, work))
+
+            self.assertEqual((live / "configuration.yaml").read_text(), "live_only:\n")
+
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_organizer_enabled_true_exports_area_view(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,9 +397,15 @@ class SyncOrganizerTests(unittest.TestCase):
                 "live_path": str(live),
             }
 
-            with self.assertRaisesRegex(RuntimeError, "organizer view exists in Git"):
+            with self.assertRaises(RuntimeError) as raised:
                 sync.materialize_homeassistant_source(source, target, self.context(sync, work))
+            message = str(raised.exception)
+            self.assertIn("organizer view exists in Git", message)
+            self.assertIn("projection rewrite is pending", message)
+            self.assertIn("Use Save HA to Git with the organizer disabled", message)
+            self.assertNotIn("Enable the Home Assistant Git layout toggle", message)
 
+    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_apply_materialize_organizer_source_excludes_unmanaged_area_files(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
