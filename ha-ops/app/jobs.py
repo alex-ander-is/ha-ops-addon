@@ -350,7 +350,16 @@ def add_save_change_details(ctx, details, status):
     ctx.add_detail(details, "\n".join([_("detail.git_changes_prepared", count=len(lines)), *lines]))
 
 
-def run_save_job(ctx, lock_acquired=False):
+def default_save_commit_subject(release):
+    return f"Save Home Assistant config {release}"
+
+
+def save_commit_subject_or_default(commit_subject, release):
+    subject = " ".join(str(commit_subject or "").splitlines()).strip()
+    return subject or default_save_commit_subject(release)
+
+
+def run_save_job(ctx, commit_subject=None, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
@@ -530,7 +539,7 @@ def run_save_job(ctx, lock_acquired=False):
             branch,
             resolved_targets,
             save_resolutions,
-            f"Save Home Assistant config {ctx.release_now()}",
+            save_commit_subject_or_default(commit_subject, ctx.release_now()),
             details,
         )
         add_save_change_details(ctx, details, ctx.git_status_porcelain(repo_dir))

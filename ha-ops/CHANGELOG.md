@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.43
+
+- Let HA-to-Git Save confirmations edit the Git commit subject before saving.
+
 ## 0.8.42
 
 - Render HA-to-Git Save conflict preview diffs from Git stage blobs for all conflicted files so Lovelace storage previews never show Git conflict markers.

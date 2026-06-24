@@ -8,6 +8,7 @@ import threading
 import conflicts as conflict_logic
 import git_ops
 import i18n
+import jobs as job_logic
 import manifest as manifest_logic
 import state as state_store
 import sync as sync_logic
@@ -483,6 +484,7 @@ def render_page(ctx):
         )
     save_preview_section_html = ""
     if not has_conflicts and (state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text):
+        save_commit_subject = job_logic.default_save_commit_subject(ctx.release_now())
         save_preview_section_html = (
             "<section class='card wide'>"
             f"<h2>{_('heading.save_preview')}</h2>"
@@ -490,7 +492,7 @@ def render_page(ctx):
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
             f"<div data-transient='save-preview'>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths)}"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths, save_commit_subject=save_commit_subject)}"
             "</div>"
             "</section>"
         )
@@ -952,7 +954,8 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/save":
-                if not self.start_job(ctx.run_save_job):
+                commit_subject = body.get("commit_subject", [None])[0]
+                if not self.start_job(ctx.run_save_job, commit_subject):
                     return
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.save_started")})

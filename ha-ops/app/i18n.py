@@ -239,6 +239,7 @@ EN_TEXT = {
     "label.area": "Area",
     "label.backups": "Backups",
     "label.candidates": "Candidates",
+    "label.commit_subject": "Commit Subject: ",
     "label.created": "Created",
     "label.delete": "Delete",
     "label.docker": "Docker",

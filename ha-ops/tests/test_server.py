@@ -1440,6 +1440,12 @@ class ServerTests(unittest.TestCase):
             self.assertIn('sessionStorage.setItem(previewExpandedStorageKey, JSON.stringify(keys));', page)
             self.assertIn('sessionStorage.removeItem(previewExpandedStorageKey);', page)
             self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
+            self.assertIn("Commit Subject: <input type='text' name='commit_subject'", page)
+            self.assertIn("value='Save Home Assistant config ", page)
+            self.assertIn("name='commit_subject'", page)
+            disabled_subject = page.index("name='commit_subject'")
+            self.assertLess(disabled_subject, page.index("<button type='submit' disabled>Confirm Save to Git</button>"))
+            self.assertIn("spellcheck='false' disabled>", page[disabled_subject : page.index("Confirm Save to Git")])
             self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
             self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
             self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
@@ -1450,6 +1456,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("name='selected' value='1' checked", selected_page)
             self.assertIn("<input type='radio' name='choice' value='ha' checked>", selected_page)
             self.assertIn("<input type='radio' name='choice' value='git'>", selected_page)
+            enabled_subject = selected_page.index("name='commit_subject'")
+            self.assertLess(enabled_subject, selected_page.index("<button type='submit'>Confirm Save to Git</button>"))
+            self.assertNotIn("disabled", selected_page[enabled_subject : selected_page.index("Confirm Save to Git")])
             self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
             self.assertNotIn("Select files to continue.", selected_page)
 
@@ -3543,9 +3552,9 @@ class ServerTests(unittest.TestCase):
                     if lock_acquired:
                         self.run_lock.release()
 
-            def run_save_job(self, lock_acquired=False):
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
                 try:
-                    self.calls.append(("save", lock_acquired))
+                    self.calls.append(("save", commit_subject, lock_acquired))
                     self.write_state(
                         {
                             "last_status": "success",
@@ -3656,8 +3665,8 @@ class ServerTests(unittest.TestCase):
             def utc_now(self):
                 return "2026-06-15T12:00:00+00:00"
 
-            def run_save_job(self, lock_acquired=False):
-                self.calls.append(("save", lock_acquired))
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
+                self.calls.append(("save", commit_subject, lock_acquired))
 
         def invoke(ctx, path, body=b""):
             handler = server.web.create_handler(ctx)
@@ -3852,8 +3861,8 @@ class ServerTests(unittest.TestCase):
             def utc_now(self):
                 return "2026-06-17T12:00:00+00:00"
 
-            def run_save_job(self, lock_acquired=False):
-                self.calls.append(("save", lock_acquired))
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
+                self.calls.append(("save", commit_subject, lock_acquired))
 
             def run_apply_job(self, lock_acquired=False):
                 self.calls.append(("apply", lock_acquired))
@@ -3941,8 +3950,8 @@ class ServerTests(unittest.TestCase):
                     if lock_acquired:
                         self.run_lock.release()
 
-            def run_save_job(self, lock_acquired=False):
-                self.record_call("save", lock_acquired)
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
+                self.record_call(("save", commit_subject), lock_acquired)
 
             def run_save_preview_job(self, lock_acquired=False):
                 self.record_call("save-preview", lock_acquired)
@@ -4028,11 +4037,12 @@ class ServerTests(unittest.TestCase):
         post_request = invoke(
             "do_POST",
             "/save",
+            body=b"commit_subject=Custom+HA+save",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Save HA to Git started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save")])
 
         post_request = invoke(
             "do_POST",
@@ -4041,7 +4051,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("HA to Git preview started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save"), "save-preview"])
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -4053,7 +4063,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Git to HA preview started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save"), "save-preview", "preview"])
         self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
         self.assertIsNone(ctx.state_updates[-1]["last_preview_fingerprint"])
@@ -4066,7 +4076,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Git state reset started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save"), "save-preview", "preview", "reset-git-state"])
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -4080,7 +4090,7 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("Disk usage check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save"), "save-preview", "preview", "reset-git-state", "disk-usage"])
 
         post_request = invoke(
             "do_POST",
@@ -4088,7 +4098,7 @@ class ServerTests(unittest.TestCase):
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 404)
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage"])
+        self.assertEqual(ctx.calls, [("save", "Custom HA save"), "save-preview", "preview", "reset-git-state", "disk-usage"])
 
         post_request = invoke(
             "do_POST",
@@ -4097,7 +4107,10 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(post_request.responses[-1], 200)
         self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, ["save", "save-preview", "preview", "reset-git-state", "disk-usage", "deleted-devices-preview"])
+        self.assertEqual(
+            ctx.calls,
+            [("save", "Custom HA save"), "save-preview", "preview", "reset-git-state", "disk-usage", "deleted-devices-preview"],
+        )
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
@@ -4117,7 +4130,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4145,7 +4158,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4175,7 +4188,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4206,7 +4219,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4230,7 +4243,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4255,7 +4268,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -4577,7 +4590,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(
             ctx.calls,
             [
-                "save",
+                ("save", "Custom HA save"),
                 "save-preview",
                 "preview",
                 "reset-git-state",
@@ -5596,6 +5609,42 @@ class ServerTests(unittest.TestCase):
                 capture_output=True,
             )
             self.assertIn("homeassistant/configuration.yaml", result.stdout)
+
+    def test_save_ha_to_git_uses_submitted_commit_subject(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            self.assertTrue(
+                server.run_save_job(commit_subject="Custom HA Save Subject"),
+                server.read_state()["last_message"],
+            )
+
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "log", "-1", "--format=%s", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.stdout.strip(), "Custom HA Save Subject")
 
     @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
     def test_save_ha_to_git_uses_homeassistant_organizer_ui_toggle(self):

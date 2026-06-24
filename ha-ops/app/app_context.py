@@ -829,8 +829,8 @@ class AppContext:
             write_state=self.write_state,
         )
 
-    def run_save_job(self, lock_acquired=False):
-        return job_logic.run_save_job(self.job_deps(), lock_acquired=lock_acquired)
+    def run_save_job(self, commit_subject=None, lock_acquired=False):
+        return job_logic.run_save_job(self.job_deps(), commit_subject=commit_subject, lock_acquired=lock_acquired)
 
     def run_apply_job(self, lock_acquired=False):
         return job_logic.run_apply_job(self.job_deps(), lock_acquired=lock_acquired)

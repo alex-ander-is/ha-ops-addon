@@ -501,6 +501,7 @@ def render_preview_decisions(
     actions_disabled=False,
     selected_paths=None,
     required_paths=None,
+    save_commit_subject="",
 ):
     action_label = _("action.confirm_save") if direction == "save" else _("action.confirm_apply")
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
@@ -567,20 +568,41 @@ def render_preview_decisions(
     footer = ""
     if paths:
         confirm_hint = f"<span class='preview-confirm-hint'>{_('message.select_preview_files_to_continue')}</span>" if needs_file_selection else "<span></span>"
-        footer = (
-            "<div class='preview-footer-actions'>"
-            f"{confirm_hint}"
-            "<div class='preview-confirm-actions'>"
-            f"<form method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
-            f"<button type='submit'{confirm_disabled}>{action_label}</button>"
-            "</form>"
-            "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
-            f"<input type='hidden' name='direction' value='{cancel_direction}'>"
-            f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
-            "</form>"
-            "</div>"
-            "</div>"
-        )
+        if direction == "save":
+            input_disabled = " disabled" if confirm_disabled else ""
+            escaped_subject = html.escape(str(save_commit_subject or ""), quote=True)
+            footer = (
+                "<div class='preview-footer-actions preview-footer-actions-save'>"
+                "<div class='preview-confirm-actions preview-confirm-actions-save'>"
+                f"<form class='preview-confirm-form' method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+                "<label class='commit-subject-control'>"
+                f"{_('label.commit_subject')}<input type='text' name='commit_subject' value='{escaped_subject}' autocomplete='off' spellcheck='false'{input_disabled}>"
+                "</label>"
+                f"<button type='submit'{confirm_disabled}>{action_label}</button>"
+                "</form>"
+                "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
+                f"<input type='hidden' name='direction' value='{cancel_direction}'>"
+                f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
+                "</form>"
+                "</div>"
+                f"{confirm_hint}"
+                "</div>"
+            )
+        else:
+            footer = (
+                "<div class='preview-footer-actions'>"
+                f"{confirm_hint}"
+                "<div class='preview-confirm-actions'>"
+                f"<form method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+                f"<button type='submit'{confirm_disabled}>{action_label}</button>"
+                "</form>"
+                "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
+                f"<input type='hidden' name='direction' value='{cancel_direction}'>"
+                f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
+                "</form>"
+                "</div>"
+                "</div>"
+            )
     return (
         "<div class='preview-decisions'>"
         "<div class='preview-list-header'>"
@@ -1140,6 +1162,45 @@ def render_page(data):
       align-items: center;
       gap: 12px;
       flex-wrap: wrap;
+    }}
+    .preview-footer-actions-save {{
+      align-items: stretch;
+      flex-direction: column;
+    }}
+    .preview-confirm-actions-save {{
+      width: 100%;
+    }}
+    .preview-confirm-form {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 520px;
+      min-width: 0;
+    }}
+    .commit-subject-control {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1 1 auto;
+      min-width: 0;
+      color: var(--ha-muted);
+      font-weight: 700;
+    }}
+    .commit-subject-control input {{
+      flex: 1 1 auto;
+      min-width: 0;
+      border: 1px solid var(--ha-border);
+      border-radius: calc(var(--ha-radius) - 6px);
+      padding: 9px 10px;
+      color: var(--ha-text);
+      background: var(--ha-card-bg);
+      font: inherit;
+    }}
+    .commit-subject-control input:disabled {{
+      border-color: #d1d5db;
+      background: #e5e7eb;
+      color: #6b7280;
+      opacity: 1;
     }}
     .preview-confirm-hint {{
       color: var(--ha-muted);
