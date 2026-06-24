@@ -104,6 +104,12 @@ def git_remote_head(repo_dir, env, branch, run_command):
     return output.split()[0]
 
 
+def fetch_origin(repo_dir, env, run_command):
+    fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
+    if fetch.returncode != 0:
+        raise RuntimeError(f"git fetch failed:\n{fetch.stderr.strip()}")
+
+
 def git_has_unpushed_commits(repo_dir, branch, run_command):
     remote_ref = f"refs/remotes/origin/{branch}"
     if not git_ref_exists(repo_dir, remote_ref, run_command):
@@ -116,6 +122,73 @@ def git_has_unpushed_commits(repo_dir, branch, run_command):
         return int(result.stdout.strip() or "0") > 0
     except ValueError as exc:
         raise RuntimeError(f"git rev-list returned invalid count: {result.stdout.strip()}") from exc
+
+
+def git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
+    commit = str(commit or "").strip()
+    if not commit:
+        return False
+    try:
+        expected = git_commit(repo_dir, commit, run_command)
+        head = git_commit(repo_dir, "HEAD", run_command)
+    except RuntimeError:
+        return False
+
+    contains = run_command(["git", "merge-base", "--is-ancestor", expected, head], cwd=repo_dir)
+    if contains.returncode == 1:
+        return False
+    if contains.returncode != 0:
+        raise RuntimeError(f"git merge-base failed:\n{contains.stderr.strip()}")
+
+    remote_ref = f"refs/remotes/origin/{branch}"
+    if not git_ref_exists(repo_dir, remote_ref, run_command):
+        return True
+
+    result = run_command(["git", "merge-base", "--is-ancestor", expected, remote_ref], cwd=repo_dir)
+    if result.returncode == 0:
+        return False
+    if result.returncode == 1:
+        return True
+    raise RuntimeError(f"git merge-base failed:\n{result.stderr.strip()}")
+
+
+def discard_unpushed_head_commit(repo_dir, env, branch, commit, run_command):
+    if not git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
+        return False
+    dirty = git_status_porcelain(repo_dir, run_command)
+    if dirty:
+        raise RuntimeError(
+            "Cannot clear Save push retry because the Git checkout has uncommitted changes."
+        )
+    remote_ref = f"refs/remotes/origin/{branch}"
+    checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
+    if git_ref_exists(repo_dir, remote_ref, run_command):
+        reset = run_command(["git", "reset", "--hard", remote_ref], env=env, cwd=repo_dir)
+        if reset.returncode != 0:
+            raise RuntimeError(f"git reset to origin/{branch} failed:\n{reset.stderr.strip()}")
+        return True
+
+    parent = run_command(["git", "rev-parse", "--verify", "--quiet", f"{commit}^"], cwd=repo_dir)
+    if parent.returncode == 0:
+        reset = run_command(["git", "reset", "--hard", parent.stdout.strip()], env=env, cwd=repo_dir)
+        if reset.returncode != 0:
+            raise RuntimeError(f"git reset to parent of Save retry commit failed:\n{reset.stderr.strip()}")
+        return True
+
+    delete_ref = run_command(["git", "update-ref", "-d", f"refs/heads/{branch}"], env=env, cwd=repo_dir)
+    if delete_ref.returncode != 0:
+        raise RuntimeError(f"git update-ref delete {branch} failed:\n{delete_ref.stderr.strip()}")
+    clear_index = run_command(["git", "rm", "-rf", "--ignore-unmatch", "."], env=env, cwd=repo_dir)
+    if clear_index.returncode != 0:
+        raise RuntimeError(f"git rm failed while clearing unborn {branch}:\n{clear_index.stderr.strip()}")
+    clean_repo_untracked(repo_dir, run_command)
+    return True
+
+
+def git_head_is_unpushed_commit(repo_dir, branch, commit, run_command):
+    return git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command)
 
 
 def git_head_or_unborn(repo_dir, run_command):
@@ -200,6 +273,24 @@ def push_branch(repo_dir, env, branch, run_command):
     push = run_command(["git", "push", "-u", "origin", branch], env=env, cwd=repo_dir)
     if push.returncode != 0:
         raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
+
+
+def push_commit_to_branch(repo_dir, env, commit, branch, run_command):
+    push = run_command(["git", "push", "origin", f"{commit}:refs/heads/{branch}"], env=env, cwd=repo_dir)
+    if push.returncode != 0:
+        raise RuntimeError(f"git push failed:\n{push.stderr.strip() or push.stdout.strip()}")
+
+
+def reset_branch_to_commit(repo_dir, env, branch, commit, run_command, hard=True):
+    commit = git_commit(repo_dir, commit, run_command)
+    checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)
+    if checkout.returncode != 0:
+        raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
+    mode = "--hard" if hard else "--mixed"
+    reset = run_command(["git", "reset", mode, commit], env=env, cwd=repo_dir)
+    if reset.returncode != 0:
+        raise RuntimeError(f"git reset to Save retry commit failed:\n{reset.stderr.strip()}")
+    return commit
 
 
 def push_branch_force_with_lease(repo_dir, env, branch, run_command):

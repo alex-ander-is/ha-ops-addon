@@ -100,8 +100,51 @@ class AppContext:
                 updates = {**updates, "last_details": details}
         return state_store.write_state(self.state_path, updates)
 
+    def save_push_retry_has_pending_commit(self, repo_dir, branch, state=None):
+        state = state if state is not None else self.read_state()
+        if not state.get("save_push_retry_pending"):
+            return False
+        commit = str(state.get("save_push_retry_commit") or "").strip()
+        if not commit:
+            return False
+        return self.git_head_is_unpushed_commit(repo_dir, branch, commit)
+
+    def save_push_retry_has_unpushed_commit(self, state=None):
+        state = state if state is not None else self.read_state()
+        if not state.get("save_push_retry_pending"):
+            return False
+        try:
+            options = self.load_options()
+            repo_dir = self.repo_checkout_path(options)
+            if not repo_dir.exists():
+                return False
+            return self.save_push_retry_has_pending_commit(repo_dir, options.get("repo_branch", "main"), state)
+        except Exception as exc:
+            self.log(f"Preserving Save push retry state because retry status could not be verified: {exc}")
+            return True
+
+    def discard_save_push_retry_commit(self, state=None):
+        state = state if state is not None else self.read_state()
+        if not state.get("save_push_retry_pending"):
+            return False
+        commit = str(state.get("save_push_retry_commit") or "").strip()
+        if not commit:
+            return False
+        options = self.load_options()
+        repo_dir = self.repo_checkout_path(options)
+        if not repo_dir.exists() or not (repo_dir / ".git").exists():
+            return False
+        env = self.git_env(options)
+        branch = options.get("repo_branch", "main")
+        self.fetch_origin(repo_dir, env)
+        return git_ops.discard_unpushed_head_commit(repo_dir, env, branch, commit, self.run_command)
+
     def clear_display_state(self):
-        return state_store.clear_display_state(self.state_path)
+        state = self.read_state()
+        return state_store.clear_display_state(
+            self.state_path,
+            preserve_save_retry=bool(state.get("save_push_retry_pending")),
+        )
 
     def repair_startup_state(self):
         state = self.read_state()
@@ -111,7 +154,14 @@ class AppContext:
             and state.get("deleted_devices_rollback_path")
         ):
             return self.repair_interrupted_deleted_devices_cleanup(state)
-        return state_store.repair_startup_state(self.state_path, self.utc_now(), self.addon_version())
+        preserve_save_retry = self.save_push_retry_has_unpushed_commit(state)
+        return state_store.repair_startup_state(
+            self.state_path,
+            self.utc_now(),
+            self.addon_version(),
+            preserve_save_retry=preserve_save_retry,
+            clear_save_retry_pending=bool(state.get("save_push_retry_pending") and not preserve_save_retry),
+        )
 
     def repair_interrupted_deleted_devices_cleanup(self, state):
         details = list(state.get("last_details") or [])
@@ -332,6 +382,9 @@ class AppContext:
     def git_has_unpushed_commits(self, repo_dir, branch):
         return git_ops.git_has_unpushed_commits(repo_dir, branch, self.run_command)
 
+    def git_head_is_unpushed_commit(self, repo_dir, branch, commit):
+        return git_ops.git_head_is_unpushed_commit(repo_dir, branch, commit, self.run_command)
+
     def git_conflict_paths(self, repo_dir):
         return git_ops.git_conflict_paths(repo_dir, self.run_command)
 
@@ -347,6 +400,9 @@ class AppContext:
             lambda conflicts: self.write_state({"conflicts": conflicts, "conflict_type": "git_rebase"}),
         )
 
+    def fetch_origin(self, repo_dir, env):
+        return git_ops.fetch_origin(repo_dir, env, self.run_command)
+
     def stage_all(self, repo_dir):
         return git_ops.stage_all(repo_dir, self.run_command)
 
@@ -361,6 +417,12 @@ class AppContext:
 
     def push_branch(self, repo_dir, env, branch):
         return git_ops.push_branch(repo_dir, env, branch, self.run_command)
+
+    def push_commit_to_branch(self, repo_dir, env, commit, branch):
+        return git_ops.push_commit_to_branch(repo_dir, env, commit, branch, self.run_command)
+
+    def reset_branch_to_commit(self, repo_dir, env, branch, commit, hard=True):
+        return git_ops.reset_branch_to_commit(repo_dir, env, branch, commit, self.run_command, hard=hard)
 
     def push_branch_force_with_lease(self, repo_dir, env, branch):
         return git_ops.push_branch_force_with_lease(repo_dir, env, branch, self.run_command)
@@ -791,11 +853,13 @@ class AppContext:
             ensure_preview_matches_state=self.ensure_preview_matches_state,
             ensure_repo=self.ensure_repo,
             export_targets=self.export_targets,
+            fetch_origin=self.fetch_origin,
             get_installed_addons=self.get_installed_addons,
             git_conflict_paths=self.git_conflict_paths,
             git_env=self.git_env,
             git_commit=self.git_commit,
             git_has_unpushed_commits=self.git_has_unpushed_commits,
+            save_push_retry_has_pending_commit=self.save_push_retry_has_pending_commit,
             git_head_or_unborn=self.git_head_or_unborn,
             git_pull_rebase=self.git_pull_rebase,
             git_status_porcelain=self.git_status_porcelain,
@@ -805,9 +869,11 @@ class AppContext:
             option_bool=self.option_bool,
             prune_release_snapshots=self.prune_release_snapshots,
             push_branch=self.push_branch,
+            push_commit_to_branch=self.push_commit_to_branch,
             push_branch_force_with_lease=self.push_branch_force_with_lease,
             read_state=self.read_state,
             release_now=self.release_now,
+            reset_branch_to_commit=self.reset_branch_to_commit,
             repo_checkout_path=self.repo_checkout_path,
             reset_repo_worktree=self.reset_repo_worktree,
             reset_service_branches_from_main=self.reset_service_branches_from_main,

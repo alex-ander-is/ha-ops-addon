@@ -85,11 +85,13 @@ class JobContext:
     ensure_preview_matches_state: Any
     ensure_repo: Any
     export_targets: Any
+    fetch_origin: Any
     get_installed_addons: Any
     git_conflict_paths: Any
     git_commit: Any
     git_env: Any
     git_has_unpushed_commits: Any
+    save_push_retry_has_pending_commit: Any
     git_head_or_unborn: Any
     git_pull_rebase: Any
     git_status_porcelain: Any
@@ -100,9 +102,11 @@ class JobContext:
     option_bool: Any
     prune_release_snapshots: Any
     push_branch: Any
+    push_commit_to_branch: Any
     push_branch_force_with_lease: Any
     read_state: Any
     release_now: Any
+    reset_branch_to_commit: Any
     repo_checkout_path: Any
     reset_repo_worktree: Any
     reset_service_branches_from_main: Any
@@ -251,6 +255,18 @@ def dirty_checkout_message(paths, action):
     )
 
 
+def retry_internal_ids_dirty_message(paths):
+    rendered = "\n".join(f"- {path}" for path in paths[:30])
+    if len(paths) > 30:
+        rendered += f"\n- and {len(paths) - 30} more"
+    return (
+        "Git checkout has uncommitted HA Ops Internal IDs migration changes, "
+        "so HA Ops cannot safely retry the pending Save push.\n\n"
+        f"Changed paths:\n{rendered}\n\n"
+        "Commit, save, or clean these changes before retrying Save."
+    )
+
+
 def ensure_clean_checkout_for_pull(ctx, repo_dir, action):
     paths = dirty_paths(ctx, repo_dir)
     if paths:
@@ -385,6 +401,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
     repo_dir = None
     checkout_dirty_for_save = False
     save_commit_created = False
+    pending_save_retry_commit = None
     state = {}
 
     write_state(
@@ -399,33 +416,68 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
 
     try:
         state = ctx.read_state()
-        if state.get("deleted_devices_pending_confirmation"):
-            write_pending_deleted_devices(ctx, "save", details, resolved_targets)
-            return False
-        if state.get("conflicts"):
-            write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
-            return False
-
-        prepare_repo_checkout_for_sync(ctx, options, details, "Save HA to Git")
-        repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
+        pending_save_retry_commit = state.get("save_push_retry_commit") if state.get("save_push_retry_pending") else None
+        if not state.get("save_push_retry_pending"):
+            if state.get("deleted_devices_pending_confirmation"):
+                write_pending_deleted_devices(ctx, "save", details, resolved_targets)
+                return False
+            if state.get("conflicts"):
+                write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
+                return False
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
-        ctx.git_pull_rebase(repo_dir, env, branch)
-        commit = ctx.git_head_or_unborn(repo_dir)
-        addons = ctx.get_installed_addons()
-        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
-        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
-
-        ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=commit))
-        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
-        if state.get("save_push_retry_pending") and ctx.git_has_unpushed_commits(repo_dir, branch):
+        if state.get("save_push_retry_pending"):
+            repo_dir = ctx.repo_checkout_path(options)
+            if repo_dir.exists() and (repo_dir / ".git").exists():
+                ctx.fetch_origin(repo_dir, env)
+            if not repo_dir.exists() or not (repo_dir / ".git").exists() or not ctx.save_push_retry_has_pending_commit(repo_dir, branch, state):
+                ctx.add_detail(details, _("detail.cleared_stale_save_push_retry"))
+                write_state(
+                    {
+                        **state_store.save_preview_clear_updates(clear_save_retry_pending=True),
+                        "last_run_at": utc_now(),
+                        "last_status": "warning",
+                        "last_action": "save",
+                        "last_message": _("message.save_push_retry_stale_cleared"),
+                        "last_details": details,
+                        "last_targets": resolved_targets,
+                    }
+                )
+                return False
+            retry_dirty_paths = dirty_paths(ctx, repo_dir)
+            retry_internal_ids_paths = [
+                path for path in retry_dirty_paths if internal_ids_migration_path(path, options)
+            ]
+            if retry_internal_ids_paths:
+                raise RuntimeError(retry_internal_ids_dirty_message(retry_internal_ids_paths))
+            commit = str(state.get("save_push_retry_commit") or "").strip()
+            ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=commit))
             ctx.add_detail(details, _("detail.retried_save_push"))
-            try:
-                ctx.push_branch(repo_dir, env, branch)
-            except RuntimeError:
-                ctx.git_pull_rebase(repo_dir, env, branch)
-                ctx.push_branch(repo_dir, env, branch)
+            ctx.push_commit_to_branch(repo_dir, env, commit, branch)
             ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
+            if retry_dirty_paths:
+                ctx.reset_branch_to_commit(repo_dir, env, branch, commit, hard=False)
+                ctx.add_detail(details, _("detail.reset_save_retry_checkout"))
+                ctx.add_detail(details, _("detail.save_push_retry_preview_not_rebuilt_dirty"))
+                write_state(
+                    {
+                        **state_store.SAVE_PUSH_RETRY_CLEAR_UPDATES,
+                        "last_run_at": utc_now(),
+                        "last_status": "warning",
+                        "last_action": "save",
+                        "last_message": _("message.save_push_retry_pushed_preview_not_rebuilt_dirty"),
+                        "last_details": details,
+                        "last_targets": state.get("last_targets", []),
+                        "post_apply_save_recommended": False,
+                    }
+                )
+                return True
+            ctx.reset_branch_to_commit(repo_dir, env, branch, commit)
+            ctx.add_detail(details, _("detail.reset_save_retry_checkout"))
+            addons = ctx.get_installed_addons()
+            manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+            resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+            ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
             retry_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, bool(state.get("include_redundant_data")))
             retry_commit = ctx.git_head_or_unborn(repo_dir)
             git_state_out_of_date = False
@@ -462,14 +514,23 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "save_preview_selected_paths": [],
                     "post_apply_save_recommended": False,
                     "save_push_retry_pending": False,
+                    "save_push_retry_commit": None,
                 }
             )
             return True
+        prepare_repo_checkout_for_sync(ctx, options, details, "Save HA to Git")
+        repo_dir = ctx.ensure_repo(options, reset_to_origin=False)
+        addons = ctx.get_installed_addons()
+        manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
+        resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+        ctx.git_pull_rebase(repo_dir, env, branch)
+        commit = ctx.git_head_or_unborn(repo_dir)
+        ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=commit))
+        ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
         include_redundant_data = bool(state.get("include_redundant_data"))
         if include_redundant_data:
             ctx.add_detail(details, _("detail.including_redundant_save"))
         current_preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
-        commit = ctx.git_head_or_unborn(repo_dir)
         if not save_preview_matches_state(state, commit, current_preview):
             if not current_preview.get("paths"):
                 ctx.add_detail(details, _("detail.no_live_changes_to_save"))
@@ -559,14 +620,11 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
 
         if new_commit:
             save_commit_created = True
+            pending_save_retry_commit = new_commit
             ctx.add_detail(details, _("detail.created_commit", commit=new_commit))
 
         if ctx.git_has_unpushed_commits(repo_dir, branch):
-            try:
-                ctx.push_branch(repo_dir, env, branch)
-            except RuntimeError:
-                ctx.git_pull_rebase(repo_dir, env, branch)
-                ctx.push_branch(repo_dir, env, branch)
+            ctx.push_branch(repo_dir, env, branch)
             ctx.add_detail(details, _("detail.pushed_branch", branch=branch))
             save_message = _("message.save_finished_pushed")
         else:
@@ -593,6 +651,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                 "save_preview_resolutions": {},
                 "save_preview_selected_paths": [],
                 "save_push_retry_pending": False,
+                "save_push_retry_commit": None,
             }
         )
 
@@ -630,6 +689,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
             repo_path = None
         conflicts = ctx.git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
         status = "conflicts" if conflicts else "error"
+        retry_pending = bool(state.get("save_push_retry_pending") or save_commit_created)
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -639,7 +699,12 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                 "last_details": details,
                 "last_targets": resolved_targets,
                 "conflicts": conflicts,
-                "save_push_retry_pending": bool(state.get("save_push_retry_pending") or save_commit_created),
+                "save_push_retry_pending": retry_pending,
+                "save_push_retry_commit": (
+                    pending_save_retry_commit
+                    if retry_pending
+                    else None
+                ),
             }
         )
         return False
@@ -1047,6 +1112,8 @@ def run_internal_ids_migrate_job(selected, ctx, lock_acquired=False):
     try:
         options = ctx.load_options()
         state = ctx.read_state()
+        if state.get("save_push_retry_pending"):
+            raise RuntimeError(_("message.save_push_retry_still_pending"))
         rows = state.get("last_internal_ids_rows") or []
         fingerprint = state.get("last_internal_ids_fingerprint")
         if not rows or not fingerprint:

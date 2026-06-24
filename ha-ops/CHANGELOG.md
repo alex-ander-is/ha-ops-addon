@@ -2,6 +2,23 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.46
+
+- Tie HA-to-Git Save push retries to the specific pending Save commit so stale retry state cannot push unrelated local commits.
+- Block unrelated HA Ops workflow actions while a HA-to-Git Save push retry is pending so Retry can only push the already-created Save commit.
+- Keep automatic display-state cleanup from discarding pending HA-to-Git Save push retries; only explicit Save cancel discards the unpushed pending Save commit.
+- Keep Save push retries pending when the exact pending commit push is rejected instead of rebasing and pushing a new commit.
+- Report a warning instead of clearing the Change List when a successful Save push retry cannot rebuild the preview because the checkout is dirty.
+- Disable stale retained-device deletion and deleted-device confirm/revert controls while a Save push retry is pending.
+- Disable Save conflict controls while a Save push retry is pending, matching the server-side retry-only guard.
+- Reset the local checkout to the pushed pending Save commit after a successful retry so later Saves cannot push unrelated local commits.
+
+## 0.8.45
+
+- Disable the HA-to-Git Save commit subject field while retrying a failed push of an already-created Save commit.
+- Render pending HA-to-Git Save push retries as retry-only by disabling ignored file and HA/Git decisions while leaving Confirm Save enabled.
+- Preserve pending HA-to-Git Save push retries across startup display-state refresh while a local unpushed Save commit still exists.
+
 ## 0.8.44
 
 - Recompute unchanged default HA-to-Git Save commit subjects when the Save job starts so delayed confirmations use the current timestamp.

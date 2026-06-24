@@ -1004,6 +1004,25 @@ class ServerTests(unittest.TestCase):
         server.ADDON_CONFIGS_DIR.mkdir(parents=True)
         server.log = lambda message: None
 
+    def post_json(self, server, path, body=b""):
+        handler = server.web.create_handler(server.context())
+        request = handler.__new__(handler)
+        request.path = path
+        request.rfile = io.BytesIO(body)
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.headers["Accept"] = "application/json"
+        request.headers["X-Requested-With"] = "fetch"
+        if body:
+            request.headers["Content-Length"] = str(len(body))
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+        request.do_POST()
+        return request
+
     def git(self, args, cwd):
         return subprocess.run(["git"] + args, cwd=cwd, check=True, text=True, capture_output=True)
 
@@ -1492,6 +1511,81 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("disabled", selected_page[enabled_subject : selected_page.index("Confirm Save to Git")])
             self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
             self.assertNotIn("Select files to continue.", selected_page)
+
+            server.write_state({"save_push_retry_pending": True})
+            retry_page = server.render_page()
+
+            self.assertNotIn("name='commit_subject'", retry_page)
+            self.assertNotIn("name='default_commit_subject'", retry_page)
+            self.assertIn(
+                "A Save commit has already been created. Confirm Save will retry pushing that commit to Git.",
+                retry_page,
+            )
+            self.assertIn("name='selected' value='1' checked disabled", retry_page)
+            self.assertIn("name='selected' value='1' disabled", retry_page)
+            self.assertIn("<input type='radio' name='choice' value='ha' checked disabled>", retry_page)
+            self.assertIn("<input type='radio' name='choice' value='git' disabled>", retry_page)
+            self.assertIn("<button type='submit' class='secondary' disabled>Select All</button>", retry_page)
+            self.assertIn("<button type='submit' class='secondary' disabled>Select None</button>", retry_page)
+            self.assertIn("<button type='submit'>Confirm Save to Git</button>", retry_page)
+            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", retry_page)
+            self.assertRegex(
+                retry_page,
+                r"<button type=\"submit\" class=\"[^\"]+\" disabled>(Preview HA to Git|Review Post-Apply HA Changes)</button>",
+            )
+            self.assertIn("<input type='checkbox' name='include_redundant_data' value='1' disabled>", retry_page)
+            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", retry_page)
+            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Reset Git State</button>", retry_page)
+            self.assertNotIn("Select files to continue.", retry_page)
+
+            server.write_state(
+                {
+                    "conflicts": ["homeassistant/configuration.yaml"],
+                    "conflict_type": "save_unknown_base",
+                    "save_push_retry_pending": True,
+                    "save_push_retry_commit": "pending-save",
+                }
+            )
+            retry_conflicts_page = server.render_page()
+            self.assertIn("<button type='submit' disabled>Approve HA to Git</button>", retry_conflicts_page)
+            self.assertIn(
+                "<button type='submit' class='secondary' disabled>Use HA Version</button>",
+                retry_conflicts_page,
+            )
+            self.assertIn(
+                "<button type='submit' class='secondary' disabled>Use Git Version</button>",
+                retry_conflicts_page,
+            )
+            self.assertNotIn("<button type='submit'>Approve HA to Git</button>", retry_conflicts_page)
+            self.assertIn("<button type='submit'>Confirm Save to Git</button>", retry_conflicts_page)
+            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", retry_conflicts_page)
+
+            server.write_state(
+                {
+                    "last_retained_devices_generated_at": "2026-06-24T12:00:00+00:00",
+                    "last_retained_devices_rows": [
+                        {
+                            "selected": True,
+                            "identifiers": ["mqtt", "zigbee2mqtt_0xabc123fffed45678"],
+                            "name": "detached_button",
+                            "manufacturer": "Example",
+                            "model": "Battery button",
+                            "retained_topics": [
+                                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config"
+                            ],
+                        }
+                    ],
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": "/tmp/rollback",
+                }
+            )
+            retry_cleanup_page = server.render_page()
+            self.assertIn("<button type='submit' disabled>Delete retained devices</button>", retry_cleanup_page)
+            self.assertIn(
+                "<button type='submit' class='secondary' disabled>Confirm Changes</button>",
+                retry_cleanup_page,
+            )
+            self.assertIn("<button type='submit' disabled>Revert Changes</button>", retry_cleanup_page)
 
     def test_apply_preview_renders_collapsed_change_list_with_apply_choices_and_footer_actions(self):
         server = load_server()
@@ -4686,6 +4780,114 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
         self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
         self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
+
+    def test_save_push_retry_blocks_unrelated_workflow_post_actions(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.calls = []
+                self.state_updates = []
+                self.state = {
+                    "save_push_retry_pending": True,
+                    "save_push_retry_commit": "pending-save",
+                }
+                self.run_lock = threading.Lock()
+
+            def read_state(self):
+                return dict(self.state)
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+                self.state.update(updates)
+
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
+                try:
+                    self.calls.append(("save", commit_subject, lock_acquired))
+                finally:
+                    if lock_acquired:
+                        self.run_lock.release()
+
+        ctx = FakeContext()
+        queued = []
+        original_start_background = server.web.start_background
+
+        def queue_background(target, *args, lock_acquired=False):
+            queued.append((target, args, {"lock_acquired": lock_acquired}))
+
+        handler = server.web.create_handler(ctx)
+
+        def invoke(path, body=b""):
+            request = handler.__new__(handler)
+            request.path = path
+            request.rfile = io.BytesIO(body)
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Accept"] = "application/json"
+            request.headers["X-Requested-With"] = "fetch"
+            if body:
+                request.headers["Content-Length"] = str(len(body))
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_error = MethodType(lambda self, status, message=None: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+            request.do_POST()
+            return request
+
+        blocked_posts = [
+            ("/apply", b""),
+            ("/generate-key", b""),
+            ("/resolve-save-preview", b"path=homeassistant%2Fconfiguration.yaml&choice=ha"),
+            ("/resolve-apply-preview", b"path=homeassistant%2Fconfiguration.yaml&choice=git"),
+            ("/clear-preview", b"direction=apply"),
+            ("/preview", b""),
+            ("/select-save-preview", b"selection_action=all"),
+            ("/select-apply-preview", b"selection_action=all"),
+            ("/save-preview", b""),
+            ("/reset-git-state", b""),
+            ("/disk-usage", b""),
+            ("/deleted-devices-preview", b""),
+            ("/retained-devices-preview", b""),
+            ("/retained-devices-delete", b"candidate=0"),
+            ("/internal-ids-preview", b""),
+            ("/internal-ids-migrate", b"candidate=0"),
+            ("/deleted-devices-delete", b""),
+            ("/deleted-devices-confirm", b""),
+            ("/deleted-devices-revert", b""),
+            ("/approve-save-conflicts", b""),
+            ("/addons", b"addon=local_zigbee2mqtt"),
+            ("/homeassistant-organizer", b"homeassistant_organizer=on"),
+            ("/include-redundant-data", b"include_redundant_data=on"),
+            ("/resolve-conflict", b"path=homeassistant%2Fconfiguration.yaml&choice=git"),
+            ("/rollback", b"release=0.8.44"),
+        ]
+
+        server.web.start_background = queue_background
+        try:
+            for path, body in blocked_posts:
+                with self.subTest(path=path):
+                    response = invoke(path, body)
+                    payload = json.loads(response.wfile.getvalue().decode())
+                    self.assertEqual(response.responses[-1], 409)
+                    self.assertFalse(payload["ok"])
+                    self.assertEqual(payload["message"], "Save push retry is still pending.")
+                    self.assertEqual(ctx.calls, [])
+                    self.assertEqual(ctx.state_updates, [])
+                    self.assertEqual(queued, [])
+
+            retry_response = invoke("/save")
+            retry_payload = json.loads(retry_response.wfile.getvalue().decode())
+            self.assertEqual(retry_response.responses[-1], 200)
+            self.assertTrue(retry_payload["ok"])
+            self.assertEqual(retry_payload["message"], "Save HA to Git started. Refreshing...")
+            self.assertEqual(len(queued), 1)
+            target, args, kwargs = queued.pop()
+            target(*args, **kwargs)
+            self.assertEqual(ctx.calls, [("save", None, True)])
+        finally:
+            server.web.start_background = original_start_background
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
@@ -8925,7 +9127,63 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview_paths"], [])
             self.assertEqual(state["save_preview_selected_paths"], [])
 
-    def test_save_push_retry_preserves_merge_commit_after_remote_advances(self):
+    def test_save_push_first_post_commit_push_failure_enters_retry_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"main": 0}
+
+            def fail_first_main_push(repo_dir, env, branch):
+                if branch == "main" and calls["main"] == 0:
+                    calls["main"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            finally:
+                server.push_branch = original_push_branch
+
+            repo = root / "data" / "ha-config"
+            state = server.read_state()
+            pending_commit = state["save_push_retry_commit"]
+            self.assertEqual(calls["main"], 1)
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(pending_commit, server.git_head_or_unborn(repo))
+            self.assertEqual(self.remote_main_subject(remote), "base")
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Original Save Subject")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+
+    def test_save_push_retry_remote_advance_rejects_exact_pending_commit_and_stays_pending(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -8959,8 +9217,12 @@ class ServerTests(unittest.TestCase):
 
             server.push_branch = fail_first_main_pushes
 
-            self.assertFalse(server.run_save_job())
-            self.assertTrue(server.read_state()["save_push_retry_pending"])
+            self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            failed_state = server.read_state()
+            self.assertTrue(failed_state["save_push_retry_pending"])
+            repo = root / "data" / "ha-config"
+            pending_commit = failed_state["save_push_retry_commit"]
+            self.assertEqual(pending_commit, server.git_head_or_unborn(repo))
 
             server.push_branch = original_push_branch
             updater = root / "updater"
@@ -8969,15 +9231,836 @@ class ServerTests(unittest.TestCase):
             (updater / "homeassistant" / "remote.yaml").write_text("remote\n")
             self.git_commit_all(updater, "remote")
             self.git(["push", "origin", "main"], updater)
+            remote_advanced_commit = self.remote_rev(remote, "main")
+
+            self.assertFalse(
+                server.run_save_job(commit_subject="Edited Retry Subject"),
+                server.read_state()["last_message"],
+            )
+            state = server.read_state()
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
+            self.assertIn("git push failed", state["last_message"])
+            self.assertEqual(self.remote_rev(remote, "main"), remote_advanced_commit)
+            self.assertEqual(self.remote_main_subject(remote), "remote")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/new.yaml")
+            self.assertEqual(self.remote_file(remote, "homeassistant/remote.yaml"), "remote\n")
+
+    def test_save_push_retry_does_not_create_new_commit_for_new_live_changes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_first_main_push(repo_dir, env, branch):
+                if branch == "main" and calls["count"] == 0:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            finally:
+                server.push_branch = original_push_branch
+            pending_commit = server.read_state()["save_push_retry_commit"]
+
+            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
+            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
+
+            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Original Save Subject")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/second.yaml")
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIn("homeassistant/packages/second.yaml", state["last_save_preview_paths"])
+            self.assertNotIn("homeassistant/packages/new.yaml", state["last_save_preview_paths"])
+
+    def test_save_push_retry_success_resets_local_commits_on_top_of_pending_commit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_first_main_push(repo_dir, env, branch):
+                if branch == "main" and calls["count"] == 0:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_first_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            finally:
+                server.push_branch = original_push_branch
+
+            repo = root / "data" / "ha-config"
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            (repo / "homeassistant" / "manual.yaml").write_text("manual\n")
+            self.git_commit_all(repo, "manual local commit on top")
+            local_commit = server.git_head_or_unborn(repo)
+            self.assertNotEqual(local_commit, pending_commit)
 
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-            parents = self.remote_parents(remote, "main")
-            self.assertEqual(len(parents), 2)
+
             state = server.read_state()
-            self.assertNotIn("homeassistant/packages/new.yaml", state["last_save_preview_paths"])
-            self.assertEqual(state["save_preview_selected_paths"], [])
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
+            self.assertNotEqual(server.git_head_or_unborn(repo), local_commit)
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/manual.yaml")
+
+            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            preview_state = server.read_state()
+            self.assertIn("homeassistant/packages/second.yaml", preview_state["last_save_preview_paths"])
+            self.assertNotIn("homeassistant/manual.yaml", preview_state["last_save_preview_paths"])
+            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
+            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
+
+            self.assertNotEqual(self.remote_rev(remote, "main"), local_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
             self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
-            self.assertEqual(self.remote_file(remote, "homeassistant/remote.yaml"), "remote\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/second.yaml"), "second:\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/manual.yaml")
+
+    def test_save_push_retry_can_be_cancelled_without_push(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_pushes
+            try:
+                self.assertFalse(server.run_save_job())
+            finally:
+                server.push_branch = original_push_branch
+
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            self.assertTrue(server.read_state()["save_push_retry_pending"])
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+
+            response = self.post_json(server, "/clear-preview", body=b"direction=save")
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertEqual(state["last_save_preview_paths"], [])
+            self.assertEqual(state["save_preview_selected_paths"], [])
+            self.assertEqual(self.remote_main_subject(remote), "base")
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(server.git_head_or_unborn(root / "data" / "ha-config"), self.remote_rev(remote, "main"))
+            self.assertNotIn("Confirm Save to Git", server.render_page())
+
+            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
+            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
+
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/second.yaml"), "second:\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/new.yaml")
+
+    def test_clear_display_state_preserves_save_push_retry_without_push(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_pushes
+            try:
+                self.assertFalse(server.run_save_job())
+            finally:
+                server.push_branch = original_push_branch
+
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            response = self.post_json(server, "/clear-display-state")
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIn("Display state cleared", response.wfile.getvalue().decode())
+
+            state = server.read_state()
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/packages/new.yaml"])
+            self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
+            self.assertEqual(server.git_head_or_unborn(root / "data" / "ha-config"), pending_commit)
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertIn("Confirm Save to Git", server.render_page())
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+
+    def test_save_push_retry_cancel_discards_first_commit_when_remote_branch_missing(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.prepare_empty_save_preview(server, root)
+            original_push_branch = server.push_branch
+
+            def fail_main_push(repo_dir, env, branch):
+                if branch == "main":
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Canceled First Save"))
+            finally:
+                server.push_branch = original_push_branch
+
+            repo = root / "data" / "ha-config"
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            self.assertTrue(server.read_state()["save_push_retry_pending"])
+            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_rev(remote, "main")
+
+            response = self.post_json(server, "/clear-preview", body=b"direction=save")
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertNotEqual(server.git_head_or_unborn(repo), pending_commit)
+            self.assertFalse(server.git_head_is_unpushed_commit(repo, "main", pending_commit))
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_rev(remote, "main")
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("second:\n")
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
+
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
+            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "second:\n")
+
+    def test_save_push_retry_cancel_resets_local_commits_on_top_of_pending_commit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+
+            def fail_main_push(repo_dir, env, branch):
+                if branch == "main":
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Canceled Save"))
+            finally:
+                server.push_branch = original_push_branch
+
+            repo = root / "data" / "ha-config"
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            (repo / "homeassistant" / "manual.yaml").write_text("manual\n")
+            self.git_commit_all(repo, "manual local commit on top")
+            local_commit = server.git_head_or_unborn(repo)
+            self.assertNotEqual(local_commit, pending_commit)
+
+            response = self.post_json(server, "/clear-preview", body=b"direction=save")
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertEqual(server.git_head_or_unborn(repo), self.remote_rev(remote, "main"))
+            self.assertEqual(self.remote_main_subject(remote), "base")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/new.yaml")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/manual.yaml")
+
+            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
+            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
+
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertNotEqual(self.remote_rev(remote, "main"), local_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/second.yaml"), "second:\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/new.yaml")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/manual.yaml")
+
+    def test_save_push_retry_cancel_dirty_checkout_returns_conflict_and_keeps_retry(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+
+            def fail_main_push(repo_dir, env, branch):
+                if branch == "main":
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_push
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Dirty Cancel Save"))
+            finally:
+                server.push_branch = original_push_branch
+
+            repo = root / "data" / "ha-config"
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            (repo / "homeassistant" / "configuration.yaml").write_text("dirty local edit\n")
+
+            response = self.post_json(server, "/clear-preview", body=b"direction=save")
+            payload = json.loads(response.wfile.getvalue().decode())
+            self.assertEqual(response.responses[-1], 409)
+            self.assertFalse(payload["ok"])
+            self.assertIn("uncommitted changes", payload["message"])
+
+            state = server.read_state()
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
+            self.assertIn("homeassistant/configuration.yaml", self.repo_status(repo))
+            self.assertEqual(self.remote_main_subject(remote), "base")
+
+    def test_save_push_retry_survives_startup_refresh(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_pushes
+            try:
+                self.assertFalse(server.run_save_job())
+            finally:
+                server.push_branch = original_push_branch
+
+            server.repair_startup_state()
+            state = server.read_state()
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], server.git_head_or_unborn(root / "data" / "ha-config"))
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/packages/new.yaml"])
+            self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
+            page = server.render_page()
+            self.assertIn("Confirm Save to Git", page)
+            self.assertIn("<button type='submit'>Confirm Save to Git</button>", page)
+            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", page)
+
+    def test_stale_save_push_retry_flag_clears_when_no_unpushed_commit_exists(self):
+        server = load_server()
+        for action in ("cancel", "startup-refresh"):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    server.write_state(
+                        {
+                            "save_push_retry_pending": True,
+                            "last_save_preview": "stale save preview",
+                            "last_save_diff": "stale save diff",
+                            "last_save_diff_generated_at": "2026-06-24T12:00:00+00:00",
+                            "last_save_preview_commit": "stale-save-commit",
+                            "last_save_preview_fingerprint": "stale-save-fingerprint",
+                            "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                            "last_save_preview_conflicts": False,
+                            "save_preview_resolutions": {},
+                            "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+                            "save_push_retry_commit": "stale-save-commit",
+                        }
+                    )
+
+                    if action == "cancel":
+                        response = self.post_json(server, "/clear-preview", body=b"direction=save")
+                        self.assertEqual(response.responses[-1], 200)
+                        self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+                    else:
+                        server.repair_startup_state()
+
+                    state = server.read_state()
+                    self.assertFalse(state.get("save_push_retry_pending", False))
+                    self.assertIsNone(state.get("save_push_retry_commit"))
+                    self.assertEqual(state["last_save_preview"], "")
+                    self.assertEqual(state["last_save_diff"], "")
+                    self.assertIsNone(state["last_save_diff_generated_at"])
+                    self.assertIsNone(state["last_save_preview_commit"])
+                    self.assertIsNone(state["last_save_preview_fingerprint"])
+                    self.assertEqual(state["last_save_preview_paths"], [])
+                    self.assertEqual(state["save_preview_selected_paths"], [])
+                    self.assertNotIn("Confirm Save to Git", server.render_page())
+
+    def test_stale_save_push_retry_flag_with_unrelated_unpushed_commit_is_not_preserved_or_pushed(self):
+        server = load_server()
+        for action in ("cancel", "startup-refresh", "confirm-save"):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    remote = self.seed_remote(root)
+                    server.OPTIONS_PATH.write_text(
+                        json.dumps(
+                            {
+                                "repo_url": str(remote),
+                                "repo_branch": "main",
+                                "repo_path": "ha-config",
+                                "apply_path": "homeassistant",
+                                "restart_after_apply": False,
+                            }
+                        )
+                    )
+                    server.get_installed_addons = lambda: []
+                    repo = server.ensure_repo(server.load_options())
+                    (repo / "homeassistant" / "manual.yaml").write_text("manual\n")
+                    self.git_commit_all(repo, "manual unrelated local commit")
+                    unrelated_commit = server.git_head_or_unborn(repo)
+                    remote_before = self.remote_rev(remote, "main")
+                    server.write_state(
+                        {
+                            "save_push_retry_pending": True,
+                            "save_push_retry_commit": "stale-save-commit",
+                            "last_save_preview": "stale save preview",
+                            "last_save_diff": "stale save diff",
+                            "last_save_diff_generated_at": "2026-06-24T12:00:00+00:00",
+                            "last_save_preview_commit": "stale-save-commit",
+                            "last_save_preview_fingerprint": "stale-save-fingerprint",
+                            "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                            "last_save_preview_conflicts": False,
+                            "save_preview_resolutions": {},
+                            "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+                        }
+                    )
+
+                    if action == "cancel":
+                        response = self.post_json(server, "/clear-preview", body=b"direction=save")
+                        self.assertEqual(response.responses[-1], 200)
+                        self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+                    elif action == "startup-refresh":
+                        server.repair_startup_state()
+                    else:
+                        self.assertFalse(server.run_save_job())
+                        state = server.read_state()
+                        self.assertEqual(
+                            state["last_message"],
+                            "Stale Save push retry was cleared. Review a fresh Save preview before confirming.",
+                        )
+
+                    state = server.read_state()
+                    self.assertFalse(state.get("save_push_retry_pending", False))
+                    self.assertIsNone(state.get("save_push_retry_commit"))
+                    self.assertEqual(state["last_save_preview"], "")
+                    self.assertEqual(state["last_save_diff"], "")
+                    self.assertIsNone(state["last_save_diff_generated_at"])
+                    self.assertIsNone(state["last_save_preview_commit"])
+                    self.assertIsNone(state["last_save_preview_fingerprint"])
+                    self.assertEqual(state["last_save_preview_paths"], [])
+                    self.assertEqual(state["save_preview_selected_paths"], [])
+                    self.assertEqual(server.git_head_or_unborn(repo), unrelated_commit)
+                    self.assertEqual(self.remote_rev(remote, "main"), remote_before)
+                    self.assertEqual(self.remote_main_subject(remote), "base")
+                    self.assertNotIn("Confirm Save to Git", server.render_page())
+
+    def test_stale_save_push_retry_does_not_commit_internal_ids_or_push_unrelated_commit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            repo = server.ensure_repo(server.load_options())
+            area_file = repo / "homeassistant" / ".ha-ops" / "areas" / "kitchen" / "automations.yaml"
+            area_file.parent.mkdir(parents=True)
+            area_file.write_text("- id: kitchen_original\n")
+            self.git_commit_all(repo, "add internal ids area")
+            self.git(["push", "origin", "main"], repo)
+            remote_before = self.remote_rev(remote, "main")
+
+            (repo / "homeassistant" / "manual.yaml").write_text("manual\n")
+            self.git_commit_all(repo, "manual unrelated local commit")
+            unrelated_commit = server.git_head_or_unborn(repo)
+            area_file.write_text("- id: kitchen_migrated\n  alias: Kitchen migrated\n")
+            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+            server.write_state(
+                {
+                    "save_push_retry_pending": True,
+                    "save_push_retry_commit": "stale-save-commit",
+                    "last_save_preview": "stale save preview",
+                    "last_save_diff": "stale save diff",
+                    "last_save_diff_generated_at": "2026-06-24T12:00:00+00:00",
+                    "last_save_preview_commit": "stale-save-commit",
+                    "last_save_preview_fingerprint": "stale-save-fingerprint",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_save_preview_conflicts": False,
+                    "save_preview_resolutions": {},
+                    "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+                }
+            )
+
+            self.assertFalse(server.run_save_job())
+
+            state = server.read_state()
+            self.assertEqual(
+                state["last_message"],
+                "Stale Save push retry was cleared. Review a fresh Save preview before confirming.",
+            )
+            self.assertFalse(state.get("save_push_retry_pending", False))
+            self.assertIsNone(state.get("save_push_retry_commit"))
+            self.assertEqual(server.git_head_or_unborn(repo), unrelated_commit)
+            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+            self.assertEqual(self.remote_rev(remote, "main"), remote_before)
+            self.assertEqual(self.remote_main_subject(remote), "add internal ids area")
+            self.assertNotIn("Confirm Save to Git", server.render_page())
+
+    def test_valid_save_push_retry_blocks_dirty_internal_ids_without_pushing_migration(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            repo = server.ensure_repo(server.load_options())
+            area_file = repo / "homeassistant" / ".ha-ops" / "areas" / "kitchen" / "automations.yaml"
+            area_file.parent.mkdir(parents=True)
+            area_file.write_text("- id: kitchen_original\n")
+            self.git_commit_all(repo, "add internal ids area")
+            self.git(["push", "origin", "main"], repo)
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_pushes
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            finally:
+                server.push_branch = original_push_branch
+            failed_state = server.read_state()
+            pending_commit = failed_state["save_push_retry_commit"]
+            self.assertTrue(failed_state["save_push_retry_pending"])
+
+            area_file.write_text("- id: kitchen_migrated\n  alias: Kitchen migrated\n")
+            self.assertFalse(server.run_save_job())
+
+            state = server.read_state()
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertIn("Internal IDs migration changes", state["last_message"])
+            self.assertEqual(self.remote_main_subject(remote), "add internal ids area")
+            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+
+    def test_valid_save_push_retry_pushes_pending_commit_with_unrelated_dirty_tracked_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            (server.CONFIG_DIR / "packages").mkdir()
+            (server.CONFIG_DIR / "packages" / "new.yaml").write_text("homeassistant:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            self.select_all_save_preview_files(server)
+            original_push_branch = server.push_branch
+            calls = {"count": 0}
+
+            def fail_main_pushes(repo_dir, env, branch):
+                if branch == "main" and calls["count"] < 2:
+                    calls["count"] += 1
+                    raise RuntimeError("temporary push failure")
+                return original_push_branch(repo_dir, env, branch)
+
+            server.push_branch = fail_main_pushes
+            try:
+                self.assertFalse(server.run_save_job(commit_subject="Original Save Subject"))
+            finally:
+                server.push_branch = original_push_branch
+            repo = root / "data" / "ha-config"
+            pending_commit = server.read_state()["save_push_retry_commit"]
+            (repo / "homeassistant" / "manual.yaml").write_text("manual\n")
+            self.git_commit_all(repo, "manual local commit on top")
+            local_commit = server.git_head_or_unborn(repo)
+            self.assertNotEqual(local_commit, pending_commit)
+            config_file = repo / "homeassistant" / "configuration.yaml"
+            config_file.write_text("dirty local edit\n")
+
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+
+            state = server.read_state()
+            self.assertFalse(state["save_push_retry_pending"])
+            self.assertIsNone(state["save_push_retry_commit"])
+            self.assertEqual(state["last_status"], "warning")
+            self.assertEqual(
+                state["last_message"],
+                "Save push retry pushed the pending commit. Local checkout changes are still present, so the Save preview was not rebuilt.",
+            )
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/packages/new.yaml"])
+            self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
+            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
+            self.assertEqual(self.remote_main_subject(remote), "Original Save Subject")
+            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
+            self.assertNotEqual(server.git_head_or_unborn(repo), local_commit)
+            self.assertIn("homeassistant/configuration.yaml", self.repo_status(repo))
+            self.assertIn("homeassistant/manual.yaml", self.repo_status(repo))
+            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/manual.yaml")
+
+    def test_stale_save_push_retry_clears_before_untracked_checkout_cleanup(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root)
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+            repo = server.ensure_repo(server.load_options())
+            untracked = repo / "homeassistant" / "local-note.txt"
+            untracked.write_text("do not delete\n")
+            server.write_state(
+                {
+                    "save_push_retry_pending": True,
+                    "save_push_retry_commit": "stale-save-commit",
+                    "last_save_preview": "stale save preview",
+                    "last_save_diff": "stale save diff",
+                    "last_save_diff_generated_at": "2026-06-24T12:00:00+00:00",
+                    "last_save_preview_commit": "stale-save-commit",
+                    "last_save_preview_fingerprint": "stale-save-fingerprint",
+                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_save_preview_conflicts": False,
+                    "save_preview_resolutions": {},
+                    "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+                }
+            )
+
+            self.assertFalse(server.run_save_job())
+
+            state = server.read_state()
+            self.assertFalse(state.get("save_push_retry_pending", False))
+            self.assertIsNone(state.get("save_push_retry_commit"))
+            self.assertTrue(untracked.exists())
+            self.assertEqual(
+                state["last_message"],
+                "Stale Save push retry was cleared. Review a fresh Save preview before confirming.",
+            )
 
     def test_selected_addon_is_saved_when_manifest_exists(self):
         server = load_server()
@@ -12336,6 +13419,12 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
             self.assertIn("run Preview Git to HA", page)
             self.assertIn(".ha-ops/areas/office/automations.yaml after internal id migration", page)
+
+            server.write_state({"save_push_retry_pending": True, "save_push_retry_commit": "pending-save"})
+            self.assertFalse(server.run_internal_ids_migrate_job(["0"]))
+            self.assertIn("Save push retry is still pending", server.read_state()["last_message"])
+            self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", automation.read_text())
+            server.write_state({"save_push_retry_pending": False, "save_push_retry_commit": None})
 
             self.assertTrue(server.run_internal_ids_migrate_job(["0"]))
             migrated = automation.read_text()

@@ -42,6 +42,10 @@ SAVE_PREVIEW_CLEAR_UPDATES = {
     "save_preview_resolutions": {},
     "save_preview_selected_paths": [],
 }
+SAVE_PUSH_RETRY_CLEAR_UPDATES = {
+    "save_push_retry_pending": False,
+    "save_push_retry_commit": None,
+}
 DELETED_DEVICES_PREVIEW_CLEAR_UPDATES = {
     "last_deleted_devices_preview": "",
     "last_deleted_devices_rows": [],
@@ -81,6 +85,23 @@ DISPLAY_CLEAR_UPDATES = {
     "conflict_type": None,
     "save_conflict_resolutions": {},
 }
+
+
+def save_preview_clear_updates(clear_save_retry_pending=False):
+    updates = dict(SAVE_PREVIEW_CLEAR_UPDATES)
+    if clear_save_retry_pending:
+        updates.update(SAVE_PUSH_RETRY_CLEAR_UPDATES)
+    return updates
+
+
+def display_clear_updates(preserve_save_retry=False, clear_save_retry_pending=False):
+    updates = dict(DISPLAY_CLEAR_UPDATES)
+    if preserve_save_retry:
+        for key in SAVE_PREVIEW_CLEAR_UPDATES:
+            updates.pop(key, None)
+    elif clear_save_retry_pending:
+        updates.update(SAVE_PUSH_RETRY_CLEAR_UPDATES)
+    return updates
 
 
 def utc_now():
@@ -184,6 +205,8 @@ def default_state():
         "homeassistant_organizer_enabled": None,
         "include_redundant_data": False,
         "post_apply_save_recommended": False,
+        "save_push_retry_pending": False,
+        "save_push_retry_commit": None,
         "conflicts": [],
         "conflict_type": None,
         "save_conflict_resolutions": {},
@@ -208,8 +231,11 @@ def write_state(path, updates):
         return current
 
 
-def clear_display_state(path):
-    updates = dict(DISPLAY_CLEAR_UPDATES)
+def clear_display_state(path, preserve_save_retry=False, clear_save_retry_pending=False):
+    updates = display_clear_updates(
+        preserve_save_retry=preserve_save_retry,
+        clear_save_retry_pending=clear_save_retry_pending,
+    )
     current = read_state(path)
     if not current.get("deleted_devices_pending_confirmation"):
         updates.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
@@ -235,7 +261,7 @@ def is_recovered_stale_error(state):
     return message == "Home Assistant config check failed: {'result': 'ok', 'data': {}}"
 
 
-def repair_startup_state(path, now, addon_version=None):
+def repair_startup_state(path, now, addon_version=None, preserve_save_retry=False, clear_save_retry_pending=False):
     state_file_exists = path.exists()
     current = read_state(path)
     stored_version = current.get("last_seen_addon_version")
@@ -246,9 +272,15 @@ def repair_startup_state(path, now, addon_version=None):
         current["last_seen_addon_version"] = addon_version
 
     if version_changed:
-        current.update(DISPLAY_CLEAR_UPDATES)
+        current.update(
+            display_clear_updates(
+                preserve_save_retry=preserve_save_retry,
+                clear_save_retry_pending=clear_save_retry_pending,
+            )
+        )
         current.update(APPLY_PREVIEW_CLEAR_UPDATES)
-        current.update(SAVE_PREVIEW_CLEAR_UPDATES)
+        if not preserve_save_retry:
+            current.update(save_preview_clear_updates(clear_save_retry_pending=clear_save_retry_pending))
         if not current.get("deleted_devices_pending_confirmation"):
             current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
         current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
@@ -264,7 +296,12 @@ def repair_startup_state(path, now, addon_version=None):
             )
             return write_state(path, current)
 
-    current.update(DISPLAY_CLEAR_UPDATES)
+    current.update(
+        display_clear_updates(
+            preserve_save_retry=preserve_save_retry,
+            clear_save_retry_pending=clear_save_retry_pending,
+        )
+    )
     if not current.get("deleted_devices_pending_confirmation"):
         current.update(DELETED_DEVICES_PREVIEW_CLEAR_UPDATES)
     current.update(RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)

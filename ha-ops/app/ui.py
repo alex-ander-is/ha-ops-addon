@@ -209,16 +209,16 @@ def render_addons(selected, get_installed_addons, addon_slug_value, addon_displa
     )
 
 
-def render_homeassistant_organizer(enabled, projection_available=False):
+def render_homeassistant_organizer(enabled, projection_available=False, disabled=False):
     checked = " checked" if enabled and projection_available else ""
-    disabled = "" if projection_available else " disabled"
+    disabled_attr = "" if projection_available and not disabled else " disabled"
     label_key = "text.split_organizer" if projection_available else "text.split_organizer_blocked"
     notice_key = "notice.organizer" if projection_available else "notice.organizer_blocked"
     return (
         "<form method='post' action='homeassistant-organizer' data-auto-submit='change'>"
         "<div class='check-list'>"
         "<label class='check-row'>"
-        f"<input type='checkbox' name='homeassistant_organizer' value='1'{checked}{disabled}>"
+        f"<input type='checkbox' name='homeassistant_organizer' value='1'{checked}{disabled_attr}>"
         f"<span>{_(label_key)}</span>"
         f"<small>{_(notice_key)}</small>"
         "</label>"
@@ -502,6 +502,8 @@ def render_preview_decisions(
     selected_paths=None,
     required_paths=None,
     save_commit_subject="",
+    save_commit_subject_disabled=False,
+    retry_only=False,
 ):
     action_label = _("action.confirm_save") if direction == "save" else _("action.confirm_apply")
     path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
@@ -509,8 +511,11 @@ def render_preview_decisions(
     selected_paths = set(selected_paths or [])
     required_paths = set(required_paths if required_paths is not None else (paths if require_all else []))
     selected_missing = [path for path in selected_paths if path in required_paths and path not in resolutions]
-    needs_file_selection = bool(paths and not selected_paths and not actions_disabled)
-    confirm_disabled = " disabled" if actions_disabled or not selected_paths or (require_all and selected_missing) else ""
+    decision_controls_disabled = actions_disabled or retry_only
+    needs_file_selection = bool(paths and not selected_paths and not actions_disabled and not retry_only)
+    confirm_disabled = (
+        " disabled" if actions_disabled or (not retry_only and (not selected_paths or (require_all and selected_missing))) else ""
+    )
     cancel_disabled = " disabled" if actions_disabled else ""
     cancel_direction = "save" if direction == "save" else "apply"
     diff_by_path, diff_summary = split_preview_diff_by_path(diff_text or "", paths)
@@ -532,14 +537,14 @@ def render_preview_decisions(
             f"<article class='preview-file' data-preview-file data-preview-key='{preview_key}'>"
             "<div class='preview-file-header'>"
             "<div class='preview-file-title'>"
-            f"{preview_selection_control(path, direction, selected, actions_disabled=actions_disabled)}"
+            f"{preview_selection_control(path, direction, selected, actions_disabled=decision_controls_disabled)}"
             f"<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>{_('button.expand_diff')}</button>"
             f"{render_preview_path(path)}{change}{status}"
             "</div>"
             "<div class='preview-file-header-actions'>"
             f"{preview_wrap_button()}"
             "<span class='preview-choice-slot' data-preview-choice-slot='header'>"
-            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=actions_disabled or not selected)}"
+            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=decision_controls_disabled or not selected)}"
             "</span>"
             "</div>"
             "</div>"
@@ -556,8 +561,8 @@ def render_preview_decisions(
         summary_parts.append(f"<p class='muted'>{_('text.no_file_changes')}</p>")
     global_controls = (
         "<div class='preview-list-controls'>"
-        f"{preview_selection_button(direction, 'all', _('button.select_all'), actions_disabled=actions_disabled)}"
-        f"{preview_selection_button(direction, 'none', _('button.select_none'), actions_disabled=actions_disabled)}"
+        f"{preview_selection_button(direction, 'all', _('button.select_all'), actions_disabled=decision_controls_disabled)}"
+        f"{preview_selection_button(direction, 'none', _('button.select_none'), actions_disabled=decision_controls_disabled)}"
         "<span class='preview-list-control-spacer' aria-hidden='true'></span>"
         f"<button type='button' class='secondary preview-expand-all'>{_('button.expand_all')}</button>"
         f"<button type='button' class='secondary preview-collapse-all'>{_('button.collapse_all')}</button>"
@@ -569,16 +574,21 @@ def render_preview_decisions(
     if paths:
         confirm_hint = f"<span class='preview-confirm-hint'>{_('message.select_preview_files_to_continue')}</span>" if needs_file_selection else "<span></span>"
         if direction == "save":
-            input_disabled = " disabled" if confirm_disabled else ""
+            input_disabled = " disabled" if confirm_disabled or save_commit_subject_disabled else ""
             escaped_subject = html.escape(str(save_commit_subject or ""), quote=True)
-            footer = (
-                "<div class='preview-footer-actions preview-footer-actions-save'>"
-                "<div class='preview-confirm-actions preview-confirm-actions-save'>"
-                f"<form class='preview-confirm-form' method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+            subject_control = (
                 f"<input type='hidden' name='default_commit_subject' value='{escaped_subject}'>"
                 "<label class='commit-subject-control'>"
                 f"{_('label.commit_subject')}<input type='text' name='commit_subject' value='{escaped_subject}' autocomplete='off' spellcheck='false'{input_disabled}>"
                 "</label>"
+                if not retry_only
+                else f"<p class='muted'>{_('notice.save_push_retry_pending')}</p>"
+            )
+            footer = (
+                "<div class='preview-footer-actions preview-footer-actions-save'>"
+                "<div class='preview-confirm-actions preview-confirm-actions-save'>"
+                f"<form class='preview-confirm-form' method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+                f"{subject_control}"
                 f"<button type='submit'{confirm_disabled}>{action_label}</button>"
                 "</form>"
                 "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
@@ -764,6 +774,7 @@ def render_targets(
     addon_slug_value=None,
     addon_display_name=None,
     addon_is_zigbee2mqtt=None,
+    disabled=False,
 ):
     selected_addons = set(selected_addons or [])
     items = items or []
@@ -803,7 +814,8 @@ def render_targets(
                 },
             )
             checked = "checked" if slug in selected_addons else ""
-            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
+            disabled_attr = " disabled" if disabled else ""
+            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}{disabled_attr}>"
             hint = _("value.zigbee2mqtt_candidate") if addon_is_zigbee2mqtt(addon) else ""
             rows.append(render_target_row(item, checkbox, addon_display_name(addon), hint))
 
@@ -811,7 +823,8 @@ def render_targets(
             if slug in seen:
                 continue
             checked = "checked" if slug in selected_addons else ""
-            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}>"
+            disabled_attr = " disabled" if disabled else ""
+            checkbox = f"<input type='checkbox' name='addon' value='{html.escape(slug, quote=True)}' {checked}{disabled_attr}>"
             rows.append(render_target_row(item, checkbox, item.get("id")))
     else:
         for item in items:
@@ -836,7 +849,7 @@ def render_targets(
     )
 
 
-def render_releases(releases):
+def render_releases(releases, disabled=False):
     intro = f"<p>{_('notice.release_snapshots')}</p>"
     if not releases:
         return f"{intro}<p>{_('text.no_local_release_snapshots')}</p>"
@@ -846,6 +859,7 @@ def render_releases(releases):
         name = html.escape(release["name"])
         created_at = html.escape(str(release.get("created_at")))
         backup_slug = html.escape(str(release.get("backup_slug")))
+        disabled_attr = " disabled" if disabled else ""
         rows.append(
             "<tr>"
             f"<td><code>{name}</code></td>"
@@ -854,7 +868,7 @@ def render_releases(releases):
             "<td>"
             f"<form method='post' action='rollback' data-async-form='true'>"
             f"<input type='hidden' name='release' value='{name}'>"
-            f"<button type='submit' class='secondary'>{_('action.rollback')}</button>"
+            f"<button type='submit' class='secondary'{disabled_attr}>{_('action.rollback')}</button>"
             "</form>"
             "</td>"
             "</tr>"
@@ -872,7 +886,7 @@ def targets_allow_protected_storage(items):
     return any(bool(item.get("allow_protected_storage")) for item in items or [])
 
 
-def render_git_auth(options, git_auth_mode, load_generated_public_key):
+def render_git_auth(options, git_auth_mode, load_generated_public_key, disabled=False):
     mode = git_auth_mode(options)
     public_key = html.escape(load_generated_public_key())
     repo_url = options.get("repo_url", "")
@@ -897,15 +911,16 @@ def render_git_auth(options, git_auth_mode, load_generated_public_key):
     elif not uses_ssh:
         hint = f"<p>{_('notice.git_auth_non_ssh')}</p>"
 
+    disabled_attr = " disabled" if disabled else ""
     action = (
         "<form method='post' action='generate-key' data-async-form='true'>"
-        f"<button type='submit' class='secondary'>{_('action.generate_deploy_key')}</button>"
+        f"<button type='submit' class='secondary'{disabled_attr}>{_('action.generate_deploy_key')}</button>"
         "</form>"
     )
     if mode == "generated":
         action = (
             "<form method='post' action='generate-key' data-async-form='true'>"
-            f"<button type='submit' class='secondary'>{_('action.regenerate_deploy_key')}</button>"
+            f"<button type='submit' class='secondary'{disabled_attr}>{_('action.regenerate_deploy_key')}</button>"
             "</form>"
         )
 

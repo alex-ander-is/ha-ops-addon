@@ -378,6 +378,7 @@ def render_page(ctx):
     save_preview_selected_paths = [str(item) for item in (state.get("save_preview_selected_paths") or []) if str(item)]
     save_preview_conflicts = bool(state.get("last_save_preview_conflicts"))
     save_preview_conflict_paths = [str(item) for item in (state.get("last_save_preview_conflict_paths") or []) if str(item)]
+    save_push_retry_pending = bool(state.get("save_push_retry_pending"))
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
@@ -410,11 +411,16 @@ def render_page(ctx):
         and state.get("last_deleted_devices_fingerprint")
     )
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
-    check_disk_usage_disabled = "disabled" if run_disabled else ""
-    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
-    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
-    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or not deletion_ready else ""
-    confirm_deletion_disabled = "disabled" if run_disabled or not deleted_devices_pending_confirmation else ""
+    if save_push_retry_pending:
+        action_disabled = "disabled"
+        check_deleted_devices_disabled = "disabled"
+    check_disk_usage_disabled = "disabled" if run_disabled or save_push_retry_pending else ""
+    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending else ""
+    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending else ""
+    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending or not deletion_ready else ""
+    confirm_deletion_disabled = (
+        "disabled" if run_disabled or save_push_retry_pending or not deleted_devices_pending_confirmation else ""
+    )
     deleted_devices_actions_html = ""
     if deleted_devices_pending_confirmation:
         deleted_devices_actions_html = (
@@ -456,7 +462,7 @@ def render_page(ctx):
         conflicts_section_html = (
             "<section class='card wide'>"
             f"<h2>{_('heading.git_conflicts')}</h2>"
-            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'), job_running)}"
+            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'), job_running or save_push_retry_pending)}"
             "</section>"
         )
     apply_preview_section_html = ""
@@ -483,7 +489,9 @@ def render_page(ctx):
             "</section>"
         )
     save_preview_section_html = ""
-    if not has_conflicts and (state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text):
+    if (not has_conflicts or save_push_retry_pending) and (
+        state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text
+    ):
         save_commit_subject = job_logic.default_save_commit_subject(ctx.release_now())
         save_preview_section_html = (
             "<section class='card wide'>"
@@ -492,7 +500,7 @@ def render_page(ctx):
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
             f"<div data-transient='save-preview'>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths, save_commit_subject=save_commit_subject)}"
+            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths, save_commit_subject=save_commit_subject, save_commit_subject_disabled=save_push_retry_pending, retry_only=save_push_retry_pending)}"
             "</div>"
             "</section>"
         )
@@ -530,7 +538,7 @@ def render_page(ctx):
         )
     retained_devices_section_html = ""
     if state.get("last_retained_devices_generated_at"):
-        retained_delete_disabled = "disabled" if run_disabled or not retained_devices_rows else ""
+        retained_delete_disabled = "disabled" if run_disabled or save_push_retry_pending or not retained_devices_rows else ""
         retained_devices_section_html = (
             "<section class='card wide'>"
             f"<h2>{_('heading.retained_devices_preview')}</h2>"
@@ -552,7 +560,7 @@ def render_page(ctx):
 
     internal_ids_section_html = ""
     if state.get("last_internal_ids_generated_at"):
-        internal_ids_migrate_disabled = "disabled" if run_disabled or not any(row.get("changes") for row in internal_ids_rows) else ""
+        internal_ids_migrate_disabled = "disabled" if run_disabled or save_push_retry_pending or not any(row.get("changes") for row in internal_ids_rows) else ""
         internal_ids_changed_files = sum(1 for row in internal_ids_rows if row.get("changes"))
         internal_ids_totals = {
             "changes": sum(int(row.get("changes") or 0) for row in internal_ids_rows),
@@ -632,7 +640,12 @@ def render_page(ctx):
             "apply_button_text": apply_button_text,
             "apply_confirm": apply_confirm,
             "conflicts_section_html": conflicts_section_html,
-            "git_auth_html": ui.render_git_auth(options, ctx.git_auth_mode, ctx.load_generated_public_key),
+            "git_auth_html": ui.render_git_auth(
+                options,
+                ctx.git_auth_mode,
+                ctx.load_generated_public_key,
+                disabled=save_push_retry_pending,
+            ),
             "targets_html": ui.render_targets(
                 target_state,
                 ctx.selected_addon_slugs(),
@@ -640,13 +653,17 @@ def render_page(ctx):
                 addon_slug_value,
                 addon_display_name,
                 ctx.addon_is_zigbee2mqtt,
+                disabled=save_push_retry_pending,
             ),
-            "organizer_html": ui.render_homeassistant_organizer(homeassistant_organizer_enabled),
+            "organizer_html": ui.render_homeassistant_organizer(
+                homeassistant_organizer_enabled,
+                disabled=save_push_retry_pending,
+            ),
             "include_redundant_data_html": ui.render_include_redundant_data(
                 bool(state.get("include_redundant_data")),
-                job_running,
+                job_running or save_push_retry_pending,
             ),
-            "releases_html": ui.render_releases(releases),
+            "releases_html": ui.render_releases(releases, disabled=save_push_retry_pending),
             "version": html.escape(ctx.addon_version()),
         }
     )
@@ -702,6 +719,16 @@ def create_handler(ctx):
             else:
                 self.send_html(render_page(ctx), status=409)
 
+        def save_retry_pending(self):
+            return bool(ctx.read_state().get("save_push_retry_pending"))
+
+        def send_save_retry_pending(self):
+            message = _("message.save_push_retry_still_pending")
+            if self.wants_json():
+                self.send_json({"ok": False, "message": message}, status=409)
+            else:
+                self.send_html(render_page(ctx), status=409)
+
         def start_job(self, target, *args, state_updates=None, lock_acquired=False):
             if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
                 return True
@@ -725,6 +752,9 @@ def create_handler(ctx):
             body = parse_qs(self.rfile.read(length).decode()) if length else {}
 
             if parsed.path == "/generate-key":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 try:
                     public_key = ctx.generate_deploy_key()
                     ctx.write_state(
@@ -774,13 +804,30 @@ def create_handler(ctx):
 
             if parsed.path == "/clear-preview":
                 direction = body.get("direction", [""])[0]
+                if self.save_retry_pending() and direction != "save":
+                    self.send_save_retry_pending()
+                    return
                 ok, _state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
                     return
                 try:
                     if direction == "save":
-                        ctx.write_state(state_store.SAVE_PREVIEW_CLEAR_UPDATES)
+                        state = ctx.read_state()
+                        try:
+                            if state.get("save_push_retry_pending"):
+                                ctx.discard_save_push_retry_commit(state)
+                            ctx.write_state(
+                                state_store.save_preview_clear_updates(
+                                    clear_save_retry_pending=bool(state.get("save_push_retry_pending"))
+                                )
+                            )
+                        except RuntimeError as exc:
+                            if self.wants_json():
+                                self.send_json({"ok": False, "message": str(exc)}, status=409)
+                            else:
+                                self.send_html(render_page(ctx), status=409)
+                            return
                         message = _("message.save_preview_cancelled")
                     elif direction == "apply":
                         ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
@@ -800,6 +847,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/apply":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_apply_job):
                     return
                 if self.wants_json():
@@ -809,6 +859,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path in {"/resolve-save-preview", "/resolve-apply-preview"}:
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 direction = "save" if parsed.path == "/resolve-save-preview" else "apply"
                 ok, state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
@@ -867,6 +920,9 @@ def create_handler(ctx):
                     release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/preview":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -877,6 +933,9 @@ def create_handler(ctx):
                     return
 
             if parsed.path in {"/select-save-preview", "/select-apply-preview"}:
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 direction = "save" if parsed.path == "/select-save-preview" else "apply"
                 ok, state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
@@ -927,6 +986,9 @@ def create_handler(ctx):
                     release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/save-preview":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -936,6 +998,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/reset-git-state":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_reset_git_state_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -945,6 +1010,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/disk-usage":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_disk_usage_job):
                     return
                 if self.wants_json():
@@ -968,6 +1036,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/deleted-devices-preview":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_deleted_devices_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -977,6 +1048,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/retained-devices-preview":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_retained_devices_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -986,6 +1060,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/retained-devices-delete":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 selected = body.get("candidate", [])
                 if not self.start_job(ctx.run_retained_devices_delete_job, selected):
                     return
@@ -996,6 +1073,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/internal-ids-preview":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_internal_ids_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES):
                     return
                 if self.wants_json():
@@ -1005,6 +1085,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/internal-ids-migrate":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 selected = body.get("candidate", [])
                 if not self.start_job(ctx.run_internal_ids_migrate_job, selected):
                     return
@@ -1015,6 +1098,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/deleted-devices-delete":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_deleted_devices_delete_job):
                     return
                 if self.wants_json():
@@ -1024,6 +1110,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/deleted-devices-confirm":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_deleted_devices_confirm_job):
                     return
                 if self.wants_json():
@@ -1033,6 +1122,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/deleted-devices-revert":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 if not self.start_job(ctx.run_deleted_devices_revert_job):
                     return
                 if self.wants_json():
@@ -1042,6 +1134,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/approve-save-conflicts":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 ok, _state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
@@ -1075,6 +1170,9 @@ def create_handler(ctx):
                     release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/addons":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 selected = body.get("addon", [])
                 ctx.set_selected_addon_slugs(selected)
                 if self.wants_json():
@@ -1084,6 +1182,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/homeassistant-organizer":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 enabled = "homeassistant_organizer" in body
                 if enabled and not manifest_logic.ORGANIZER_PROJECTION_AVAILABLE:
                     message = _("message.homeassistant_organizer_blocked")
@@ -1101,6 +1202,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/include-redundant-data":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 ok, state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
@@ -1123,6 +1227,9 @@ def create_handler(ctx):
                 return
 
             if parsed.path == "/resolve-conflict":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 ok, _state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
@@ -1155,6 +1262,9 @@ def create_handler(ctx):
                     release_action_slot(ctx, lock_acquired)
 
             if parsed.path == "/rollback":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
                 release = body.get("release", [""])[0]
                 if not release:
                     if self.wants_json():
