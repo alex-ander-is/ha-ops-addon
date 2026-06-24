@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.42
+
+- Render HA-to-Git Save conflict preview diffs from Git stage blobs for all conflicted files so Lovelace storage previews never show Git conflict markers.
+
 ## 0.8.41
 
 - Keep HA Ops pages refreshing while a background job is still running so long Save and Apply operations do not leave stale disabled preview controls on screen.

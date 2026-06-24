@@ -7396,6 +7396,123 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
 
+    def test_save_preview_lovelace_storage_conflict_diff_uses_git_stages(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = self.seed_remote(root, "base\n")
+            seed = root / "seed"
+            lovelace = seed / "homeassistant" / ".storage" / "lovelace.lovelace"
+            lovelace.parent.mkdir(parents=True)
+            lovelace.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "config": {
+                                "cards": [
+                                    {
+                                        "type": "custom:mushroom-template-card",
+                                        "icon": "mdi:shoe-sneaker",
+                                        "icon_color": "blue",
+                                        "primary": "Keep",
+                                        "secondary": "Light",
+                                        "tap_action": {"action": "toggle"},
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            self.git_commit_all(seed, "base lovelace")
+            self.git(["push", "origin", "main"], seed)
+            self.git(["branch", "-f", "ha-ops/ha-live", "HEAD"], seed)
+            self.git(["branch", "-f", "ha-ops/base", "HEAD"], seed)
+            self.push_service_branches(seed)
+
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            git_lovelace = updater / "homeassistant" / ".storage" / "lovelace.lovelace"
+            git_lovelace.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "config": {
+                                "cards": [
+                                    {
+                                        "type": "custom:mushroom-template-card",
+                                        "icon": "mdi:shoe-sneaker",
+                                        "icon_color": "grey",
+                                        "primary": "Keep",
+                                        "secondary": "Light",
+                                        "tap_action": {"action": "none"},
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            self.git_commit_all(updater, "git lovelace")
+            self.git(["push", "origin", "main"], updater)
+
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "lovelace.lovelace").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "config": {
+                                "cards": [
+                                    {
+                                        "type": "custom:mushroom-template-card",
+                                        "icon": "mdi:shoe-sneaker",
+                                        "icon_color": "{% if is_state(\"input_boolean.hallway_keep_light_on\", \"on\") %}\n  orange\n{% else %}\n  grey\n{% endif %}\n",
+                                        "primary": "Keep",
+                                        "secondary": "Light",
+                                        "tap_action": {
+                                            "action": "call-service",
+                                            "service": "script.hallway_toggle_light_no_timeout",
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n"
+            )
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview_conflict_paths"], ["homeassistant/.storage/lovelace.lovelace"])
+            self.assertIn("homeassistant/.storage/lovelace.lovelace", state["last_save_diff"])
+            self.assertNotIn("<<<<<<<", state["last_save_diff"])
+            self.assertNotIn("=======", state["last_save_diff"])
+            self.assertNotIn(">>>>>>>", state["last_save_diff"])
+            self.assertIn('"action": "none"', state["last_save_diff"])
+            self.assertIn('"action": "call-service"', state["last_save_diff"])
+            self.assertIn("script.hallway_toggle_light_no_timeout", state["last_save_diff"])
+
     def test_save_preview_conflict_skips_unselected_clean_merge_change(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -2296,10 +2296,8 @@ def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=Tr
         if relative.is_absolute() or ".." in relative.parts:
             continue
         path_text = relative.as_posix()
-        if (
-            relative.name in NORMALIZED_STORAGE_FILES
-            and git_conflict_stage_exists(repo_dir, 2, path_text, ctx)
-            and git_conflict_stage_exists(repo_dir, 3, path_text, ctx)
+        if git_conflict_stage_exists(repo_dir, 2, path_text, ctx) and git_conflict_stage_exists(
+            repo_dir, 3, path_text, ctx
         ):
             before_path = before_root / relative
             after_path = after_root / relative
