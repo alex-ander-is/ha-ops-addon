@@ -575,6 +575,7 @@ def render_preview_decisions(
                 "<div class='preview-footer-actions preview-footer-actions-save'>"
                 "<div class='preview-confirm-actions preview-confirm-actions-save'>"
                 f"<form class='preview-confirm-form' method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
+                f"<input type='hidden' name='default_commit_subject' value='{escaped_subject}'>"
                 "<label class='commit-subject-control'>"
                 f"{_('label.commit_subject')}<input type='text' name='commit_subject' value='{escaped_subject}' autocomplete='off' spellcheck='false'{input_disabled}>"
                 "</label>"

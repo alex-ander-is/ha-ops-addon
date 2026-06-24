@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.44
+
+- Recompute unchanged default HA-to-Git Save commit subjects when the Save job starts so delayed confirmations use the current timestamp.
+
 ## 0.8.43
 
 - Let HA-to-Git Save confirmations edit the Git commit subject before saving.

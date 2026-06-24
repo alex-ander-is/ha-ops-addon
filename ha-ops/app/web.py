@@ -955,6 +955,10 @@ def create_handler(ctx):
 
             if parsed.path == "/save":
                 commit_subject = body.get("commit_subject", [None])[0]
+                default_commit_subject = body.get("default_commit_subject", [None])[0]
+                commit_subject = job_logic.save_commit_subject_from_submission(
+                    commit_subject, default_commit_subject
+                )
                 if not self.start_job(ctx.run_save_job, commit_subject):
                     return
                 if self.wants_json():

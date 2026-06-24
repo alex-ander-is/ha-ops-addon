@@ -354,8 +354,21 @@ def default_save_commit_subject(release):
     return f"Save Home Assistant config {release}"
 
 
-def save_commit_subject_or_default(commit_subject, release):
+def normalize_save_commit_subject(commit_subject):
     subject = " ".join(str(commit_subject or "").splitlines()).strip()
+    return subject
+
+
+def save_commit_subject_from_submission(commit_subject, default_commit_subject):
+    subject = normalize_save_commit_subject(commit_subject)
+    default_subject = normalize_save_commit_subject(default_commit_subject)
+    if subject and default_subject and subject == default_subject:
+        return None
+    return commit_subject
+
+
+def save_commit_subject_or_default(commit_subject, release):
+    subject = normalize_save_commit_subject(commit_subject)
     return subject or default_save_commit_subject(release)
 
 
