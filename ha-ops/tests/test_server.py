@@ -11136,6 +11136,68 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Apply preview conflicts (1):", state["last_diff"])
             self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
 
+    def test_apply_preview_ignores_repo_only_service_branch_conflicts(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            self.git(["init", "--bare", str(remote)], root)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            config_path = seed / "homeassistant" / "configuration.yaml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("base\n")
+            test_path = seed / "tests" / "test_battery_attention_report_html.py"
+            test_path.parent.mkdir()
+            test_path.write_text("base\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+            self.push_service_branches(seed)
+
+            updater = root / "updater"
+            self.git(["clone", str(remote), str(updater)], root)
+            self.git(["checkout", "main"], updater)
+            (updater / "homeassistant" / "configuration.yaml").write_text("git\n")
+            (updater / "tests" / "test_battery_attention_report_html.py").write_text("git\n")
+            self.git_commit_all(updater, "git changes")
+            self.git(["push", "origin", "main"], updater)
+
+            live_updater = root / "live-updater"
+            self.git(["clone", str(remote), str(live_updater)], root)
+            self.git(["checkout", "ha-ops/ha-live"], live_updater)
+            (live_updater / "homeassistant" / "configuration.yaml").write_text("ha\n")
+            (live_updater / "tests" / "test_battery_attention_report_html.py").write_text("ha\n")
+            self.git_commit_all(live_updater, "live changes")
+            self.git(["push", "origin", "ha-ops/ha-live"], live_updater)
+
+            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
+                        "create_ha_backup": False,
+                        "create_release_snapshot": False,
+                        "reload_yaml_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertTrue(state["last_preview_conflicts"])
+            self.assertEqual(state["last_preview_conflict_paths"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(state["last_preview_paths"], ["homeassistant/configuration.yaml"])
+            self.assertIn("homeassistant/configuration.yaml", state["last_diff"])
+            self.assertNotIn("tests/test_battery_attention_report_html.py", state["last_diff"])
+
     def test_apply_preview_uses_updated_remote_live_branch(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

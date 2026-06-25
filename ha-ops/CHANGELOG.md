@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.48
+
+- Keep repository-only files such as tests out of Git-to-HA Apply conflict previews so only managed target files appear in Apply decisions.
+
 ## 0.8.47
 
 - Keep repository-only files such as tests out of HA-to-Git Save previews and Save commits so HA Ops only offers Home Assistant managed config paths.

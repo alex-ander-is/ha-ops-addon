@@ -1620,6 +1620,29 @@ def managed_save_merge_paths(repo_dir, resolved_targets, paths, ctx):
     return sorted(path for path in set(paths) if save_merge_path_is_managed(repo_dir, resolved_targets, path, ctx))
 
 
+def apply_merge_path_is_managed(repo_dir, resolved_targets, path_text, ctx):
+    relative = Path(path_text)
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        source_relative = target_repo_source_relative(repo_dir, target)
+        try:
+            target_relative = relative.relative_to(source_relative)
+        except ValueError:
+            continue
+
+        if target.get("type") == "homeassistant":
+            return homeassistant_managed_save_relative_path(target_relative, target, ctx)
+        return not is_excluded_path(target_relative, Path("."), ctx.export_excludes)
+    return False
+
+
+def managed_apply_merge_paths(repo_dir, resolved_targets, paths, ctx):
+    return sorted(path for path in set(paths) if apply_merge_path_is_managed(repo_dir, resolved_targets, path, ctx))
+
+
 def restore_unmanaged_save_merge_paths(repo_dir, resolved_targets, ctx):
     for path in merge_change_paths(repo_dir, ctx):
         if save_merge_path_is_managed(repo_dir, resolved_targets, path, ctx):
@@ -3607,10 +3630,13 @@ def build_apply_preview(resolved_targets, ctx, details=None, repo_dir=None, main
     try:
         git_ensure_head(repo_dir, ctx, details)
         update_ha_live_branch(resolved_targets, repo_dir, details, ctx, prefer_local_live=prefer_local_live)
-        conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
+        raw_conflicts = merge_git_into_ha_live(repo_dir, main_branch, ctx)
+        conflicts = managed_apply_merge_paths(repo_dir, resolved_targets, raw_conflicts, ctx)
+        for path in sorted(set(raw_conflicts) - set(conflicts)):
+            git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
-            paths = sorted(set(conflicts) | set(merge_change_paths(repo_dir, ctx)))
+            paths = managed_apply_merge_paths(repo_dir, resolved_targets, set(conflicts) | set(merge_change_paths(repo_dir, ctx)), ctx)
             summary = "\n".join(
                 [_("preview.apply_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
             )
