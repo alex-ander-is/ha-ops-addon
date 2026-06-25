@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.47
+
+- Keep repository-only files such as tests out of HA-to-Git Save previews and Save commits so HA Ops only offers Home Assistant managed config paths.
+
 ## 0.8.46
 
 - Tie HA-to-Git Save push retries to the specific pending Save commit so stale retry state cannot push unrelated local commits.

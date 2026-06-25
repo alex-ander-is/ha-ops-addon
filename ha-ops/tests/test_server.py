@@ -8390,6 +8390,122 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("homeassistant/old.yaml", result.stdout)
             self.assertNotIn("homeassistant/packages/stale.yaml", result.stdout)
 
+    def test_save_preview_ignores_repo_only_service_branch_files(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir()
+            (seed / "homeassistant" / "scripts.yaml").write_text("old_script:\n  sequence: []\n")
+            self.git_commit_all(seed, "base")
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            self.git(["checkout", "-B", "ha-ops/ha-live"], seed)
+            (seed / "homeassistant" / "scripts.yaml").write_text("new_script:\n  sequence: []\n")
+            (seed / "tests").mkdir()
+            (seed / "tests" / "test_battery_attention_markdown_v2.py").write_text("def test_contract():\n    pass\n")
+            self.git_commit_all(seed, "live service branch")
+            self.git(["push", "-u", "origin", "ha-ops/ha-live"], seed)
+            self.git(["branch", "-f", "ha-ops/base", "main"], seed)
+            self.git(["push", "-u", "origin", "ha-ops/base"], seed)
+
+            (server.CONFIG_DIR / "scripts.yaml").write_text("new_script:\n  sequence: []\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/scripts.yaml"])
+            self.assertIn("homeassistant/scripts.yaml", state["last_save_preview"])
+            self.assertNotIn("tests/test_battery_attention_markdown_v2.py", state["last_save_preview"])
+            self.assertNotIn("tests/test_battery_attention_markdown_v2.py", state.get("last_save_preview_suppressed_paths", []))
+
+            self.select_all_save_preview_files(server)
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            result = subprocess.run(
+                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            self.assertIn("homeassistant/scripts.yaml", result.stdout)
+            self.assertNotIn("tests/test_battery_attention_markdown_v2.py", result.stdout)
+
+    def test_save_preview_ignores_repo_only_service_branch_conflicts(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+            self.git(["init", str(seed)], root)
+            self.git(["checkout", "-b", "main"], seed)
+            (seed / "homeassistant").mkdir()
+            (seed / "homeassistant" / "scripts.yaml").write_text("old_script:\n  sequence: []\n")
+            (seed / "tests").mkdir()
+            test_path = seed / "tests" / "test_battery_attention_markdown_v2.py"
+            test_path.write_text("def test_contract():\n    return 'base'\n")
+            self.git_commit_all(seed, "base")
+            base = self.git(["rev-parse", "HEAD"], seed).stdout.strip()
+            self.git(["remote", "add", "origin", str(remote)], seed)
+            self.git(["push", "-u", "origin", "main"], seed)
+
+            self.git(["checkout", "-B", "ha-ops/ha-live", base], seed)
+            (seed / "homeassistant" / "scripts.yaml").write_text("new_script:\n  sequence: []\n")
+            test_path.write_text("def test_contract():\n    return 'live'\n")
+            self.git_commit_all(seed, "live service branch")
+            self.git(["push", "-u", "origin", "ha-ops/ha-live"], seed)
+            self.git(["branch", "-f", "ha-ops/base", base], seed)
+            self.git(["push", "-u", "origin", "ha-ops/base"], seed)
+
+            self.git(["checkout", "-B", "main", base], seed)
+            test_path.write_text("def test_contract():\n    return 'main'\n")
+            self.git_commit_all(seed, "main repo-only test change")
+            self.git(["push", "origin", "main"], seed)
+
+            (server.CONFIG_DIR / "scripts.yaml").write_text("new_script:\n  sequence: []\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            state = server.read_state()
+            self.assertFalse(state["last_save_preview_conflicts"])
+            self.assertEqual(state["last_save_preview_conflict_paths"], [])
+            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/scripts.yaml"])
+            self.assertIn("homeassistant/scripts.yaml", state["last_save_preview"])
+            self.assertNotIn("tests/test_battery_attention_markdown_v2.py", state["last_save_preview"])
+            self.assertNotIn(
+                "tests/test_battery_attention_markdown_v2.py",
+                json.dumps(state.get("last_save_preview_fingerprint", "")),
+            )
+
     def test_empty_git_apply_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

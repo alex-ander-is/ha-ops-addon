@@ -11,6 +11,7 @@ import i18n
 import storage_managed
 import targets as target_model
 import organizer
+import policies
 
 
 HA_LIVE_BRANCH = "ha-ops/ha-live"
@@ -1567,6 +1568,65 @@ def target_repo_source_relative(repo_dir, target):
         return Path(target.get("source") or Path(target["source_path"]).name)
 
 
+def homeassistant_managed_save_relative_path(relative, target, ctx):
+    relative = Path(relative)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        return False
+
+    if len(relative.parts) == 1:
+        name = relative.name
+        root_excludes = getattr(ctx, "ha_root_excludes", policies.HOMEASSISTANT_EXPORT_ROOT_EXCLUDES)
+        root_patterns = getattr(ctx, "ha_root_patterns", policies.HOMEASSISTANT_EXPORT_ROOT_PATTERNS)
+        return name not in root_excludes and any(fnmatch.fnmatch(name, pattern) for pattern in root_patterns)
+
+    first = relative.parts[0]
+    if first in ctx.ha_dirs:
+        return not is_excluded_path(relative, Path("."), ctx.export_excludes)
+    if target and target.get("include_zigbee2mqtt_legacy") and first in {Path(path).parts[0] for path in ctx.zigbee2mqtt_paths}:
+        return any(relative == Path(path) or relative.is_relative_to(Path(path)) for path in ctx.zigbee2mqtt_paths)
+    if first == ".storage":
+        return len(relative.parts) == 2 and relative.parts[1] in ctx.storage_allowlist
+    if first == storage_managed.MANAGED_DIR:
+        return not is_excluded_path(relative, Path("."), ctx.export_excludes)
+    if target and homeassistant_organizer_enabled(target):
+        organized = organizer.organized_root(Path("."), organizer_options(target))
+        return relative == organized or relative.is_relative_to(organized)
+    return False
+
+
+def save_merge_path_is_managed(repo_dir, resolved_targets, path_text, ctx):
+    relative = Path(path_text)
+    if relative.is_absolute() or ".." in relative.parts:
+        return False
+
+    repo_dir = Path(repo_dir)
+    for target in resolved_targets:
+        source_relative = target_repo_source_relative(repo_dir, target)
+        try:
+            target_relative = relative.relative_to(source_relative)
+        except ValueError:
+            continue
+
+        if target.get("type") == "homeassistant":
+            if homeassistant_managed_save_relative_path(target_relative, target, ctx):
+                return True
+        elif target_model.save_delete(target):
+            if not is_excluded_path(target_relative, Path("."), ctx.export_excludes):
+                return True
+    return False
+
+
+def managed_save_merge_paths(repo_dir, resolved_targets, paths, ctx):
+    return sorted(path for path in set(paths) if save_merge_path_is_managed(repo_dir, resolved_targets, path, ctx))
+
+
+def restore_unmanaged_save_merge_paths(repo_dir, resolved_targets, ctx):
+    for path in merge_change_paths(repo_dir, ctx):
+        if save_merge_path_is_managed(repo_dir, resolved_targets, path, ctx):
+            continue
+        git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
+
+
 def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
     repo_dir = Path(repo_dir)
     collapse_duplicate_organizer_route_items(repo_dir, resolved_targets, ctx)
@@ -2280,7 +2340,12 @@ def normalize_organizer_save_diff_files(before_root, after_root, resolved_target
 
 
 def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=True):
-    paths = sorted(set(merge_change_paths(repo_dir, ctx)) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)))
+    paths = managed_save_merge_paths(
+        repo_dir,
+        resolved_targets,
+        set(merge_change_paths(repo_dir, ctx)) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)),
+        ctx,
+    )
     if not paths:
         return ""
 
@@ -2431,7 +2496,12 @@ def merge_preview_for_save(repo_dir, resolved_targets, include_redundant_data, c
             "suppressed_paths": [],
         }
 
-    raw_paths = sorted(set(raw_status_paths) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)))
+    raw_paths = managed_save_merge_paths(
+        repo_dir,
+        resolved_targets,
+        set(raw_status_paths) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)),
+        ctx,
+    )
     diff = merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=not include_redundant_data)
     paths = diff_change_paths(diff)
     if diff and not paths:
@@ -2463,7 +2533,10 @@ def merge_preview_for_save(repo_dir, resolved_targets, include_redundant_data, c
 
 
 def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, message, details, ctx):
-    conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+    raw_conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+    conflicts = managed_save_merge_paths(repo_dir, resolved_targets, raw_conflicts, ctx)
+    for path in sorted(set(raw_conflicts) - set(conflicts)):
+        git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
     if conflicts:
         missing = [path for path in conflicts if (resolutions or {}).get(path) not in {"ha", "git"}]
         if missing:
@@ -2481,6 +2554,7 @@ def commit_save_merge(repo_dir, main_branch, resolved_targets, resolutions, mess
             continue
         git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
 
+    restore_unmanaged_save_merge_paths(repo_dir, resolved_targets, ctx)
     stage_managed_save_worktree(repo_dir, resolved_targets, ctx)
     partial_save = any(choice == "git" for choice in (resolutions or {}).values())
     commit = (
@@ -2744,10 +2818,18 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
     try:
         git_ensure_head(repo_dir, ctx, details)
         update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data)
-        conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+        raw_conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
+        conflicts = managed_save_merge_paths(repo_dir, resolved_targets, raw_conflicts, ctx)
+        for path in sorted(set(raw_conflicts) - set(conflicts)):
+            git_restore_path_from_ref(repo_dir, "HEAD", path, ctx)
         update_base_branch(repo_dir, main_branch, ctx)
         if conflicts:
-            raw_paths = sorted(set(conflicts) | set(merge_preview_candidate_paths(repo_dir, resolved_targets, ctx)))
+            raw_paths = managed_save_merge_paths(
+                repo_dir,
+                resolved_targets,
+                set(conflicts) | set(merge_preview_candidate_paths(repo_dir, resolved_targets, ctx)),
+                ctx,
+            )
             summary = "\n".join(
                 [_("preview.save_conflicts_title", count=len(conflicts)), *[_("preview.conflict_item", path=path) for path in conflicts]]
             )
