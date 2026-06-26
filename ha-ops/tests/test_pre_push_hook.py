@@ -79,6 +79,29 @@ class PrePushHookTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("ha-ops/config.yaml", result.stderr)
 
+    def test_allows_hook_only_push_without_release_bump(self):
+        self.write_file(".githooks/pre-push", "#!/bin/sh\nexit 0\n")
+        head = self.commit("Change hook")
+
+        result = self.invoke_hook(self.branch_push_stdin(head))
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Running HA Ops tests before push", result.stdout)
+
+    def test_rejects_push_when_remote_main_moved(self):
+        self.write_file("ha-ops/app.py", "print('remote change')\n")
+        remote_head = self.commit("Remote update")
+        run(["git", "push", "origin", "main"], cwd=self.repo)
+        self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.0\n\n- Initial.\n")
+        head = self.commit("Release from stale remote")
+        run(["git", "tag", "0.2.0"], cwd=self.repo)
+
+        result = self.invoke_hook(self.branch_push_stdin(head))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"remote main moved from {self.base} to {remote_head}", result.stderr)
+
     def test_rejects_release_files_without_matching_tag(self):
         self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
         self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.0\n\n- Initial.\n")

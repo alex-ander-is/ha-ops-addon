@@ -26,6 +26,12 @@ do
 done
 
 if [ "$requires_release_check" = "1" ]; then
+  remote_main=$(git ls-remote --heads "$REMOTE_NAME" refs/heads/main | awk '{print $1}')
+  if [ -n "$remote_main" ] && [ "$branch_remote_sha" != "$ZERO_SHA" ] && [ "$branch_remote_sha" != "$remote_main" ]; then
+    echo "Push rejected: remote main moved from $branch_remote_sha to $remote_main. Fetch/rebase and retry." >&2
+    exit 1
+  fi
+
   if [ "$branch_remote_sha" = "$ZERO_SHA" ]; then
     empty_tree=$(git hash-object -t tree /dev/null)
     changed_files=$(git diff --name-only "$empty_tree" "$branch_local_sha")
@@ -33,37 +39,40 @@ if [ "$requires_release_check" = "1" ]; then
     changed_files=$(git diff --name-only "$branch_remote_sha" "$branch_local_sha")
   fi
 
-  echo "$changed_files" | grep -qx "ha-ops/config.yaml" || {
-    echo "Push rejected: HA Ops changes must bump ha-ops/config.yaml." >&2
-    exit 1
-  }
-  echo "$changed_files" | grep -qx "ha-ops/CHANGELOG.md" || {
-    echo "Push rejected: HA Ops changes must update ha-ops/CHANGELOG.md." >&2
-    exit 1
-  }
+  release_relevant_files=$(printf '%s\n' "$changed_files" | grep '^ha-ops/' | grep -v '^ha-ops/tests/' || true)
+  if [ -n "$release_relevant_files" ]; then
+    echo "$changed_files" | grep -qx "ha-ops/config.yaml" || {
+      echo "Push rejected: HA Ops changes must bump ha-ops/config.yaml." >&2
+      exit 1
+    }
+    echo "$changed_files" | grep -qx "ha-ops/CHANGELOG.md" || {
+      echo "Push rejected: HA Ops changes must update ha-ops/CHANGELOG.md." >&2
+      exit 1
+    }
 
-  version=$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' ha-ops/config.yaml | head -n 1)
-  if [ -z "$version" ]; then
-    echo "Push rejected: could not read ha-ops/config.yaml version." >&2
-    exit 1
-  fi
+    version=$(sed -n 's/^version:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' ha-ops/config.yaml | head -n 1)
+    if [ -z "$version" ]; then
+      echo "Push rejected: could not read ha-ops/config.yaml version." >&2
+      exit 1
+    fi
 
-  git rev-parse -q --verify "refs/tags/$version" >/dev/null || {
-    echo "Push rejected: missing local tag $version for HA Ops version $version." >&2
-    exit 1
-  }
+    git rev-parse -q --verify "refs/tags/$version" >/dev/null || {
+      echo "Push rejected: missing local tag $version for HA Ops version $version." >&2
+      exit 1
+    }
 
-  if git ls-remote --exit-code --tags "$REMOTE_NAME" "refs/tags/$version" >/dev/null 2>&1; then
-    :
-  else
-    case " $pushed_tags " in
-      *" $version "*)
-        ;;
-      *)
-        echo "Push rejected: tag $version must be pushed with this release." >&2
-        exit 1
-        ;;
-    esac
+    if git ls-remote --exit-code --tags "$REMOTE_NAME" "refs/tags/$version" >/dev/null 2>&1; then
+      :
+    else
+      case " $pushed_tags " in
+        *" $version "*)
+          ;;
+        *)
+          echo "Push rejected: tag $version must be pushed with this release." >&2
+          exit 1
+          ;;
+      esac
+    fi
   fi
 fi
 
