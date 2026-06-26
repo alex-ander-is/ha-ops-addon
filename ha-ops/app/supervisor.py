@@ -94,6 +94,12 @@ def core_reload_yaml(call_supervisor):
         raise RuntimeError(f"Core YAML reload failed: {payload}")
 
 
+def core_reload_lovelace(call_supervisor):
+    payload = call_supervisor("POST", "/core/api/services/lovelace/reload_resources", {})
+    if not supervisor_ok(payload) and not isinstance(payload, list):
+        raise RuntimeError(f"Lovelace reload failed: {payload}")
+
+
 def do_core_check(call_supervisor):
     payload = call_supervisor("POST", "/core/check")
     data = payload.get("data", {})

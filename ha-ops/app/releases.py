@@ -14,6 +14,7 @@ class ReleaseContext:
     add_detail: Callable[..., Any]
     addon_action: Callable[..., Any]
     clear_tree: Callable[..., Any]
+    core_reload_lovelace: Callable[[], Any]
     core_reload_yaml: Callable[[], Any]
     core_restart: Callable[[], Any]
     core_start: Callable[[], Any]
@@ -176,6 +177,7 @@ def restore_release_snapshot(release_name, details, core_already_stopped, ctx):
     homeassistant_should_restart = False
     homeassistant_should_start = False
     homeassistant_should_reload = False
+    homeassistant_should_reload_lovelace = False
 
     for target in targets:
         live_path = Path(target["live_path"])
@@ -205,6 +207,8 @@ def restore_release_snapshot(release_name, details, core_already_stopped, ctx):
                 homeassistant_should_restart = True
             elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_rollback(target):
                 homeassistant_should_reload = True
+            if homeassistant_changes.changed_lovelace_resource_storage:
+                homeassistant_should_reload_lovelace = True
             if core_stopped and target_model.start_core_after_storage_rollback(target):
                 homeassistant_should_start = True
         elif target_type == "addon" and target.get("stop_addon_before_sync", False):
@@ -245,8 +249,19 @@ def restore_release_snapshot(release_name, details, core_already_stopped, ctx):
     elif homeassistant_seen and homeassistant_should_restart:
         ctx.add_detail(details, "Restarting Home Assistant Core after rollback.")
         ctx.core_restart()
-    elif homeassistant_seen and homeassistant_should_reload:
-        ctx.add_detail(details, "Reloading Home Assistant YAML config after rollback.")
-        ctx.core_reload_yaml()
+    elif homeassistant_seen:
+        core_restarted = False
+        if homeassistant_should_reload_lovelace:
+            try:
+                ctx.add_detail(details, "Reloading Lovelace resources after rollback.")
+                ctx.core_reload_lovelace()
+            except Exception as exc:
+                ctx.add_detail(details, f"Lovelace reload failed after rollback; restarting Home Assistant Core instead: {exc}")
+                ctx.add_detail(details, "Restarting Home Assistant Core after rollback.")
+                ctx.core_restart()
+                core_restarted = True
+        if not core_restarted and homeassistant_should_reload:
+            ctx.add_detail(details, "Reloading Home Assistant YAML config after rollback.")
+            ctx.core_reload_yaml()
 
     return metadata

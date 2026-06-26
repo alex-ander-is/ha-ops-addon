@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.49
+
+- Reload Lovelace resources instead of stopping and starting Core when Git-to-HA Apply only changes `lovelace_resources`; dashboard/config storage still uses the normal storage lifecycle.
+- Keep the committed custom HA-to-Git Save commit subject visible in the disabled Save Preview field after Confirm Save to Git completes.
+
 ## 0.8.48
 
 - Keep repository-only files such as tests out of Git-to-HA Apply conflict previews so only managed target files appear in Apply decisions.

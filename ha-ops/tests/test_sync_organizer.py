@@ -43,6 +43,7 @@ class SyncOrganizerTests(unittest.TestCase):
             clean_dir_names=set(),
             clean_file_patterns=[],
             clean_paths=[],
+            core_reload_lovelace=lambda: None,
             core_restart=lambda: None,
             core_reload_yaml=lambda: None,
             core_start=lambda: None,

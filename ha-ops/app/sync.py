@@ -29,6 +29,7 @@ class SyncContext:
     clean_dir_names: set
     clean_file_patterns: list
     clean_paths: list
+    core_reload_lovelace: Callable[[], Any]
     core_restart: Callable[[], Any]
     core_reload_yaml: Callable[[], Any]
     core_start: Callable[[], Any]
@@ -52,10 +53,25 @@ class SyncContext:
 class ChangeSet:
     changed_yaml: bool = False
     changed_storage: bool = False
+    changed_lovelace_resource_storage: bool = False
     changed_protected_storage: bool = False
 
     def any(self):
-        return self.changed_yaml or self.changed_storage or self.changed_protected_storage
+        return (
+            self.changed_yaml
+            or self.changed_storage
+            or self.changed_lovelace_resource_storage
+            or self.changed_protected_storage
+        )
+
+
+LOVELACE_RESOURCE_STORAGE_FILES = {
+    "lovelace_resources",
+}
+
+
+def storage_file_needs_core_stop(name):
+    return name not in LOVELACE_RESOURCE_STORAGE_FILES
 
 
 def has_managed_content(path):
@@ -1136,7 +1152,10 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
         elif mode == "rollback" and (dest_path.exists() or dest_path.is_symlink()):
             changed = True
         if changed:
-            changes.changed_storage = True
+            if storage_file_needs_core_stop(name):
+                changes.changed_storage = True
+            else:
+                changes.changed_lovelace_resource_storage = True
             if is_protected:
                 changes.changed_protected_storage = True
 
@@ -1268,9 +1287,24 @@ def apply_targets(resolved_targets, details, ctx):
             if target_model.restart_core_after_apply(homeassistant_target):
                 ctx.add_detail(details, _("detail.restarting_core"))
                 ctx.core_restart()
-            elif homeassistant_changes.changed_yaml and target_model.reload_yaml_after_apply(homeassistant_target):
-                ctx.add_detail(details, _("detail.reloading_yaml_config"))
-                ctx.core_reload_yaml()
+            else:
+                core_restarted = False
+                if homeassistant_changes.changed_lovelace_resource_storage:
+                    try:
+                        ctx.add_detail(details, _("detail.reloading_lovelace_config"))
+                        ctx.core_reload_lovelace()
+                    except Exception as exc:
+                        ctx.add_detail(details, _("detail.lovelace_reload_failed_restarting_core", error=exc))
+                        ctx.add_detail(details, _("detail.restarting_core"))
+                        ctx.core_restart()
+                        core_restarted = True
+                if (
+                    not core_restarted
+                    and homeassistant_changes.changed_yaml
+                    and target_model.reload_yaml_after_apply(homeassistant_target)
+                ):
+                    ctx.add_detail(details, _("detail.reloading_yaml_config"))
+                    ctx.core_reload_yaml()
         return {"core_stopped": False}
     except Exception as exc:
         if homeassistant_apply_started and homeassistant_rollback_path is not None and homeassistant_rollback_live_path is not None:

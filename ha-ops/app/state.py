@@ -39,6 +39,7 @@ SAVE_PREVIEW_CLEAR_UPDATES = {
     "last_save_preview_paths": [],
     "last_save_preview_conflicts": False,
     "last_save_preview_conflict_paths": [],
+    "last_save_commit_subject": None,
     "save_preview_resolutions": {},
     "save_preview_selected_paths": [],
 }
@@ -179,6 +180,7 @@ def default_state():
         "last_save_preview_paths": [],
         "last_save_preview_conflicts": False,
         "last_save_preview_conflict_paths": [],
+        "last_save_commit_subject": None,
         "save_preview_resolutions": {},
         "save_preview_selected_paths": [],
         "last_deleted_devices_preview": "",

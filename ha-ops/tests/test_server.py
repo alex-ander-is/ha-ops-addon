@@ -1815,6 +1815,7 @@ class ServerTests(unittest.TestCase):
                     "last_details": ["old detail"],
                     "last_diff": "old diff",
                     "last_save_preview": "old save",
+                    "last_save_commit_subject": "Old custom subject",
                     "last_internal_ids_preview": "old internal ids preview",
                     "last_internal_ids_rows": [{"index": 0, "path": ".ha-ops/areas/synthetic/automations.yaml"}],
                     "last_internal_ids_count": 1,
@@ -1989,6 +1990,7 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_save_preview_fingerprint"])
             self.assertEqual(state["last_save_preview_paths"], [])
             self.assertFalse(state["last_save_preview_conflicts"])
+            self.assertIsNone(state["last_save_commit_subject"])
             self.assertEqual(state["save_preview_resolutions"], {})
 
             storage = server.CONFIG_DIR / ".storage"
@@ -5892,6 +5894,74 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(self.remote_main_subject(remote), "Custom HA Save Subject")
 
+    def test_save_ha_to_git_keeps_committed_custom_subject_in_disabled_preview_input(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().release_now = lambda: "2026-06-24_20-00-00"
+            remote = self.seed_remote(root)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
+            packages = server.CONFIG_DIR / "packages"
+            packages.mkdir()
+            (packages / "new.yaml").write_text("new:\n")
+            (packages / "second.yaml").write_text("second:\n")
+            server.OPTIONS_PATH.write_text(
+                json.dumps(
+                    {
+                        "repo_url": str(remote),
+                        "repo_branch": "main",
+                        "repo_path": "ha-config",
+                        "apply_path": "homeassistant",
+                        "restart_after_apply": False,
+                    }
+                )
+            )
+            server.get_installed_addons = lambda: []
+
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            preview_state = server.read_state()
+            self.assertIn("homeassistant/packages/new.yaml", preview_state["last_save_preview_paths"])
+            self.assertIn("homeassistant/packages/second.yaml", preview_state["last_save_preview_paths"])
+            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/new.yaml"]})
+            self.assertTrue(
+                server.run_save_job(commit_subject="Custom HA Save Subject"),
+                server.read_state()["last_message"],
+            )
+
+            self.assertEqual(self.remote_main_subject(remote), "Custom HA Save Subject")
+            state = server.read_state()
+            self.assertEqual(state["last_save_commit_subject"], "Custom HA Save Subject")
+            self.assertNotIn("homeassistant/packages/new.yaml", state["last_save_preview_paths"])
+            self.assertIn("homeassistant/packages/second.yaml", state["last_save_preview_paths"])
+            self.assertEqual(state["save_preview_selected_paths"], [])
+
+            page = server.render_page()
+            subject_start = page.index("name='commit_subject'")
+            confirm_start = page.index("Confirm Save to Git")
+            self.assertIn(
+                "name='commit_subject' value='Custom HA Save Subject'",
+                page[subject_start:confirm_start],
+            )
+            self.assertIn("spellcheck='false' disabled>", page[subject_start:confirm_start])
+            self.assertIn(
+                "name='default_commit_subject' value='Save Home Assistant config 2026-06-24_20-00-00'",
+                page,
+            )
+            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
+
+            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
+            selected_page = server.render_page()
+            subject_start = selected_page.index("name='commit_subject'")
+            confirm_start = selected_page.index("Confirm Save to Git")
+            self.assertIn(
+                "name='commit_subject' value='Save Home Assistant config 2026-06-24_20-00-00'",
+                selected_page[subject_start:confirm_start],
+            )
+            self.assertNotIn("value='Custom HA Save Subject'", selected_page[subject_start:confirm_start])
+            self.assertNotIn("disabled", selected_page[subject_start:confirm_start])
+            self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
+
     def test_save_ha_to_git_recomputes_unchanged_default_commit_subject_at_job_start(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -9084,6 +9154,321 @@ class ServerTests(unittest.TestCase):
             )
 
             self.assertEqual(events, ["check", "reload"])
+
+    def test_lovelace_resources_apply_reloads_without_stopping_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "lovelace"])
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+
+    def test_lovelace_dashboard_storage_apply_still_stops_core(self):
+        for storage_name in ("lovelace", "lovelace.lovelace", "lovelace.map", "lovelace_dashboards"):
+            with self.subTest(storage_name=storage_name):
+                server = load_server()
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    source = root / "repo" / "homeassistant"
+                    source_storage = source / ".storage"
+                    live_storage = server.CONFIG_DIR / ".storage"
+                    source_storage.mkdir(parents=True)
+                    live_storage.mkdir(parents=True)
+                    (source_storage / storage_name).write_text('{"data":{"config":{"title":"Git"}}}\n')
+                    (live_storage / storage_name).write_text('{"data":{"config":{"title":"Live"}}}\n')
+                    events = []
+                    server.core_stop = lambda: events.append("stop")
+                    server.do_core_check = lambda: events.append("check")
+                    server.core_start = lambda: events.append("start")
+                    server.core_reload_lovelace = lambda: events.append("lovelace")
+                    server.core_reload_yaml = lambda: events.append("reload")
+                    server.core_restart = lambda: events.append("restart")
+
+                    server.apply_targets(
+                        [
+                            {
+                                "id": "homeassistant",
+                                "type": "homeassistant",
+                                "source_path": str(source),
+                                "live_path": str(server.CONFIG_DIR),
+                                "stop_core_before_storage_apply": True,
+                                "start_core_after_storage_apply": True,
+                            }
+                        ],
+                        [],
+                    )
+
+                    self.assertEqual(events, ["stop", "check", "start"])
+                    self.assertEqual((live_storage / storage_name).read_text(), '{"data":{"config":{"title":"Git"}}}\n')
+
+    def test_lovelace_dashboard_and_resources_apply_uses_storage_lifecycle(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "lovelace.lovelace").write_text('{"data":{"config":{"title":"Git"}}}\n')
+            (live_storage / "lovelace.lovelace").write_text('{"data":{"config":{"title":"Live"}}}\n')
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["stop", "check", "start"])
+            self.assertEqual((live_storage / "lovelace.lovelace").read_text(), '{"data":{"config":{"title":"Git"}}}\n')
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+
+    def test_lovelace_dashboard_and_resources_apply_can_restart_instead_of_reload(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "lovelace_dashboards").write_text('{"data":{"items":[{"title":"Git"}]}}\n')
+            (live_storage / "lovelace_dashboards").write_text('{"data":{"items":[{"title":"Live"}]}}\n')
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "restart_core_after_apply": True,
+                        "stop_core_before_storage_apply": False,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "restart"])
+
+    def test_lovelace_storage_apply_respects_explicit_restart(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "restart_core_after_apply": True,
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "restart"])
+
+    def test_lovelace_storage_apply_falls_back_to_restart_when_soft_reload_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+
+            def fail_lovelace_reload():
+                events.append("lovelace")
+                raise RuntimeError("service unavailable")
+
+            server.core_reload_lovelace = fail_lovelace_reload
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "lovelace", "restart"])
+
+    def test_mixed_yaml_and_lovelace_apply_restart_fallback_skips_yaml_reload(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("git\n")
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            (source_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.do_core_check = lambda: events.append("check")
+
+            def fail_lovelace_reload():
+                events.append("lovelace")
+                raise RuntimeError("service unavailable")
+
+            def fail_yaml_reload():
+                events.append("reload")
+                raise AssertionError("YAML reload should not run after restart fallback")
+
+            server.core_reload_lovelace = fail_lovelace_reload
+            server.core_reload_yaml = fail_yaml_reload
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "reload_yaml_after_apply": True,
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "lovelace", "restart"])
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/git.js"}]}}\n')
+
+    def test_non_lovelace_storage_apply_still_stops_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source_storage = source / ".storage"
+            live_storage = server.CONFIG_DIR / ".storage"
+            source_storage.mkdir(parents=True)
+            live_storage.mkdir(parents=True)
+            (source_storage / "input_boolean").write_text("{}\n")
+            (live_storage / "input_boolean").write_text('{"data":{"items":[]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.do_core_check = lambda: events.append("check")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_storage_apply": True,
+                        "start_core_after_storage_apply": True,
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["stop", "check", "start"])
 
     def test_yaml_apply_can_explicitly_restart_core(self):
         server = load_server()
@@ -15337,6 +15722,126 @@ devices:
             self.assertFalse((release_dir / "homeassistant" / "home-assistant.log").exists())
             self.assertTrue((release_dir / "addon-local_zigbee2mqtt" / "configuration.yaml").exists())
             self.assertFalse((release_dir / "addon-local_zigbee2mqtt" / "nested" / "runtime.db").exists())
+
+    def test_lovelace_resources_release_rollback_reloads_without_stopping_core(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(root / "repo" / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                        "stop_core_before_storage_rollback": True,
+                        "start_core_after_storage_rollback": True,
+                    }
+                ],
+                "abc123",
+                None,
+            )
+
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.restore_release_snapshot(release, [])
+
+            self.assertEqual(events, ["lovelace"])
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+
+    def test_lovelace_resources_release_rollback_falls_back_to_restart_when_reload_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+            (server.CONFIG_DIR / "configuration.yaml").write_text("snapshot\n")
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(root / "repo" / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                        "reload_yaml_after_rollback": True,
+                    }
+                ],
+                "abc123",
+                None,
+            )
+
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            events = []
+
+            def fail_lovelace_reload():
+                events.append("lovelace")
+                raise RuntimeError("service unavailable")
+
+            def fail_yaml_reload():
+                events.append("reload")
+                raise AssertionError("YAML reload should not run after restart fallback")
+
+            server.core_reload_lovelace = fail_lovelace_reload
+            server.core_reload_yaml = fail_yaml_reload
+            server.core_restart = lambda: events.append("restart")
+
+            server.restore_release_snapshot(release, [])
+
+            self.assertEqual(events, ["lovelace", "restart"])
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "snapshot\n")
+
+    def test_mixed_yaml_and_lovelace_resources_release_rollback_reloads_both(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live_storage = server.CONFIG_DIR / ".storage"
+            live_storage.mkdir(parents=True)
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+            (server.CONFIG_DIR / "configuration.yaml").write_text("snapshot\n")
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(root / "repo" / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                        "reload_yaml_after_rollback": True,
+                    }
+                ],
+                "abc123",
+                None,
+            )
+
+            (live_storage / "lovelace_resources").write_text('{"data":{"items":[{"url":"/local/live.js"}]}}\n')
+            (server.CONFIG_DIR / "configuration.yaml").write_text("live\n")
+            events = []
+            server.core_reload_lovelace = lambda: events.append("lovelace")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.restore_release_snapshot(release, [])
+
+            self.assertEqual(events, ["lovelace", "reload"])
+            self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "snapshot\n")
 
     def test_addon_rollback_preserves_excluded_runtime_files(self):
         server = load_server()

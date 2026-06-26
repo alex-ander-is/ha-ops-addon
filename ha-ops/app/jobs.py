@@ -403,6 +403,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
     save_commit_created = False
     pending_save_retry_commit = None
     state = {}
+    effective_save_commit_subject = None
 
     write_state(
         {
@@ -416,17 +417,20 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
 
     try:
         state = ctx.read_state()
-        pending_save_retry_commit = state.get("save_push_retry_commit") if state.get("save_push_retry_pending") else None
-        if not state.get("save_push_retry_pending"):
+        pending_save_retry = bool(state.get("save_push_retry_pending"))
+        pending_save_retry_commit = state.get("save_push_retry_commit") if pending_save_retry else None
+        if not pending_save_retry:
             if state.get("deleted_devices_pending_confirmation"):
                 write_pending_deleted_devices(ctx, "save", details, resolved_targets)
                 return False
             if state.get("conflicts"):
                 write_pending_conflicts(ctx, "save", conflict_status_message(state), details, resolved_targets)
                 return False
+            effective_save_commit_subject = save_commit_subject_or_default(commit_subject, ctx.release_now())
+            write_state({"last_save_commit_subject": effective_save_commit_subject})
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
-        if state.get("save_push_retry_pending"):
+        if pending_save_retry:
             repo_dir = ctx.repo_checkout_path(options)
             if repo_dir.exists() and (repo_dir / ".git").exists():
                 ctx.fetch_origin(repo_dir, env)
@@ -512,6 +516,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_preview_conflict_paths": retry_preview.get("conflicts", []),
                     "save_preview_resolutions": {},
                     "save_preview_selected_paths": [],
+                    "last_save_commit_subject": state.get("last_save_commit_subject"),
                     "post_apply_save_recommended": False,
                     "save_push_retry_pending": False,
                     "save_push_retry_commit": None,
@@ -550,6 +555,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                         "last_save_preview_paths": [],
                         "last_save_preview_conflicts": False,
                         "last_save_preview_conflict_paths": [],
+                        "last_save_commit_subject": None,
                         "save_preview_resolutions": {},
                         "save_preview_selected_paths": [],
                         "post_apply_save_recommended": False,
@@ -574,6 +580,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_preview_paths": current_preview.get("paths", []),
                     "last_save_preview_conflicts": bool(current_preview.get("conflicts")),
                     "last_save_preview_conflict_paths": current_preview.get("conflicts", []),
+                    "last_save_commit_subject": None,
                     "save_preview_resolutions": {},
                     "save_preview_selected_paths": [],
                     "post_apply_save_recommended": False,
@@ -598,6 +605,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_preview_paths": [],
                     "last_save_preview_conflicts": False,
                     "last_save_preview_conflict_paths": [],
+                    "last_save_commit_subject": None,
                     "save_preview_resolutions": {},
                     "save_preview_selected_paths": [],
                     "post_apply_save_recommended": False,
@@ -613,7 +621,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
             branch,
             resolved_targets,
             save_resolutions,
-            save_commit_subject_or_default(commit_subject, ctx.release_now()),
+            effective_save_commit_subject,
             details,
         )
         add_save_change_details(ctx, details, ctx.git_status_porcelain(repo_dir))
@@ -671,6 +679,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                 "last_save_preview_paths": post_save_preview.get("paths", []),
                 "last_save_preview_conflicts": bool(post_save_preview.get("conflicts")),
                 "last_save_preview_conflict_paths": post_save_preview.get("conflicts", []),
+                "last_save_commit_subject": effective_save_commit_subject if new_commit else None,
                 "post_apply_save_recommended": False,
             }
         )
@@ -690,6 +699,11 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
         conflicts = ctx.git_conflict_paths(repo_path) if repo_path and repo_path.exists() else []
         status = "conflicts" if conflicts else "error"
         retry_pending = bool(state.get("save_push_retry_pending") or save_commit_created)
+        last_save_commit_subject = (
+            effective_save_commit_subject
+            if save_commit_created
+            else state.get("last_save_commit_subject") if retry_pending else None
+        )
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -705,6 +719,7 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     if retry_pending
                     else None
                 ),
+                "last_save_commit_subject": last_save_commit_subject,
             }
         )
         return False

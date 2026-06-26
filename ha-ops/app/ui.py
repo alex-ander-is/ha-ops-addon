@@ -502,6 +502,7 @@ def render_preview_decisions(
     selected_paths=None,
     required_paths=None,
     save_commit_subject="",
+    default_save_commit_subject=None,
     save_commit_subject_disabled=False,
     retry_only=False,
 ):
@@ -576,8 +577,12 @@ def render_preview_decisions(
         if direction == "save":
             input_disabled = " disabled" if confirm_disabled or save_commit_subject_disabled else ""
             escaped_subject = html.escape(str(save_commit_subject or ""), quote=True)
+            escaped_default_subject = html.escape(
+                str(save_commit_subject if default_save_commit_subject is None else default_save_commit_subject),
+                quote=True,
+            )
             subject_control = (
-                f"<input type='hidden' name='default_commit_subject' value='{escaped_subject}'>"
+                f"<input type='hidden' name='default_commit_subject' value='{escaped_default_subject}'>"
                 "<label class='commit-subject-control'>"
                 f"{_('label.commit_subject')}<input type='text' name='commit_subject' value='{escaped_subject}' autocomplete='off' spellcheck='false'{input_disabled}>"
                 "</label>"
