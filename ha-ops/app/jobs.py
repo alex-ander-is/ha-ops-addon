@@ -1364,13 +1364,11 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
         count = int(state.get("last_deleted_devices_count") or 0)
         if not fingerprint or count <= 0:
             raise i18n.error("error.deleted_devices_preview_required")
-        current_preview = ctx.build_deleted_devices_preview()
-        if current_preview["fingerprint"] != fingerprint:
+        if ctx.device_registry_fingerprint() != fingerprint:
             raise i18n.error("error.deleted_devices_preview_changed")
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
-        current_preview = ctx.build_deleted_devices_preview()
-        if current_preview["fingerprint"] != fingerprint:
+        if ctx.device_registry_fingerprint() != fingerprint:
             raise i18n.error("error.deleted_devices_preview_changed")
         ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices"))
         ctx.core_stop()

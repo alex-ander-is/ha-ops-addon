@@ -398,6 +398,9 @@ class ServerTests(unittest.TestCase):
             def build_deleted_devices_preview(self):
                 return {"fingerprint": "fresh"}
 
+            def device_registry_fingerprint(self):
+                return "fresh"
+
         cases = [
             (
                 "internal ids preview required",
@@ -1040,6 +1043,62 @@ class ServerTests(unittest.TestCase):
             ],
             repo,
         )
+
+    def write_device_registry_file(self, path, devices=None, deleted_devices=None):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "minor_version": 12,
+                    "key": "core.device_registry",
+                    "data": {
+                        "devices": devices or [],
+                        "deleted_devices": deleted_devices or [],
+                    },
+                }
+            )
+        )
+
+    def seed_deleted_devices_history_repo(self, server, root, source="homeassistant", manifest=None):
+        repo = root / "data" / "ha-config"
+        self.git(["init", str(repo)], root)
+        server.OPTIONS_PATH.write_text(
+            json.dumps(
+                {
+                    "repo_path": "ha-config",
+                    "apply_path": "homeassistant",
+                    **({"manifest_path": "ha-ops.json"} if manifest else {}),
+                }
+            )
+        )
+        if manifest:
+            (repo / "ha-ops.json").write_text(json.dumps(manifest))
+        registry = repo / source / ".storage" / "core.device_registry"
+        self.write_device_registry_file(
+            registry,
+            devices=[
+                {
+                    "id": "deleted-1",
+                    "name_by_user": "🛋️ living_room_xmas_train",
+                    "manufacturer": "Tuya",
+                    "model": "TS011F_plug",
+                    "model_id": "TS011F_plug_3",
+                    "identifiers": [["mqtt", "zigbee2mqtt_0x00124b0024abcdef"]],
+                },
+                {
+                    "id": "former-live-id",
+                    "name": "identifier fallback plug",
+                    "manufacturer": "Tuya",
+                    "model_id": "TS011F_plug_3",
+                    "identifiers": [["mqtt", "zigbee2mqtt_0x00124b0024abcdee"]],
+                },
+            ],
+        )
+        self.git_commit_all(repo, "historical devices")
+        self.write_device_registry_file(registry, devices=[], deleted_devices=[])
+        self.git_commit_all(repo, "current devices")
+        return repo
 
     def push_service_branches(self, seed):
         for branch in ("ha-ops/ha-live", "ha-ops/base"):
@@ -1786,6 +1845,7 @@ class ServerTests(unittest.TestCase):
                     "last_status": "running",
                     "last_action": "deleted_devices_delete",
                     "last_message": "Deleting deleted_devices.",
+                    "last_deleted_devices_rows": [{"id": "deleted-1", "recovered_name": "stale recovered"}],
                     "deleted_devices_pending_confirmation": True,
                     "deleted_devices_rollback_path": str(rollback_path),
                     "deleted_devices_rollback_fingerprint": "before",
@@ -1803,6 +1863,7 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(state["deleted_devices_pending_confirmation"])
             self.assertFalse(rollback_path.exists())
             self.assertEqual(state["last_deleted_devices_count"], 1)
+            self.assertNotIn("recovered_name", state["last_deleted_devices_rows"][0])
 
     def test_startup_clears_transient_display_state(self):
         server = load_server()
@@ -1853,6 +1914,10 @@ class ServerTests(unittest.TestCase):
                     "last_preview_commit": "abc",
                     "last_preview_fingerprint": "old",
                     "last_preview_live_fingerprints": {"homeassistant": {"hash": "sha256:old"}},
+                    "last_deleted_devices_rows": [{"id": "deleted-1", "recovered_name": "stale recovered"}],
+                    "last_deleted_devices_count": 1,
+                    "last_deleted_devices_fingerprint": "old-deleted",
+                    "last_deleted_devices_generated_at": "2026-05-22T12:00:00+00:00",
                 }
             )
 
@@ -1868,6 +1933,9 @@ class ServerTests(unittest.TestCase):
             self.assertIsNone(state["last_preview_commit"])
             self.assertIsNone(state["last_preview_fingerprint"])
             self.assertEqual(state["last_preview_live_fingerprints"], {})
+            self.assertEqual(state["last_deleted_devices_rows"], [])
+            self.assertEqual(state["last_deleted_devices_count"], 0)
+            self.assertIsNone(state["last_deleted_devices_fingerprint"])
 
     def test_startup_clears_internal_ids_preview_after_addon_version_change(self):
         server = load_server()
@@ -14748,6 +14816,294 @@ devices:
             self.assertEqual(state["last_deleted_devices_count"], 0)
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertTrue(Path(state["deleted_devices_rollback_path"]).exists())
+
+    def test_deleted_devices_preview_enriches_rows_from_homeassistant_target_git_history(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            storage = server.CONFIG_DIR / ".storage"
+            self.write_device_registry_file(
+                storage / "core.device_registry",
+                deleted_devices=[
+                    {
+                        "id": "deleted-1",
+                        "name": "Live tombstone",
+                        "identifiers": [["mqtt", "zigbee2mqtt_0x00124b0024abcdef"]],
+                    }
+                ],
+            )
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "deleted_entities": [
+                                {
+                                    "device_id": "deleted-1",
+                                    "area_id": "living",
+                                    "entity_id": "switch.live_tombstone",
+                                    "original_name": "Live entity name",
+                                    "original_device_class": "outlet",
+                                }
+                            ]
+                        }
+                    }
+                )
+            )
+            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": [{"id": "living", "name": "Living Room"}]}}))
+            repo = self.seed_deleted_devices_history_repo(server, root)
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            state = server.read_state()
+            row = state["last_deleted_devices_rows"][0]
+            page = server.render_page()
+
+            self.assertEqual(row["area"], "Living Room")
+            self.assertEqual(row["entity_id"], "switch.live_tombstone")
+            self.assertEqual(row["original_name"], "Live entity name")
+            self.assertEqual(row["original_device_class"], "outlet")
+            self.assertEqual(row["recovered_name"], "living_room_xmas_train")
+            self.assertEqual(row["recovered_manufacturer"], "Tuya")
+            self.assertEqual(row["recovered_model"], "TS011F_plug")
+            self.assertEqual(row["recovered_model_id"], "TS011F_plug_3")
+            self.assertEqual(row["recovered_identifiers"], [["mqtt", "zigbee2mqtt_0x00124b0024abcdef"]])
+            self.assertEqual(row["source_path"], "homeassistant/.storage/core.device_registry")
+            self.assertRegex(row["source_commit"], r"^[0-9a-f]{40}$")
+            self.assertIn("living_room_xmas_train", page)
+            self.assertIn("Tuya", page)
+            self.assertIn("TS011F_plug_3", page)
+            self.assertIn("zigbee2mqtt_0x00124b0024abcdef", page)
+            self.assertIn(row["source_commit"][:12], page)
+            self.assertEqual(server.device_registry_fingerprint(), state["last_deleted_devices_fingerprint"])
+            self.assertEqual(self.repo_status(repo), "")
+
+    def test_deleted_devices_preview_enriches_device_without_entity_history_by_identifier(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            self.write_device_registry_file(
+                server.CONFIG_DIR / ".storage" / "core.device_registry",
+                deleted_devices=[
+                    {
+                        "id": "deleted-2",
+                        "identifiers": [["mqtt", "zigbee2mqtt_0x00124b0024abcdee"]],
+                    }
+                ],
+            )
+            self.seed_deleted_devices_history_repo(server, root)
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            row = server.read_state()["last_deleted_devices_rows"][0]
+
+            self.assertEqual(row["id"], "deleted-2")
+            self.assertEqual(row["entity_id"], "")
+            self.assertEqual(row["recovered_name"], "identifier fallback plug")
+            self.assertEqual(row["recovered_manufacturer"], "Tuya")
+            self.assertEqual(row["recovered_model_id"], "TS011F_plug_3")
+
+    def test_deleted_devices_history_uses_custom_manifest_homeassistant_source(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            self.write_device_registry_file(
+                server.CONFIG_DIR / ".storage" / "core.device_registry",
+                deleted_devices=[{"id": "deleted-1"}],
+            )
+            self.seed_deleted_devices_history_repo(
+                server,
+                root,
+                source="targets/ha-prod",
+                manifest={
+                    "version": 1,
+                    "targets": [
+                        {
+                            "id": "homeassistant-prod",
+                            "type": "homeassistant",
+                            "source": "targets/ha-prod",
+                        }
+                    ],
+                },
+            )
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            row = server.read_state()["last_deleted_devices_rows"][0]
+
+            self.assertEqual(row["recovered_name"], "living_room_xmas_train")
+            self.assertEqual(row["source_path"], "targets/ha-prod/.storage/core.device_registry")
+
+    def test_deleted_devices_history_uses_only_allowed_local_git_commands(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            self.write_device_registry_file(
+                server.CONFIG_DIR / ".storage" / "core.device_registry",
+                deleted_devices=[{"id": "deleted-1"}],
+            )
+            repo = self.seed_deleted_devices_history_repo(server, root)
+            calls = []
+
+            def capture_run_command(command, env=None, cwd=None, timeout=None):
+                calls.append((command, Path(cwd) if cwd else None))
+                return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=False, timeout=timeout)
+
+            server.run_command = capture_run_command
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+
+            self.assertTrue(calls)
+            for command, cwd in calls:
+                self.assertEqual(cwd, repo.resolve())
+                self.assertEqual(command[0], "git")
+                self.assertIn(command[1], {"log", "show"})
+                self.assertNotIn("fetch", command)
+                self.assertNotIn("pull", command)
+                self.assertNotIn("checkout", command)
+                self.assertNotIn("-p", command)
+                if command[1] == "log":
+                    self.assertEqual(command, ["git", "log", "--format=%H", "--max-count=50", "--", "homeassistant/.storage/core.device_registry"])
+                if command[1] == "show":
+                    self.assertEqual(len(command), 3)
+                    self.assertRegex(command[2], r"^[0-9a-f]{40}:homeassistant/\.storage/core\.device_registry$")
+
+    def test_deleted_devices_fingerprint_stays_live_only_when_history_changes_or_disappears(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            self.write_device_registry_file(
+                server.CONFIG_DIR / ".storage" / "core.device_registry",
+                deleted_devices=[{"id": "deleted-1"}],
+            )
+            repo = self.seed_deleted_devices_history_repo(server, root)
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            first_fingerprint = server.read_state()["last_deleted_devices_fingerprint"]
+            self.write_device_registry_file(
+                repo / "homeassistant" / ".storage" / "core.device_registry",
+                devices=[
+                    {
+                        "id": "deleted-1",
+                        "name": "changed only in git",
+                    }
+                ],
+            )
+            self.git_commit_all(repo, "change history only")
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            second_fingerprint = server.read_state()["last_deleted_devices_fingerprint"]
+            self.assertEqual(second_fingerprint, first_fingerprint)
+
+            (repo / ".git").rename(repo / ".git-disabled")
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertEqual(server.read_state()["last_deleted_devices_fingerprint"], first_fingerprint)
+
+    def test_deleted_devices_history_failures_degrade_to_live_only_preview(self):
+        server = load_server()
+        failure_outputs = [
+            (["git", "log", "--format=%H", "--max-count=50", "--", "homeassistant/.storage/core.device_registry"], 1, "", "log failed"),
+            (["git", "log", "--format=%H", "--max-count=50", "--", "homeassistant/.storage/core.device_registry"], 0, "abc\n", ""),
+            (["git", "show", "abc:homeassistant/.storage/core.device_registry"], 0, "{", ""),
+            (
+                ["git", "show", "abc:homeassistant/.storage/core.device_registry"],
+                0,
+                json.dumps({"data": {"devices": {}}}),
+                "",
+            ),
+        ]
+        for index, _case in enumerate(range(4)):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.configure_paths(server, root)
+                server.get_installed_addons = lambda: []
+                self.write_device_registry_file(
+                    server.CONFIG_DIR / ".storage" / "core.device_registry",
+                    deleted_devices=[{"id": "deleted-1", "name": "Live only"}],
+                )
+                repo = root / "data" / "ha-config"
+                self.git(["init", str(repo)], root)
+                server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
+
+                def failing_run_command(command, env=None, cwd=None, timeout=None):
+                    expected, returncode, stdout, stderr = failure_outputs[min(index, len(failure_outputs) - 1)]
+                    if command == expected:
+                        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                    return subprocess.CompletedProcess(command, 1, "", "unexpected")
+
+                if index >= 2:
+                    def two_step_run_command(command, env=None, cwd=None, timeout=None):
+                        if command[1] == "log":
+                            return subprocess.CompletedProcess(command, 0, "abc\n", "")
+                        expected, returncode, stdout, stderr = failure_outputs[index]
+                        if command == expected:
+                            return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+                        return subprocess.CompletedProcess(command, 1, "", "unexpected")
+
+                    server.run_command = two_step_run_command
+                else:
+                    server.run_command = failing_run_command
+
+                self.assertTrue(server.run_deleted_devices_preview_job())
+                row = server.read_state()["last_deleted_devices_rows"][0]
+
+                self.assertNotIn("recovered_name", row)
+                self.assertEqual(row["original_name"], "Live only")
+
+    def test_deleted_devices_delete_preflight_does_not_scan_git_history(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            server.get_installed_addons = lambda: []
+            storage = server.CONFIG_DIR / ".storage"
+            self.write_device_registry_file(storage / "core.device_registry", deleted_devices=[{"id": "deleted-1"}])
+            self.seed_deleted_devices_history_repo(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant", "require_fresh_backup": False}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            calls = []
+
+            def fail_on_history(command, env=None, cwd=None, timeout=None):
+                calls.append(command)
+                if command[:2] == ["git", "log"] or command[:2] == ["git", "show"]:
+                    raise AssertionError("delete preflight scanned git history")
+                return subprocess.run(command, cwd=cwd, env=env, text=True, capture_output=True, check=False, timeout=timeout)
+
+            server.run_command = fail_on_history
+
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            self.assertFalse([command for command in calls if command[:2] in (["git", "log"], ["git", "show"])])
+
+    def test_recovered_deleted_device_rows_clear_with_display_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "last_deleted_devices_preview": "old",
+                    "last_deleted_devices_rows": [{"id": "deleted-1", "recovered_name": "living_room_xmas_train"}],
+                    "last_deleted_devices_count": 1,
+                    "last_deleted_devices_fingerprint": "fingerprint",
+                    "last_deleted_devices_generated_at": "2026-05-16T12:00:00+00:00",
+                }
+            )
+
+            server.clear_display_state()
+            state = server.read_state()
+
+            self.assertEqual(state["last_deleted_devices_rows"], [])
+            self.assertEqual(state["last_deleted_devices_preview"], "")
 
     def test_confirm_deleted_devices_discards_rollback(self):
         server = load_server()

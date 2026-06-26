@@ -60,7 +60,7 @@ class ReleaseReadinessTests(unittest.TestCase):
 
         self.assertEqual([], failures)
 
-    def test_lovelace_apply_changelog_note_is_under_current_version(self):
+    def test_deleted_device_history_changelog_note_is_under_current_version(self):
         config = CONFIG_PATH.read_text()
         match = re.search(r'^version:\s*"([^"]+)"\s*$', config, re.MULTILINE)
         self.assertIsNotNone(match)
@@ -68,15 +68,15 @@ class ReleaseReadinessTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text()
         current_section = changelog_section(changelog, current_version)
         self.assertIsNotNone(current_section)
-        lovelace_note = (
-            "Reload Lovelace resources instead of stopping and starting Core when "
-            "Git-to-HA Apply only changes `lovelace_resources`"
+        deleted_device_history_note = (
+            "Show recovered names, manufacturers, models, identifiers, and source "
+            "commits for deleted device cleanup candidates"
         )
-        self.assertIn(lovelace_note, current_section)
+        self.assertIn(deleted_device_history_note, current_section)
 
-        old_section = changelog_section(changelog, "0.8.48")
+        old_section = changelog_section(changelog, "0.8.49")
         self.assertIsNotNone(old_section)
-        self.assertNotIn(lovelace_note, old_section)
+        self.assertNotIn(deleted_device_history_note, old_section)
 
 
 if __name__ == "__main__":

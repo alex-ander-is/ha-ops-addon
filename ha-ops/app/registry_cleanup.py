@@ -346,6 +346,125 @@ def deleted_device_label(device):
     return " | ".join(pieces) or json.dumps(device, ensure_ascii=False, sort_keys=True)
 
 
+def normalize_recovered_name(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"^[^\w]+", "", text, flags=re.UNICODE).strip() or text
+
+
+def identifier_key(identifier):
+    if not isinstance(identifier, list) or len(identifier) < 2:
+        return None
+    return tuple(str(item) for item in identifier[:2])
+
+
+def deleted_device_identifier_keys(device):
+    keys = set()
+    for identifier in device.get("identifiers") or []:
+        key = identifier_key(identifier)
+        if key:
+            keys.add(key)
+    ieee = mqtt_zigbee2mqtt_identifier(device)
+    if ieee:
+        keys.add(("mqtt", f"zigbee2mqtt_{ieee}"))
+    return keys
+
+
+def historical_devices_from_snapshot(text):
+    data = json.loads(text)
+    devices = data.get("data", {}).get("devices")
+    if not isinstance(devices, list):
+        raise RuntimeError("Historical device registry snapshot has no device list.")
+    return [device for device in devices if isinstance(device, dict)]
+
+
+def enrich_row_from_history(row, device, source_commit, source_path):
+    enriched = dict(row)
+    enriched.update(
+        {
+            "recovered_name": normalize_recovered_name(device.get("name_by_user") or device.get("name")),
+            "recovered_manufacturer": device.get("manufacturer") or "",
+            "recovered_model": device.get("model") or "",
+            "recovered_model_id": device.get("model_id") or "",
+            "recovered_identifiers": device.get("identifiers") or [],
+            "source_commit": source_commit,
+            "source_path": source_path,
+        }
+    )
+    return enriched
+
+
+def enrich_deleted_device_rows_from_history(rows, devices, history_context):
+    if not rows or not devices or not history_context:
+        return rows
+    repo_path = Path(history_context.get("repo_path") or "")
+    registry_path = history_context.get("registry_path") or ""
+    run_command = history_context.get("run_command")
+    if not repo_path or not registry_path or not run_command:
+        return rows
+    try:
+        repo_path = repo_path.resolve()
+        if not (repo_path / ".git").exists():
+            return rows
+        registry_path = str(Path(registry_path).as_posix())
+        if not registry_path or registry_path.startswith("../") or registry_path.startswith("/") or registry_path == ".":
+            return rows
+        log_result = run_command(
+            ["git", "log", "--format=%H", "--max-count=50", "--", registry_path],
+            cwd=repo_path,
+        )
+        if log_result.returncode != 0:
+            return rows
+        commits = [line.strip() for line in log_result.stdout.splitlines() if line.strip()]
+    except Exception:
+        return rows
+
+    by_id = {str(device.get("id")): device for device in devices if isinstance(device, dict) and device.get("id")}
+    row_ids = {str(row.get("id")) for row in rows if row.get("id")}
+    wanted_identifiers = {
+        str(device.get("id")): deleted_device_identifier_keys(device)
+        for device in devices
+        if isinstance(device, dict) and device.get("id")
+    }
+    recovered = {}
+    for commit in commits:
+        if row_ids.issubset(recovered):
+            break
+        try:
+            show_result = run_command(["git", "show", f"{commit}:{registry_path}"], cwd=repo_path)
+            if show_result.returncode != 0:
+                continue
+            historical_devices = historical_devices_from_snapshot(show_result.stdout)
+        except Exception:
+            continue
+        historical_by_id = {str(device.get("id")): device for device in historical_devices if device.get("id")}
+        historical_by_identifier = {}
+        for device in historical_devices:
+            for key in deleted_device_identifier_keys(device):
+                historical_by_identifier.setdefault(key, device)
+        for device_id, current_device in by_id.items():
+            if device_id in recovered:
+                continue
+            historical = historical_by_id.get(device_id)
+            if not historical:
+                for key in wanted_identifiers.get(device_id, set()):
+                    historical = historical_by_identifier.get(key)
+                    if historical:
+                        break
+            if historical:
+                recovered[device_id] = (historical, commit)
+
+    if not recovered:
+        return rows
+    return [
+        enrich_row_from_history(row, *recovered[str(row.get("id"))], registry_path)
+        if row.get("id") and str(row.get("id")) in recovered
+        else row
+        for row in rows
+    ]
+
+
 def area_names(config_dir):
     data = read_optional_registry(area_registry_path(config_dir))
     areas = data.get("data", {}).get("areas", [])
@@ -387,7 +506,7 @@ def deleted_device_rows(config_dir, devices):
     return rows
 
 
-def build_deleted_devices_preview(config_dir):
+def build_deleted_devices_preview(config_dir, history_context=None):
     _path, text, data = read_device_registry(config_dir)
     devices = deleted_devices(data)
     lines = [_("preview.deleted_devices_title", count=len(devices))]
@@ -399,7 +518,7 @@ def build_deleted_devices_preview(config_dir):
         "count": len(devices),
         "fingerprint": fingerprint_text(text),
         "summary": "\n".join(lines),
-        "rows": deleted_device_rows(config_dir, devices),
+        "rows": enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
     }
 
 

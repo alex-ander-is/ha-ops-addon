@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.50
+
+- Show recovered names, manufacturers, models, identifiers, and source commits for deleted device cleanup candidates by reading local Home Assistant config Git history; keep the enrichment read-only and fall back to the live-only preview when history is unavailable.
+- Keep deleted device cleanup deletion checks based only on the live device registry fingerprint so Git history changes cannot block or alter cleanup.
+
 ## 0.8.49
 
 - Reload Lovelace resources instead of stopping and starting Core when Git-to-HA Apply only changes `lovelace_resources`; dashboard/config storage still uses the normal storage lifecycle.

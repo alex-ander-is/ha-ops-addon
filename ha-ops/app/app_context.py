@@ -602,8 +602,39 @@ class AppContext:
     def normalize_changed_save_registry_worktree(self, repo_dir, resolved_targets, details):
         return sync_logic.normalize_changed_save_registry_worktree(repo_dir, resolved_targets, details, self.sync_deps())
 
+    def deleted_devices_history_context(self):
+        options = self.load_options()
+        repo_dir = self.repo_checkout_path(options)
+        try:
+            repo_dir = repo_dir.resolve()
+            if not (repo_dir / ".git").exists():
+                return None
+            try:
+                addons = self.get_installed_addons()
+            except Exception:
+                addons = []
+            manifest, _path = self.load_manifest(repo_dir, options, addons)
+            targets = self.resolve_targets(repo_dir, manifest, addons, require_source=False)
+            homeassistant_targets = [target for target in targets if target.get("type") == "homeassistant"]
+            if not homeassistant_targets:
+                return None
+            source_path = Path(homeassistant_targets[0].get("source_path") or "").resolve()
+            if source_path != repo_dir and repo_dir not in source_path.parents:
+                return None
+            registry_path = (source_path / ".storage" / "core.device_registry").relative_to(repo_dir).as_posix()
+            if registry_path.startswith("../") or registry_path.startswith("/"):
+                return None
+            return {
+                "repo_path": repo_dir,
+                "registry_path": registry_path,
+                "run_command": self.run_command,
+            }
+        except Exception as exc:
+            self.log(f"deleted_devices history enrichment disabled: {exc}")
+            return None
+
     def build_deleted_devices_preview(self):
-        return registry_cleanup.build_deleted_devices_preview(self.config_dir)
+        return registry_cleanup.build_deleted_devices_preview(self.config_dir, self.deleted_devices_history_context())
 
     def list_retained_discovery_topics(self):
         return registry_cleanup.list_retained_discovery_topics(self.run_command, self.mqtt_service())

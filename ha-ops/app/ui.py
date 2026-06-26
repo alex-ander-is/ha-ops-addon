@@ -637,19 +637,42 @@ def render_deleted_devices_table(rows):
         return f"<p>{_('text.no_deleted_devices')}</p>"
     rendered_rows = []
     for row in rows:
+        model = " / ".join(str(value) for value in (row.get("recovered_model"), row.get("recovered_model_id")) if value)
+        identifiers = row.get("recovered_identifiers") or []
+        rendered_identifiers = []
+        for identifier in identifiers[:3]:
+            if isinstance(identifier, list):
+                rendered_identifiers.append(":".join(str(item) for item in identifier))
+            else:
+                rendered_identifiers.append(str(identifier))
+        source_commit = str(row.get("source_commit") or "")
+        source = " ".join(
+            value
+            for value in (
+                source_commit[:12] if source_commit else "",
+                str(row.get("source_path") or ""),
+            )
+            if value
+        )
         rendered_rows.append(
             "<tr>"
             f"<td>{html.escape(str(row.get('area') or ''))}</td>"
             f"<td><code>{html.escape(str(row.get('id') or ''))}</code></td>"
+            f"<td>{html.escape(str(row.get('recovered_name') or ''))}</td>"
+            f"<td>{html.escape(str(row.get('recovered_manufacturer') or ''))}</td>"
+            f"<td>{html.escape(model)}</td>"
+            f"<td><code>{html.escape(', '.join(rendered_identifiers))}</code></td>"
             f"<td>{html.escape(str(row.get('original_name') or ''))}</td>"
             f"<td>{html.escape(str(row.get('original_device_class') or ''))}</td>"
+            f"<td><code>{html.escape(source)}</code></td>"
             "</tr>"
         )
     return (
         "<div class='table-scroll'>"
         "<table class='deleted-devices-table'>"
-        f"<thead><tr><th>{_('label.area')}</th><th>ID</th><th>{_('label.original_name')}</th>"
-        f"<th>{_('label.original_device_class')}</th></tr></thead>"
+        f"<thead><tr><th>{_('label.area')}</th><th>ID</th><th>{_('label.name')}</th>"
+        f"<th>Manufacturer</th><th>Model</th><th>{_('label.identifiers')}</th>"
+        f"<th>{_('label.original_name')}</th><th>{_('label.original_device_class')}</th><th>Source</th></tr></thead>"
         f"<tbody>{''.join(rendered_rows)}</tbody>"
         "</table>"
         "</div>"
