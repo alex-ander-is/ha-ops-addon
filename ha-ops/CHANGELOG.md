@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.51
+
+- Hide empty columns in the deleted device cleanup preview table and size ID, identifier, source, name, manufacturer, and model columns more efficiently for review.
+
 ## 0.8.50
 
 - Show recovered names, manufacturers, models, identifiers, and source commits for deleted device cleanup candidates by reading local Home Assistant config Git history; keep the enrichment read-only and fall back to the live-only preview when history is unavailable.

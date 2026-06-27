@@ -13703,6 +13703,56 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Approve Deletion", page)
             self.assertNotIn("identifiers=mqtt:old", page)
 
+    def test_deleted_devices_table_hides_empty_columns_and_keeps_non_empty_columns(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_deleted_devices_generated_at": "2026-06-27T07:37:13+00:00",
+                    "last_deleted_devices_count": 2,
+                    "last_deleted_devices_rows": [
+                        {
+                            "id": "deleted-1",
+                            "recovered_name": "Living Room Motion",
+                            "recovered_manufacturer": "Aqara",
+                            "recovered_model": "Motion sensor",
+                            "recovered_model_id": "RTCGQ11LM",
+                            "recovered_identifiers": [["mqtt", "zigbee2mqtt_0x00158d0001"]],
+                            "source_commit": "0123456789abcdef0123456789abcdef01234567",
+                            "source_path": "homeassistant/.storage/core.device_registry",
+                        },
+                        {
+                            "id": "deleted-2",
+                            "recovered_name": "Kitchen Button",
+                        },
+                    ],
+                }
+            )
+
+            page = server.render_page()
+            table_start = page.index("<table class='deleted-devices-table'>")
+            table = page[table_start : page.index("</table>", table_start)]
+
+            self.assertIn("<th>ID</th>", table)
+            self.assertIn("<th>Name</th>", table)
+            self.assertIn("<th>Manufacturer</th>", table)
+            self.assertIn("<th>Model</th>", table)
+            self.assertIn("<th>Identifiers</th>", table)
+            self.assertIn("<th>Source</th>", table)
+            self.assertNotIn("<th>Area</th>", table)
+            self.assertNotIn("<th>Original Name</th>", table)
+            self.assertNotIn("<th>Original Device Class</th>", table)
+            self.assertIn("Living Room Motion", table)
+            self.assertIn("Aqara", table)
+            self.assertIn("Motion sensor / RTCGQ11LM", table)
+            self.assertIn("mqtt:zigbee2mqtt_0x00158d0001", table)
+            self.assertIn("0123456789ab homeassistant/.storage/core.device_registry", table)
+            self.assertIn("deleted-device-col-source", table)
+            self.assertIn("deleted-device-cell-identifiers", table)
+
     def test_stale_mqtt_discovery_preview_finds_registry_device_missing_from_z2m(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
