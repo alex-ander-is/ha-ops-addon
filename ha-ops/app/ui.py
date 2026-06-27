@@ -640,6 +640,16 @@ def render_deleted_devices_table(rows):
         model = " / ".join(str(value) for value in (row.get("recovered_model"), row.get("recovered_model_id")) if value)
         return model
 
+    def device_value(row):
+        return "\n".join(
+            value
+            for value in (
+                str(row.get("recovered_manufacturer") or ""),
+                model_value(row),
+            )
+            if value
+        )
+
     def identifiers_value(row):
         identifiers = row.get("recovered_identifiers") or []
         rendered_identifiers = []
@@ -668,8 +678,7 @@ def render_deleted_devices_table(rows):
         ("area", _("label.area"), plain_value("area"), False),
         ("id", "ID", plain_value("id"), True),
         ("name", _("label.name"), plain_value("recovered_name"), False),
-        ("manufacturer", "Manufacturer", plain_value("recovered_manufacturer"), False),
-        ("model", "Model", model_value, False),
+        ("device", "Manufacturer / Model", device_value, False),
         ("identifiers", _("label.identifiers"), identifiers_value, True),
         ("original-name", _("label.original_name"), plain_value("original_name"), False),
         ("original-device-class", _("label.original_device_class"), plain_value("original_device_class"), False),
@@ -680,24 +689,25 @@ def render_deleted_devices_table(rows):
         for column in columns
         if column[0] == "id" or any(column[2](row).strip() for row in rows)
     ]
-    colgroup = "".join(f"<col class='deleted-device-col-{key}'>" for key, _, _, _ in visible_columns)
-    header = "".join(f"<th>{label}</th>" for _, label, _, _ in visible_columns)
+    header = "".join(
+        f"<div class='deleted-device-header-cell deleted-device-col-{key}'>{label}</div>"
+        for key, label, _, _ in visible_columns
+    )
     rendered_rows = []
     for row in rows:
         cells = []
         for key, _label, value_for_row, is_code in visible_columns:
-            value = html.escape(value_for_row(row))
-            class_attr = f" class='deleted-device-cell-{key}'"
+            value = html.escape(value_for_row(row)).replace("\n", "<br>")
+            class_attr = f" class='deleted-device-cell deleted-device-cell-{key} deleted-device-col-{key}'"
             content = f"<code>{value}</code>" if is_code else value
-            cells.append(f"<td{class_attr}>{content}</td>")
-        rendered_rows.append(f"<tr>{''.join(cells)}</tr>")
+            cells.append(f"<div{class_attr}>{content}</div>")
+        rendered_rows.append(f"<div class='deleted-device-row'>{''.join(cells)}</div>")
     return (
         "<div class='table-scroll'>"
-        "<table class='deleted-devices-table'>"
-        f"<colgroup>{colgroup}</colgroup>"
-        f"<thead><tr>{header}</tr></thead>"
-        f"<tbody>{''.join(rendered_rows)}</tbody>"
-        "</table>"
+        "<div class='deleted-devices-table'>"
+        f"<div class='deleted-device-header'>{header}</div>"
+        f"{''.join(rendered_rows)}"
+        "</div>"
         "</div>"
     )
 
@@ -1496,29 +1506,45 @@ def render_page(data):
     .deleted-devices-table {{
       min-width: 760px;
     }}
-    .deleted-devices-table .deleted-device-col-id {{
-      width: 10ch;
+    .deleted-device-header,
+    .deleted-device-row {{
+      display: flex;
+      align-items: stretch;
+      border-bottom: 1px solid #d0d7de;
     }}
-    .deleted-devices-table .deleted-device-col-source {{
-      width: 18ch;
+    .deleted-device-header {{
+      background: #f6f8fa;
+      font-weight: 700;
     }}
-    .deleted-devices-table .deleted-device-col-identifiers {{
-      width: 22ch;
+    .deleted-device-header-cell,
+    .deleted-device-cell {{
+      box-sizing: border-box;
+      min-width: 0;
+      padding: 8px;
+      overflow-wrap: anywhere;
+      word-break: normal;
     }}
-    .deleted-devices-table .deleted-device-col-area,
-    .deleted-devices-table .deleted-device-col-original-device-class {{
-      width: 11ch;
+    .deleted-device-col-id {{
+      flex: 0 1 11ch;
     }}
-    .deleted-devices-table .deleted-device-col-name,
-    .deleted-devices-table .deleted-device-col-manufacturer,
-    .deleted-devices-table .deleted-device-col-model,
-    .deleted-devices-table .deleted-device-col-original-name {{
-      width: auto;
+    .deleted-device-col-source {{
+      flex: 1 2 20ch;
     }}
-    .deleted-devices-table td {{
-      vertical-align: top;
+    .deleted-device-col-identifiers {{
+      flex: 1 2 22ch;
     }}
-    .deleted-devices-table td code {{
+    .deleted-device-col-area,
+    .deleted-device-col-original-device-class {{
+      flex: 0 1 12ch;
+    }}
+    .deleted-device-col-name,
+    .deleted-device-col-original-name {{
+      flex: 2 1 20ch;
+    }}
+    .deleted-device-col-device {{
+      flex: 2 1 24ch;
+    }}
+    .deleted-device-cell code {{
       display: block;
       overflow-wrap: anywhere;
       white-space: normal;

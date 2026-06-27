@@ -13626,7 +13626,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("disabled", disk_form)
             self.assertIn("disabled", deleted_form)
 
-    def test_deleted_devices_preview_lists_entities_as_table(self):
+    def test_deleted_devices_preview_lists_entities_as_flex_rows(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13693,15 +13693,21 @@ class ServerTests(unittest.TestCase):
                 ],
             )
             page = server.render_page()
-            self.assertIn("<th>Area</th>", page)
-            self.assertIn("<th>ID</th>", page)
-            self.assertNotIn("<th>Entity ID</th>", page)
-            self.assertNotIn("sensor.bathroom_presence_illuminance", page)
-            self.assertIn("Illuminance", page)
-            self.assertIn("illuminance", page)
-            self.assertIn("deleted-1", page)
-            self.assertIn("Approve Deletion", page)
-            self.assertNotIn("identifiers=mqtt:old", page)
+            table_start = page.index("<div class='deleted-devices-table'>")
+            table = page[table_start : page.index("</section>", table_start)]
+            self.assertIn("<div class='deleted-device-header'>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
+            self.assertNotIn("<table class='deleted-devices-table'>", table)
+            self.assertNotIn("<colgroup>", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-entity-id", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-device", table)
+            self.assertNotIn("sensor.bathroom_presence_illuminance", table)
+            self.assertIn("Illuminance", table)
+            self.assertIn("illuminance", table)
+            self.assertIn("deleted-1", table)
+            self.assertIn("Approve Deletion", table)
+            self.assertNotIn("identifiers=mqtt:old", table)
 
     def test_deleted_devices_table_hides_empty_columns_and_keeps_non_empty_columns(self):
         server = load_server()
@@ -13712,7 +13718,7 @@ class ServerTests(unittest.TestCase):
             server.write_state(
                 {
                     "last_deleted_devices_generated_at": "2026-06-27T07:37:13+00:00",
-                    "last_deleted_devices_count": 2,
+                    "last_deleted_devices_count": 4,
                     "last_deleted_devices_rows": [
                         {
                             "id": "deleted-1",
@@ -13728,30 +13734,47 @@ class ServerTests(unittest.TestCase):
                             "id": "deleted-2",
                             "recovered_name": "Kitchen Button",
                         },
+                        {
+                            "id": "deleted-3",
+                            "recovered_model": "Smart plug",
+                            "recovered_model_id": "TS011F_plug_3",
+                        },
+                        {
+                            "id": "deleted-4",
+                            "recovered_manufacturer": "Tuya",
+                        },
                     ],
                 }
             )
 
             page = server.render_page()
-            table_start = page.index("<table class='deleted-devices-table'>")
-            table = page[table_start : page.index("</table>", table_start)]
+            table_start = page.index("<div class='deleted-devices-table'>")
+            table = page[table_start : page.index("</section>", table_start)]
 
-            self.assertIn("<th>ID</th>", table)
-            self.assertIn("<th>Name</th>", table)
-            self.assertIn("<th>Manufacturer</th>", table)
-            self.assertIn("<th>Model</th>", table)
-            self.assertIn("<th>Identifiers</th>", table)
-            self.assertIn("<th>Source</th>", table)
-            self.assertNotIn("<th>Area</th>", table)
-            self.assertNotIn("<th>Original Name</th>", table)
-            self.assertNotIn("<th>Original Device Class</th>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-name'>Name</div>", table)
+            self.assertIn(
+                "deleted-device-header-cell deleted-device-col-device'>Manufacturer / Model</div>",
+                table,
+            )
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-manufacturer", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-model", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-identifiers'>Identifiers</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-source'>Source</div>", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-area", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-name", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
+            self.assertNotIn("<table", table)
+            self.assertNotIn("<colgroup", table)
             self.assertIn("Living Room Motion", table)
-            self.assertIn("Aqara", table)
-            self.assertIn("Motion sensor / RTCGQ11LM", table)
+            self.assertIn("Aqara<br>Motion sensor / RTCGQ11LM", table)
+            self.assertIn(">Smart plug / TS011F_plug_3</div>", table)
+            self.assertIn(">Tuya</div>", table)
             self.assertIn("mqtt:zigbee2mqtt_0x00158d0001", table)
             self.assertIn("0123456789ab homeassistant/.storage/core.device_registry", table)
             self.assertIn("deleted-device-col-source", table)
             self.assertIn("deleted-device-cell-identifiers", table)
+            self.assertIn("deleted-device-cell-device", table)
 
     def test_stale_mqtt_discovery_preview_finds_registry_device_missing_from_z2m(self):
         server = load_server()

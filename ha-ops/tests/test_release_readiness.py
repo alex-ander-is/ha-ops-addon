@@ -69,12 +69,12 @@ class ReleaseReadinessTests(unittest.TestCase):
         current_section = changelog_section(changelog, current_version)
         self.assertIsNotNone(current_section)
         deleted_device_table_note = (
-            "Hide empty columns in the deleted device cleanup preview table and "
-            "size ID, identifier, source, name, manufacturer, and model columns"
+            "Render the deleted device cleanup preview as flexible rows instead "
+            "of a fixed table and combine manufacturer and model details"
         )
         self.assertIn(deleted_device_table_note, current_section)
 
-        old_section = changelog_section(changelog, "0.8.50")
+        old_section = changelog_section(changelog, "0.8.51")
         self.assertIsNotNone(old_section)
         self.assertNotIn(deleted_device_table_note, old_section)
 
