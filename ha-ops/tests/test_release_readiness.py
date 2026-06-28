@@ -60,7 +60,7 @@ class ReleaseReadinessTests(unittest.TestCase):
 
         self.assertEqual([], failures)
 
-    def test_deleted_device_table_changelog_note_is_under_current_version(self):
+    def test_preparation_log_context_changelog_note_is_under_current_version(self):
         config = CONFIG_PATH.read_text()
         match = re.search(r'^version:\s*"([^"]+)"\s*$', config, re.MULTILINE)
         self.assertIsNotNone(match)
@@ -68,15 +68,14 @@ class ReleaseReadinessTests(unittest.TestCase):
         changelog = CHANGELOG_PATH.read_text()
         current_section = changelog_section(changelog, current_version)
         self.assertIsNotNone(current_section)
-        deleted_device_table_note = (
-            "Render the deleted device cleanup preview as flexible rows instead "
-            "of a fixed table and combine manufacturer and model details"
+        preparation_log_context_note = (
+            "Prefix running preparation log messages with the HA Ops action context"
         )
-        self.assertIn(deleted_device_table_note, current_section)
+        self.assertIn(preparation_log_context_note, current_section)
 
-        old_section = changelog_section(changelog, "0.8.51")
+        old_section = changelog_section(changelog, "0.8.52")
         self.assertIsNotNone(old_section)
-        self.assertNotIn(deleted_device_table_note, old_section)
+        self.assertNotIn(preparation_log_context_note, old_section)
 
 
 if __name__ == "__main__":

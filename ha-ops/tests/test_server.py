@@ -872,6 +872,15 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ctx.updates[0]["last_message"], "CATALOG: preparing save.")
         self.assertEqual(ctx.updates[1]["last_message"], "CATALOG: pending deleted_devices cleanup.")
 
+    def test_preparing_action_messages_include_button_context(self):
+        server = load_server()
+        i18n = server.app_context.job_logic.i18n
+
+        self.assertEqual(i18n.EN_TEXT["message.preparing_save"], "Preparing HA to Git save.")
+        self.assertEqual(i18n.EN_TEXT["message.preparing_save_preview"], "Preparing HA to Git save preview.")
+        self.assertEqual(i18n.EN_TEXT["message.preparing_apply"], "Preparing Git to HA apply.")
+        self.assertEqual(i18n.EN_TEXT["message.preparing_apply_preview"], "Preparing Git to HA apply preview.")
+
     def test_job_detail_log_text_comes_from_translation_catalog(self):
         server = load_server()
 
@@ -2218,7 +2227,7 @@ class ServerTests(unittest.TestCase):
             root = Path(tmp)
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
-            server.write_state({"last_status": "running", "last_message": "Preparing save preview."})
+            server.write_state({"last_status": "running", "last_message": "Preparing HA to Git save preview."})
 
             page = server.render_page()
             state = server.read_state()
@@ -14465,7 +14474,7 @@ devices:
                 {
                     "last_status": "running",
                     "last_action": "synthetic",
-                    "last_message": "Preparing save.",
+                    "last_message": "Preparing HA to Git save.",
                     "last_details": ["Using branch main."],
                 }
             )
@@ -14473,8 +14482,8 @@ devices:
             page = server.render_page()
             state = server.read_state()
 
-            self.assertEqual(state["last_details"], ["Using branch main.", "Preparing save."])
-            self.assertLess(page.index("Using branch main."), page.index("Preparing save."))
+            self.assertEqual(state["last_details"], ["Using branch main.", "Preparing HA to Git save."])
+            self.assertLess(page.index("Using branch main."), page.index("Preparing HA to Git save."))
 
     def test_add_detail_keeps_action_message_separate_from_details(self):
         server = load_server()
@@ -14484,7 +14493,7 @@ devices:
             server.write_state(
                 {
                     "last_status": "running",
-                    "last_message": "Preparing save preview.",
+                    "last_message": "Preparing HA to Git save preview.",
                     "last_details": [],
                 }
             )
@@ -14493,7 +14502,7 @@ devices:
             server.context().add_detail(details, "Committed pending Internal IDs migration changes to Git: abc123.")
             state = server.read_state()
 
-            self.assertEqual(state["last_message"], "Preparing save preview.")
+            self.assertEqual(state["last_message"], "Preparing HA to Git save preview.")
             self.assertEqual(state["last_details"], ["Committed pending Internal IDs migration changes to Git: abc123."])
 
     def test_add_detail_does_not_restore_running_after_terminal_status(self):

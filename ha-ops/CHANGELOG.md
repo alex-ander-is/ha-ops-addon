@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.53
+
+- Prefix running preparation log messages with the HA Ops action context so Preview, Save, and Apply logs show whether they belong to HA to Git or Git to HA.
+
 ## 0.8.52
 
 - Render the deleted device cleanup preview as flexible rows instead of a fixed table and combine manufacturer and model details into one stacked column for better scanning.
