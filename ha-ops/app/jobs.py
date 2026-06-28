@@ -873,7 +873,6 @@ def run_reset_git_state_job(ctx, lock_acquired=False):
 
         ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=ctx.git_head_or_unborn(repo_dir)))
         ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
-        ctx.add_detail(details, _("detail.resetting_git_state"))
         ctx.reset_service_branches_from_main(resolved_targets, repo_dir, branch, details)
         for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
             ctx.push_branch_force_with_lease(repo_dir, env, service_branch)
@@ -980,7 +979,6 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_pending_before_check")
-        ctx.add_detail(details, _("detail.checking_deleted_devices"))
         preview = ctx.build_deleted_devices_preview()
         count = preview["count"]
         log_action(ctx, f"deleted_devices preview: found {count} deleted device(s)")
@@ -1065,7 +1063,6 @@ def run_internal_ids_preview_job(ctx, lock_acquired=False):
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_pending_before_internal_ids")
-        details.append(_("detail.checking_internal_ids"))
         preview = ctx.build_internal_ids_preview()
         count = int(preview["count"])
         message = _("message.internal_ids_found", count=count, suffix="" if count == 1 else "s")
@@ -1221,7 +1218,6 @@ def run_retained_devices_preview_job(ctx, lock_acquired=False):
         state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_pending_before_retained")
-        ctx.add_detail(details, _("detail.checking_retained_devices"))
         preview = ctx.build_retained_devices_preview()
         rows = retained_device_rows(preview["candidates"])
         count = len(rows)

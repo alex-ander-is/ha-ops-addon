@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.54
+
+- Avoid duplicate running log context lines for checks such as deleted_devices, Internal IDs, retained devices, and Reset Git State.
+
 ## 0.8.53
 
 - Prefix running preparation log messages with the HA Ops action context so Preview, Save, and Apply logs show whether they belong to HA to Git or Git to HA.

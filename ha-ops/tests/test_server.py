@@ -888,6 +888,7 @@ class ServerTests(unittest.TestCase):
             def __init__(self):
                 self.run_lock = threading.Lock()
                 self.updates = {}
+                self.writes = []
 
             def utc_now(self):
                 return "2026-06-15T12:00:00+00:00"
@@ -896,6 +897,7 @@ class ServerTests(unittest.TestCase):
                 return {}
 
             def write_state(self, updates):
+                self.writes.append(dict(updates))
                 self.updates.update(updates)
 
             def add_detail(self, details, message):
@@ -914,24 +916,27 @@ class ServerTests(unittest.TestCase):
                 }
 
         i18n = server.app_context.job_logic.i18n
-        original_detail = i18n.EN_TEXT["detail.checking_deleted_devices"]
-        i18n.EN_TEXT["detail.checking_deleted_devices"] = "CATALOG: deleted_devices detail sentinel."
+        original_message = i18n.EN_TEXT["message.checking_deleted_devices"]
+        i18n.EN_TEXT["message.checking_deleted_devices"] = "CATALOG: deleted_devices message sentinel."
         try:
             ctx = DeletedDevicesPreviewContext()
             self.assertTrue(server.app_context.job_logic.run_deleted_devices_preview_job(ctx))
         finally:
-            i18n.EN_TEXT["detail.checking_deleted_devices"] = original_detail
+            i18n.EN_TEXT["message.checking_deleted_devices"] = original_message
 
-        self.assertIn("CATALOG: deleted_devices detail sentinel.", ctx.updates["last_details"])
+        self.assertEqual(ctx.writes[0]["last_message"], "CATALOG: deleted_devices message sentinel.")
+        self.assertEqual(ctx.writes[0]["last_details"], [])
+        self.assertEqual(ctx.updates["last_message"], "Found 0 deleted_devices entries.")
+        self.assertEqual(ctx.updates["last_details"], [])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
-            server.write_state(ctx.updates)
+            server.write_state(ctx.writes[0])
 
             page = server.render_page()
 
-        self.assertIn("CATALOG: deleted_devices detail sentinel.", page)
+        self.assertIn("CATALOG: deleted_devices message sentinel.", page)
         self.assertNotIn("Checking Home Assistant deleted_devices.", page)
 
     def test_render_page_escapes_translation_text_in_inline_script_literals(self):
@@ -14377,6 +14382,19 @@ devices:
                 0,
             )
 
+    def test_running_action_log_does_not_add_duplicate_context_details(self):
+        jobs_source = (ROOT / "app" / "jobs.py").read_text()
+
+        duplicate_detail_keys = [
+            "detail.checking_deleted_devices",
+            "detail.checking_internal_ids",
+            "detail.checking_retained_devices",
+            "detail.resetting_git_state",
+        ]
+        for key in duplicate_detail_keys:
+            with self.subTest(key=key):
+                self.assertNotIn(key, jobs_source)
+
     def test_internal_ids_preview_log_keeps_check_before_result(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -14392,12 +14410,12 @@ devices:
                 state["last_details"],
                 [
                     "Checking internal ids.",
-                    "Checking HA Ops automations, scripts, and scenes for safe internal id migrations.",
                     "Found 0 internal id migration files.",
                 ],
             )
+            self.assertNotIn("Checking HA Ops automations, scripts, and scenes for safe internal id migrations.", state["last_details"])
             self.assertLess(
-                page.index("Checking HA Ops automations, scripts, and scenes for safe internal id migrations."),
+                page.index("Checking internal ids."),
                 page.index("Found 0 internal id migration files."),
             )
 
@@ -14434,11 +14452,11 @@ devices:
             self.assertEqual(
                 state["last_details"],
                 [
-                    "Checking deleted_devices.",
                     "Checking Home Assistant deleted_devices.",
                     "Found 0 deleted_devices entries.",
                 ],
             )
+            self.assertNotIn("Checking deleted_devices.", state["last_details"])
             self.assertLess(
                 page.index("Checking Home Assistant deleted_devices."),
                 page.index("Found 0 deleted_devices entries."),

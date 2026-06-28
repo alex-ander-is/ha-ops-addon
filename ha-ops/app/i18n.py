@@ -293,7 +293,7 @@ EN_TEXT = {
     "message.approved_save_conflicts_count": "Approved {count} Save conflict(s).",
     "message.approved_save_conflicts_saving_state": "Approved Save conflicts. Saving HA to Git.",
     "message.approve_save_conflicts_saving": "{message} Saving...",
-    "message.checking_deleted_devices": "Checking deleted_devices.",
+    "message.checking_deleted_devices": "Checking Home Assistant deleted_devices.",
     "message.checking_disk_usage": "Checking disk usage.",
     "message.checking_internal_ids": "Checking internal ids.",
     "message.checking_retained_devices": "Checking retained devices.",
