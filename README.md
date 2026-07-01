@@ -2,6 +2,22 @@
 
 Home Assistant add-on repository for HA Ops.
 
+## Install in Home Assistant
+
+1. Open Home Assistant.
+2. Go to `Settings` -> `Apps` -> `Install app` (`App store`).
+3. Open the three-dot menu in the top right and choose `Repositories`.
+4. Paste this URL:
+
+```text
+https://github.com/alex-ander-is/ha-ops-addon
+```
+
+5. Click `Add`, close the dialog, and wait until `HA Ops` appears in the store.
+6. Open `HA Ops`, click `Install`, then open the `Configuration` tab.
+7. Set your Git repository settings, especially `repo_url`, `repo_branch`, and `git_ssh_key` if the repository is private.
+8. Click `Save`, then `Start`.
+
 `ha-ops` is an ingress UI for managing a Git-backed Home Assistant configuration:
 
 - Preview live Home Assistant config before saving it to Git
@@ -15,10 +31,6 @@ Home Assistant add-on repository for HA Ops.
 - Roll back from saved local releases
 
 See [`ha-ops/README.md`](./ha-ops/README.md) for setup and behavior.
-
-## Install
-
-Add this repository URL in the Home Assistant add-on store, then install `HA Ops`.
 
 ## Presentation Assets
 
