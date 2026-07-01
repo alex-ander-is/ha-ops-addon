@@ -387,6 +387,7 @@ EN_TEXT = {
     "notice.apply_confirm_backup_disabled": "Fresh system backup checks are disabled.",
     "notice.apply_confirm_protected_storage": "Protected .storage apply is enabled for at least one target.",
     "notice.conflict_resolution": "HA Ops stopped before changing Git because these files differ between live Home Assistant and the repository, and there is no trusted common base. Choose {ha_choice} to save the live Home Assistant file to Git, or choose {git_choice} to keep the repository file unchanged.",
+    "notice.save_preview_editor_config_candidates": "HA Ops added {paths} as optional editor and formatter settings for this initial HA-to-Git preview. They preserve existing end-of-file formatting, exist only in the Git candidate, and are never applied to live Home Assistant. Select them to save them, or leave them unchecked to omit them.",
     "notice.deleted_devices_confirm_effect": "Confirm Changes: keep this cleanup. Entries removed by this cleanup stay removed. New deleted_devices entries are kept.",
     "notice.deleted_devices_pending": "Confirm Changes accepts this diff. Revert Changes restores removed lines while keeping any new current entries.",
     "notice.deleted_devices_revert_effect": "Revert Changes: restore only entries removed by this cleanup. Other registry changes and new deleted_devices entries are kept.",

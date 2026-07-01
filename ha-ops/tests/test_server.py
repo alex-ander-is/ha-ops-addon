@@ -1480,6 +1480,27 @@ class ServerTests(unittest.TestCase):
             self.assertIn("registry item would be removed", page)
             self.assertLess(page.index("apply-preview-warning"), page.index("data-transient='apply-preview'"))
 
+    def test_render_page_shows_save_preview_warnings_outside_diff(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_save_preview": "Save preview changes (1):\n- Added: .editorconfig",
+                    "last_save_diff": "diff --git a/.editorconfig b/.editorconfig",
+                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
+                    "last_save_preview_warnings": ["editor settings are Git-only candidates"],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("Save Preview", page)
+            self.assertIn("editor settings are Git-only candidates", page)
+            self.assertLess(page.index("editor settings are Git-only candidates"), page.index("data-transient='save-preview'"))
+
     def test_save_preview_renders_collapsed_change_list_with_save_choices_and_footer_actions(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2905,6 +2926,59 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(preview["paths"], ["homeassistant/configuration.yaml"])
             self.assertIn("homeassistant/configuration.yaml", preview["diff"])
+
+    def test_initial_save_preview_offers_git_only_editor_settings(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            (repo / "README.md").write_text("base\n")
+            self.git_commit_all(repo, "base")
+            server.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
+            target = {
+                "id": "homeassistant",
+                "type": "homeassistant",
+                "source_path": str(repo / "homeassistant"),
+                "live_path": str(server.CONFIG_DIR),
+                "delete": False,
+            }
+            ctx = server.app_context.AppContext(
+                data_dir=server.DATA_DIR,
+                config_dir=server.CONFIG_DIR,
+                addon_configs_dir=server.ADDON_CONFIGS_DIR,
+            ).sync_deps()
+
+            preview = server.sync_logic.build_save_preview([target], repo, [], ctx)
+
+            self.assertIn(".editorconfig", preview["paths"])
+            self.assertIn(".vscode/settings.json", preview["paths"])
+            self.assertIn(".prettierignore", preview["paths"])
+            self.assertTrue(preview["warnings"])
+            self.assertIn("never applied to live Home Assistant", preview["warnings"][0])
+            self.assertFalse((server.CONFIG_DIR / ".editorconfig").exists())
+            self.assertFalse((server.CONFIG_DIR / ".vscode/settings.json").exists())
+            self.assertFalse((server.CONFIG_DIR / ".prettierignore").exists())
+            self.assertTrue(server.sync_logic.save_merge_path_is_managed(repo, [target], ".editorconfig", ctx))
+            self.assertFalse(server.sync_logic.apply_merge_path_is_managed(repo, [target], ".editorconfig", ctx))
+
+    def test_existing_homeassistant_repository_does_not_get_editor_setting_candidates(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant"
+            source.mkdir(parents=True)
+            (source / "configuration.yaml").write_text("homeassistant:\n")
+
+            self.assertFalse(
+                server.sync_logic.initial_homeassistant_save(
+                    [{"type": "homeassistant", "source_path": str(source)}]
+                )
+            )
 
     def test_save_preview_job_toggle_controls_registry_noise(self):
         server = load_server()

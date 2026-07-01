@@ -16,6 +16,11 @@ import policies
 
 HA_LIVE_BRANCH = "ha-ops/ha-live"
 HA_BASE_BRANCH = "ha-ops/base"
+EDITOR_CONFIG_FILES = {
+    Path(".editorconfig"): "root = true\n\n[*]\nend_of_line = lf\ninsert_final_newline = false\ntrim_trailing_whitespace = false\n",
+    Path(".vscode/settings.json"): "{\n  \"files.insertFinalNewline\": false,\n  \"files.trimFinalNewlines\": false\n}\n",
+    Path(".prettierignore"): "# Home Assistant owns these JSON files and may preserve a missing final newline.\nhomeassistant/.storage/**\n",
+}
 
 
 def _(key, **values):
@@ -1612,6 +1617,38 @@ def target_repo_source_relative(repo_dir, target):
         return Path(target.get("source") or Path(target["source_path"]).name)
 
 
+def generic_editor_config_path(path):
+    return Path(path) in EDITOR_CONFIG_FILES
+
+
+def initial_homeassistant_save(resolved_targets):
+    homeassistant_sources = [Path(target["source_path"]) for target in resolved_targets if target.get("type") == "homeassistant"]
+    return bool(homeassistant_sources) and not any(source.exists() and has_managed_content(source) for source in homeassistant_sources)
+
+
+def sync_editor_config_files(repo_dir, main_branch, add_candidates, ctx):
+    generated = []
+    for relative, content in EDITOR_CONFIG_FILES.items():
+        destination = Path(repo_dir) / relative
+        if git_ref_path_exists(repo_dir, main_branch, relative.as_posix(), ctx):
+            git_restore_path_from_ref(repo_dir, main_branch, relative.as_posix(), ctx)
+            continue
+        if destination.exists() or destination.is_symlink():
+            safe_remove_path(destination)
+        if add_candidates:
+            ensure_dir(destination.parent)
+            destination.write_text(content)
+            generated.append(relative.as_posix())
+    return generated
+
+
+def editor_config_preview_warnings(paths, initial_export):
+    generated = sorted(path for path in paths if generic_editor_config_path(path))
+    if not initial_export or not generated:
+        return []
+    return [_("notice.save_preview_editor_config_candidates", paths=", ".join(generated))]
+
+
 def homeassistant_managed_save_relative_path(relative, target, ctx):
     relative = Path(relative)
     if relative.is_absolute() or ".." in relative.parts or not relative.parts:
@@ -1642,6 +1679,9 @@ def save_merge_path_is_managed(repo_dir, resolved_targets, path_text, ctx):
     relative = Path(path_text)
     if relative.is_absolute() or ".." in relative.parts:
         return False
+
+    if generic_editor_config_path(relative):
+        return True
 
     repo_dir = Path(repo_dir)
     for target in resolved_targets:
@@ -1719,6 +1759,12 @@ def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
         forced = ctx.run_command(["git", "add", "-f", "--", *storage_paths], cwd=repo_dir)
         if forced.returncode != 0:
             raise RuntimeError(f"git add allowlisted .storage failed:\n{forced.stderr.strip()}")
+
+    editor_config_paths = [str(path) for path in EDITOR_CONFIG_FILES if (repo_dir / path).is_file()]
+    if editor_config_paths:
+        forced = ctx.run_command(["git", "add", "-f", "--", *editor_config_paths], cwd=repo_dir)
+        if forced.returncode != 0:
+            raise RuntimeError(f"git add editor settings failed:\n{forced.stderr.strip()}")
 
 
 def sync_applied_normalized_storage_to_repo_worktree(repo_dir, resolved_targets, ctx):
@@ -1850,9 +1896,19 @@ def ensure_live_branch_available(repo_dir, ctx, prefer_local=False):
         return
 
 
-def update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data=False, prefer_local_live=False):
+def update_ha_live_branch(
+    resolved_targets,
+    repo_dir,
+    details,
+    ctx,
+    include_redundant_data=False,
+    prefer_local_live=False,
+    include_editor_config_candidates=False,
+):
     export_root = build_save_export(resolved_targets, details, ctx)
+    main_branch = git_current_branch(repo_dir, ctx) or "HEAD"
     ensure_live_branch_available(repo_dir, ctx, prefer_local=prefer_local_live)
+    sync_editor_config_files(repo_dir, main_branch, include_editor_config_candidates, ctx)
     apply_save_export(resolved_targets, export_root, details, ctx)
     if not include_redundant_data:
         restore_normalized_equal_save_worktree(repo_dir, resolved_targets, details, ctx)
@@ -2882,9 +2938,17 @@ def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
 def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redundant_data=False):
     repo_dir = Path(repo_dir)
     main_branch = git_current_branch(repo_dir, ctx) or "main"
+    initial_export = initial_homeassistant_save(resolved_targets)
     try:
         git_ensure_head(repo_dir, ctx, details)
-        update_ha_live_branch(resolved_targets, repo_dir, details, ctx, include_redundant_data)
+        update_ha_live_branch(
+            resolved_targets,
+            repo_dir,
+            details,
+            ctx,
+            include_redundant_data,
+            include_editor_config_candidates=initial_export,
+        )
         raw_conflicts = merge_ha_live_into_git(repo_dir, main_branch, ctx)
         conflicts = managed_save_merge_paths(repo_dir, resolved_targets, raw_conflicts, ctx)
         for path in sorted(set(raw_conflicts) - set(conflicts)):
@@ -2920,6 +2984,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
                     paths,
                     ctx,
                 ),
+                "warnings": editor_config_preview_warnings(paths, initial_export),
             }
 
         preview = merge_preview_for_save(repo_dir, resolved_targets, include_redundant_data, ctx)
@@ -2938,6 +3003,7 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
             "fingerprint": fingerprint_text(diff),
             "suppressed_paths": preview["suppressed_paths"],
             "suppressed_preserve_triggers": preview.get("suppressed_preserve_triggers", {}),
+            "warnings": editor_config_preview_warnings(paths, initial_export),
         }
     finally:
         git_abort_merge(repo_dir, ctx)

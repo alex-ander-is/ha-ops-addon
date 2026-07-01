@@ -83,6 +83,13 @@ you want to process, or use `Select All`; unchecked files stay unchanged in Git.
 For selected non-conflict files, Save defaults to the HA version unless you
 choose `Keep Unchanged`.
 
+On the first HA-to-Git preview for a repository without Home Assistant config,
+HA Ops also offers `.editorconfig`, `.vscode/settings.json`, and
+`.prettierignore` as optional Git-only editor and formatter settings. They
+preserve the existing end-of-file formatting of each file and are never written
+to live Home Assistant. Select them to keep them in Git, or leave them
+unchecked to omit them.
+
 Saved:
 
 - root `*.yaml` and `*.yml`, except `secrets.yaml`

@@ -496,12 +496,22 @@ def render_page(ctx):
         save_commit_subject = default_save_commit_subject
         if state.get("last_save_commit_subject") and not save_preview_selected_paths:
             save_commit_subject = state.get("last_save_commit_subject")
+        save_preview_warnings_html = ""
+        if state.get("last_save_preview_warnings"):
+            warning_items = "".join(f"<li>{html.escape(item)}</li>" for item in state["last_save_preview_warnings"])
+            save_preview_warnings_html = (
+                "<div class='apply-preview-warning' role='alert'>"
+                f"<strong>{_('heading.warnings')}</strong>"
+                f"<ul>{warning_items}</ul>"
+                "</div>"
+            )
         save_preview_section_html = (
             "<section class='card wide'>"
             f"<h2>{_('heading.save_preview')}</h2>"
             f"<p>{_('label.generated_at')} "
             f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
             "</p>"
+            f"{save_preview_warnings_html}"
             f"<div data-transient='save-preview'>"
             f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths, save_commit_subject=save_commit_subject, default_save_commit_subject=default_save_commit_subject, save_commit_subject_disabled=save_push_retry_pending, retry_only=save_push_retry_pending)}"
             "</div>"
