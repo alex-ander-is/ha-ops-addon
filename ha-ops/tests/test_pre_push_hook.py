@@ -31,8 +31,8 @@ class PrePushHookTests(unittest.TestCase):
         run(["git", "config", "user.email", "test@example.com"], cwd=self.repo)
         run(["git", "config", "user.name", "Test User"], cwd=self.repo)
         run(["git", "remote", "add", "origin", str(self.remote)], cwd=self.repo)
-        self.write_file("ha-ops/config.yaml", 'version: "0.1.0"\n')
-        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.1.0\n\n- Initial.\n")
+        self.write_file("ha-ops/config.yaml", 'version: "0.1.1"\n')
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.1.1\n\n- Initial.\n")
         self.write_file("ha-ops/app.py", "print('hello')\n")
         run(["git", "add", "."], cwd=self.repo)
         run(["git", "commit", "-m", "Initial"], cwd=self.repo)
@@ -93,7 +93,7 @@ class PrePushHookTests(unittest.TestCase):
         remote_head = self.commit("Remote update")
         run(["git", "push", "origin", "main"], cwd=self.repo)
         self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
-        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.0\n\n- Initial.\n")
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 10\n\n- Initial.\n")
         head = self.commit("Release from stale remote")
         run(["git", "tag", "0.2.0"], cwd=self.repo)
 
@@ -104,7 +104,7 @@ class PrePushHookTests(unittest.TestCase):
 
     def test_rejects_release_files_without_matching_tag(self):
         self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
-        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.0\n\n- Initial.\n")
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.1\n\n- Initial.\n")
         head = self.commit("Release without tag")
 
         result = self.invoke_hook(self.branch_push_stdin(head))
@@ -114,7 +114,7 @@ class PrePushHookTests(unittest.TestCase):
 
     def test_allows_release_files_with_matching_tag_pushed_together(self):
         self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
-        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.0\n\n- Initial.\n")
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.1\n\n- Initial.\n")
         head = self.commit("Release with tag")
         run(["git", "tag", "0.2.0"], cwd=self.repo)
         stdin = self.branch_push_stdin(head)
