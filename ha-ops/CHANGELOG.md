@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.55
+
+- Reload frontend themes after Git-to-HA Apply or release rollback when only files in `themes/` changed, without restarting Core or running the general YAML reload.
+- Offer `.editorconfig`, `.vscode/settings.json`, and `.prettierignore` as optional Git-only candidates in the first HA-to-Git preview; they are never synced to live Home Assistant.
+
 ## 0.8.54
 
 - Avoid duplicate running log context lines for checks such as deleted_devices, Internal IDs, retained devices, and Reset Git State.

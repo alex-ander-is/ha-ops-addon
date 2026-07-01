@@ -60,18 +60,14 @@ class ReleaseReadinessTests(unittest.TestCase):
 
         self.assertEqual([], failures)
 
-    def test_duplicate_running_log_changelog_note_is_under_current_version(self):
-        config = CONFIG_PATH.read_text()
-        match = re.search(r'^version:\s*"([^"]+)"\s*$', config, re.MULTILINE)
-        self.assertIsNotNone(match)
-        current_version = match.group(1)
+    def test_duplicate_running_log_changelog_note_stays_in_its_release(self):
         changelog = CHANGELOG_PATH.read_text()
-        current_section = changelog_section(changelog, current_version)
-        self.assertIsNotNone(current_section)
+        documented_section = changelog_section(changelog, "0.8.54")
+        self.assertIsNotNone(documented_section)
         duplicate_running_log_note = (
             "Avoid duplicate running log context lines"
         )
-        self.assertIn(duplicate_running_log_note, current_section)
+        self.assertIn(duplicate_running_log_note, documented_section)
 
         old_section = changelog_section(changelog, "0.8.53")
         self.assertIsNotNone(old_section)
