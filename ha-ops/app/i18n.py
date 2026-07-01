@@ -121,6 +121,7 @@ EN_TEXT = {
     "detail.pushed_ha_live": "Pushed to origin/ha-ops/ha-live.",
     "detail.pushed_ha_base": "Pushed to origin/ha-ops/base.",
     "detail.reloading_lovelace_config": "Reloading Lovelace resources.",
+    "detail.reloading_themes": "Reloading Home Assistant themes.",
     "detail.reloading_yaml_config": "Reloading Home Assistant config.",
     "detail.lovelace_reload_failed_restarting_core": "Lovelace reload failed; restarting Home Assistant Core instead: {error}",
     "detail.rebuilding_apply_preview": "Rebuilding apply preview for safety checks.",

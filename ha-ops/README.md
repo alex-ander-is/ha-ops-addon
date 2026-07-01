@@ -135,6 +135,7 @@ Skipped:
 - Local release snapshots are pruned by configured count and age.
 - A change resolver classifies Home Assistant changes as YAML and/or `.storage`; lifecycle actions are controlled by explicit flags.
 - YAML-only apply reloads Home Assistant config by default instead of restarting Core.
+- Theme-only apply reloads frontend themes with `frontend.reload_themes` instead of restarting Core or running the general YAML reload.
 - Lovelace resource storage (`lovelace_resources`) apply reloads Lovelace resources by default instead of restarting Core, with restart fallback if the soft reload fails.
 - Dashboard/config `.storage` files such as `lovelace.lovelace`, `lovelace_dashboards`, and `lovelace.map` use the normal storage lifecycle because `lovelace.reload_resources` is resources-only.
 - Other `.storage` apply or rollback can stop/start Core by policy because Home Assistant may otherwise keep stale state or rewrite those files.

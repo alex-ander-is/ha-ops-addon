@@ -324,6 +324,9 @@ class AppContext:
     def core_reload_lovelace(self):
         return supervisor.core_reload_lovelace(self.call_supervisor)
 
+    def core_reload_themes(self):
+        return supervisor.core_reload_themes(self.call_supervisor)
+
     def do_core_check(self):
         return supervisor.do_core_check(self.call_supervisor)
 
@@ -753,6 +756,7 @@ class AppContext:
             clean_file_patterns=policies.EXPORT_CLEAN_FILE_PATTERNS,
             clean_paths=policies.EXPORT_CLEAN_PATHS,
             core_reload_lovelace=self.core_reload_lovelace,
+            core_reload_themes=self.core_reload_themes,
             core_restart=self.core_restart,
             core_reload_yaml=self.core_reload_yaml,
             core_start=self.core_start,
@@ -778,6 +782,7 @@ class AppContext:
             addon_action=self.addon_action,
             clear_tree=self.clear_tree,
             core_reload_lovelace=self.core_reload_lovelace,
+            core_reload_themes=self.core_reload_themes,
             core_reload_yaml=self.core_reload_yaml,
             core_restart=self.core_restart,
             core_start=self.core_start,

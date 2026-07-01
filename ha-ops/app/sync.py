@@ -30,6 +30,7 @@ class SyncContext:
     clean_file_patterns: list
     clean_paths: list
     core_reload_lovelace: Callable[[], Any]
+    core_reload_themes: Callable[[], Any]
     core_restart: Callable[[], Any]
     core_reload_yaml: Callable[[], Any]
     core_start: Callable[[], Any]
@@ -52,6 +53,7 @@ class SyncContext:
 @dataclass
 class ChangeSet:
     changed_yaml: bool = False
+    changed_themes: bool = False
     changed_storage: bool = False
     changed_lovelace_resource_storage: bool = False
     changed_protected_storage: bool = False
@@ -59,6 +61,7 @@ class ChangeSet:
     def any(self):
         return (
             self.changed_yaml
+            or self.changed_themes
             or self.changed_storage
             or self.changed_lovelace_resource_storage
             or self.changed_protected_storage
@@ -1132,10 +1135,14 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
     for name in managed_dirs:
         src_path = src / name
         dest_path = dest / name
-        if source_tree_has_overlay_changes(src_path, dest_path, ctx.export_excludes):
-            changes.changed_yaml = True
-        if mode == "rollback" and destination_tree_has_managed_extra(src_path, dest_path, ctx.export_excludes):
-            changes.changed_yaml = True
+        changed = source_tree_has_overlay_changes(src_path, dest_path, ctx.export_excludes)
+        if mode == "rollback":
+            changed = changed or destination_tree_has_managed_extra(src_path, dest_path, ctx.export_excludes)
+        if changed:
+            if name == "themes":
+                changes.changed_themes = True
+            else:
+                changes.changed_yaml = True
 
     src_storage = src / ".storage"
     dest_storage = dest / ".storage"
@@ -1298,6 +1305,9 @@ def apply_targets(resolved_targets, details, ctx):
                         ctx.add_detail(details, _("detail.restarting_core"))
                         ctx.core_restart()
                         core_restarted = True
+                if not core_restarted and homeassistant_changes.changed_themes:
+                    ctx.add_detail(details, _("detail.reloading_themes"))
+                    ctx.core_reload_themes()
                 if (
                     not core_restarted
                     and homeassistant_changes.changed_yaml

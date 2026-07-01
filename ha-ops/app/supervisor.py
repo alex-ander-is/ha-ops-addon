@@ -100,6 +100,12 @@ def core_reload_lovelace(call_supervisor):
         raise RuntimeError(f"Lovelace reload failed: {payload}")
 
 
+def core_reload_themes(call_supervisor):
+    payload = call_supervisor("POST", "/core/api/services/frontend/reload_themes", {})
+    if not supervisor_ok(payload) and not isinstance(payload, list):
+        raise RuntimeError(f"Theme reload failed: {payload}")
+
+
 def do_core_check(call_supervisor):
     payload = call_supervisor("POST", "/core/check")
     data = payload.get("data", {})

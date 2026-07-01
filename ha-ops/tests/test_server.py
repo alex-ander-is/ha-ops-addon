@@ -9237,6 +9237,38 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(events, ["check", "reload"])
 
+    def test_theme_apply_reloads_themes_without_general_yaml_reload(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            source = root / "repo" / "homeassistant" / "themes" / "custom"
+            live = server.CONFIG_DIR / "themes" / "custom"
+            source.mkdir(parents=True)
+            live.mkdir(parents=True)
+            (source / "theme.yaml").write_text("custom: {primary-color: '#fff'}\n")
+            (live / "theme.yaml").write_text("custom: {primary-color: '#000'}\n")
+            events = []
+            server.do_core_check = lambda: events.append("check")
+            server.core_reload_themes = lambda: events.append("themes")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.apply_targets(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(source.parents[1]),
+                        "live_path": str(server.CONFIG_DIR),
+                    }
+                ],
+                [],
+            )
+
+            self.assertEqual(events, ["check", "themes"])
+            self.assertEqual((live / "theme.yaml").read_text(), "custom: {primary-color: '#fff'}\n")
+
     def test_lovelace_resources_apply_reloads_without_stopping_core(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -16215,6 +16247,39 @@ devices:
 
             self.assertEqual(events, ["lovelace"])
             self.assertEqual((live_storage / "lovelace_resources").read_text(), '{"data":{"items":[{"url":"/local/snapshot.js"}]}}\n')
+
+    def test_theme_release_rollback_reloads_themes_without_general_yaml_reload(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            live_theme = server.CONFIG_DIR / "themes" / "custom" / "theme.yaml"
+            live_theme.parent.mkdir(parents=True)
+            live_theme.write_text("custom: {primary-color: '#fff'}\n")
+
+            release = server.create_release_snapshot(
+                [
+                    {
+                        "id": "homeassistant",
+                        "type": "homeassistant",
+                        "source_path": str(root / "repo" / "homeassistant"),
+                        "live_path": str(server.CONFIG_DIR),
+                    }
+                ],
+                "abc123",
+                None,
+            )
+
+            live_theme.write_text("custom: {primary-color: '#000'}\n")
+            events = []
+            server.core_reload_themes = lambda: events.append("themes")
+            server.core_reload_yaml = lambda: events.append("reload")
+            server.core_restart = lambda: events.append("restart")
+
+            server.restore_release_snapshot(release, [])
+
+            self.assertEqual(events, ["themes"])
+            self.assertEqual(live_theme.read_text(), "custom: {primary-color: '#fff'}\n")
 
     def test_lovelace_resources_release_rollback_falls_back_to_restart_when_reload_fails(self):
         server = load_server()

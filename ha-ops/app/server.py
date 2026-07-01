@@ -50,6 +50,7 @@ _PATCHABLE_METHODS = {
     "core_start",
     "core_restart",
     "core_reload_lovelace",
+    "core_reload_themes",
     "core_reload_yaml",
     "do_core_check",
     "backup_mount_info",
