@@ -3208,7 +3208,7 @@ def build_preview_baseline(target, baseline_path, ctx):
         ctx.log(f"Preview {target['id']}: exporting live Home Assistant config from {live_path}")
         export_homeassistant_config(live_path, baseline_path, target, ctx)
     else:
-        ctx.log(f"Preview {target['id']}: exporting live add-on config from {live_path}")
+        ctx.log(f"Preview {target['id']}: exporting live App config from {live_path}")
         export_target_to_path(target, baseline_path, ctx)
 
 
@@ -3232,7 +3232,7 @@ def sync_to_preview(target, baseline_path, preview_path, ctx):
     else:
         if source_path.exists() and has_managed_content(source_path):
             reject_source_symlinks(target, ctx)
-            ctx.log(f"Preview {target['id']}: applying Git add-on config from {source_path}")
+            ctx.log(f"Preview {target['id']}: applying Git App config from {source_path}")
             sync_tree(source_path, preview_path, target_model.apply_delete(target), ctx.export_excludes, ctx.run_command)
         skipped_protected = []
     return skipped_protected

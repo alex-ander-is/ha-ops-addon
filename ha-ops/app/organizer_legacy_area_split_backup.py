@@ -111,7 +111,7 @@ if yaml is not None:
 
 def require_yaml():
     if yaml is None:
-        raise RuntimeError("PyYAML is required for HA Ops organizer. Install py3-yaml in the add-on image.")
+        raise RuntimeError("PyYAML is required for HA Ops organizer. Install py3-yaml in the App image.")
 
 
 def yaml_dump_text(data):

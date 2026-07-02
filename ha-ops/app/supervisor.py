@@ -67,7 +67,7 @@ def get_addon_info(slug, call_supervisor):
 def addon_action(slug, action, call_supervisor):
     payload = call_supervisor("POST", f"/addons/{slug}/{action}")
     if not supervisor_ok(payload):
-        raise RuntimeError(f"Add-on {slug} {action} failed: {payload}")
+        raise RuntimeError(f"App {slug} {action} failed: {payload}")
 
 
 def core_stop(call_supervisor):

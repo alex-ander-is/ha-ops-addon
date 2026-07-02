@@ -66,7 +66,7 @@ def generate_deploy_key(work_dir, key_path, pub_path, run_command, log):
             ]
         )
     except FileNotFoundError as exc:
-        raise RuntimeError("ssh-keygen is not available inside the add-on image") from exc
+        raise RuntimeError("ssh-keygen is not available inside the App image") from exc
     if result.returncode != 0:
         raise RuntimeError(f"ssh-keygen failed:\n{result.stderr.strip() or result.stdout.strip()}")
 

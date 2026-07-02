@@ -1,6 +1,6 @@
 # ha-ops-addon
 
-Home Assistant add-on repository for HA Ops.
+Home Assistant App repository for HA Ops.
 
 ## Install in Home Assistant
 
@@ -25,7 +25,7 @@ https://github.com/alex-ander-is/ha-ops-addon
 - Preview Git changes through service branch merges before applying them to Home Assistant
 - Select exactly which preview files Save or Apply should process
 - Apply Git config as an overlay, with deletions only when explicitly selected from a preview
-- Discover installed add-ons and let the user choose which add-on configs are managed
+- Discover installed Apps and let the user choose which App configs are managed
 - Require fresh system backups and create full Home Assistant backups when needed
 - Create pruned local release snapshots
 - Roll back from saved local releases
@@ -34,8 +34,8 @@ See [`ha-ops/README.md`](./ha-ops/README.md) for setup and behavior.
 
 ## Presentation Assets
 
-- `ha-ops/icon.png` is the Home Assistant app/add-on list icon.
-- `ha-ops/logo.png` is the add-on presentation logo.
+- `ha-ops/icon.png` is the Home Assistant Apps list icon.
+- `ha-ops/logo.png` is the App presentation logo.
 - Home Assistant update indicators come from Supervisor version state, not from these image files.
 
 For local HAOS development, clone this repository into:

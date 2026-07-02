@@ -7,7 +7,7 @@ configuration:
     description: Git branch that HA Ops should fetch and apply.
   repo_path:
     name: Local Checkout Folder
-    description: Folder name used inside the add-on data directory for the local Git checkout.
+    description: Folder name used inside the App data directory for the local Git checkout.
   manifest_path:
     name: Deployment Manifest Path
     description: Path inside the repository to the HA Ops manifest file, usually ha-ops.json.

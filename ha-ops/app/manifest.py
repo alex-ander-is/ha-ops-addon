@@ -188,7 +188,7 @@ def resolve_addon_slug(target, addons):
                 return exact
         if target.get("optional"):
             return None
-        raise RuntimeError(f"Configured add-on slug was not found: {exact}")
+        raise RuntimeError(f"Configured App slug was not found: {exact}")
 
     suffix = target.get("addon_slug_suffix")
     if suffix:
@@ -197,7 +197,7 @@ def resolve_addon_slug(target, addons):
             return matches[0]["slug"]
         if not matches and target.get("optional"):
             return None
-        raise RuntimeError(f"Expected one add-on slug ending with '{suffix}', found {len(matches)}")
+        raise RuntimeError(f"Expected one App slug ending with '{suffix}', found {len(matches)}")
 
     name_contains = target.get("addon_name_contains")
     if name_contains:
@@ -210,9 +210,9 @@ def resolve_addon_slug(target, addons):
             return matches[0]["slug"]
         if not matches and target.get("optional"):
             return None
-        raise RuntimeError(f"Expected one add-on name containing '{name_contains}', found {len(matches)}")
+        raise RuntimeError(f"Expected one App name containing '{name_contains}', found {len(matches)}")
 
-    raise RuntimeError(f"Add-on target '{target.get('id')}' is missing resolver fields")
+    raise RuntimeError(f"App target '{target.get('id')}' is missing resolver fields")
 
 
 def addon_by_slug(addons, slug):
@@ -245,7 +245,7 @@ def validate_addon_live_path(path, allowed_roots, target_id):
     if any(path_is_within(path, root) for root in allowed_roots):
         return path
     roots = ", ".join(str(root) for root in allowed_roots)
-    raise RuntimeError(f"Add-on live path escapes allowed config roots for target '{target_id}': {path}. Allowed roots: {roots}")
+    raise RuntimeError(f"App live path escapes allowed config roots for target '{target_id}': {path}. Allowed roots: {roots}")
 
 
 def addon_config_path_candidates(target, slug, addon, addon_configs_dir, config_dir, addon_is_zigbee2mqtt):

@@ -13259,9 +13259,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<td class='checkbox-col'><input type='checkbox'", page)
             self.assertIn(".managed-targets-table .checkbox-col", page)
             self.assertIn("Zigbee2MQTT (local_zigbee2mqtt)", page)
-            self.assertNotIn("<h2>Managed Add-ons</h2>", page)
+            self.assertNotIn("<h2>Managed Apps</h2>", page)
             self.assertNotIn("Protected Storage", page)
-            self.assertNotIn("Save Add-on Selection", page)
+            self.assertNotIn("Save App Selection", page)
 
     def test_primary_actions_are_grouped_by_direction(self):
         server = load_server()
@@ -13408,8 +13408,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("custom_components", details)
             self.assertIn("www", details)
             self.assertIn("logs", details)
-            self.assertIn("Add-on configs", details)
-            self.assertIn("Docker: unavailable from HA Ops add-on", details)
+            self.assertIn("App configs", details)
+            self.assertIn("Docker: unavailable from HA Ops App", details)
             self.assertIn("System journal:", details)
             self.assertIn("12.0M", details)
             self.assertIn("Disk usage summary finished.", details)
@@ -13580,10 +13580,10 @@ class ServerTests(unittest.TestCase):
             details = "\n".join(lines)
 
             self.assertLess(elapsed, 0.15)
-            self.assertIn("Storage: unavailable from HA Ops add-on (timed out after 0.01s).", details)
-            self.assertIn("Host: unavailable from HA Ops add-on (timed out after 0.01s).", details)
-            self.assertIn("Docker: unavailable from HA Ops add-on (timed out after 0.01s).", details)
-            self.assertIn("System journal: unavailable from HA Ops add-on (timed out after 0.01s).", details)
+            self.assertIn("Storage: unavailable from HA Ops App (timed out after 0.01s).", details)
+            self.assertIn("Host: unavailable from HA Ops App (timed out after 0.01s).", details)
+            self.assertIn("Docker: unavailable from HA Ops App (timed out after 0.01s).", details)
+            self.assertIn("System journal: unavailable from HA Ops App (timed out after 0.01s).", details)
 
     def test_disk_usage_treats_docker_socket_errors_as_optional(self):
         server = load_server()
@@ -13616,7 +13616,7 @@ class ServerTests(unittest.TestCase):
             details = "\n".join(lines)
 
             self.assertIn("Disk usage summary (read-only).", details)
-            self.assertIn("Docker: unavailable from HA Ops add-on (socket denied).", details)
+            self.assertIn("Docker: unavailable from HA Ops App (socket denied).", details)
 
     def test_disk_usage_treats_unexpected_docker_payload_as_optional(self):
         server = load_server()
@@ -13644,7 +13644,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("Disk usage summary (read-only).", details)
             self.assertIn(
-                "Docker: unavailable from HA Ops add-on (Docker API response has an unexpected schema.).",
+                "Docker: unavailable from HA Ops App (Docker API response has an unexpected schema.).",
                 details,
             )
 
@@ -16219,7 +16219,7 @@ devices:
                 server.resolve_targets(
                     root / "repo",
                     {"targets": [target]},
-                    [{"slug": "local_zigbee2mqtt", "name": "Plain add-on"}],
+                    [{"slug": "local_zigbee2mqtt", "name": "Plain App"}],
                     require_source=False,
                 )
 
@@ -16240,7 +16240,7 @@ devices:
                 server.resolve_targets(
                     root / "repo",
                     {"targets": [target]},
-                    [{"slug": "local_zigbee2mqtt", "name": "Plain add-on"}],
+                    [{"slug": "local_zigbee2mqtt", "name": "Plain App"}],
                     require_source=False,
                 )
 

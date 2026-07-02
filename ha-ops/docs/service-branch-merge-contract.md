@@ -17,7 +17,7 @@ shortcuts are unsafe.
 
 - `repo_branch`, usually `main`, is the user-managed branch.
 - `ha-ops/ha-live` is the latest exported live Home Assistant and selected
-  add-on config.
+  App config.
 - `ha-ops/base` is a marker branch pointing at the current merge base between
   `repo_branch` and `ha-ops/ha-live`.
 

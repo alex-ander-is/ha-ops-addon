@@ -7,7 +7,7 @@ configuration:
     description: Git-ветка, которую HA Ops будет подтягивать и применять.
   repo_path:
     name: Локальная папка checkout
-    description: Имя папки внутри данных add-on, в которой хранится локальный checkout репозитория.
+    description: Имя папки внутри данных приложения, в которой хранится локальный checkout репозитория.
   manifest_path:
     name: Путь к manifest
     description: Путь внутри репозитория к manifest-файлу HA Ops, обычно ha-ops.json.

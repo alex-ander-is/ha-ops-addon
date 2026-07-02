@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.8.56
+
+- Use Home Assistant's current Apps terminology in displayed names, documentation, translations, and runtime messages.
+
 ## 0.8.55
 
 - Reload frontend themes after Git-to-HA Apply or release rollback when only files in `themes/` changed, without restarting Core or running the general YAML reload.
@@ -122,7 +126,7 @@ Released sections are immutable. Put every new change into a new version section
 ## 0.8.30
 
 - Add a read-only Disk Usage action that prints mapped HA Ops storage sizes, Supervisor host disk fields, and Docker `/system/df` diagnostics to the Log.
-- Declare `docker_api: true` for read-only Docker `/system/df` diagnostics; this Home Assistant add-on capability is broad.
+- Declare `docker_api: true` for read-only Docker `/system/df` diagnostics; this Home Assistant App capability is broad.
 
 ## 0.8.29
 
@@ -317,7 +321,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.7.17
 
-- Use selected Zigbee2MQTT add-on source data when previewing and applying Actions IDs migrations.
+- Use selected Zigbee2MQTT App source data when previewing and applying Actions IDs migrations.
 
 ## 0.7.16
 
@@ -382,7 +386,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.7.3
 
-- Clear stale Internal IDs migration previews after refresh, restart, and add-on updates.
+- Clear stale Internal IDs migration previews after refresh, restart, and App updates.
 - Rename the Internal IDs check action to Check actions IDs and group primary controls by HA to Git, Git to HA, and Maintenance sections.
 
 ## 0.7.2
@@ -408,7 +412,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.6.21
 
-- Clear stale transient status after an HA Ops add-on version update so old errors are not shown as fresh failures.
+- Clear stale transient status after an HA Ops App version update so old errors are not shown as fresh failures.
 
 ## 0.6.20
 
@@ -533,7 +537,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.5.3
 
-- Merge managed add-on selection into the targets table.
+- Merge managed App selection into the targets table.
 - Hide the protected-storage implementation detail from the main targets table.
 
 ## 0.5.2
@@ -594,7 +598,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.4.30
 
-- Use the Home Assistant add-on config mount at /config as the default live config path.
+- Use the Home Assistant App config mount at /config as the default live config path.
 
 ## 0.4.29
 
@@ -624,16 +628,16 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.4.23
 
-- Align add-on presentation assets with Home Assistant expectations: keep a 128x128 app icon and use a landscape logo.
-- Document that update indicators come from Supervisor version state, not from add-on image assets.
+- Align App presentation assets with Home Assistant expectations: keep a 128x128 app icon and use a landscape logo.
+- Document that update indicators come from Supervisor version state, not from App image assets.
 
 ## 0.4.22
 
-- Restore the add-on app icon for Home Assistant apps/add-ons lists.
+- Restore the App icon for Home Assistant Apps lists.
 
 ## 0.4.21
 
-- Make managed add-on checkboxes save immediately and remove the separate Save Add-on Selection button.
+- Make managed App checkboxes save immediately and remove the separate Save App Selection button.
 
 ## 0.4.20
 
@@ -646,7 +650,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.4.18
 
-- Removed the add-on app icon while keeping the logo.
+- Removed the App icon while keeping the logo.
 
 ## 0.4.17
 
@@ -663,7 +667,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.4.14
 
-- Add HA Ops add-on icon and logo assets.
+- Add HA Ops App icon and logo assets.
 
 ## 0.4.13
 
@@ -701,15 +705,15 @@ Released sections are immutable. Put every new change into a new version section
 
 - Split server internals into UI, state, supervisor, backups, manifest, Git, sync, jobs, and target modules.
 - Avoid stopping Home Assistant Core twice when Apply fails after Core was already stopped for `.storage` sync.
-- Recursively remove excluded runtime files from add-on save destinations before exporting live config.
-- Reject add-on manifest live paths outside expected add-on config roots.
+- Recursively remove excluded runtime files from App save destinations before exporting live config.
+- Reject App manifest live paths outside expected App config roots.
 - Filter release snapshots to managed config paths to avoid storing runtime databases and logs.
 - Add regression coverage for rollback, delete semantics, protected storage, conflict blocking, and clean checkout imports.
 
 ## 0.4.5
 
-- Apply selected add-ons as an overlay by default so partial Git sources do not delete live-only add-on files.
-- Keep destructive add-on deletes available only through explicit `delete: true`.
+- Apply selected Apps as an overlay by default so partial Git sources do not delete live-only App files.
+- Keep destructive App deletes available only through explicit `delete: true`.
 
 ## 0.4.4
 
@@ -726,15 +730,15 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.4.1
 
-- Make Managed Add-ons checkboxes control add-on targets even when `ha-ops.json` exists.
-- Preserve manifest options for selected add-ons while excluding unchecked add-ons.
-- Save selected add-ons from live config even when Git currently contains only a `.gitkeep` scaffold.
+- Make Managed Apps checkboxes control App targets even when `ha-ops.json` exists.
+- Preserve manifest options for selected Apps while excluding unchecked Apps.
+- Save selected Apps from live config even when Git currently contains only a `.gitkeep` scaffold.
 
 ## 0.4.0
 
 - Replace the export-branch flow with `Save HA to Git`, `Preview Git to HA`, and `Apply Git to HA`.
 - Make empty or partial Git repositories safe: Apply is an overlay/no-op and does not delete live-only config.
-- Add installed add-on discovery with managed add-on checkboxes.
+- Add installed App discovery with managed App checkboxes.
 - Add file-level Git conflict resolution for save conflicts.
 - Keep commit metadata out of the main status UI because live Home Assistant can change outside Git.
 
@@ -753,7 +757,7 @@ Released sections are immutable. Put every new change into a new version section
 - Show latest Home Assistant backup status in the UI.
 - Rename the action button to `Pull & Apply`.
 - Use checksum-based sync so same-size config edits are not skipped.
-- Skip optional add-on targets whose source folder only contains `.gitkeep`.
+- Skip optional App targets whose source folder only contains `.gitkeep`.
 - Validate manifest paths, rollback release names, and make deploy key regeneration atomic.
 
 ## 0.3.18

@@ -102,7 +102,7 @@ Saved:
 - `ui_lovelace_minimalist/`
 - selected allowlisted `.storage` config files, including protected registry and instance files
 - safe managed projections such as `.storage_managed/core.config_entries.json`
-- selected add-on config folders
+- selected App config folders
 
 Preserved:
 
@@ -128,8 +128,8 @@ Skipped:
 
 - Git config is applied as an overlay, not as a destructive mirror.
 - Missing files in Git do not delete live Home Assistant files during normal overlay apply. In conflict previews, a selected Git-side deletion can remove the matching live file.
-- Selected add-on config is applied as an overlay by default.
-- Selected add-on runtime files such as databases and logs are ignored on apply, even when present in Git.
+- Selected App config is applied as an overlay by default.
+- Selected App runtime files such as databases and logs are ignored on apply, even when present in Git.
 - Empty Git source is a no-op.
 - Home Assistant directories that exist in Git are applied as overlays.
 - `Preview Git to HA` always shows the full diff for allowlisted `.storage`, including protected registry and instance files.
@@ -147,14 +147,14 @@ Skipped:
 - Dashboard/config `.storage` files such as `lovelace.lovelace`, `lovelace_dashboards`, and `lovelace.map` use the normal storage lifecycle because `lovelace.reload_resources` is resources-only.
 - Other `.storage` apply or rollback can stop/start Core by policy because Home Assistant may otherwise keep stale state or rewrite those files.
 
-## Managed Add-ons
+## Managed Apps
 
-- HA Ops discovers installed add-ons through Supervisor.
-- Add-ons are unmanaged by default.
-- Check an add-on in the UI to include its config in `Save HA to Git` and future Git-to-HA apply.
-- Uncheck an add-on in the UI to exclude it, even when `ha-ops.json` exists.
-- Set `delete: true` in an optional manifest only when intentionally mirroring an add-on folder destructively.
-- Zigbee2MQTT is detected from installed add-on metadata instead of a hard-coded slug.
+- HA Ops discovers installed Apps through Supervisor.
+- Apps are unmanaged by default.
+- Check an App in the UI to include its config in `Save HA to Git` and future Git-to-HA apply.
+- Uncheck an App in the UI to exclude it, even when `ha-ops.json` exists.
+- Set `delete: true` in an optional manifest only when intentionally mirroring an App folder destructively.
+- Zigbee2MQTT is detected from installed App metadata instead of a hard-coded slug.
 - If Zigbee2MQTT stores config under `/config/zigbee2mqtt`, HA Ops can use that existing path instead of assuming `/addon_configs/<slug>`.
 
 ## Disk Usage
@@ -163,11 +163,11 @@ Skipped:
 - The report starts with a single Storage tree: total used storage, inferred System storage, visible App data, visible Home Assistant config, and Free space.
 - The Home Assistant branch keeps useful child details such as the database, Zigbee2MQTT, `custom_components`, `.storage`, `www`, and logs when those paths are visible.
 - Filesystem rows and top-level totals are deduplicated by backing filesystem totals so repeated mapped paths on the same device are counted once.
-- System storage is inferred from filesystem used space minus paths the add-on can read. If HA Ops cannot account for host-only paths, the report marks that part as partial or unavailable instead of pretending it inspected the host.
+- System storage is inferred from filesystem used space minus paths the App can read. If HA Ops cannot account for host-only paths, the report marks that part as partial or unavailable instead of pretending it inspected the host.
 - HA Ops declares `docker_api: true` only so this report can read Docker disk usage. The Docker API capability is broad; HA Ops uses it for the read-only `/system/df` endpoint.
 - Path traversal and optional diagnostics are bounded. If Supervisor, Docker, journal, or filesystem diagnostics time out or are unavailable, the report marks that section as unavailable and keeps the rest of the summary.
 
-## Add-on Options
+## App Options
 
 - `repo_url`: Git URL of the private config repository.
 - `repo_branch`: branch to save and apply, usually `main`.

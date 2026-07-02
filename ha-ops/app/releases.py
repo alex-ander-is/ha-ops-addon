@@ -217,7 +217,7 @@ def restore_release_snapshot(release_name, details, core_already_stopped, ctx):
                 homeassistant_should_start = True
         elif target_type == "addon" and target.get("stop_addon_before_sync", False):
             slug = target.get("resolved_slug")
-            ctx.add_detail(details, f"Stopping add-on {slug} before rollback sync.")
+            ctx.add_detail(details, f"Stopping App {slug} before rollback sync.")
             addon_was_started = ctx.stop_addon_for_sync(slug)
 
         if target.get("existed", True):
@@ -239,10 +239,10 @@ def restore_release_snapshot(release_name, details, core_already_stopped, ctx):
             slug = target.get("resolved_slug")
             if target.get("stop_addon_before_sync", False):
                 if addon_was_started:
-                    ctx.add_detail(details, f"Starting add-on {slug} after rollback.")
+                    ctx.add_detail(details, f"Starting App {slug} after rollback.")
                     ctx.addon_action(slug, "start")
             else:
-                ctx.add_detail(details, f"Restarting add-on {slug} after rollback.")
+                ctx.add_detail(details, f"Restarting App {slug} after rollback.")
                 ctx.restart_or_start_addon(slug)
 
     if homeassistant_seen and homeassistant_should_start:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 CONFIG_PATH = ROOT / "config.yaml"
 TEXT_SUFFIXES = {
@@ -26,7 +27,7 @@ def repo_text_files():
             continue
         if path.suffix not in TEXT_SUFFIXES:
             continue
-        if "__pycache__" in path.parts:
+        if "__pycache__" in path.parts or ".codex-audit" in path.parts:
             continue
         yield path
 
@@ -43,6 +44,19 @@ def changelog_section(text, version):
 
 
 class ReleaseReadinessTests(unittest.TestCase):
+    def test_displayed_terminology_uses_apps(self):
+        legacy_term = re.compile(r"\badd-" + r"ons?\b", re.IGNORECASE)
+        paths = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "README.md", REPO_ROOT / "repository.yaml", *repo_text_files()]
+        matches = []
+
+        for path in paths:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+            if legacy_term.search(text):
+                matches.append(str(path.relative_to(REPO_ROOT)))
+
+        self.assertEqual(matches, [])
+        self.assertIn('name: HA Ops Apps', (REPO_ROOT / "repository.yaml").read_text(encoding="utf-8"))
+
     def test_repo_text_files_do_not_contain_local_fixture_markers(self):
         private_tmp = "/" + "private" + "/" + "tmp"
         live_artifacts = "ha-ops-live-" + "artifacts"

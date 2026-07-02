@@ -82,7 +82,7 @@ Required follow-up tests:
   list indentation, or mapping key order under the chosen oracle.
 - [ ] Prove `areas -> heap -> areas` does not churn the same YAML style cases.
 - [ ] Include both `annotatedyaml` and fallback dumper behavior where practical,
-  or explicitly document which runtime is authoritative for add-on tests.
+  or explicitly document which runtime is authoritative for App tests.
 - [ ] Add regression coverage before changing loader or dumper behavior.
 - [ ] Keep style tests separate from routing tests so failures identify whether
   the bug is projection/routing or YAML serialization.
