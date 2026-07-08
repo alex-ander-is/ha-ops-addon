@@ -216,21 +216,302 @@ def rollback_path(work_dir):
     return rollback_dir(work_dir) / "core.device_registry"
 
 
+def entity_rollback_path(rollback_file):
+    return Path(rollback_file).with_name("core.entity_registry")
+
+
+# v1 is deliberately separate from the old pair of files.  The old files have
+# no lifecycle information and are therefore only safe when state.json points
+# at them explicitly.  This self-describing file is the sole startup-discovered
+# rollback source.
+ROLLBACK_MANIFEST_NAME = "rollback-manifest-v1.json"
+ROLLBACK_MANIFEST_VERSION = 1
+ROLLBACK_PHASE_RESTORE_REQUIRED = "restore_required"
+ROLLBACK_PHASE_RECOVERING = "recovering"
+ROLLBACK_PHASE_PENDING = "pending_confirmation"
+ROLLBACK_PHASE_CONFIRMED = "confirmed"
+ROLLBACK_PHASE_REVERTED = "reverted"
+ROLLBACK_NONTERMINAL_PHASES = {ROLLBACK_PHASE_RESTORE_REQUIRED, ROLLBACK_PHASE_RECOVERING}
+ROLLBACK_TERMINAL_PHASES = {ROLLBACK_PHASE_CONFIRMED, ROLLBACK_PHASE_REVERTED}
+
+
+def rollback_manifest_path(work_dir):
+    return rollback_dir(work_dir) / ROLLBACK_MANIFEST_NAME
+
+
+def manifest_sidecar_path(manifest_file, registry_name):
+    return Path(manifest_file).with_name(f"{registry_name}.snapshot")
+
+
+def _fsync_directory(path):
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace_bytes(path, payload, *, sync_directory=True):
+    """Write bytes durably using a same-directory temp + atomic replace."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+        if sync_directory:
+            _fsync_directory(path.parent)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _durable_unlink(path):
+    path = Path(path)
+    if path.exists():
+        path.unlink()
+        _fsync_directory(path.parent)
+
+
+def _snapshot_record(manifest_file, registry_name, text):
+    if text is None:
+        return {"present": False, "sidecar": None, "sha256": None, "length": 0}
+    payload = text.encode("utf-8")
+    sidecar = manifest_sidecar_path(manifest_file, registry_name)
+    _durable_replace_bytes(sidecar, payload)
+    return {
+        "present": True,
+        "sidecar": sidecar.name,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "length": len(payload),
+    }
+
+
+def _manifest_payload(manifest_file, manifest):
+    try:
+        if not isinstance(manifest, dict) or manifest.get("version") != ROLLBACK_MANIFEST_VERSION:
+            raise ValueError("unsupported rollback manifest version")
+        if manifest.get("phase") not in (ROLLBACK_NONTERMINAL_PHASES | ROLLBACK_TERMINAL_PHASES | {ROLLBACK_PHASE_PENDING}):
+            raise ValueError("invalid rollback manifest phase")
+        registries = manifest["registries"]
+        result = {}
+        for registry_name in ("core.device_registry", "core.entity_registry"):
+            record = registries[registry_name]
+            present = record.get("present")
+            if not isinstance(present, bool):
+                raise ValueError(f"invalid presence for {registry_name}")
+            if not present:
+                if record.get("sidecar") is not None or record.get("sha256") is not None:
+                    raise ValueError(f"unexpected sidecar for absent {registry_name}")
+                result[registry_name] = None
+                continue
+            name = record.get("sidecar")
+            if not isinstance(name, str) or Path(name).name != name:
+                raise ValueError(f"invalid sidecar name for {registry_name}")
+            payload = (Path(manifest_file).parent / name).read_bytes()
+            if record.get("length") != len(payload) or record.get("sha256") != hashlib.sha256(payload).hexdigest():
+                raise ValueError(f"invalid sidecar payload for {registry_name}")
+            result[registry_name] = payload
+        return result
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Deleted devices rollback manifest is invalid: {exc}") from exc
+
+
+def load_rollback_manifest(manifest_file):
+    manifest_file = Path(manifest_file)
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Deleted devices rollback manifest is invalid: {exc}") from exc
+    return manifest, _manifest_payload(manifest_file, manifest)
+
+
+def load_rollback_manifest_metadata(manifest_file):
+    """Load v1 lifecycle metadata without requiring terminal sidecars."""
+    manifest_file = Path(manifest_file)
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+        if not isinstance(manifest, dict) or manifest.get("version") != ROLLBACK_MANIFEST_VERSION:
+            raise ValueError("unsupported rollback manifest version")
+        if manifest.get("phase") not in (
+            ROLLBACK_NONTERMINAL_PHASES | ROLLBACK_TERMINAL_PHASES | {ROLLBACK_PHASE_PENDING}
+        ):
+            raise ValueError("invalid rollback manifest phase")
+        registries = manifest["registries"]
+        for registry_name in ("core.device_registry", "core.entity_registry"):
+            record = registries[registry_name]
+            if not isinstance(record.get("present"), bool):
+                raise ValueError(f"invalid presence for {registry_name}")
+            sidecar = record.get("sidecar")
+            if record["present"]:
+                if not isinstance(sidecar, str) or Path(sidecar).name != sidecar:
+                    raise ValueError(f"invalid sidecar name for {registry_name}")
+            elif sidecar is not None:
+                raise ValueError(f"unexpected sidecar for absent {registry_name}")
+        return manifest
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Deleted devices rollback manifest is invalid: {exc}") from exc
+
+
+def rollback_manifest_is_v1(rollback_file):
+    """Do not trust stale state metadata to reinterpret a legacy snapshot."""
+    return Path(rollback_file).name == ROLLBACK_MANIFEST_NAME
+
+
+def rollback_manifest_status(work_dir):
+    """Return the canonical v1 artifact status without consulting state."""
+    path = rollback_manifest_path(work_dir)
+    if not path.exists():
+        return {"status": "absent", "path": path}
+    try:
+        manifest = load_rollback_manifest_metadata(path)
+        # Terminal manifests are already committed. Sidecars may have been
+        # durably removed before a later unlink failed, so they are not needed
+        # to complete their artifact cleanup on the next startup.
+        if manifest["phase"] in ROLLBACK_TERMINAL_PHASES:
+            return {"status": "valid", "path": path, "manifest": manifest, "payloads": None}
+        manifest, payloads = load_rollback_manifest(path)
+        return {"status": "valid", "path": path, "manifest": manifest, "payloads": payloads}
+    except RuntimeError as exc:
+        return {"status": "invalid", "path": path, "error": exc}
+
+
+def rollback_manifest_phase(manifest_file, phase):
+    manifest, _payloads = load_rollback_manifest(manifest_file)
+    manifest["phase"] = phase
+    _durable_replace_bytes(Path(manifest_file), (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    return manifest
+
+
+def read_entity_registry(config_dir):
+    path = entity_registry_path(config_dir)
+    if not path.exists():
+        return path, None, {}
+    text = path.read_text(encoding="utf-8")
+    return path, text, json.loads(text)
+
+
+def registry_fingerprint(device_text, entity_text):
+    entity_component = entity_text if entity_text is not None else "<missing core.entity_registry>"
+    return fingerprint_text(f"{device_text}\n\0\n{entity_component}")
+
+
 def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint):
     path, text, _data = read_device_registry(config_dir)
-    current_fingerprint = fingerprint_text(text)
+    _entity_path, entity_text, _entity_data = read_entity_registry(config_dir)
+    current_fingerprint = registry_fingerprint(text, entity_text)
     if expected_fingerprint and current_fingerprint != expected_fingerprint:
-        raise RuntimeError("Device registry changed since preview. Run Check deleted_devices again.")
-    dest = rollback_path(work_dir)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text(text, encoding="utf-8")
-    return {"path": str(dest), "fingerprint": current_fingerprint}
+        raise RuntimeError("Deleted devices changed since preview. Run Check deleted devices again.")
+    manifest_file = rollback_manifest_path(work_dir)
+    manifest_file.parent.mkdir(parents=True, exist_ok=True)
+    # Sidecars are fully committed before the manifest makes them discoverable.
+    device_record = _snapshot_record(manifest_file, "core.device_registry", text)
+    entity_record = _snapshot_record(manifest_file, "core.entity_registry", entity_text)
+    device_count = len(deleted_devices(json.loads(text)))
+    entity_count = len(deleted_entities(json.loads(entity_text))) if entity_text is not None else 0
+    manifest = {
+        "version": ROLLBACK_MANIFEST_VERSION,
+        "phase": ROLLBACK_PHASE_RESTORE_REQUIRED,
+        "fingerprint": current_fingerprint,
+        "device_count": device_count,
+        "entity_count": entity_count,
+        "registries": {
+            "core.device_registry": device_record,
+            "core.entity_registry": entity_record,
+        },
+    }
+    # The directory fsync in _durable_replace_bytes is the commit point.  No
+    # state publication or registry mutation happens before this returns.
+    _durable_replace_bytes(
+        manifest_file,
+        (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+    )
+    return {
+        "path": str(manifest_file),
+        "fingerprint": current_fingerprint,
+        "format": "manifest_v1",
+        "device_count": device_count,
+        "entity_count": entity_count,
+    }
+
+
+def _replace_registry_from_snapshot(destination, payload):
+    _durable_replace_bytes(destination, payload)
+
+
+def _restore_v1_registry(config_dir, source, manifest, payloads):
+    source = Path(source)
+    destinations = {
+        "core.device_registry": device_registry_path(config_dir),
+        "core.entity_registry": entity_registry_path(config_dir),
+    }
+    restored_devices = restored_entities = 0
+    merged_devices = merged_entities = 0
+    preserved_devices = preserved_entities = 0
+    result_texts = {}
+    for name, destination in destinations.items():
+        original = payloads[name]
+        if original is None:
+            # The optional entity registry did not exist at the snapshot
+            # point. It may have been created by Home Assistant later; a
+            # rollback must never remove or rewrite that newer registry.
+            try:
+                result_texts[name] = destination.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                result_texts[name] = None
+            continue
+        snapshot_data = json.loads(original.decode("utf-8"))
+        snapshot_entries = deleted_devices(snapshot_data) if name == "core.device_registry" else deleted_entities(snapshot_data)
+        try:
+            current_text = destination.read_text(encoding="utf-8")
+            current_data = json.loads(current_text)
+        except (OSError, json.JSONDecodeError):
+            # A torn/missing registry has no later tombstones to merge. Restore
+            # the exact verified bytes rather than attempting to parse it.
+            _replace_registry_from_snapshot(destination, original)
+            result_texts[name] = original.decode("utf-8")
+            if name == "core.device_registry":
+                restored_devices = len(snapshot_entries)
+                merged_devices = len(snapshot_entries)
+            else:
+                restored_entities = len(snapshot_entries)
+                merged_entities = len(snapshot_entries)
+            continue
+        current_entries = deleted_devices(current_data) if name == "core.device_registry" else deleted_entities(current_data)
+        merged = merge_deleted_devices(current_entries, snapshot_entries) if name == "core.device_registry" else merge_deleted_entities(current_entries, snapshot_entries)
+        if name == "core.device_registry":
+            current_data.setdefault("data", {})["deleted_devices"] = merged
+            restored_devices, merged_devices, preserved_devices = len(snapshot_entries), len(merged), len(current_entries)
+        else:
+            current_data.setdefault("data", {})["deleted_entities"] = merged
+            restored_entities, merged_entities, preserved_entities = len(snapshot_entries), len(merged), len(current_entries)
+        _durable_replace_bytes(destination, (json.dumps(current_data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+        result_texts[name] = destination.read_text(encoding="utf-8")
+    return {
+        "fingerprint": registry_fingerprint(result_texts["core.device_registry"], result_texts["core.entity_registry"]),
+        "restored": restored_devices + restored_entities,
+        "merged": merged_devices + merged_entities,
+        "preserved": preserved_devices + preserved_entities,
+        "restored_devices": restored_devices,
+        "restored_entities": restored_entities,
+    }
 
 
 def restore_deleted_devices_rollback(config_dir, rollback_file):
     source = Path(rollback_file)
+    if source.name == ROLLBACK_MANIFEST_NAME:
+        manifest, payloads = load_rollback_manifest(source)
+        return _restore_v1_registry(config_dir, source, manifest, payloads)
     if not source.exists():
-        raise RuntimeError("deleted_devices rollback snapshot is missing.")
+        # Older cleanup state did not persist whether the rollback included
+        # entities.  Preserve the established device-only fallback rather than
+        # presenting a vague registry label.
+        raise RuntimeError("Deleted devices rollback snapshot is missing.")
     rollback_data = json.loads(source.read_text(encoding="utf-8"))
     restored_devices = deleted_devices(rollback_data)
 
@@ -242,19 +523,56 @@ def restore_deleted_devices_rollback(config_dir, rollback_file):
     tmp_path = dest.with_name(f".{dest.name}.tmp")
     tmp_path.write_text(json.dumps(current_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp_path, dest)
+    entity_snapshot = entity_rollback_path(source)
+    restored_entities = []
+    current_entities = []
+    merged_entities = []
+    entity_text = None
+    if entity_snapshot.exists():
+        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
+        restored_entities = deleted_entities(rollback_entity_data)
+        entity_dest, _current_entity_text, current_entity_data = read_entity_registry(config_dir)
+        current_entities = deleted_entities(current_entity_data)
+        merged_entities = merge_deleted_entities(current_entities, restored_entities)
+        current_entity_data.setdefault("data", {})["deleted_entities"] = merged_entities
+        tmp_entity_path = entity_dest.with_name(f".{entity_dest.name}.tmp")
+        tmp_entity_path.write_text(json.dumps(current_entity_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp_entity_path, entity_dest)
+        entity_text = entity_dest.read_text(encoding="utf-8")
     text = dest.read_text(encoding="utf-8")
     return {
-        "fingerprint": fingerprint_text(text),
-        "restored": len(restored_devices),
-        "merged": len(merged_devices),
-        "preserved": len(current_devices),
+        "fingerprint": registry_fingerprint(text, entity_text),
+        "restored": len(restored_devices) + len(restored_entities),
+        "merged": len(merged_devices) + len(merged_entities),
+        "preserved": len(current_devices) + len(current_entities),
+        "restored_devices": len(restored_devices),
+        "restored_entities": len(restored_entities),
     }
 
 
 def discard_deleted_devices_rollback(rollback_file):
     path = Path(rollback_file)
+    if rollback_manifest_is_v1(path):
+        # Do not unlink the manifest in a finally block. It is the retry
+        # record when a sidecar unlink or its directory fsync fails. Metadata
+        # remains readable even after some already-durable sidecar removals.
+        manifest = load_rollback_manifest_metadata(path)
+        records = manifest["registries"]
+        for name in ("core.device_registry", "core.entity_registry"):
+            sidecar = records[name].get("sidecar")
+            if sidecar:
+                _durable_unlink(path.parent / sidecar)
+        _durable_unlink(path)
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+        return
     if path.exists():
         path.unlink()
+    entity_path = entity_rollback_path(path)
+    if entity_path.exists():
+        entity_path.unlink()
     try:
         path.parent.rmdir()
     except OSError:
@@ -263,6 +581,22 @@ def discard_deleted_devices_rollback(rollback_file):
 
 def deleted_devices(data):
     return data.get("data", {}).get("deleted_devices", [])
+
+
+def deleted_entities(data):
+    return data.get("data", {}).get("deleted_entities", [])
+
+
+def deleted_entries_label(device_count, entity_count):
+    if device_count and entity_count:
+        return _("label.deleted_devices_and_entities")
+    if device_count:
+        return _("label.deleted_devices")
+    if entity_count:
+        return _("label.deleted_entities")
+    # Older pending cleanups did not persist a scope.  Keep their established
+    # device-only wording rather than exposing a vague registry term.
+    return _("label.deleted_devices")
 
 
 def deleted_device_key(device):
@@ -283,10 +617,84 @@ def merge_deleted_devices(current_devices, restored_devices):
     return merged
 
 
+def deleted_entity_key(entity):
+    if isinstance(entity, dict):
+        for key in ("id", "entity_id", "unique_id"):
+            if entity.get(key):
+                return (key, str(entity[key]))
+    return ("json", json.dumps(entity, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+
+
+def merge_deleted_entities(current_entities, restored_entities):
+    merged = list(current_entities)
+    seen = {deleted_entity_key(entity) for entity in merged}
+    for entity in restored_entities:
+        key = deleted_entity_key(entity)
+        if key in seen:
+            continue
+        merged.append(entity)
+        seen.add(key)
+    return merged
+
+
 def deleted_devices_cleanup_status(config_dir, rollback_file):
     source = Path(rollback_file)
+    if rollback_manifest_is_v1(source):
+        metadata = load_rollback_manifest_metadata(source)
+        if metadata["phase"] in ROLLBACK_TERMINAL_PHASES:
+            # A terminal phase is the durable outcome. Sidecars may already
+            # be gone after an interrupted artifact cleanup, so do not turn a
+            # safe retry into a manual-recovery error by loading them again.
+            return {
+                "fingerprint": None,
+                "removed": 0,
+                "current": 0,
+                "returned": 0,
+                "added": 0,
+                "returned_entities": 0,
+                "removed_devices": 0,
+                "removed_entities": 0,
+                "current_devices": 0,
+                "current_entities": 0,
+                "added_devices": 0,
+                "added_entities": 0,
+                "returned_devices": 0,
+                "terminal_phase": metadata["phase"],
+            }
+        _manifest, payloads = load_rollback_manifest(source)
+        rollback_data = json.loads(payloads["core.device_registry"].decode("utf-8"))
+        removed_devices = deleted_devices(rollback_data)
+        removed_keys = {deleted_device_key(device) for device in removed_devices}
+        _path, text, current_data = read_device_registry(config_dir)
+        current_devices = deleted_devices(current_data)
+        returned = [device for device in current_devices if deleted_device_key(device) in removed_keys]
+        added = [device for device in current_devices if deleted_device_key(device) not in removed_keys]
+        entity_payload = payloads["core.entity_registry"]
+        removed_entities = current_entities = returned_entities = added_entities = []
+        entity_text = None
+        if entity_payload is not None:
+            rollback_entity_data = json.loads(entity_payload.decode("utf-8"))
+            removed_entities = deleted_entities(rollback_entity_data)
+            removed_entity_keys = {deleted_entity_key(entity) for entity in removed_entities}
+            _entity_path, entity_text, current_entity_data = read_entity_registry(config_dir)
+            current_entities = deleted_entities(current_entity_data)
+            returned_entities = [entity for entity in current_entities if deleted_entity_key(entity) in removed_entity_keys]
+            added_entities = [entity for entity in current_entities if deleted_entity_key(entity) not in removed_entity_keys]
+        return {
+            "fingerprint": registry_fingerprint(text, entity_text),
+            "removed": len(removed_devices) + len(removed_entities),
+            "current": len(current_devices) + len(current_entities),
+            "returned": len(returned) + len(returned_entities),
+            "added": len(added) + len(added_entities),
+            "returned_entities": len(returned_entities),
+            "removed_devices": len(removed_devices), "removed_entities": len(removed_entities),
+            "current_devices": len(current_devices), "current_entities": len(current_entities),
+            "added_devices": len(added), "added_entities": len(added_entities),
+            "returned_devices": len(returned),
+            "terminal_phase": None,
+        }
     if not source.exists():
-        raise RuntimeError("deleted_devices rollback snapshot is missing.")
+        raise RuntimeError("Deleted devices rollback snapshot is missing.")
     rollback_data = json.loads(source.read_text(encoding="utf-8"))
     removed_devices = deleted_devices(rollback_data)
     removed_keys = {deleted_device_key(device) for device in removed_devices}
@@ -294,33 +702,91 @@ def deleted_devices_cleanup_status(config_dir, rollback_file):
     current_devices = deleted_devices(current_data)
     returned = [device for device in current_devices if deleted_device_key(device) in removed_keys]
     added = [device for device in current_devices if deleted_device_key(device) not in removed_keys]
+    entity_snapshot = entity_rollback_path(source)
+    removed_entities = []
+    current_entities = []
+    returned_entities = []
+    added_entities = []
+    entity_text = None
+    if entity_snapshot.exists():
+        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
+        removed_entities = deleted_entities(rollback_entity_data)
+        removed_entity_keys = {deleted_entity_key(entity) for entity in removed_entities}
+        _entity_path, entity_text, current_entity_data = read_entity_registry(config_dir)
+        current_entities = deleted_entities(current_entity_data)
+        returned_entities = [entity for entity in current_entities if deleted_entity_key(entity) in removed_entity_keys]
+        added_entities = [entity for entity in current_entities if deleted_entity_key(entity) not in removed_entity_keys]
     return {
-        "fingerprint": fingerprint_text(text),
-        "removed": len(removed_devices),
-        "current": len(current_devices),
-        "returned": len(returned),
-        "added": len(added),
+        "fingerprint": registry_fingerprint(text, entity_text),
+        "removed": len(removed_devices) + len(removed_entities),
+        "current": len(current_devices) + len(current_entities),
+        "returned": len(returned) + len(returned_entities),
+        "added": len(added) + len(added_entities),
+        "returned_entities": len(returned_entities),
+        "removed_devices": len(removed_devices),
+        "removed_entities": len(removed_entities),
+        "current_devices": len(current_devices),
+        "current_entities": len(current_entities),
+        "added_devices": len(added),
+        "added_entities": len(added_entities),
+        "returned_devices": len(returned),
+        "terminal_phase": None,
     }
 
 
 def deleted_devices_pending_diff(config_dir, rollback_file):
     source = Path(rollback_file)
+    if source.name == ROLLBACK_MANIFEST_NAME:
+        _manifest, payloads = load_rollback_manifest(source)
+        rollback_data = json.loads(payloads["core.device_registry"].decode("utf-8"))
+        _path, _text, current_data = read_device_registry(config_dir)
+        removed_devices = deleted_devices(rollback_data)
+        diff = []
+        if removed_devices:
+            diff.extend(difflib.unified_diff(json.dumps(removed_devices, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted devices before cleanup", tofile="deleted devices now", lineterm=""))
+        if payloads["core.entity_registry"] is not None:
+            rollback_entity_data = json.loads(payloads["core.entity_registry"].decode("utf-8"))
+            _entity_path, _entity_text, current_entity_data = read_entity_registry(config_dir)
+            removed_entities = deleted_entities(rollback_entity_data)
+            if removed_entities:
+                diff.extend(difflib.unified_diff(json.dumps(removed_entities, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted entities before cleanup", tofile="deleted entities now", lineterm=""))
+        return "\n".join(diff) if diff else "No deleted devices difference."
     if not source.exists():
-        raise RuntimeError("deleted_devices rollback snapshot is missing.")
+        raise RuntimeError("Deleted devices rollback snapshot is missing.")
     rollback_data = json.loads(source.read_text(encoding="utf-8"))
     _path, _text, current_data = read_device_registry(config_dir)
-    before_lines = json.dumps(deleted_devices(rollback_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
-    current_lines = json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
-    diff = list(
-        difflib.unified_diff(
-            before_lines,
-            current_lines,
-            fromfile="deleted_devices before cleanup",
-            tofile="deleted_devices now",
-            lineterm="",
+    removed_devices = deleted_devices(rollback_data)
+    diff = []
+    if removed_devices:
+        before_lines = json.dumps(removed_devices, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+        current_lines = json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+        diff.extend(
+            difflib.unified_diff(
+                before_lines,
+                current_lines,
+                fromfile="deleted devices before cleanup",
+                tofile="deleted devices now",
+                lineterm="",
+            )
         )
-    )
-    return "\n".join(diff) if diff else "No deleted_devices difference."
+    entity_snapshot = entity_rollback_path(source)
+    if entity_snapshot.exists():
+        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
+        _entity_path, _entity_text, current_entity_data = read_entity_registry(config_dir)
+        removed_entities = deleted_entities(rollback_entity_data)
+        if removed_entities:
+            before_entity_lines = json.dumps(removed_entities, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+            current_entity_lines = json.dumps(deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+            diff.extend(
+                difflib.unified_diff(
+                    before_entity_lines,
+                    current_entity_lines,
+                    fromfile="deleted entities before cleanup",
+                    tofile="deleted entities now",
+                    lineterm="",
+                )
+            )
+    return "\n".join(diff) if diff else "No deleted devices difference."
 
 
 def deleted_device_label(device):
@@ -506,38 +972,107 @@ def deleted_device_rows(config_dir, devices):
     return rows
 
 
+def deleted_entity_rows(config_dir, entities):
+    areas = area_names(config_dir)
+    rows = []
+    for entity in entities:
+        area_id = entity.get("area_id") or ""
+        rows.append(
+            {
+                "area": areas.get(area_id) or area_id,
+                "id": entity.get("id") or "",
+                "entity_id": entity.get("entity_id") or "",
+                "original_name": entity.get("original_name") or entity.get("name") or "",
+                "original_device_class": entity.get("original_device_class") or "",
+                "kind": "deleted_entity",
+            }
+        )
+    return rows
+
+
 def build_deleted_devices_preview(config_dir, history_context=None):
     _path, text, data = read_device_registry(config_dir)
     devices = deleted_devices(data)
-    lines = [_("preview.deleted_devices_title", count=len(devices))]
+    _entity_path, entity_text, entity_data = read_entity_registry(config_dir)
+    entities = deleted_entities(entity_data)
+    total = len(devices) + len(entities)
+    label = deleted_entries_label(len(devices), len(entities))
+    lines = [_("preview.deleted_entries_title", entries=label, count=total)]
     if devices:
+        lines.append(_("preview.deleted_devices_title", count=len(devices)))
         lines.extend(f"- {deleted_device_label(device)}" for device in devices)
-    else:
-        lines.append(_("preview.deleted_devices_none"))
+    if entities:
+        lines.append(_("preview.deleted_entities_title", count=len(entities)))
+        lines.extend(f"- {entity.get('entity_id') or entity.get('id') or json.dumps(entity, ensure_ascii=False, sort_keys=True)}" for entity in entities)
+    if not total:
+        lines.append(_("preview.deleted_entries_none"))
     return {
-        "count": len(devices),
-        "fingerprint": fingerprint_text(text),
+        "count": total,
+        "device_count": len(devices),
+        "entity_count": len(entities),
+        "fingerprint": registry_fingerprint(text, entity_text),
         "summary": "\n".join(lines),
-        "rows": enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
+        "rows": [
+            *enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
+            *deleted_entity_rows(config_dir, entities),
+        ],
     }
 
 
 def device_registry_fingerprint(config_dir):
     _path, text, _data = read_device_registry(config_dir)
-    return fingerprint_text(text)
+    _entity_path, entity_text, _entity_data = read_entity_registry(config_dir)
+    return registry_fingerprint(text, entity_text)
 
 
 def clear_deleted_devices(config_dir, expected_fingerprint):
     path, text, data = read_device_registry(config_dir)
-    current_fingerprint = fingerprint_text(text)
+    entity_path, entity_text, entity_data = read_entity_registry(config_dir)
+    current_fingerprint = registry_fingerprint(text, entity_text)
     if expected_fingerprint and current_fingerprint != expected_fingerprint:
-        raise RuntimeError("Device registry changed since preview. Run Check deleted_devices again.")
+        raise RuntimeError("Deleted devices changed since preview. Run Check deleted devices again.")
 
     devices = deleted_devices(data)
-    removed = len(devices)
+    entities = deleted_entities(entity_data)
+    removed = len(devices) + len(entities)
     data.setdefault("data", {})["deleted_devices"] = []
-
-    tmp_path = path.with_name(f".{path.name}.tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    os.replace(tmp_path, path)
-    return {"removed": removed, "fingerprint": fingerprint_text(path.read_text(encoding="utf-8"))}
+    device_temp = path.with_name(f".{path.name}.deleted-entries.tmp")
+    device_restore_temp = path.with_name(f".{path.name}.deleted-entries.restore.tmp")
+    entity_temp = entity_path.with_name(f".{entity_path.name}.deleted-entries.tmp")
+    device_replaced = False
+    try:
+        device_temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        if entity_text is not None:
+            entity_data.setdefault("data", {})["deleted_entities"] = []
+            entity_temp.write_text(json.dumps(entity_data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            device_restore_temp.write_text(text, encoding="utf-8")
+        os.replace(device_temp, path)
+        device_replaced = True
+        if entity_text is not None:
+            try:
+                os.replace(entity_temp, entity_path)
+            except Exception as entity_error:
+                try:
+                    os.replace(device_restore_temp, path)
+                except Exception as restore_error:
+                    error = RuntimeError(
+                        f"Failed to update deleted entities and restore deleted devices: {entity_error}; {restore_error}"
+                    )
+                    error.manual_recovery = True
+                    raise error from entity_error
+                raise RuntimeError(
+                    f"Failed to update deleted entities; restored deleted devices: {entity_error}"
+                ) from entity_error
+            entity_text = entity_path.read_text(encoding="utf-8")
+    finally:
+        for temp in (device_temp, device_restore_temp, entity_temp):
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
+    return {
+        "removed": removed,
+        "removed_devices": len(devices),
+        "removed_entities": len(entities),
+        "fingerprint": registry_fingerprint(path.read_text(encoding="utf-8"), entity_text),
+    }

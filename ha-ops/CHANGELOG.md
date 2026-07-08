@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.0
+
+- Extend deleted registry cleanup to cover both device and entity tombstones, preserving new tombstones during Confirm or Revert.
+- Store cleanup rollback state as a durable manifest and block mutating HA Ops actions while a failed restore requires manual recovery; read-only Disk Usage remains available.
+- Show the affected entry type and entity ID throughout the cleanup preview, confirmation, and recovery UI.
+
 ## 0.8.56
 
 - Use Home Assistant's current Apps terminology in displayed names, documentation, translations, and runtime messages.

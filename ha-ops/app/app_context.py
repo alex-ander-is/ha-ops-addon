@@ -148,12 +148,72 @@ class AppContext:
 
     def repair_startup_state(self):
         state = self.read_state()
+        # v1 is authoritative independently of state.json.  Legacy files have
+        # no lifecycle metadata and remain deliberately state-scoped below.
+        manifest_status = registry_cleanup.rollback_manifest_status(self.work_dir)
+        if manifest_status["status"] == "invalid":
+            return self.write_state(
+                {
+                    "last_status": "error",
+                    "last_action": "deleted_devices_delete",
+                    "last_message": _("message.interrupted_deleted_devices_manual_recovery"),
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(manifest_status["path"]),
+                    "deleted_devices_rollback_format": "manifest_v1",
+                    "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL,
+                }
+            )
+        if manifest_status["status"] == "valid":
+            manifest = manifest_status["manifest"]
+            path = str(manifest_status["path"])
+            phase = manifest["phase"]
+            if phase in registry_cleanup.ROLLBACK_TERMINAL_PHASES:
+                registry_cleanup.discard_deleted_devices_rollback(path)
+                return self.write_state(
+                    {
+                        "deleted_devices_pending_confirmation": False,
+                        "deleted_devices_rollback_path": None,
+                        "deleted_devices_rollback_format": None,
+                        "deleted_devices_rollback_fingerprint": None,
+                        "deleted_devices_applied_fingerprint": None,
+                        "deleted_devices_pending_device_count": 0,
+                        "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
+                    }
+                )
+            if phase == registry_cleanup.ROLLBACK_PHASE_PENDING:
+                return self.write_state(
+                    {
+                        "deleted_devices_pending_confirmation": True,
+                        "deleted_devices_rollback_path": path,
+                        "deleted_devices_rollback_format": "manifest_v1",
+                        "deleted_devices_rollback_fingerprint": manifest.get("fingerprint"),
+                        "deleted_devices_pending_device_count": manifest.get("device_count", 0),
+                        "deleted_devices_pending_entity_count": manifest.get("entity_count", 0),
+                        "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
+                    }
+                )
+            state = dict(state, deleted_devices_rollback_path=path, deleted_devices_rollback_format="manifest_v1")
+            return self.recover_deleted_devices_cleanup(state)
         if (
-            state.get("last_status") == "running"
-            and state.get("last_action") == "deleted_devices_delete"
-            and state.get("deleted_devices_rollback_path")
+            state.get("deleted_devices_rollback_format") == "manifest_v1"
+            and registry_cleanup.rollback_manifest_is_v1(state.get("deleted_devices_rollback_path") or "")
         ):
-            return self.repair_interrupted_deleted_devices_cleanup(state)
+            return self.write_state(
+                {
+                    "last_status": "error",
+                    "last_action": "deleted_devices_delete",
+                    "last_message": _("message.interrupted_deleted_devices_manual_recovery"),
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL,
+                }
+            )
+        phase = state_store.deleted_devices_recovery_phase(state)
+        if phase in {
+            state_store.DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED,
+            state_store.DELETED_DEVICES_RECOVERY_RECOVERING,
+        } and state.get("deleted_devices_rollback_path"):
+            return self.recover_deleted_devices_cleanup(state)
         preserve_save_retry = self.save_push_retry_has_unpushed_commit(state)
         return state_store.repair_startup_state(
             self.state_path,
@@ -163,18 +223,25 @@ class AppContext:
             clear_save_retry_pending=bool(state.get("save_push_retry_pending") and not preserve_save_retry),
         )
 
-    def repair_interrupted_deleted_devices_cleanup(self, state):
+    def recover_deleted_devices_cleanup(self, state):
+        """Converge an interrupted registry cleanup only while Core is stopped."""
         details = list(state.get("last_details") or [])
         rollback_path = state.get("deleted_devices_rollback_path")
         restored = False
+        core_stopped = False
         try:
+            self.write_state({"deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_RECOVERING})
+            self.core_stop()
+            core_stopped = True
             self.restore_deleted_devices_rollback(rollback_path)
             restored = True
             details.append(_("detail.restored_deleted_devices_after_restart"))
             self.core_start()
             details.append(_("detail.started_core_after_restore"))
-            self.discard_deleted_devices_rollback(rollback_path)
+            if registry_cleanup.rollback_manifest_is_v1(rollback_path):
+                self.set_deleted_devices_rollback_phase(rollback_path, registry_cleanup.ROLLBACK_PHASE_REVERTED)
             preview = self.build_deleted_devices_preview()
+            self.discard_deleted_devices_rollback(rollback_path)
             return self.write_state(
                 {
                     "last_run_at": self.utc_now(),
@@ -185,28 +252,38 @@ class AppContext:
                     "last_deleted_devices_preview": preview["summary"],
                     "last_deleted_devices_rows": preview["rows"],
                     "last_deleted_devices_count": preview["count"],
+                    "last_deleted_devices_device_count": preview.get("device_count", 0),
+                    "last_deleted_devices_entity_count": preview.get("entity_count", 0),
                     "last_deleted_devices_fingerprint": preview["fingerprint"],
                     "last_deleted_devices_generated_at": self.utc_now(),
                     "deleted_devices_pending_confirmation": False,
                     "deleted_devices_rollback_path": None,
+                    "deleted_devices_rollback_format": None,
                     "deleted_devices_rollback_fingerprint": None,
                     "deleted_devices_applied_fingerprint": None,
+                    "deleted_devices_pending_device_count": 0,
+                    "deleted_devices_pending_entity_count": 0,
+                    "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                 }
             )
         except Exception as exc:
             details.append(_("detail.startup_deleted_devices_recovery_failed", error=exc))
-            try:
-                self.core_start()
-                details.append(_("detail.started_core_after_startup_recovery_failure"))
-            except Exception as start_exc:
-                details.append(_("detail.failed_start_core_after_startup_recovery_failure", error=start_exc))
+            if core_stopped:
+                try:
+                    self.core_start()
+                    details.append(_("detail.started_core_after_startup_recovery_failure"))
+                except Exception as start_exc:
+                    details.append(_("detail.failed_start_core_after_startup_recovery_failure", error=start_exc))
             updates = {
                 "last_run_at": self.utc_now(),
                 "last_status": "error",
                 "last_action": "deleted_devices_delete",
                 "last_message": _("message.interrupted_deleted_devices_manual_recovery"),
                 "last_details": details,
-                "deleted_devices_pending_confirmation": bool(rollback_path and not restored),
+                # Keep the snapshot and fence even when restore completed but
+                # the later start/preview/discard step did not.
+                "deleted_devices_pending_confirmation": bool(rollback_path),
+                "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL,
             }
             if restored:
                 try:
@@ -216,15 +293,20 @@ class AppContext:
                             "last_deleted_devices_preview": preview["summary"],
                             "last_deleted_devices_rows": preview["rows"],
                             "last_deleted_devices_count": preview["count"],
+                            "last_deleted_devices_device_count": preview.get("device_count", 0),
+                            "last_deleted_devices_entity_count": preview.get("entity_count", 0),
                             "last_deleted_devices_fingerprint": preview["fingerprint"],
                             "last_deleted_devices_generated_at": self.utc_now(),
-                            "deleted_devices_pending_confirmation": False,
-                            "deleted_devices_applied_fingerprint": None,
+                            "deleted_devices_pending_confirmation": True,
                         }
                     )
                 except Exception:
                     pass
             return self.write_state(updates)
+
+    # Kept for compatibility with existing callers and state-repair tests.
+    def repair_interrupted_deleted_devices_cleanup(self, state):
+        return self.recover_deleted_devices_cleanup(state)
 
     def run_command(self, command, env=None, cwd=None, timeout=None):
         return subprocess.run(
@@ -733,6 +815,9 @@ class AppContext:
     def create_deleted_devices_rollback(self, expected_fingerprint):
         return registry_cleanup.create_deleted_devices_rollback(self.config_dir, self.work_dir, expected_fingerprint)
 
+    def set_deleted_devices_rollback_phase(self, rollback_path, phase):
+        return registry_cleanup.rollback_manifest_phase(rollback_path, phase)
+
     def deleted_devices_cleanup_status(self, rollback_path):
         return registry_cleanup.deleted_devices_cleanup_status(self.config_dir, rollback_path)
 
@@ -925,6 +1010,7 @@ class AppContext:
             selected_apply_targets_from_preview=self.selected_apply_targets_from_preview,
             approve_storage_apply_targets=self.approve_storage_apply_targets,
             restore_deleted_devices_rollback=self.restore_deleted_devices_rollback,
+            set_deleted_devices_rollback_phase=self.set_deleted_devices_rollback_phase,
             restore_release_snapshot=self.restore_release_snapshot,
             apply_internal_ids_migration=self.apply_internal_ids_migration,
             run_lock=self.run_lock,

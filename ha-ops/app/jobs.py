@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import i18n
+import registry_cleanup
 import state as state_store
 
 
@@ -11,9 +12,10 @@ def _(key, **values):
 
 def enter_run_lock(ctx, action, lock_acquired=False):
     if lock_acquired:
-        return True
-    run_lock = ctx.run_lock
-    if not run_lock.acquire(blocking=False):
+        acquired = True
+    else:
+        acquired = ctx.run_lock.acquire(blocking=False)
+    if not acquired:
         ctx.write_state(
             {
                 "last_run_at": ctx.utc_now(),
@@ -23,11 +25,24 @@ def enter_run_lock(ctx, action, lock_acquired=False):
             }
         )
         return False
+    # This guard is intentionally here, after both normal and pre-reserved
+    # lock acquisition paths converge.  A web caller cannot bypass it by
+    # passing lock_acquired=True.
+    if not recovery_action_allowed(ctx.read_state(), action):
+        ctx.run_lock.release()
+        return False
     return True
 
 
 def release_run_lock(ctx):
     ctx.run_lock.release()
+
+
+RECOVERY_READ_ONLY_ACTIONS = {"disk_usage"}
+
+
+def recovery_action_allowed(state, action):
+    return action in RECOVERY_READ_ONLY_ACTIONS or state_store.deleted_devices_recovery_allows(state, action)
 
 
 def service_branch_push_out_of_date(branch, error):
@@ -117,6 +132,7 @@ class JobContext:
     selected_apply_targets_from_preview: Any
     approve_storage_apply_targets: Any
     restore_deleted_devices_rollback: Any
+    set_deleted_devices_rollback_phase: Any
     restore_release_snapshot: Any
     apply_internal_ids_migration: Any
     run_lock: Any
@@ -312,6 +328,24 @@ def pending_deleted_devices_message():
     return _("message.pending_deleted_devices")
 
 
+def deleted_entries_label(device_count, entity_count):
+    if device_count and entity_count:
+        return _("label.deleted_devices_and_entities")
+    if device_count:
+        return _("label.deleted_devices")
+    if entity_count:
+        return _("label.deleted_entities")
+    return _("label.deleted_devices")
+
+
+def state_deleted_entries_label(state, pending=False):
+    prefix = "deleted_devices_pending" if pending else "last_deleted_devices"
+    return deleted_entries_label(
+        int(state.get(f"{prefix}_device_count") or 0),
+        int(state.get(f"{prefix}_entity_count") or 0),
+    )
+
+
 def write_pending_deleted_devices(ctx, action, details=None, targets=None):
     ctx.write_state(
         {
@@ -331,6 +365,8 @@ def refresh_deleted_devices_preview_updates(ctx):
         "last_deleted_devices_preview": preview["summary"],
         "last_deleted_devices_rows": preview["rows"],
         "last_deleted_devices_count": preview["count"],
+        "last_deleted_devices_device_count": preview.get("device_count", 0),
+        "last_deleted_devices_entity_count": preview.get("entity_count", 0),
         "last_deleted_devices_fingerprint": preview["fingerprint"],
         "last_deleted_devices_generated_at": ctx.utc_now(),
     }
@@ -987,8 +1023,9 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
             raise i18n.error("error.deleted_devices_pending_before_check")
         preview = ctx.build_deleted_devices_preview()
         count = preview["count"]
+        entries = deleted_entries_label(preview.get("device_count", 0), preview.get("entity_count", 0))
         log_action(ctx, f"deleted_devices preview: found {count} deleted device(s)")
-        message = _("message.deleted_devices_found", count=count, entry_word="entry" if count == 1 else "entries")
+        message = _("message.deleted_devices_found", count=count, entries=entries)
         write_state(
             {
                 "last_run_at": utc_now(),
@@ -999,6 +1036,8 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
                 "last_deleted_devices_preview": preview["summary"],
                 "last_deleted_devices_rows": preview["rows"],
                 "last_deleted_devices_count": count,
+                "last_deleted_devices_device_count": preview.get("device_count", 0),
+                "last_deleted_devices_entity_count": preview.get("entity_count", 0),
                 "last_deleted_devices_fingerprint": preview["fingerprint"],
                 "last_deleted_devices_generated_at": utc_now(),
             }
@@ -1017,6 +1056,8 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
                 "last_deleted_devices_preview": "",
                 "last_deleted_devices_rows": [],
                 "last_deleted_devices_count": 0,
+                "last_deleted_devices_device_count": 0,
+                "last_deleted_devices_entity_count": 0,
                 "last_deleted_devices_fingerprint": None,
                 "last_deleted_devices_generated_at": None,
             }
@@ -1347,31 +1388,35 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
     rollback = None
     restored_preview = None
     rollback_restore_failed = False
+    state = ctx.read_state()
+    entries = state_deleted_entries_label(state)
     log_action(ctx, "deleted_devices delete: started")
     write_state(
         {
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_delete",
-            "last_message": _("message.deleting_deleted_devices"),
+            "last_message": _("message.deleting_deleted_devices", entries=entries),
             "last_details": details,
         }
     )
 
     try:
-        state = ctx.read_state()
         if state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_pending_before_delete")
         fingerprint = state.get("last_deleted_devices_fingerprint")
         count = int(state.get("last_deleted_devices_count") or 0)
+        device_count = int(state.get("last_deleted_devices_device_count") or 0)
+        entity_count = int(state.get("last_deleted_devices_entity_count") or 0)
+        entries = deleted_entries_label(device_count, entity_count)
         if not fingerprint or count <= 0:
             raise i18n.error("error.deleted_devices_preview_required")
         if ctx.device_registry_fingerprint() != fingerprint:
-            raise i18n.error("error.deleted_devices_preview_changed")
+            raise i18n.error("error.deleted_devices_preview_changed", entries=entries)
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
         if ctx.device_registry_fingerprint() != fingerprint:
-            raise i18n.error("error.deleted_devices_preview_changed")
+            raise i18n.error("error.deleted_devices_preview_changed", entries=entries)
         ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices"))
         ctx.core_stop()
         core_stopped = True
@@ -1380,16 +1425,20 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
             {
                 "deleted_devices_pending_confirmation": True,
                 "deleted_devices_rollback_path": rollback["path"],
+                "deleted_devices_rollback_format": rollback.get("format"),
                 "deleted_devices_rollback_fingerprint": rollback["fingerprint"],
                 "deleted_devices_applied_fingerprint": None,
+                "deleted_devices_pending_device_count": device_count,
+                "deleted_devices_pending_entity_count": entity_count,
+                "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED,
             }
         )
         ctx.add_detail(details, _("detail.saved_deleted_devices_rollback"))
         result = ctx.clear_deleted_devices(fingerprint)
         registry_changed = True
         removed = result["removed"]
-        log_action(ctx, f"deleted_devices delete: cleared {removed} deleted device(s)")
-        ctx.add_detail(details, _("detail.removed_deleted_devices", count=removed, entry_word="entry" if removed == 1 else "entries"))
+        log_action(ctx, f"deleted_devices delete: cleared {removed} {entries}")
+        ctx.add_detail(details, _("detail.removed_deleted_devices", count=removed, entries=entries))
         ctx.add_detail(details, _("detail.starting_core"))
         try:
             ctx.core_start()
@@ -1402,14 +1451,25 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 except Exception:
                     rollback_restore_failed = True
                     raise
-                ctx.core_start()
+                try:
+                    ctx.core_start()
+                except Exception:
+                    # The snapshot is still needed until a later Revert can
+                    # complete a fully quiesced recovery.
+                    rollback_restore_failed = True
+                    raise
                 core_stopped = False
+                if rollback.get("format") == "manifest_v1":
+                    ctx.set_deleted_devices_rollback_phase(rollback["path"], "reverted")
                 ctx.discard_deleted_devices_rollback(rollback["path"])
                 details.append(_("detail.reverted_deleted_devices_after_core_failure"))
                 registry_changed = False
                 raise
         core_stopped = False
         log_action(ctx, "deleted_devices delete: Core restarted, waiting for confirmation")
+
+        if rollback.get("format") == "manifest_v1":
+            ctx.set_deleted_devices_rollback_phase(rollback["path"], "pending_confirmation")
 
         write_state(
             {
@@ -1419,23 +1479,30 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 "last_message": _(
                     "message.deleted_deleted_devices",
                     count=removed,
-                    entry_word="entry" if removed == 1 else "entries",
+                    entries=entries,
                 ),
                 "last_details": details,
                 "last_backup_slug": backup_slug,
                 "last_deleted_devices_preview": _("text.no_deleted_devices"),
                 "last_deleted_devices_rows": [],
                 "last_deleted_devices_count": 0,
+                "last_deleted_devices_device_count": 0,
+                "last_deleted_devices_entity_count": 0,
                 "last_deleted_devices_fingerprint": result["fingerprint"],
                 "last_deleted_devices_generated_at": utc_now(),
                 "deleted_devices_pending_confirmation": True,
                 "deleted_devices_rollback_path": rollback["path"] if rollback else None,
+                "deleted_devices_rollback_format": rollback.get("format") if rollback else None,
                 "deleted_devices_rollback_fingerprint": rollback["fingerprint"] if rollback else None,
                 "deleted_devices_applied_fingerprint": result["fingerprint"],
+                "deleted_devices_pending_device_count": result.get("removed_devices", device_count),
+                "deleted_devices_pending_entity_count": result.get("removed_entities", entity_count),
+                "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
         return True
     except Exception as exc:
+        rollback_restore_failed = rollback_restore_failed or bool(getattr(exc, "manual_recovery", False))
         details.append(str(exc))
         log_action(ctx, f"deleted_devices delete: failed: {exc}")
         if core_stopped:
@@ -1444,7 +1511,7 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 details.append(_("detail.started_core_after_deletion_failure"))
             except Exception as start_exc:
                 details.append(_("detail.failed_start_core_after_deletion_failure", error=start_exc))
-        if rollback and not registry_changed and not restored_preview:
+        if rollback and not registry_changed and not restored_preview and not rollback_restore_failed:
             try:
                 ctx.discard_deleted_devices_rollback(rollback["path"])
             except Exception as rollback_exc:
@@ -1464,15 +1531,27 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 **(restored_preview or {}),
                 **(
                     {
-                        "last_deleted_devices_preview": _("text.no_deleted_devices"),
-                        "last_deleted_devices_rows": [],
-                        "last_deleted_devices_count": 0,
-                        "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
-                        "last_deleted_devices_generated_at": utc_now(),
+                        **(
+                            {}
+                            if restored_preview
+                            else {
+                                "last_deleted_devices_preview": _("text.no_deleted_devices"),
+                                "last_deleted_devices_rows": [],
+                                "last_deleted_devices_count": 0,
+                                "last_deleted_devices_device_count": 0,
+                                "last_deleted_devices_entity_count": 0,
+                                "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
+                                "last_deleted_devices_generated_at": utc_now(),
+                            }
+                        ),
                         "deleted_devices_pending_confirmation": True,
                         "deleted_devices_rollback_path": rollback["path"],
+                        "deleted_devices_rollback_format": rollback.get("format"),
                         "deleted_devices_rollback_fingerprint": rollback["fingerprint"],
                         "deleted_devices_applied_fingerprint": result.get("fingerprint") if result else None,
+                        "deleted_devices_pending_device_count": result.get("removed_devices", device_count) if result else device_count,
+                        "deleted_devices_pending_entity_count": result.get("removed_entities", entity_count) if result else entity_count,
+                        "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL,
                     }
                     if rollback_restore_failed
                     else {}
@@ -1482,12 +1561,18 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                         "last_deleted_devices_preview": _("text.no_deleted_devices"),
                         "last_deleted_devices_rows": [],
                         "last_deleted_devices_count": 0,
+                        "last_deleted_devices_device_count": 0,
+                        "last_deleted_devices_entity_count": 0,
                         "last_deleted_devices_fingerprint": result.get("fingerprint") if result else None,
                         "last_deleted_devices_generated_at": utc_now(),
                         "deleted_devices_pending_confirmation": False,
                         "deleted_devices_rollback_path": None,
+                        "deleted_devices_rollback_format": None,
                         "deleted_devices_rollback_fingerprint": None,
                         "deleted_devices_applied_fingerprint": None,
+                        "deleted_devices_pending_device_count": 0,
+                        "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
                     if registry_changed and not restored_preview and not rollback_restore_failed
                     else {}
@@ -1496,10 +1581,15 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                     {
                         "deleted_devices_pending_confirmation": False,
                         "deleted_devices_rollback_path": None,
+                        "deleted_devices_rollback_format": None,
                         "deleted_devices_rollback_fingerprint": None,
                         "deleted_devices_applied_fingerprint": None,
+                        "deleted_devices_pending_device_count": 0,
+                        "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
-                    if restored_preview or (rollback and not registry_changed)
+                    if (restored_preview and not rollback_restore_failed)
+                    or (rollback and not registry_changed and not rollback_restore_failed)
                     else {}
                 ),
             }
@@ -1517,40 +1607,48 @@ def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
         return False
 
     details = []
+    state = ctx.read_state()
+    entries = state_deleted_entries_label(state, pending=True)
     log_action(ctx, "deleted_devices confirm: started")
     write_state(
         {
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_confirm",
-            "last_message": _("message.confirming_deleted_devices_cleanup"),
+            "last_message": _("message.confirming_deleted_devices_cleanup", entries=entries),
             "last_details": details,
         }
     )
     try:
-        state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_cleanup_not_pending")
         rollback_path = state.get("deleted_devices_rollback_path")
         if not rollback_path:
-            raise i18n.error("error.deleted_devices_rollback_missing")
+            raise i18n.error("error.deleted_devices_rollback_missing", entries=entries)
         applied_fingerprint = state.get("deleted_devices_applied_fingerprint")
         cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
         if cleanup_status["returned"] > 0:
-            raise i18n.error("error.deleted_devices_removed_returned")
+            raise i18n.error("error.deleted_devices_removed_returned", entries=entries)
         if applied_fingerprint and cleanup_status["fingerprint"] != applied_fingerprint:
             if cleanup_status["added"] > 0:
                 details.append(
                     _(
                         "detail.device_registry_new_deleted_devices",
                         count=cleanup_status["added"],
-                        entry_word="entry" if cleanup_status["added"] == 1 else "entries",
+                        entries=entries,
                     )
                 )
                 log_action(ctx, "deleted_devices confirm: new deleted_devices are present and preserved")
             else:
-                details.append(_("detail.device_registry_changed_after_deletion"))
+                details.append(_("detail.device_registry_changed_after_deletion", entries=entries))
                 log_action(ctx, "deleted_devices confirm: registry fingerprint changed, removed deleted_devices did not return")
+        if (
+            registry_cleanup.rollback_manifest_is_v1(rollback_path)
+            and not cleanup_status.get("terminal_phase")
+        ):
+            # This must succeed before state cleanup or artifact removal. A
+            # failed durable terminal write leaves the pending source intact.
+            ctx.set_deleted_devices_rollback_phase(rollback_path, "confirmed")
         ctx.discard_deleted_devices_rollback(rollback_path)
         log_action(ctx, "deleted_devices confirm: confirmed and discarded rollback")
         write_state(
@@ -1558,12 +1656,16 @@ def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "deleted_devices_confirm",
-                "last_message": _("message.confirmed_deleted_devices_cleanup"),
+                "last_message": _("message.confirmed_deleted_devices_cleanup", entries=entries),
                 "last_details": details,
                 "deleted_devices_pending_confirmation": False,
                 "deleted_devices_rollback_path": None,
+                "deleted_devices_rollback_format": None,
                 "deleted_devices_rollback_fingerprint": None,
                 "deleted_devices_applied_fingerprint": None,
+                "deleted_devices_pending_device_count": 0,
+                "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
         return True
@@ -1593,10 +1695,13 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
         return False
 
     details = []
+    state = ctx.read_state()
+    entries = state_deleted_entries_label(state, pending=True)
     options = ctx.load_options()
     backup_slug = None
     core_stopped = False
     restore_applied = False
+    recovery_armed = False
     result = None
     log_action(ctx, "deleted_devices revert: started")
     write_state(
@@ -1604,34 +1709,70 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
             "last_run_at": utc_now(),
             "last_status": "running",
             "last_action": "deleted_devices_revert",
-            "last_message": _("message.reverting_deleted_devices_cleanup"),
+            "last_message": _("message.reverting_deleted_devices_cleanup", entries=entries),
             "last_details": details,
         }
     )
 
     try:
-        state = ctx.read_state()
         if not state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_cleanup_not_pending")
         rollback_path = state.get("deleted_devices_rollback_path")
         if not rollback_path:
-            raise i18n.error("error.deleted_devices_rollback_missing")
+            raise i18n.error("error.deleted_devices_rollback_missing", entries=entries)
+
+        # A prior Revert can have restored the registries and published its
+        # terminal phase before artifact cleanup failed. Retrying it only
+        # needs to finish that cleanup; it must not restore a second time.
+        cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
+        if cleanup_status.get("terminal_phase"):
+            if cleanup_status["terminal_phase"] != registry_cleanup.ROLLBACK_PHASE_REVERTED:
+                raise RuntimeError("Deleted devices cleanup was already confirmed; it cannot be reverted.")
+            ctx.discard_deleted_devices_rollback(rollback_path)
+            preview_updates = refresh_deleted_devices_preview_updates(ctx)
+            write_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "success",
+                    "last_action": "deleted_devices_revert",
+                    "last_message": _("message.reverted_deleted_devices_cleanup", entries=entries),
+                    "last_details": details,
+                    **preview_updates,
+                    "deleted_devices_pending_confirmation": False,
+                    "deleted_devices_rollback_path": None,
+                    "deleted_devices_rollback_format": None,
+                    "deleted_devices_rollback_fingerprint": None,
+                    "deleted_devices_applied_fingerprint": None,
+                    "deleted_devices_pending_device_count": 0,
+                    "deleted_devices_pending_entity_count": 0,
+                    "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
+                }
+            )
+            return True
 
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
+        # A process loss after this point must be recovered as a quiesced
+        # rollback, even if Core has already restarted by the next App start.
+        write_state({"deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED})
+        if registry_cleanup.rollback_manifest_is_v1(rollback_path):
+            ctx.set_deleted_devices_rollback_phase(rollback_path, "restore_required")
+        recovery_armed = True
         ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices_restore"))
         ctx.core_stop()
         core_stopped = True
         result = ctx.restore_deleted_devices_rollback(rollback_path)
         restore_applied = True
-        ctx.add_detail(details, _("detail.restored_deleted_devices", count=result.get("restored", 0)))
+        ctx.add_detail(details, _("detail.restored_deleted_devices", count=result.get("restored", 0), entries=entries))
         if result.get("preserved", 0) > 0:
-            ctx.add_detail(details, _("detail.preserved_current_deleted_devices", count=result.get("preserved", 0)))
+            ctx.add_detail(details, _("detail.preserved_current_deleted_devices", count=result.get("preserved", 0), entries=entries))
         ctx.add_detail(details, _("detail.preserved_other_registry_changes"))
         ctx.add_detail(details, _("detail.starting_core"))
         ctx.core_start()
         core_stopped = False
-        ctx.discard_deleted_devices_rollback(rollback_path)
         preview_updates = refresh_deleted_devices_preview_updates(ctx)
+        if registry_cleanup.rollback_manifest_is_v1(rollback_path):
+            ctx.set_deleted_devices_rollback_phase(rollback_path, "reverted")
+        ctx.discard_deleted_devices_rollback(rollback_path)
         log_action(ctx, "deleted_devices revert: restored deleted_devices and restarted Core")
 
         write_state(
@@ -1639,14 +1780,18 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "deleted_devices_revert",
-                "last_message": _("message.reverted_deleted_devices_cleanup"),
+                "last_message": _("message.reverted_deleted_devices_cleanup", entries=entries),
                 "last_details": details,
                 "last_backup_slug": backup_slug,
                 **preview_updates,
                 "deleted_devices_pending_confirmation": False,
                 "deleted_devices_rollback_path": None,
+                "deleted_devices_rollback_format": None,
                 "deleted_devices_rollback_fingerprint": None,
                 "deleted_devices_applied_fingerprint": None,
+                "deleted_devices_pending_device_count": 0,
+                "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
         return True
@@ -1674,10 +1819,13 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                             if result
                             else {}
                         ),
-                        "deleted_devices_pending_confirmation": False,
-                        "deleted_devices_applied_fingerprint": None,
                     }
                     if restore_applied
+                    else {}
+                ),
+                **(
+                    {"deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL}
+                    if recovery_armed
                     else {}
                 ),
             }

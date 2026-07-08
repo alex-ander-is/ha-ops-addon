@@ -14,6 +14,45 @@ def _(key, **values):
 
 STATE_LOCK = threading.Lock()
 
+# A cleanup rollback can outlive the App process.  Keep the recovery contract
+# in state rather than deriving it from a transient job status.
+DELETED_DEVICES_RECOVERY_NONE = "none"
+DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED = "restore_required"
+DELETED_DEVICES_RECOVERY_RECOVERING = "recovering"
+DELETED_DEVICES_RECOVERY_MANUAL = "manual_recovery"
+DELETED_DEVICES_RECOVERY_ACTIVE = {
+    DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED,
+    DELETED_DEVICES_RECOVERY_RECOVERING,
+    DELETED_DEVICES_RECOVERY_MANUAL,
+}
+
+
+def deleted_devices_recovery_phase(state):
+    """Return a compatible recovery phase for persisted cleanup state."""
+    phase = state.get("deleted_devices_recovery_phase")
+    if phase in DELETED_DEVICES_RECOVERY_ACTIVE:
+        return phase
+    # Before the coordinator existed, an interrupted delete with a snapshot
+    # was the only persisted recovery signal.
+    if (
+        state.get("last_status") == "running"
+        and state.get("last_action") in {"deleted_devices_delete", "deleted_devices_revert"}
+        and state.get("deleted_devices_rollback_path")
+    ):
+        return DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED
+    if phase == DELETED_DEVICES_RECOVERY_NONE:
+        return phase
+    return DELETED_DEVICES_RECOVERY_NONE
+
+
+def deleted_devices_recovery_active(state):
+    return deleted_devices_recovery_phase(state) in DELETED_DEVICES_RECOVERY_ACTIVE
+
+
+def deleted_devices_recovery_allows(state, action):
+    """Only Revert can resolve a persisted manual/restart recovery fence."""
+    return not deleted_devices_recovery_active(state) or action == "deleted_devices_revert"
+
 APPLY_PREVIEW_CLEAR_UPDATES = {
     "last_diff": "",
     "last_diff_generated_at": None,
@@ -52,6 +91,8 @@ DELETED_DEVICES_PREVIEW_CLEAR_UPDATES = {
     "last_deleted_devices_preview": "",
     "last_deleted_devices_rows": [],
     "last_deleted_devices_count": 0,
+    "last_deleted_devices_device_count": 0,
+    "last_deleted_devices_entity_count": 0,
     "last_deleted_devices_fingerprint": None,
     "last_deleted_devices_generated_at": None,
 }
@@ -188,6 +229,8 @@ def default_state():
         "last_deleted_devices_preview": "",
         "last_deleted_devices_rows": [],
         "last_deleted_devices_count": 0,
+        "last_deleted_devices_device_count": 0,
+        "last_deleted_devices_entity_count": 0,
         "last_deleted_devices_fingerprint": None,
         "last_deleted_devices_generated_at": None,
         "last_retained_devices_preview": "",
@@ -203,8 +246,12 @@ def default_state():
         "last_internal_ids_unresolved": [],
         "deleted_devices_pending_confirmation": False,
         "deleted_devices_rollback_path": None,
+        "deleted_devices_rollback_format": None,
         "deleted_devices_rollback_fingerprint": None,
         "deleted_devices_applied_fingerprint": None,
+        "deleted_devices_pending_device_count": 0,
+        "deleted_devices_pending_entity_count": 0,
+        "deleted_devices_recovery_phase": DELETED_DEVICES_RECOVERY_NONE,
         "managed_addons": [],
         "homeassistant_organizer_enabled": None,
         "include_redundant_data": False,

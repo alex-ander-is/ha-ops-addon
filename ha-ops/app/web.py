@@ -19,6 +19,24 @@ def _(key, **values):
     return i18n.t(key, **values)
 
 
+def deleted_entries_label(device_count, entity_count):
+    if device_count and entity_count:
+        return _("label.deleted_devices_and_entities")
+    if device_count:
+        return _("label.deleted_devices")
+    if entity_count:
+        return _("label.deleted_entities")
+    return _("label.deleted_devices")
+
+
+def deleted_entries_label_from_state(state, pending=False):
+    prefix = "deleted_devices_pending" if pending else "last_deleted_devices"
+    return deleted_entries_label(
+        int(state.get(f"{prefix}_device_count") or 0),
+        int(state.get(f"{prefix}_entity_count") or 0),
+    )
+
+
 STATUS_LABEL_KEYS = {
     "busy": "status.busy",
     "conflicts": "status.conflicts",
@@ -102,7 +120,13 @@ def repair_stale_running_state(ctx, state):
         run_lock.release()
 
 
-def reserve_action_slot(ctx):
+def recovery_action_allowed(ctx, action):
+    return job_logic.recovery_action_allowed(ctx.read_state(), action)
+
+
+def reserve_action_slot(ctx, action="mutation"):
+    if not recovery_action_allowed(ctx, action):
+        return False, None, False
     run_lock = getattr(ctx, "run_lock", None)
     if run_lock is None:
         state = ctx.read_state()
@@ -112,6 +136,9 @@ def reserve_action_slot(ctx):
         return False, None, False
     try:
         state = ctx.read_state()
+        if not job_logic.recovery_action_allowed(state, action):
+            run_lock.release()
+            return False, state, False
         return True, state, True
     except Exception:
         run_lock.release()
@@ -123,10 +150,10 @@ def release_action_slot(ctx, lock_acquired):
         ctx.run_lock.release()
 
 
-def reserve_mutation_slot(ctx):
+def reserve_mutation_slot(ctx, action="mutation"):
     if job_is_running(ctx):
         return False, None, False
-    return reserve_action_slot(ctx)
+    return reserve_action_slot(ctx, action)
 
 
 def addon_slug_value(addon):
@@ -271,8 +298,12 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
     details = [str(item) for item in (state.get("last_details") or []) if str(item)]
 
     if pending_deleted_devices and rollback_path:
+        entries = deleted_entries_label(
+            int(state.get("deleted_devices_pending_device_count") or 0),
+            int(state.get("deleted_devices_pending_entity_count") or 0),
+        )
         lines = [
-            _("message.deleted_devices_waiting"),
+            _("message.deleted_devices_waiting", entries=entries),
             "",
             f"{_('label.previous_action')}: {action_label(state.get('last_action'))}",
         ]
@@ -281,22 +312,26 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
         lines.extend(["", _("text.current_state")])
         try:
             cleanup = ctx.deleted_devices_cleanup_status(rollback_path)
+            removed_entries = deleted_entries_label(cleanup.get("removed_devices", 0), cleanup.get("removed_entities", 0))
+            current_entries = deleted_entries_label(cleanup.get("current_devices", 0), cleanup.get("current_entities", 0))
+            added_entries = deleted_entries_label(cleanup.get("added_devices", 0), cleanup.get("added_entities", 0))
             lines.extend(
                 [
-                    _("text.cleanup_removed", count=cleanup["removed"]),
-                    _("text.cleanup_current", count=cleanup["current"]),
-                    _("text.cleanup_added", count=cleanup["added"]),
+                    _("text.cleanup_removed", count=cleanup["removed"], entries=removed_entries),
+                    _("text.cleanup_current", count=cleanup["current"], entries=current_entries),
+                    _("text.cleanup_added", count=cleanup["added"], entries=added_entries),
                     _("text.cleanup_returned", count=cleanup["returned"]),
                 ]
             )
+            entries = removed_entries
         except Exception as exc:
             lines.append(_("text.rollback_status_unavailable", error=exc))
         lines.extend(
             [
                 _("text.rollback_available"),
                 "",
-                _("notice.deleted_devices_confirm_effect"),
-                _("notice.deleted_devices_revert_effect"),
+                _("notice.deleted_devices_confirm_effect", entries=entries),
+                _("notice.deleted_devices_revert_effect", entries=entries),
             ]
         )
         if details:
@@ -352,6 +387,7 @@ def render_page(ctx):
     last_status = state.get("last_status", "idle")
     job_running = job_is_running(ctx, state)
     has_conflicts = bool(state.get("conflicts"))
+    deleted_devices_recovery_active = state_store.deleted_devices_recovery_active(state)
     deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
     deleted_devices_rollback_path = state.get("deleted_devices_rollback_path")
     pending_deleted_devices_decision = bool(deleted_devices_pending_confirmation and deleted_devices_rollback_path)
@@ -386,7 +422,7 @@ def render_page(ctx):
     save_details_text = save_diff_text or save_preview_text
     save_summary_text = save_preview_text if save_diff_text and save_diff_text != save_preview_text else ""
     run_disabled = "disabled" if job_running else ""
-    action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
     apply_action = "apply"
     apply_button_text = _("action.apply")
     post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
@@ -410,18 +446,31 @@ def render_page(ctx):
         and state.get("last_deleted_devices_generated_at")
         and state.get("last_deleted_devices_fingerprint")
     )
-    check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation else ""
+    check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
     if save_push_retry_pending:
         action_disabled = "disabled"
         check_deleted_devices_disabled = "disabled"
     check_disk_usage_disabled = "disabled" if run_disabled or save_push_retry_pending else ""
-    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending else ""
-    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending else ""
-    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or save_push_retry_pending or not deletion_ready else ""
+    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
+    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
+    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending or not deletion_ready else ""
     confirm_deletion_disabled = (
-        "disabled" if run_disabled or save_push_retry_pending or not deleted_devices_pending_confirmation else ""
+        "disabled" if run_disabled or save_push_retry_pending or deleted_devices_recovery_active or not deleted_devices_pending_confirmation else ""
+    )
+    revert_deletion_disabled = (
+        "disabled"
+        if run_disabled or save_push_retry_pending or not deleted_devices_pending_confirmation or not deleted_devices_rollback_path
+        else ""
     )
     deleted_devices_actions_html = ""
+    preview_entries = deleted_entries_label(
+        int(state.get("last_deleted_devices_device_count") or 0),
+        int(state.get("last_deleted_devices_entity_count") or 0),
+    )
+    pending_entries = deleted_entries_label(
+        int(state.get("deleted_devices_pending_device_count") or 0),
+        int(state.get("deleted_devices_pending_entity_count") or 0),
+    )
     if deleted_devices_pending_confirmation:
         deleted_devices_actions_html = (
             "<div class='actions deletion-actions'>"
@@ -430,8 +479,8 @@ def render_page(ctx):
             f"<button type='submit' class='secondary' {confirm_deletion_disabled}>{_('action.confirm_changes')}</button>"
             "</form>"
             "<form method='post' action='deleted-devices-revert' data-async-form='true' "
-            f"data-confirm='{html.escape(_('confirm.deleted_devices_revert'), quote=True)}'>"
-            f"<button type='submit' {confirm_deletion_disabled}>{_('action.revert_changes')}</button>"
+            f"data-confirm='{html.escape(_('confirm.deleted_devices_revert', entries=pending_entries), quote=True)}'>"
+            f"<button type='submit' {revert_deletion_disabled}>{_('action.revert_changes')}</button>"
             "</form>"
             "</div>"
             "</div>"
@@ -442,7 +491,7 @@ def render_page(ctx):
             "<div class='action-row'>"
             "<form method='post' action='deleted-devices-delete' data-async-form='true' "
             "data-preserve-display-state='true' "
-            f"data-confirm='{html.escape(_('confirm.deleted_devices_delete'), quote=True)}'>"
+            f"data-confirm='{html.escape(_('confirm.deleted_devices_delete', entries=preview_entries), quote=True)}'>"
             f"<button type='submit' {deletion_disabled}>{_('action.approve_deleted_devices')}</button>"
             "</form>"
             "</div>"
@@ -526,7 +575,13 @@ def render_page(ctx):
             "</p>"
         )
         if pending_deleted_devices_decision:
-            deleted_devices_heading = _("heading.pending_deleted_devices_diff")
+            deleted_devices_heading = _(
+                "heading.pending_deleted_devices_diff",
+                entries=deleted_entries_label(
+                    int(state.get("deleted_devices_pending_device_count") or 0),
+                    int(state.get("deleted_devices_pending_entity_count") or 0),
+                ),
+            )
             deleted_devices_generated_html = ""
             try:
                 deleted_devices_preview_html = (
@@ -689,11 +744,26 @@ def start_background(target, *args, lock_acquired=False):
     return thread
 
 
+def job_action(target):
+    name = getattr(target, "__name__", "")
+    return name.removeprefix("run_").removesuffix("_job") or "mutation"
+
+
 def start_reserved_background(ctx, target, *args, state_updates=None, lock_acquired=False):
+    action = job_action(target)
+    if not recovery_action_allowed(ctx, action):
+        if lock_acquired:
+            ctx.run_lock.release()
+        return False
     if lock_acquired:
+        # A caller may have reserved the lock before a concurrent recovery
+        # fence was persisted; check again while it owns that reservation.
+        if not recovery_action_allowed(ctx, action):
+            ctx.run_lock.release()
+            return False
         ok, reserved_lock = True, True
     else:
-        ok, _state, reserved_lock = reserve_action_slot(ctx)
+        ok, _state, reserved_lock = reserve_action_slot(ctx, action)
     if not ok:
         return False
     try:
@@ -732,6 +802,14 @@ def create_handler(ctx):
             else:
                 self.send_html(render_page(ctx), status=409)
 
+        def send_recovery_blocked(self):
+            state = ctx.read_state()
+            message = state.get("last_message") or _("message.deleted_devices_cleanup_manual_recovery")
+            if self.wants_json():
+                self.send_json({"ok": False, "message": message}, status=409)
+            else:
+                self.send_html(render_page(ctx), status=409)
+
         def save_retry_pending(self):
             return bool(ctx.read_state().get("save_push_retry_pending"))
 
@@ -745,7 +823,10 @@ def create_handler(ctx):
         def start_job(self, target, *args, state_updates=None, lock_acquired=False):
             if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
                 return True
-            self.send_running_action()
+            if not recovery_action_allowed(ctx, job_action(target)):
+                self.send_recovery_blocked()
+            else:
+                self.send_running_action()
             return False
 
         def do_GET(self):
@@ -763,6 +844,16 @@ def create_handler(ctx):
             parsed = urlparse(self.path)
             length = int(self.headers.get("Content-Length", "0"))
             body = parse_qs(self.rfile.read(length).decode()) if length else {}
+
+            # The recovery fence is authoritative at the HTTP boundary too:
+            # reject before a direct endpoint can mutate state or queue work.
+            # Disk usage is deliberately read-only and remains available.
+            if (
+                state_store.deleted_devices_recovery_active(ctx.read_state())
+                and parsed.path not in {"/deleted-devices-revert", "/disk-usage"}
+            ):
+                self.send_recovery_blocked()
+                return
 
             if parsed.path == "/generate-key":
                 if self.save_retry_pending():
@@ -1114,10 +1205,11 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
+                entries = deleted_entries_label_from_state(ctx.read_state())
                 if not self.start_job(ctx.run_deleted_devices_delete_job):
                     return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": _("message.deleted_devices_delete_started")})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_delete_started", entries=entries)})
                 else:
                     self.send_html(render_page(ctx))
                 return
@@ -1126,10 +1218,11 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
+                entries = deleted_entries_label_from_state(ctx.read_state(), pending=True)
                 if not self.start_job(ctx.run_deleted_devices_confirm_job):
                     return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_confirm_started")})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_confirm_started", entries=entries)})
                 else:
                     self.send_html(render_page(ctx))
                 return
@@ -1138,10 +1231,11 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
+                entries = deleted_entries_label_from_state(ctx.read_state(), pending=True)
                 if not self.start_job(ctx.run_deleted_devices_revert_job):
                     return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_revert_started")})
+                    self.send_json({"ok": True, "message": _("message.deleted_devices_cleanup_revert_started", entries=entries)})
                 else:
                     self.send_html(render_page(ctx))
                 return
@@ -1157,6 +1251,8 @@ def create_handler(ctx):
                 try:
                     message = conflict_logic.approve_save_unknown_base_conflicts(ctx)
                     if not self.start_job(ctx.run_save_job, lock_acquired=lock_acquired):
+                        # start_job consumed a pre-reserved lock on rejection.
+                        lock_acquired = False
                         return
                     lock_acquired = False
                     if self.wants_json():

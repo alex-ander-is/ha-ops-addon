@@ -677,6 +677,7 @@ def render_deleted_devices_table(rows):
     columns = [
         ("area", _("label.area"), plain_value("area"), False),
         ("id", "ID", plain_value("id"), True),
+        ("entity-id", "Entity ID", plain_value("entity_id"), True),
         ("name", _("label.name"), plain_value("recovered_name"), False),
         ("device", "Manufacturer / Model", device_value, False),
         ("identifiers", _("label.identifiers"), identifiers_value, True),

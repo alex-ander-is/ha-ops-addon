@@ -449,7 +449,7 @@ class ServerTests(unittest.TestCase):
                 lambda ctx: server.app_context.job_logic.run_deleted_devices_delete_job(ctx),
                 {"last_deleted_devices_count": 1, "last_deleted_devices_fingerprint": "stale"},
                 "CATALOG: deleted_devices preview changed.",
-                "Device registry changed since preview. Run Check deleted_devices again.",
+                "deleted devices changed since preview. Run Check deleted devices again.",
             ),
         ]
 
@@ -462,6 +462,26 @@ class ServerTests(unittest.TestCase):
                     self.assertEqual(ctx.updates[-1]["last_message"], expected)
                     self.assertEqual(ctx.updates[-1]["last_details"][-1], expected)
                     self.assertNotIn(forbidden, ctx.updates[-1]["last_details"])
+
+            for action, expected in (
+                (
+                    server.app_context.job_logic.run_deleted_devices_confirm_job,
+                    "Confirming deleted entities cleanup.",
+                ),
+                (
+                    server.app_context.job_logic.run_deleted_devices_revert_job,
+                    "Reverting deleted entities cleanup.",
+                ),
+            ):
+                with self.subTest(action=action.__name__):
+                    ctx = JobContext(
+                        {
+                            "deleted_devices_pending_confirmation": True,
+                            "deleted_devices_pending_entity_count": 1,
+                        }
+                    )
+                    self.assertFalse(action(ctx))
+                    self.assertEqual(ctx.updates[0]["last_message"], expected)
         finally:
             i18n.EN_TEXT.update(originals)
 
@@ -595,7 +615,7 @@ class ServerTests(unittest.TestCase):
                 server.app_context.job_logic.run_deleted_devices_revert_job,
                 {"deleted_devices_pending_confirmation": True},
                 "CATALOG: rollback missing.",
-                "deleted_devices rollback snapshot is missing.",
+                "Deleted devices rollback snapshot is missing.",
             ),
         ]
 
@@ -926,7 +946,7 @@ class ServerTests(unittest.TestCase):
 
         self.assertEqual(ctx.writes[0]["last_message"], "CATALOG: deleted_devices message sentinel.")
         self.assertEqual(ctx.writes[0]["last_details"], [])
-        self.assertEqual(ctx.updates["last_message"], "Found 0 deleted_devices entries.")
+        self.assertEqual(ctx.updates["last_message"], "Found 0 deleted devices.")
         self.assertEqual(ctx.updates["last_details"], [])
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1874,6 +1894,7 @@ class ServerTests(unittest.TestCase):
             rollback_path.parent.mkdir(parents=True)
             rollback_path.write_text(json.dumps(original))
             events = []
+            server.core_stop = lambda: events.append("stop")
             server.core_start = lambda: events.append("start")
             server.write_state(
                 {
@@ -1892,13 +1913,184 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
 
             self.assertEqual(json.loads(registry_path.read_text()), original)
-            self.assertEqual(events, ["start"])
+            self.assertEqual(events, ["stop", "start"])
             self.assertEqual(state["last_status"], "interrupted")
-            self.assertEqual(state["last_message"], "Interrupted deleted_devices cleanup was reverted on startup.")
+            self.assertEqual(state["last_message"], "Interrupted deleted devices cleanup was reverted on startup.")
             self.assertFalse(state["deleted_devices_pending_confirmation"])
             self.assertFalse(rollback_path.exists())
             self.assertEqual(state["last_deleted_devices_count"], 1)
             self.assertNotIn("recovered_name", state["last_deleted_devices_rows"][0])
+
+    def test_startup_recovery_does_not_restore_when_core_stop_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            original = {"data": {"devices": [], "deleted_devices": [{"id": "deleted-1"}]}}
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            rollback_path = server.WORK_DIR / "deleted-devices-rollback" / "core.device_registry"
+            rollback_path.parent.mkdir(parents=True)
+            rollback_path.write_text(json.dumps(original))
+            events = []
+
+            def fail_stop():
+                events.append("stop")
+                raise RuntimeError("stop failed")
+
+            server.core_stop = fail_stop
+            server.core_start = lambda: events.append("start")
+            server.write_state(
+                {
+                    "last_status": "running",
+                    "last_action": "deleted_devices_delete",
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(rollback_path),
+                    "deleted_devices_recovery_phase": "restore_required",
+                }
+            )
+
+            server._CTX.repair_startup_state()
+            state = server.read_state()
+
+            self.assertEqual(events, ["stop"])
+            self.assertEqual(json.loads(registry_path.read_text())["data"]["deleted_devices"], [])
+            self.assertEqual(state["deleted_devices_recovery_phase"], "manual_recovery")
+            self.assertTrue(Path(state["deleted_devices_rollback_path"]).exists())
+
+    def test_manual_recovery_rejects_direct_mutating_job_and_releases_reserved_lock(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "deleted_devices_recovery_phase": "manual_recovery",
+                    "deleted_devices_rollback_path": str(root / "rollback"),
+                    "last_message": "Manual recovery is required.",
+                }
+            )
+
+            self.assertTrue(server.RUN_LOCK.acquire(blocking=False))
+            self.assertFalse(server.run_apply_job(lock_acquired=True))
+            self.assertTrue(server.RUN_LOCK.acquire(blocking=False))
+            server.RUN_LOCK.release()
+
+    def test_manual_recovery_http_blocks_mutations_before_job_dispatch(self):
+        server = load_server()
+
+        class FakeContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.calls = []
+                self.state = {
+                    "deleted_devices_recovery_phase": "manual_recovery",
+                    "deleted_devices_rollback_path": "/tmp/rollback",
+                    "last_message": "Manual recovery is required.",
+                }
+
+            def read_state(self):
+                return dict(self.state)
+
+            def run_apply_job(self, lock_acquired=False):
+                self.calls.append("apply")
+
+            def run_save_job(self, commit_subject=None, lock_acquired=False):
+                self.calls.append("save")
+
+            def run_deleted_devices_confirm_job(self, lock_acquired=False):
+                self.calls.append("confirm")
+
+            def run_rollback_job(self, release, lock_acquired=False):
+                self.calls.append("rollback")
+
+        ctx = FakeContext()
+        handler = server.web.create_handler(ctx)
+
+        for path, body in (("/apply", b""), ("/save", b""), ("/deleted-devices-confirm", b""), ("/rollback", b"release=x")):
+            request = handler.__new__(handler)
+            request.path = path
+            request.rfile = io.BytesIO(body)
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Accept"] = "application/json"
+            request.headers["Content-Length"] = str(len(body))
+            request.responses = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: None, request)
+            request.end_headers = MethodType(lambda self: None, request)
+            request.do_POST()
+            self.assertEqual(request.responses[-1], 409)
+            self.assertFalse(json.loads(request.wfile.getvalue().decode())["ok"])
+
+        self.assertEqual(ctx.calls, [])
+
+    def test_startup_recovers_delete_crash_after_core_start(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            original = {"data": {"devices": [], "deleted_devices": [{"id": "deleted-1"}]}}
+            registry_path.write_text(json.dumps(original))
+            server.core_stop = lambda: None
+
+            def crash_after_start():
+                raise BaseException("simulated power loss")
+
+            server.core_start = crash_after_start
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            with self.assertRaises(BaseException):
+                server.run_deleted_devices_delete_job()
+            self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], "restore_required")
+
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server._CTX.repair_startup_state()
+
+            self.assertEqual(events, ["stop", "start"])
+            self.assertEqual(json.loads(registry_path.read_text()), original)
+            self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], "none")
+
+    def test_startup_recovers_revert_crash_after_core_start(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            original = {"data": {"devices": [], "deleted_devices": [{"id": "deleted-1"}]}}
+            registry_path.write_text(json.dumps(original))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+
+            def crash_after_start():
+                raise BaseException("simulated power loss")
+
+            server.core_stop = lambda: None
+            server.core_start = crash_after_start
+            with self.assertRaises(BaseException):
+                server.run_deleted_devices_revert_job()
+            self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], "restore_required")
+
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+            server._CTX.repair_startup_state()
+
+            self.assertEqual(events, ["stop", "start"])
+            self.assertEqual(json.loads(registry_path.read_text()), original)
+            self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], "none")
 
     def test_startup_clears_transient_display_state(self):
         server = load_server()
@@ -4411,7 +4603,7 @@ class ServerTests(unittest.TestCase):
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted_devices check started", post_request.wfile.getvalue().decode())
+        self.assertIn("Deleted devices and entities check started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
             [
@@ -4522,7 +4714,7 @@ class ServerTests(unittest.TestCase):
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted_devices deletion started", post_request.wfile.getvalue().decode())
+        self.assertIn("deleted devices deletion started", post_request.wfile.getvalue().decode())
         self.assertEqual(ctx.calls[-1], "deleted-devices-delete")
 
         post_request = invoke(
@@ -4531,7 +4723,7 @@ class ServerTests(unittest.TestCase):
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted_devices cleanup confirmation started", post_request.wfile.getvalue().decode())
+        self.assertIn("deleted devices cleanup confirmation started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
             [
@@ -4556,7 +4748,7 @@ class ServerTests(unittest.TestCase):
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted_devices cleanup revert started", post_request.wfile.getvalue().decode())
+        self.assertIn("deleted devices cleanup revert started", post_request.wfile.getvalue().decode())
         self.assertEqual(
             ctx.calls,
             [
@@ -13281,7 +13473,7 @@ class ServerTests(unittest.TestCase):
             reset_git_state = page.index('action="reset-git-state"')
             disk_usage_section = page.index("<h2>Disk Usage</h2>")
             disk_usage = page.index('action="disk-usage"')
-            deleted_section = page.index("<h2>Deleted Devices</h2>")
+            deleted_section = page.index("<h2>Deleted devices and entities</h2>")
             deleted = page.index('action="deleted-devices-preview"')
             retained_section = page.index("<h2>Retained Devices</h2>")
             retained = page.index('action="retained-devices-preview"')
@@ -13303,13 +13495,14 @@ class ServerTests(unittest.TestCase):
             self.assertLess(internal_ids_section, internal_ids)
             self.assertIn('<div class="action-row">', page)
             self.assertIn('<section class="action-section">', page)
+            self.assertIn("<h2>Deleted devices and entities</h2>", page)
             self.assertNotIn('<button type="submit" >Save HA to Git</button>', page)
             self.assertNotIn('<button type="submit" >Apply Git to HA</button>', page)
-            self.assertIn("Check deleted_devices", page)
+            self.assertIn("Check deleted devices and entities", page)
             self.assertIn("Reset Git State", page)
             self.assertIn("Check disk usage", page)
             self.assertIn("Check actions IDs", page)
-            self.assertIn("Previews deleted device registry entries.", page)
+            self.assertIn("Previews deleted devices and entities.", page)
             self.assertIn("Rebuilds HA Ops service branches", page)
             self.assertIn("Prints a read-only disk usage summary to the Log", page)
             self.assertIn("Finds stale Zigbee2MQTT MQTT discovery topics.", page)
@@ -13799,7 +13992,7 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(server.run_deleted_devices_preview_job())
             state = server.read_state()
 
-            self.assertEqual(state["last_deleted_devices_count"], 1)
+            self.assertEqual(state["last_deleted_devices_count"], 2)
             self.assertEqual(
                 state["last_deleted_devices_rows"],
                 [
@@ -13809,7 +14002,15 @@ class ServerTests(unittest.TestCase):
                         "original_name": "Illuminance",
                         "original_device_class": "illuminance",
                         "id": "deleted-1",
-                    }
+                    },
+                    {
+                        "area": "Bathroom",
+                        "id": "",
+                        "entity_id": "sensor.bathroom_presence_illuminance",
+                        "original_name": "Illuminance",
+                        "original_device_class": "illuminance",
+                        "kind": "deleted_entity",
+                    },
                 ],
             )
             page = server.render_page()
@@ -13820,9 +14021,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
             self.assertNotIn("<table class='deleted-devices-table'>", table)
             self.assertNotIn("<colgroup>", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-entity-id", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-entity-id", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-device", table)
-            self.assertNotIn("sensor.bathroom_presence_illuminance", table)
+            self.assertIn("sensor.bathroom_presence_illuminance", table)
             self.assertIn("Illuminance", table)
             self.assertIn("illuminance", table)
             self.assertIn("deleted-1", table)
@@ -14554,18 +14755,18 @@ devices:
             self.assertIsNone(state["last_diff_generated_at"])
             self.assertNotIn("Save Preview", page)
             self.assertNotIn("stale save diff", page)
-            self.assertEqual(state["last_message"], "Found 0 deleted_devices entries.")
+            self.assertEqual(state["last_message"], "Found 0 deleted devices.")
             self.assertEqual(
                 state["last_details"],
                 [
-                    "Checking Home Assistant deleted_devices.",
-                    "Found 0 deleted_devices entries.",
+                    "Checking Home Assistant deleted devices and entities.",
+                    "Found 0 deleted devices.",
                 ],
             )
             self.assertNotIn("Checking deleted_devices.", state["last_details"])
             self.assertLess(
-                page.index("Checking Home Assistant deleted_devices."),
-                page.index("Found 0 deleted_devices entries."),
+                page.index("Checking Home Assistant deleted devices and entities."),
+                page.index("Found 0 deleted devices."),
             )
 
     def test_log_appends_message_after_details(self):
@@ -15023,6 +15224,273 @@ devices:
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertTrue(Path(state["deleted_devices_rollback_path"]).exists())
 
+    def test_deleted_entities_only_preview_and_delete(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            entity_path = storage / "core.entity_registry"
+            entity_path.write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [],
+                            "deleted_entities": [{"id": "entity-1", "entity_id": "switch.living_room_xmas_tree", "original_name": "Christmas tree"}],
+                        }
+                    }
+                )
+            )
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            preview = server.read_state()
+            self.assertEqual(preview["last_deleted_devices_count"], 1)
+            self.assertIn("Deleted entities", preview["last_deleted_devices_preview"])
+            self.assertIn("deleted entities", preview["last_message"])
+            preview_page = server.render_page()
+            self.assertIn("switch.living_room_xmas_tree", preview_page)
+            self.assertNotIn("deleted_devices", preview_page)
+
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            self.assertEqual(json.loads(entity_path.read_text())["data"]["deleted_entities"], [])
+            delete_state = server.read_state()
+            self.assertIn("deleted entities", delete_state["last_message"])
+            self.assertEqual(delete_state["deleted_devices_pending_device_count"], 0)
+            self.assertEqual(delete_state["deleted_devices_pending_entity_count"], 1)
+            self.assertNotIn("deleted_devices", delete_state["last_message"])
+            self.assertNotIn("deleted_devices", server.render_page())
+            pending_diff = server._CTX.deleted_devices_pending_diff(delete_state["deleted_devices_rollback_path"])
+            self.assertIn("deleted entities before cleanup", pending_diff)
+            self.assertIn("deleted entities now", pending_diff)
+            self.assertNotIn("deleted_entities before cleanup", pending_diff)
+
+            reloaded_server = load_server()
+            reloaded_server.DATA_DIR = root / "data"
+            reloaded_server.WORK_DIR = reloaded_server.DATA_DIR / "work"
+            reloaded_server.STATE_PATH = reloaded_server.DATA_DIR / "state.json"
+            reloaded_server.OPTIONS_PATH = reloaded_server.DATA_DIR / "options.json"
+            reloaded_server.RELEASES_DIR = reloaded_server.DATA_DIR / "releases"
+            reloaded_server.CONFIG_DIR = root / "homeassistant"
+            reloaded_server.ADDON_CONFIGS_DIR = root / "addon_configs"
+            reloaded_server.log = lambda message: None
+            reloaded_state = reloaded_server.read_state()
+            self.assertEqual(reloaded_state["deleted_devices_pending_entity_count"], 1)
+            self.assertIn("Pending deleted entities Diff", reloaded_server.render_page())
+
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            confirmed = server.read_state()
+            self.assertEqual(confirmed["last_message"], "Confirmed deleted entities cleanup.")
+            self.assertNotIn("deleted_devices", server.render_page())
+
+    def test_deleted_devices_preview_includes_mixed_deleted_registry_entries(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(
+                json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Old Button"}]}})
+            )
+            (storage / "core.entity_registry").write_text(
+                json.dumps({"data": {"entities": [], "deleted_entities": [{"id": "entity-1", "entity_id": "sensor.philips_1_lqi"}]}})
+            )
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            state = server.read_state()
+            self.assertEqual(state["last_deleted_devices_count"], 2)
+            self.assertIn("Old Button", state["last_deleted_devices_preview"])
+            self.assertIn("sensor.philips_1_lqi", state["last_deleted_devices_preview"])
+
+    def test_deleted_entities_fingerprint_blocks_stale_delete_before_core_stop(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            entity_path = storage / "core.entity_registry"
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [{"id": "entity-1", "entity_id": "sensor.old"}]}}))
+            events = []
+            server.core_stop = lambda: events.append("stop")
+            server.core_start = lambda: events.append("start")
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [{"id": "entity-2", "entity_id": "sensor.new"}]}}))
+
+            self.assertFalse(server.run_deleted_devices_delete_job())
+            self.assertEqual(events, [])
+            self.assertIn("changed since preview", server.read_state()["last_message"])
+
+    def test_confirm_deleted_entities_keeps_pending_when_removed_entity_returns(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            entity_path = storage / "core.entity_registry"
+            entity = {"id": "entity-1", "entity_id": "sensor.philips_1_lqi"}
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [entity]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [entity]}}))
+
+            self.assertFalse(server.run_deleted_devices_confirm_job())
+            self.assertTrue(server.read_state()["deleted_devices_pending_confirmation"])
+            self.assertIn("returned", server.read_state()["last_message"])
+
+    def test_revert_deleted_entities_preserves_new_entity_tombstones(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            entity_path = storage / "core.entity_registry"
+            old = {"id": "entity-1", "entity_id": "sensor.philips_1_lqi"}
+            new = {"id": "entity-2", "entity_id": "sensor.new_lqi"}
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [old]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [new]}}))
+            self.assertTrue(server.run_deleted_devices_revert_job())
+            self.assertEqual(json.loads(entity_path.read_text())["data"]["deleted_entities"], [new, old])
+
+    def test_deleted_entities_write_failure_restores_devices_and_keeps_no_pending_cleanup(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            device_path = storage / "core.device_registry"
+            original_devices = {"data": {"devices": [], "deleted_devices": [{"id": "device-1"}]}}
+            original_entities = {"data": {"entities": [], "deleted_entities": [{"id": "entity-1", "entity_id": "sensor.old"}]}}
+            device_path.write_text(json.dumps(original_devices))
+            entity_path = storage / "core.entity_registry"
+            entity_path.write_text(json.dumps(original_entities))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+
+            registry_cleanup = server.app_context.registry_cleanup
+            original_replace = registry_cleanup.os.replace
+
+            def fail_entity_replace(source, destination):
+                if Path(destination) == entity_path:
+                    raise OSError("entity replace failed")
+                return original_replace(source, destination)
+
+            registry_cleanup.os.replace = fail_entity_replace
+            try:
+                self.assertFalse(server.run_deleted_devices_delete_job())
+            finally:
+                registry_cleanup.os.replace = original_replace
+
+            self.assertEqual(json.loads(device_path.read_text()), original_devices)
+            self.assertEqual(json.loads(entity_path.read_text()), original_entities)
+            state = server.read_state()
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertIsNone(state["deleted_devices_rollback_path"])
+            self.assertEqual(list(storage.glob(".*.deleted-entries.*")), [])
+
+    def test_deleted_entities_write_and_device_compensation_failure_keeps_manual_recovery(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            device_path = storage / "core.device_registry"
+            device_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1"}]}}))
+            entity_path = storage / "core.entity_registry"
+            entity_path.write_text(json.dumps({"data": {"entities": [], "deleted_entities": [{"id": "entity-1", "entity_id": "sensor.old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+
+            registry_cleanup = server.app_context.registry_cleanup
+            original_replace = registry_cleanup.os.replace
+
+            def fail_entity_and_device_compensation(source, destination):
+                source = Path(source)
+                destination = Path(destination)
+                if destination == entity_path:
+                    raise OSError("entity replace failed")
+                if destination == device_path and source.name.endswith(".deleted-entries.restore.tmp"):
+                    raise OSError("device compensation failed")
+                return original_replace(source, destination)
+
+            registry_cleanup.os.replace = fail_entity_and_device_compensation
+            try:
+                self.assertFalse(server.run_deleted_devices_delete_job())
+            finally:
+                registry_cleanup.os.replace = original_replace
+
+            state = server.read_state()
+            rollback_path = Path(state["deleted_devices_rollback_path"])
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertTrue(rollback_path.exists())
+            self.assertIn("Manual recovery is required", state["last_message"])
+            self.assertTrue(any("device compensation failed" in detail for detail in state["last_details"]))
+
+    def test_deleted_entities_absent_and_legacy_rollback_leave_entity_registry_untouched(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            device_path = storage / "core.device_registry"
+            device_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1"}]}}))
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertEqual(server.read_state()["last_deleted_devices_count"], 1)
+            self.assertFalse((storage / "core.entity_registry").exists())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            self.assertFalse((storage / "core.entity_registry").exists())
+
+            rollback = root / "work" / "deleted-devices-rollback" / "core.device_registry"
+            rollback.parent.mkdir(parents=True)
+            rollback.write_text(json.dumps({"data": {"deleted_devices": [{"id": "device-1"}]}}))
+            entity_path = storage / "core.entity_registry"
+            entity_path.write_text(json.dumps({"data": {"deleted_entities": [{"id": "entity-current"}]}}))
+            status = server._CTX.deleted_devices_cleanup_status(str(rollback))
+            self.assertEqual(status["removed"], 1)
+            self.assertNotIn("deleted_entities before cleanup", server._CTX.deleted_devices_pending_diff(str(rollback)))
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(rollback),
+                    "deleted_devices_applied_fingerprint": None,
+                }
+            )
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            self.assertEqual(json.loads(entity_path.read_text())["data"]["deleted_entities"], [{"id": "entity-current"}])
+
     def test_deleted_devices_preview_enriches_rows_from_homeassistant_target_git_history(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -15471,7 +15939,7 @@ devices:
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertEqual(state["last_deleted_devices_fingerprint"], "after")
             self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
-            self.assertIn("Pending deleted_devices Diff", page)
+            self.assertIn("Pending deleted devices Diff", page)
             self.assertIn("Pending diff unavailable", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
@@ -15511,7 +15979,7 @@ devices:
                 {
                     "last_status": "error",
                     "last_action": "deleted_devices_revert",
-                    "last_message": "Device registry changed after deletion. Review manually before reverting.",
+                    "last_message": "Registry entries changed after deletion. Review manually before reverting.",
                     "last_details": [],
                     "last_deleted_devices_preview": "No deleted_devices entries found.",
                     "last_deleted_devices_rows": [],
@@ -15532,20 +16000,20 @@ devices:
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)
-            self.assertIn("deleted_devices cleanup is waiting for your decision.", page)
+            self.assertIn("deleted devices cleanup is waiting for your decision.", page)
             self.assertIn("Previous action: Revert Changes", page)
-            self.assertIn("Last result: Device registry changed after deletion. Review manually before reverting.", page)
-            self.assertIn("- removed by this cleanup: 1", page)
-            self.assertIn("- currently in deleted_devices: 1", page)
-            self.assertIn("- new deleted_devices after restart: 1", page)
+            self.assertIn("Last result: Registry entries changed after deletion. Review manually before reverting.", page)
+            self.assertIn("- deleted devices removed by this cleanup: 1", page)
+            self.assertIn("- currently present deleted devices: 1", page)
+            self.assertIn("- new deleted devices after restart: 1", page)
             self.assertIn("- removed entries returned: 0", page)
-            self.assertIn("Confirm Changes: keep this cleanup.", page)
-            self.assertIn("Revert Changes: restore only entries removed by this cleanup.", page)
-            self.assertIn("<h2>Pending deleted_devices Diff</h2>", page)
+            self.assertIn("Confirm Changes: keep this cleanup. Removed deleted devices stay removed.", page)
+            self.assertIn("Revert Changes: restore only deleted devices removed by this cleanup.", page)
+            self.assertIn("<h2>Pending deleted devices Diff</h2>", page)
             self.assertNotIn("<h2>Deletion of deleted_devices Preview</h2>", page)
             self.assertIn("Confirm Changes accepts this diff.", page)
-            self.assertIn("deleted_devices before cleanup", page)
-            self.assertIn("deleted_devices now", page)
+            self.assertIn("deleted devices before cleanup", page)
+            self.assertIn("deleted devices now", page)
             self.assertIn("diff-del", page)
             self.assertIn("d Button", page)
             self.assertIn("diff-add", page)
@@ -15577,14 +16045,14 @@ devices:
             self.assertTrue(server.run_deleted_devices_delete_job())
             page = server.render_page()
 
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Check deleted_devices</button>", page)
+            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Check deleted devices and entities</button>", page)
             self.assertNotIn("action='deleted-devices-delete'", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
             self.assertFalse(server.run_deleted_devices_preview_job())
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
             self.assertFalse(server.run_deleted_devices_delete_job())
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
     def test_pending_deleted_devices_cleanup_blocks_save_apply_and_previews(self):
         server = load_server()
@@ -15632,19 +16100,19 @@ devices:
 
             self.assertFalse(server.run_save_preview_job())
             self.assertEqual(server.read_state()["last_action"], "save_preview")
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
             self.assertFalse(server.run_save_job())
             self.assertEqual(server.read_state()["last_action"], "save")
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
             self.assertFalse(server.run_preview_job())
             self.assertEqual(server.read_state()["last_action"], "preview")
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
             self.assertFalse(server.run_apply_job())
             self.assertEqual(server.read_state()["last_action"], "apply")
-            self.assertIn("pending deleted_devices cleanup", server.read_state()["last_message"])
+            self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
             page = server.render_page()
             self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview HA to Git</button>", page)
@@ -15842,7 +16310,7 @@ devices:
             self.assertEqual(state["last_backup_slug"], "backup-slug")
             self.assertIn("changed since preview", state["last_message"])
 
-    def test_deleted_devices_partial_success_clears_approval_when_core_start_fails(self):
+    def test_deleted_devices_partial_success_retains_manual_recovery_when_core_start_fails(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -15877,10 +16345,11 @@ devices:
 
             self.assertEqual(data["data"]["deleted_devices"], [{"id": "deleted-1", "name": "Old Button"}])
             self.assertEqual(events, ["stop", "start", "start", "start"])
-            self.assertFalse(state.get("deleted_devices_pending_confirmation", False))
+            self.assertTrue(state.get("deleted_devices_pending_confirmation", False))
             self.assertEqual(state["last_deleted_devices_count"], 1)
             self.assertIn("Old Button", state["last_deleted_devices_preview"])
-            self.assertIn("start failed", state["last_message"])
+            self.assertEqual(state["deleted_devices_recovery_phase"], "manual_recovery")
+            self.assertIn("start failed", "\n".join(state["last_details"]))
 
     def test_deleted_devices_failed_restore_preserves_manual_recovery_state(self):
         server = load_server()
@@ -15929,6 +16398,218 @@ devices:
             self.assertIn("Manual recovery is required", state["last_message"])
             self.assertIn("restore failed", "\n".join(state["last_details"]))
 
+    def test_confirm_keeps_v1_manifest_when_terminal_publication_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+            self.assertEqual(rollback.name, "rollback-manifest-v1.json")
+
+            def fail_directory_fsync(_directory):
+                raise OSError("directory fsync failed")
+
+            registry_cleanup = sys.modules["registry_cleanup"]
+            original_fsync = registry_cleanup._fsync_directory
+            registry_cleanup._fsync_directory = fail_directory_fsync
+            try:
+                self.assertFalse(server.run_deleted_devices_confirm_job())
+            finally:
+                registry_cleanup._fsync_directory = original_fsync
+            state = server.read_state()
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertTrue(rollback.exists())
+            self.assertTrue((rollback.parent / "core.device_registry.snapshot").exists())
+
+    def test_confirm_keeps_terminal_v1_manifest_when_sidecar_cleanup_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+
+            registry_cleanup = sys.modules["registry_cleanup"]
+            original_unlink = registry_cleanup._durable_unlink
+
+            def fail_device_sidecar_unlink(path):
+                if Path(path).name == "core.device_registry.snapshot":
+                    raise OSError("sidecar fsync failed")
+                return original_unlink(path)
+
+            registry_cleanup._durable_unlink = fail_device_sidecar_unlink
+            try:
+                self.assertFalse(server.run_deleted_devices_confirm_job())
+            finally:
+                registry_cleanup._durable_unlink = original_unlink
+
+            self.assertTrue(rollback.exists())
+            self.assertTrue((rollback.parent / "core.device_registry.snapshot").exists())
+            self.assertEqual(json.loads(rollback.read_text())["phase"], "confirmed")
+            self.assertTrue(server.read_state()["deleted_devices_pending_confirmation"])
+            self.assertTrue(server.run_deleted_devices_confirm_job())
+            self.assertFalse(rollback.exists())
+
+    def test_revert_keeps_v1_manifest_and_manual_fence_when_terminal_publication_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry = storage / "core.device_registry"
+            registry.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+            real_phase = server._CTX.set_deleted_devices_rollback_phase
+
+            def fail_reverted(path, phase):
+                if phase != "reverted":
+                    return real_phase(path, phase)
+                registry_cleanup = sys.modules["registry_cleanup"]
+                original_fsync = registry_cleanup._fsync_directory
+                registry_cleanup._fsync_directory = lambda _directory: (_ for _ in ()).throw(OSError("directory fsync failed"))
+                try:
+                    return real_phase(path, phase)
+                finally:
+                    registry_cleanup._fsync_directory = original_fsync
+
+            server._CTX.set_deleted_devices_rollback_phase = fail_reverted
+            self.assertFalse(server.run_deleted_devices_revert_job())
+            state = server.read_state()
+            self.assertEqual(state["deleted_devices_recovery_phase"], "manual_recovery")
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertTrue(rollback.exists())
+            self.assertTrue((rollback.parent / "core.device_registry.snapshot").exists())
+
+    def test_revert_keeps_terminal_v1_manifest_when_sidecar_cleanup_fails(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry = storage / "core.device_registry"
+            registry.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+
+            registry_cleanup = sys.modules["registry_cleanup"]
+            original_unlink = registry_cleanup._durable_unlink
+
+            def fail_device_sidecar_unlink(path):
+                if Path(path).name == "core.device_registry.snapshot":
+                    raise OSError("sidecar fsync failed")
+                return original_unlink(path)
+
+            registry_cleanup._durable_unlink = fail_device_sidecar_unlink
+            try:
+                self.assertFalse(server.run_deleted_devices_revert_job())
+            finally:
+                registry_cleanup._durable_unlink = original_unlink
+
+            self.assertTrue(rollback.exists())
+            self.assertTrue((rollback.parent / "core.device_registry.snapshot").exists())
+            self.assertEqual(json.loads(rollback.read_text())["phase"], "reverted")
+            self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], "manual_recovery")
+            self.assertTrue(server.run_deleted_devices_revert_job())
+            self.assertFalse(rollback.exists())
+
+    def test_v1_revert_preserves_entity_registry_created_after_snapshot(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            entity_path = storage / "core.entity_registry"
+            current_entities = {"data": {"entities": [{"entity_id": "sensor.new"}], "deleted_entities": [{"id": "new"}]}}
+            entity_path.write_text(json.dumps(current_entities))
+
+            self.assertTrue(server.run_deleted_devices_revert_job())
+
+            self.assertEqual(json.loads(entity_path.read_text()), current_entities)
+
+    def test_v1_startup_recovery_preserves_entity_registry_created_after_snapshot(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = server.read_state()["deleted_devices_rollback_path"]
+            entity_path = storage / "core.entity_registry"
+            current_entities = {"data": {"entities": [{"entity_id": "sensor.new"}], "deleted_entities": [{"id": "new"}]}}
+            entity_path.write_text(json.dumps(current_entities))
+            server._CTX.set_deleted_devices_rollback_phase(rollback, "restore_required")
+            server.write_state({"deleted_devices_recovery_phase": "restore_required"})
+
+            server._CTX.repair_startup_state()
+
+            self.assertEqual(json.loads(entity_path.read_text()), current_entities)
+
+    def test_stale_manifest_format_does_not_break_legacy_revert(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            rollback = root / "work" / "deleted-devices-rollback" / "core.device_registry"
+            rollback.parent.mkdir(parents=True)
+            rollback.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(rollback),
+                    "deleted_devices_rollback_format": "manifest_v1",
+                }
+            )
+
+            self.assertTrue(server.run_deleted_devices_revert_job())
+
+            self.assertEqual(json.loads(registry_path.read_text())["data"]["deleted_devices"], [{"id": "old"}])
+            self.assertFalse(rollback.exists())
     def test_confirm_deleted_devices_allows_unrelated_registry_changes_after_delete(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -15961,8 +16642,8 @@ devices:
             state = server.read_state()
 
             self.assertFalse(state["deleted_devices_pending_confirmation"])
-            self.assertIn("Confirmed deleted_devices cleanup", state["last_message"])
-            self.assertIn("removed deleted_devices did not return", "\n".join(state["last_details"]))
+            self.assertIn("Confirmed deleted devices cleanup", state["last_message"])
+            self.assertIn("removed deleted devices did not return", "\n".join(state["last_details"]))
 
     def test_confirm_deleted_devices_allows_new_deleted_devices_after_delete(self):
         server = load_server()
@@ -15998,8 +16679,8 @@ devices:
 
             self.assertFalse(state["deleted_devices_pending_confirmation"])
             self.assertEqual(data["data"]["deleted_devices"], [{"id": "deleted-2", "name": "Returned Button"}])
-            self.assertIn("Confirmed deleted_devices cleanup", state["last_message"])
-            self.assertIn("new deleted_devices", "\n".join(state["last_details"]))
+            self.assertIn("Confirmed deleted devices cleanup", state["last_message"])
+            self.assertIn("new deleted devices", "\n".join(state["last_details"]))
 
     def test_confirm_deleted_devices_fails_when_removed_entry_returns_after_delete(self):
         server = load_server()
@@ -16081,8 +16762,8 @@ devices:
                     {"id": "deleted-1", "name": "Old Button"},
                 ],
             )
-            self.assertIn("Reverted deleted_devices cleanup", state["last_message"])
-            self.assertIn("Preserved 1 current deleted_devices", "\n".join(state["last_details"]))
+            self.assertIn("Reverted deleted devices cleanup", state["last_message"])
+            self.assertIn("Preserved 1 current deleted devices", "\n".join(state["last_details"]))
             self.assertIn("Preserved other current core.device_registry changes", "\n".join(state["last_details"]))
             self.assertIn("deleted_devices revert: restored deleted_devices", "\n".join(logs))
 
