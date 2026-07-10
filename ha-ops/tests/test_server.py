@@ -1778,10 +1778,53 @@ class ServerTests(unittest.TestCase):
             selected_page = server.render_page()
 
             self.assertIn("name='selected' value='1' checked", selected_page)
+            self.assertIn("preview-choice-option preview-choice-option-selected", selected_page)
             self.assertIn("<input type='radio' name='choice' value='git' checked>", selected_page)
             self.assertIn("<input type='radio' name='choice' value='ha'>", selected_page)
             self.assertIn("<button type='submit'>Confirm Apply to HA</button>", selected_page)
             self.assertNotIn("Select files to continue.", selected_page)
+
+    def test_apply_selected_lovelace_storage_highlights_git_default_without_has_selector(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            server.write_state(
+                {
+                    "last_status": "idle",
+                    "last_preview": "Apply preview changes (4):\n- Modified: homeassistant/.storage/lovelace.lovelace",
+                    "last_diff": "\n".join(
+                        [
+                            "## homeassistant",
+                            "diff -ruN /tmp/apply-preview/baseline/.storage/lovelace.lovelace /tmp/apply-preview/preview/.storage/lovelace.lovelace",
+                            "--- /tmp/apply-preview/baseline/.storage/lovelace.lovelace",
+                            "+++ /tmp/apply-preview/preview/.storage/lovelace.lovelace",
+                            "@@ -1 +1 @@",
+                            '-{"data":{"config":{"title":"Live"}}}',
+                            '+{"data":{"config":{"title":"Git"}}}',
+                        ]
+                    ),
+                    "last_preview_paths": [
+                        "homeassistant/configuration.yaml",
+                        "homeassistant/.storage/lovelace.lovelace",
+                        "homeassistant/scripts.yaml",
+                        "homeassistant/scenes.yaml",
+                    ],
+                    "apply_preview_selected_paths": ["homeassistant/.storage/lovelace.lovelace"],
+                }
+            )
+
+            page = server.render_page()
+
+            self.assertIn("homeassistant/.storage/<strong>lovelace.lovelace</strong>", page)
+            self.assertIn(
+                "<label class='preview-choice-option preview-choice-option-selected'>"
+                "<input type='radio' name='choice' value='git' checked>"
+                "<span>Use Git Version</span>",
+                page,
+            )
+            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
 
     def test_running_preview_disables_save_and_apply_cancel_actions(self):
         server = load_server()

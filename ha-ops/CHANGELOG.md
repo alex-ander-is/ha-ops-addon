@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.1
+
+- Highlight the default Git choice immediately when selecting a Git-to-HA Apply preview row, including Lovelace dashboard storage files.
+- Report early Save state-read failures cleanly and clear deleted-device cleanup confirmation state after a successful revert restore even if Core restart fails.
+
 ## 0.9.0
 
 - Extend deleted registry cleanup to cover both device and entity tombstones, preserving new tombstones during Confirm or Revert.

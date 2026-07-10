@@ -194,6 +194,7 @@ EN_TEXT = {
     "error.deleted_devices_preview_changed": "{entries} changed since preview. Run Check deleted devices again.",
     "error.deleted_devices_preview_required": "Run Check deleted devices before approving deletion.",
     "error.deleted_devices_rollback_missing": "{entries} rollback snapshot is missing.",
+    "error.deleted_devices_already_confirmed": "{entries} cleanup was already confirmed; it cannot be reverted.",
     "error.internal_ids_preview_required": "Run Check actions IDs before approving migration.",
     "error.internal_ids_selection_required": "Select at least one internal id migration file.",
     "error.live_path_missing": "Live path does not exist for target '{target}': {path}",

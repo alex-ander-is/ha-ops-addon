@@ -428,7 +428,26 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not enter_run_lock(ctx, "save", lock_acquired):
+    try:
+        if not enter_run_lock(ctx, "save", lock_acquired):
+            return False
+    except Exception as exc:
+        try:
+            release_run_lock(ctx)
+        except RuntimeError:
+            pass
+        message = str(exc)
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "save",
+                "last_message": message,
+                "last_details": [message],
+                "save_push_retry_pending": False,
+                "save_push_retry_commit": None,
+            }
+        )
         return False
 
     details = []
@@ -1702,6 +1721,7 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
     core_stopped = False
     restore_applied = False
     recovery_armed = False
+    core_start_failed_after_restore = False
     result = None
     log_action(ctx, "deleted_devices revert: started")
     write_state(
@@ -1727,7 +1747,7 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
         cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
         if cleanup_status.get("terminal_phase"):
             if cleanup_status["terminal_phase"] != registry_cleanup.ROLLBACK_PHASE_REVERTED:
-                raise RuntimeError("Deleted devices cleanup was already confirmed; it cannot be reverted.")
+                raise i18n.error("error.deleted_devices_already_confirmed", entries=entries)
             ctx.discard_deleted_devices_rollback(rollback_path)
             preview_updates = refresh_deleted_devices_preview_updates(ctx)
             write_state(
@@ -1767,7 +1787,11 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
             ctx.add_detail(details, _("detail.preserved_current_deleted_devices", count=result.get("preserved", 0), entries=entries))
         ctx.add_detail(details, _("detail.preserved_other_registry_changes"))
         ctx.add_detail(details, _("detail.starting_core"))
-        ctx.core_start()
+        try:
+            ctx.core_start()
+        except Exception:
+            core_start_failed_after_restore = True
+            raise
         core_stopped = False
         preview_updates = refresh_deleted_devices_preview_updates(ctx)
         if registry_cleanup.rollback_manifest_is_v1(rollback_path):
@@ -1817,6 +1841,16 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                         **(
                             refresh_deleted_devices_preview_updates(ctx)
                             if result
+                            else {}
+                        ),
+                        **(
+                            {
+                                "deleted_devices_pending_confirmation": False,
+                                "deleted_devices_applied_fingerprint": None,
+                                "deleted_devices_pending_device_count": 0,
+                                "deleted_devices_pending_entity_count": 0,
+                            }
+                            if core_start_failed_after_restore
                             else {}
                         ),
                     }

@@ -317,16 +317,25 @@ def preview_choice_control(path, direction, path_action, selected_choice=None, a
     disabled = " disabled" if actions_disabled else ""
     primary_checked = " checked" if selected_choice == primary_choice else ""
     keep_checked = " checked" if selected_choice == keep_choice else ""
+    primary_classes = "preview-choice-option"
+    keep_classes = "preview-choice-option"
+    if selected_choice == primary_choice:
+        primary_classes += " preview-choice-option-selected"
+    if selected_choice == keep_choice:
+        keep_classes += " preview-choice-option-selected"
+    if actions_disabled:
+        primary_classes += " preview-choice-option-disabled"
+        keep_classes += " preview-choice-option-disabled"
     return (
         f"<form class='preview-choice-toggle' method='post' action='{path_action}' "
         "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true' "
         "data-preserve-preview-expanded='true'>"
         f"<input type='hidden' name='path' value='{escaped_path}'>"
-        f"<label class='preview-choice-option'>"
+        f"<label class='{primary_classes}'>"
         f"<input type='radio' name='choice' value='{primary_choice}'{primary_checked}{disabled}>"
         f"<span>{primary_label}</span>"
         "</label>"
-        f"<label class='preview-choice-option'>"
+        f"<label class='{keep_classes}'>"
         f"<input type='radio' name='choice' value='{keep_choice}'{keep_checked}{disabled}>"
         f"<span>{_('action.keep_unchanged')}</span>"
         "</label>"
@@ -1378,15 +1387,18 @@ def render_page(data):
       opacity: 0;
       pointer-events: none;
     }}
+    .preview-choice-option-selected,
     .preview-choice-option:has(input:checked) {{
       background: var(--ha-primary);
       color: var(--ha-primary-contrast);
     }}
+    .preview-choice-option-disabled,
     .preview-choice-option:has(input:disabled) {{
       background: #e5e7eb;
       color: #6b7280;
       cursor: default;
     }}
+    .preview-choice-option-selected.preview-choice-option-disabled,
     .preview-choice-option:has(input:checked:disabled) {{
       background: #d1d5db;
       color: #4b5563;
