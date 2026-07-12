@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.2
+
+- Add version-negotiated Docker build-cache usage estimates and one-shot all-cache pruning.
+- Preserve ambiguous or corrupt prune state until explicit acknowledgement.
+
 ## 0.9.1
 
 - Highlight the default Git choice immediately when selecting a Git-to-HA Apply preview row, including Lovelace dashboard storage files.

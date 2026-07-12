@@ -1,6 +1,8 @@
 import json
 import os
+import hashlib
 import threading
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -25,6 +27,100 @@ DELETED_DEVICES_RECOVERY_ACTIVE = {
     DELETED_DEVICES_RECOVERY_RECOVERING,
     DELETED_DEVICES_RECOVERY_MANUAL,
 }
+
+DOCKER_PRUNE_FENCE_KEY = "docker_build_cache_prune_fence"
+DOCKER_PRUNE_ACTIVE_PHASES = {"accepted", "dispatching"}
+
+
+def _valid_timestamp(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.tzinfo is not None
+    except ValueError:
+        return False
+
+
+def classify_docker_prune_fence(value):
+    if value is None:
+        return {"kind": "idle"}
+    valid = isinstance(value, dict) and value.get("schema") == 1
+    operation_id = value.get("operation_id") if isinstance(value, dict) else None
+    phase = value.get("phase") if isinstance(value, dict) else None
+    try:
+        parsed_uuid = uuid.UUID(operation_id) if isinstance(operation_id, str) else None
+        valid = valid and str(parsed_uuid) == operation_id.lower() and parsed_uuid.variant == uuid.RFC_4122
+    except (ValueError, AttributeError):
+        valid = False
+    valid = valid and phase in DOCKER_PRUNE_ACTIVE_PHASES | {"resolution_required"}
+    valid = valid and _valid_timestamp(value.get("accepted_at"))
+    for key in ("context", "error"):
+        if key in value and (not isinstance(value[key], str) or len(value[key]) > 2000):
+            valid = False
+    if valid:
+        return {"kind": "valid", "phase": phase, "operation_id": operation_id.lower(), "value": value}
+    canonical = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    token = "corrupt:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    return {"kind": "corrupt", "phase": "resolution_required", "recovery_token": token, "value": value}
+
+
+def new_docker_prune_fence(operation_id, accepted_at):
+    return {"schema": 1, "operation_id": str(operation_id), "phase": "accepted", "accepted_at": accepted_at}
+
+
+def transition_docker_prune_fence(path, operation_id, from_phases, phase, updates=None):
+    with STATE_LOCK:
+        current = read_state(path)
+        classified = classify_docker_prune_fence(current.get(DOCKER_PRUNE_FENCE_KEY))
+        if classified.get("kind") != "valid" or classified.get("operation_id") != operation_id or classified.get("phase") not in set(from_phases):
+            return None
+        fence = dict(classified["value"], phase=phase)
+        if updates:
+            fence.update(updates)
+        current[DOCKER_PRUNE_FENCE_KEY] = fence
+        _replace_state(path, current)
+        return current
+
+
+def clear_docker_prune_fence(path, mode, identity, updates=None):
+    with STATE_LOCK:
+        current = read_state(path)
+        classified = classify_docker_prune_fence(current.get(DOCKER_PRUNE_FENCE_KEY))
+        matches = (
+            mode == "operation" and classified.get("kind") == "valid"
+            and classified.get("phase") == "resolution_required" and classified.get("operation_id") == identity
+        ) or (mode == "corrupt" and classified.get("kind") == "corrupt" and classified.get("recovery_token") == identity)
+        if not matches:
+            return None
+        current[DOCKER_PRUNE_FENCE_KEY] = None
+        if updates:
+            current.update(updates)
+        _replace_state(path, current)
+        return current
+
+
+def complete_docker_prune_fence(path, operation_id, updates):
+    with STATE_LOCK:
+        current = read_state(path)
+        classified = classify_docker_prune_fence(current.get(DOCKER_PRUNE_FENCE_KEY))
+        if (
+            classified.get("kind") != "valid"
+            or classified.get("operation_id") != operation_id
+            or classified.get("phase") != "dispatching"
+        ):
+            return None
+        current[DOCKER_PRUNE_FENCE_KEY] = None
+        current.update(updates)
+        _replace_state(path, current)
+        return current
+
+
+def _replace_state(path, current):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+    os.replace(temp_path, path)
 
 
 def deleted_devices_recovery_phase(state):
@@ -258,6 +354,7 @@ def default_state():
         "post_apply_save_recommended": False,
         "save_push_retry_pending": False,
         "save_push_retry_commit": None,
+        DOCKER_PRUNE_FENCE_KEY: None,
         "conflicts": [],
         "conflict_type": None,
         "save_conflict_resolutions": {},
@@ -275,10 +372,7 @@ def write_state(path, updates):
         if updates.get("deleted_devices_pending_confirmation") is True:
             current.update(APPLY_PREVIEW_CLEAR_UPDATES)
             current.update(SAVE_PREVIEW_CLEAR_UPDATES)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = path.with_name(f".{path.name}.tmp")
-        temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
-        os.replace(temp_path, path)
+        _replace_state(path, current)
         return current
 
 

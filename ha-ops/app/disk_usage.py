@@ -488,7 +488,11 @@ def _docker_usage_lines(socket_path, docker_system_df=None, timeout=OPTIONAL_COM
             payload, error = None, str(exc)
     else:
         try:
-            payload = _call_with_timeout(docker_system_df, timeout=timeout)
+            result = _call_with_timeout(docker_system_df, timeout=timeout)
+            if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], dict):
+                payload, cache_usage = result
+            else:
+                payload, cache_usage = result, None
             error = None
         except Exception as exc:
             payload, error = None, str(exc)
@@ -530,11 +534,32 @@ def _docker_usage_lines(socket_path, docker_system_df=None, timeout=OPTIONAL_COM
         for name, size in sorted(volumes_with_size, key=lambda item: item[1], reverse=True)[:5]:
             lines.append(_("detail.disk_usage_docker_item", name=name, size=format_size(size)))
 
-        build_cache = payload.get("BuildCache") or []
-        if not isinstance(build_cache, list):
-            raise TypeError(_("detail.disk_usage_docker_payload_invalid"))
-        build_cache_size = sum(int(item.get("Size") or 0) for item in build_cache if isinstance(item, dict))
-        lines.append(_("detail.disk_usage_docker_build_cache", count=len(build_cache), size=format_size(build_cache_size)))
+        if docker_system_df is None:
+            build_cache = payload.get("BuildCache") or []
+            if not isinstance(build_cache, list):
+                raise TypeError(_("detail.disk_usage_docker_payload_invalid"))
+            build_cache_size = sum(int(item.get("Size") or 0) for item in build_cache if isinstance(item, dict))
+            lines.append(_("detail.disk_usage_docker_build_cache", count=len(build_cache), size=format_size(build_cache_size)))
+            lines.append(_("detail.disk_usage_docker_build_cache_reclaimable_unavailable"))
+        else:
+            if cache_usage is None:
+                build_cache = payload.get("BuildCache") or []
+                if not isinstance(build_cache, list):
+                    raise TypeError(_("detail.disk_usage_docker_payload_invalid"))
+                build_cache_size = sum(int(item.get("Size") or 0) for item in build_cache if isinstance(item, dict))
+                lines.append(_("detail.disk_usage_docker_build_cache", count=len(build_cache), size=format_size(build_cache_size)))
+                lines.append(_("detail.disk_usage_docker_build_cache_reclaimable_unavailable"))
+                return lines, None
+            count = cache_usage.get("count")
+            lines.append(_(
+                "detail.disk_usage_docker_build_cache",
+                count=_("label.unknown") if count is None else count,
+                size=format_size(cache_usage["size"]),
+            ))
+            lines.append(_(
+                "detail.disk_usage_docker_build_cache_reclaimable",
+                size=format_size(cache_usage["reclaimable"]),
+            ))
         return lines, None
     except Exception as exc:
         return None, str(exc)

@@ -1874,8 +1874,12 @@ def render_page(data):
               <form method="post" action="disk-usage" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_disk_usage_disabled']}>{_('action.check_disk_usage')}</button>
               </form>
+              <form method="post" action="docker-build-cache-prune" data-async-form="true" data-confirm="{_('confirm.docker_build_cache_prune')}">
+                <button type="submit" class="warning" {data['docker_prune_disabled']}>{_('action.clear_docker_build_cache')}</button>
+              </form>
             </div>
             <p class="action-flow">{_('text.disk_usage_flow')}</p>
+            {data['docker_prune_status_html']}
           </section>
           <section class="action-section">
             <h2>{_('heading.deleted_devices')}</h2>

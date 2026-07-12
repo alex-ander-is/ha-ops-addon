@@ -164,7 +164,10 @@ Skipped:
 - The Home Assistant branch keeps useful child details such as the database, Zigbee2MQTT, `custom_components`, `.storage`, `www`, and logs when those paths are visible.
 - Filesystem rows and top-level totals are deduplicated by backing filesystem totals so repeated mapped paths on the same device are counted once.
 - System storage is inferred from filesystem used space minus paths the App can read. If HA Ops cannot account for host-only paths, the report marks that part as partial or unavailable instead of pretending it inspected the host.
-- HA Ops declares `docker_api: true` only so this report can read Docker disk usage. The Docker API capability is broad; HA Ops uses it for the read-only `/system/df` endpoint.
+- The Docker API capability is broad. HA Ops negotiates Docker Engine API 1.39 through 1.52, then uses a versioned `/system/df` and versioned prune endpoint. Docker socket write access is platform-dependent and is not guaranteed.
+- The build-cache estimate is an upper bound at the time of the check. Shared records can be selected while their bytes remain referenced, so the cleanup may free less space.
+- `Clear build cache` makes one irreversible `all=true` request. It removes all build-cache types that Docker considers unused, cannot restore cache, and can make later builds slower. It does not prune images, containers, volumes, or networks.
+- An interrupted or uncertain cleanup remains durably fenced across refresh, restart, and App updates. HA Ops reconciles an orphaned same-process worker to an acknowledgement screen; acknowledgement does not retry or restore cache, and corrupted fence state also requires explicit acknowledgement.
 - Path traversal and optional diagnostics are bounded. If Supervisor, Docker, journal, or filesystem diagnostics time out or are unavailable, the report marks that section as unavailable and keeps the rest of the summary.
 
 ## App Options

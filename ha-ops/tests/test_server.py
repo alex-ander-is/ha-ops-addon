@@ -11287,6 +11287,11 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "conflicts")
             self.assertIn("Resolve Git conflicts", state["last_message"])
 
+            self.assertFalse(server.run_save_job())
+            state = server.read_state()
+            self.assertEqual(state["last_status"], "conflicts")
+            self.assertIn("Resolve Git conflicts", state["last_message"])
+
     def test_selected_addon_delete_true_preview_counts_managed_live_only_deletion(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -17208,11 +17213,207 @@ devices:
             self.assertEqual(state["last_status"], "conflicts")
             self.assertIn("Resolve Git conflicts", state["last_message"])
 
-            self.assertFalse(server.run_save_job())
-            state = server.read_state()
-            self.assertEqual(state["last_status"], "conflicts")
-            self.assertIn("Resolve Git conflicts", state["last_message"])
+    def test_docker_api_negotiation_uses_numeric_versions_and_bounds(self):
+        server = load_server()
+        api = server.app_context.docker_api
+        self.assertEqual(api.select_api_version("1.52", "1.24"), (1, 41))
+        self.assertEqual(api.select_api_version("1.40", "1.39"), (1, 40))
+        self.assertEqual(api.select_api_version("1.52", "1.52"), (1, 52))
+        with self.assertRaises(api.DockerAPIError):
+            api.select_api_version("1.38", "1.24")
+        with self.assertRaises(api.DockerAPIError):
+            api.select_api_version("1.52", "1.x")
 
+    def test_docker_api_legacy_reclaimable_is_upper_bound(self):
+        server = load_server()
+        usage = server.app_context.docker_api.build_cache_usage(
+            {
+                "BuildCache": [
+                    {"Size": 10, "InUse": False, "Shared": False},
+                    {"Size": 20, "InUse": True, "Shared": False},
+                    {"Size": 30, "InUse": True, "Shared": True},
+                ]
+            },
+            (1, 41),
+        )
+        self.assertEqual(usage, {"count": 3, "size": 60, "reclaimable": 40})
+
+    def test_docker_api_152_rejects_impossible_reclaimable_total(self):
+        server = load_server()
+        api = server.app_context.docker_api
+        self.assertEqual(
+            api.build_cache_usage(
+                {
+                    "BuildCacheUsage": {
+                        "TotalSize": 50,
+                        "Reclaimable": 20,
+                        "Active": 1,
+                        "TotalCount": 2,
+                    }
+                },
+                (1, 52),
+            )["reclaimable"],
+            20,
+        )
+        with self.assertRaises(api.DockerAPIError):
+            api.build_cache_usage({"BuildCacheUsage": {"TotalSize": 20, "Reclaimable": 50}}, (1, 52))
+
+    def test_docker_prune_active_resolution_and_corrupt_ui_lifecycle(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            operation_id = "f9e35068-0f1d-4eca-83f8-93bfd878cbea"
+            fence = server.app_context.state_store.new_docker_prune_fence(
+                operation_id, "2026-07-12T18:00:00+00:00"
+            )
+
+            for phase in ("accepted", "dispatching"):
+                with self.subTest(phase=phase):
+                    server.write_state({"docker_build_cache_prune_fence": dict(fence, phase=phase)})
+                    server.RUN_LOCK.acquire()
+                    try:
+                        page = server.render_page()
+                    finally:
+                        server.RUN_LOCK.release()
+                    expected = (
+                        "Build-cache cleanup is accepted and waiting to dispatch."
+                        if phase == "accepted"
+                        else "Build-cache cleanup request is in progress."
+                    )
+                    self.assertIn(expected, page)
+                    self.assertNotIn(">Acknowledge</button>", page)
+                    self.assertIn('action="docker-build-cache-prune"', page)
+                    prune_form = page[page.index('action="docker-build-cache-prune"'):][:700]
+                    self.assertIn('<button type="submit" class="warning" disabled>', prune_form)
+
+            server.write_state({"docker_build_cache_prune_fence": dict(fence, phase="resolution_required")})
+            page = server.render_page()
+            self.assertIn(">Acknowledge</button>", page)
+            self.assertIn("name='mode' value='operation'", page)
+            self.assertIn(f"name='operation_id' value='{operation_id}'", page)
+
+            corrupt = {"schema": 99, "operation_id": operation_id}
+            server.write_state({"docker_build_cache_prune_fence": corrupt})
+            page = server.render_page()
+            self.assertIn(">Acknowledge</button>", page)
+            self.assertIn("name='mode' value='corrupt'", page)
+            self.assertNotIn("name='operation_id'", page)
+            self.assertEqual(server.read_state()["docker_build_cache_prune_fence"], corrupt)
+            token = server.app_context.state_store.classify_docker_prune_fence(corrupt)["recovery_token"]
+            response = self.post_json(
+                server,
+                "/docker-build-cache-prune-resolve",
+                body=f"mode=corrupt&recovery_token={token}".encode(),
+            )
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+
+    def test_docker_prune_acknowledgement_and_success_do_not_resurrect(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            operation_id = "f9e35068-0f1d-4eca-83f8-93bfd878cbea"
+            fence = server.app_context.state_store.new_docker_prune_fence(
+                operation_id, "2026-07-12T18:00:00+00:00"
+            )
+            server.write_state({"docker_build_cache_prune_fence": dict(fence, phase="resolution_required")})
+
+            response = self.post_json(
+                server,
+                "/docker-build-cache-prune-resolve",
+                body=f"mode=operation&operation_id={operation_id}".encode(),
+            )
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+            self.assertNotIn(">Acknowledge</button>", server.render_page())
+
+            server.clear_display_state()
+            server.repair_startup_state()
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+
+            server.write_state({"docker_build_cache_prune_fence": fence})
+            server.context().docker_api.prune_build_cache = lambda: {
+                "space_reclaimed": 12,
+                "caches_deleted": ["cache-id"],
+            }
+            server.RUN_LOCK.acquire()
+            self.assertTrue(server.run_docker_build_cache_prune_job(operation_id, lock_acquired=True))
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+            self.assertEqual(server.read_state()["last_status"], "success")
+
+            server.clear_display_state()
+            server.repair_startup_state()
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+            self.assertNotIn(">Acknowledge</button>", server.render_page())
+
+    def test_docker_prune_fence_survives_refresh_restart_and_version_update(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            operation_id = "f9e35068-0f1d-4eca-83f8-93bfd878cbea"
+            fence = server.app_context.state_store.new_docker_prune_fence(
+                operation_id, "2026-07-12T18:00:00+00:00"
+            )
+            server.write_state({
+                "last_seen_addon_version": "0.9.1",
+                "docker_build_cache_prune_fence": fence,
+            })
+
+            server.clear_display_state()
+            self.assertEqual(
+                server.read_state()["docker_build_cache_prune_fence"]["operation_id"], operation_id
+            )
+
+            server.repair_startup_state()
+            restarted = server.read_state()["docker_build_cache_prune_fence"]
+            self.assertEqual(restarted["phase"], "resolution_required")
+            self.assertEqual(restarted["operation_id"], operation_id)
+
+            server.ADDON_CONFIG_PATH = Path(tmp) / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "0.9.2"\n')
+            server.repair_startup_state()
+            updated = server.read_state()["docker_build_cache_prune_fence"]
+            self.assertEqual(updated["phase"], "resolution_required")
+            self.assertEqual(updated["operation_id"], operation_id)
+            self.assertIn(">Acknowledge</button>", server.render_page())
+
+    def test_docker_prune_fence_corruption_token_is_canonical_and_durable(self):
+        server = load_server()
+        state_store = server.app_context.state_store
+        first = state_store.classify_docker_prune_fence({"b": 2, "a": 1})
+        second = state_store.classify_docker_prune_fence({"a": 1, "b": 2})
+        self.assertEqual(first["kind"], "corrupt")
+        self.assertEqual(first["recovery_token"], second["recovery_token"])
+        self.assertTrue(first["recovery_token"].startswith("corrupt:"))
+
+    def test_docker_prune_fence_requires_exact_acknowledgement_identity(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "state.json"
+            operation_id = "f9e35068-0f1d-4eca-83f8-93bfd878cbea"
+            server.app_context.state_store.write_state(
+                path,
+                {
+                    "docker_build_cache_prune_fence": {
+                        "schema": 1,
+                        "operation_id": operation_id,
+                        "phase": "resolution_required",
+                        "accepted_at": "2026-07-12T18:00:00+00:00",
+                    }
+                },
+            )
+            self.assertIsNone(server.app_context.state_store.clear_docker_prune_fence(path, "operation", str(__import__("uuid").uuid4())))
+            self.assertIsNotNone(server.app_context.state_store.clear_docker_prune_fence(path, "operation", operation_id))
+
+    def test_disk_usage_controls_are_same_row_and_prune_copy_is_explicit(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            page = server.render_page()
+        section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
+        self.assertLess(section.index('action="disk-usage"'), section.index('action="docker-build-cache-prune"'))
+        self.assertIn("all Docker build cache not currently in use", section)
+        self.assertIn("cannot be restored", section)
 
 if __name__ == "__main__":
     unittest.main()

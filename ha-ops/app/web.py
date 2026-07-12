@@ -4,6 +4,7 @@ from urllib.parse import parse_qs, urlparse
 import html
 import json
 import threading
+import uuid
 
 import conflicts as conflict_logic
 import git_ops
@@ -124,6 +125,37 @@ def recovery_action_allowed(ctx, action):
     return job_logic.recovery_action_allowed(ctx.read_state(), action)
 
 
+def reconcile_docker_prune_orphan(ctx, lock_acquired=False):
+    run_lock = getattr(ctx, "run_lock", None)
+    acquired_here = False
+    if run_lock is not None and not lock_acquired:
+        if not run_lock.acquire(blocking=False):
+            return ctx.read_state(), False
+        acquired_here = True
+    try:
+        current = ctx.read_state()
+        classify = getattr(ctx, "classify_docker_prune_fence", None)
+        fence = (
+            classify(current)
+            if classify is not None
+            else state_store.classify_docker_prune_fence(current.get(state_store.DOCKER_PRUNE_FENCE_KEY))
+        )
+        if fence.get("kind") == "valid" and fence.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
+            transition = getattr(ctx, "transition_docker_prune_fence", None)
+            updated = transition(
+                    fence["operation_id"],
+                    state_store.DOCKER_PRUNE_ACTIVE_PHASES,
+                    "resolution_required",
+                    {"context": _("message.docker_prune_orphaned")},
+                ) if transition is not None else None
+            if updated is not None:
+                current = updated
+        return current, True
+    finally:
+        if acquired_here:
+            run_lock.release()
+
+
 def reserve_action_slot(ctx, action="mutation"):
     if not recovery_action_allowed(ctx, action):
         return False, None, False
@@ -135,7 +167,7 @@ def reserve_action_slot(ctx, action="mutation"):
     if not run_lock.acquire(blocking=False):
         return False, None, False
     try:
-        state = ctx.read_state()
+        state, reconciled = reconcile_docker_prune_orphan(ctx, lock_acquired=True)
         if not job_logic.recovery_action_allowed(state, action):
             run_lock.release()
             return False, state, False
@@ -347,7 +379,7 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
 
 def render_page(ctx):
     options = ctx.load_options()
-    state = ctx.read_state()
+    state, reconciled = reconcile_docker_prune_orphan(ctx)
     backup_status = ctx.latest_system_backup_status(options)
     if (
         state.get("last_status") == "error"
@@ -384,6 +416,12 @@ def render_page(ctx):
         for target in manifest_preview
     )
     state = repair_stale_running_state(ctx, state)
+    classify_prune = getattr(ctx, "classify_docker_prune_fence", None)
+    docker_prune = (
+        classify_prune(state)
+        if classify_prune is not None
+        else state_store.classify_docker_prune_fence(state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
+    )
     last_status = state.get("last_status", "idle")
     job_running = job_is_running(ctx, state)
     has_conflicts = bool(state.get("conflicts"))
@@ -451,6 +489,29 @@ def render_page(ctx):
         action_disabled = "disabled"
         check_deleted_devices_disabled = "disabled"
     check_disk_usage_disabled = "disabled" if run_disabled or save_push_retry_pending else ""
+    docker_prune_disabled = "disabled" if run_disabled or save_push_retry_pending or docker_prune.get("kind") != "idle" else ""
+    if docker_prune.get("kind") == "valid" and docker_prune.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
+        docker_prune_status_html = f"<p class='action-flow'>{_('message.docker_prune_phase_' + docker_prune['phase'])}</p>"
+    elif docker_prune.get("phase") == "resolution_required":
+        if docker_prune.get("kind") == "valid":
+            hidden = (
+                "<input type='hidden' name='mode' value='operation'>"
+                f"<input type='hidden' name='operation_id' value='{html.escape(docker_prune['operation_id'], quote=True)}'>"
+            )
+            copy = _("message.docker_prune_ambiguity_valid")
+        else:
+            hidden = (
+                "<input type='hidden' name='mode' value='corrupt'>"
+                f"<input type='hidden' name='recovery_token' value='{html.escape(docker_prune['recovery_token'], quote=True)}'>"
+            )
+            copy = _("message.docker_prune_ambiguity_corrupt")
+        docker_prune_status_html = (
+            f"<p class='action-flow'>{copy}</p>"
+            "<form method='post' action='docker-build-cache-prune-resolve' data-async-form='true'>"
+            f"{hidden}<button type='submit' class='secondary'>{_('action.acknowledge_docker_prune')}</button></form>"
+        )
+    else:
+        docker_prune_status_html = ""
     check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
     check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
     deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending or not deletion_ready else ""
@@ -700,6 +761,8 @@ def render_page(ctx):
             "save_preview_hint_html": save_preview_hint_html,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "check_disk_usage_disabled": check_disk_usage_disabled,
+            "docker_prune_disabled": docker_prune_disabled,
+            "docker_prune_status_html": docker_prune_status_html,
             "check_retained_devices_disabled": check_retained_devices_disabled,
             "check_internal_ids_disabled": check_internal_ids_disabled,
             "deletion_disabled": deletion_disabled,
@@ -1121,6 +1184,99 @@ def create_handler(ctx):
                     return
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.disk_usage_started")})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/docker-build-cache-prune":
+                if self.save_retry_pending():
+                    self.send_save_retry_pending()
+                    return
+                ok, state, lock_acquired = reserve_action_slot(ctx, "docker_build_cache_prune")
+                if not ok:
+                    self.send_running_action()
+                    return
+                operation_id = str(uuid.uuid4())
+                transferred = False
+                try:
+                    fence = ctx.classify_docker_prune_fence(state)
+                    if fence.get("kind") != "idle":
+                        self.send_running_action()
+                        return
+                    ctx.write_state(
+                        {
+                            state_store.DOCKER_PRUNE_FENCE_KEY: state_store.new_docker_prune_fence(
+                                operation_id, ctx.utc_now()
+                            ),
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "running",
+                            "last_action": "docker_build_cache_prune",
+                            "last_message": _("message.docker_prune_accepted"),
+                        }
+                    )
+                    try:
+                        start_background(
+                            ctx.run_docker_build_cache_prune_job,
+                            operation_id,
+                            lock_acquired=True,
+                        )
+                        transferred = True
+                    except Exception as exc:
+                        ctx.transition_docker_prune_fence(
+                            operation_id,
+                            {"accepted"},
+                            "resolution_required",
+                            {"context": _("message.docker_prune_thread_failed"), "error": str(exc)[:2000]},
+                        )
+                        raise
+                except Exception as exc:
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": str(exc)}, status=500)
+                    else:
+                        self.send_html(render_page(ctx), status=500)
+                    return
+                finally:
+                    if lock_acquired and not transferred:
+                        release_action_slot(ctx, True)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": _("message.docker_prune_started")})
+                else:
+                    self.send_html(render_page(ctx))
+                return
+
+            if parsed.path == "/docker-build-cache-prune-resolve":
+                ok, state, lock_acquired = reserve_action_slot(ctx, "docker_build_cache_prune_resolve")
+                if not ok:
+                    self.send_running_action()
+                    return
+                try:
+                    mode = body.get("mode", [""])[0]
+                    identity = (
+                        body.get("operation_id", [""])[0]
+                        if mode == "operation"
+                        else body.get("recovery_token", [""])[0]
+                    )
+                    cleared = ctx.clear_docker_prune_fence(
+                        mode,
+                        identity,
+                        {
+                            "last_run_at": ctx.utc_now(),
+                            "last_status": "idle",
+                            "last_action": "docker_build_cache_prune_resolve",
+                            "last_message": _("message.docker_prune_acknowledged"),
+                            "last_details": [],
+                        },
+                    )
+                    if cleared is None:
+                        if self.wants_json():
+                            self.send_json({"ok": False, "message": _("message.docker_prune_acknowledgement_stale")}, status=409)
+                        else:
+                            self.send_html(render_page(ctx), status=409)
+                        return
+                finally:
+                    release_action_slot(ctx, lock_acquired)
+                if self.wants_json():
+                    self.send_json({"ok": True, "message": _("message.docker_prune_acknowledged")})
                 else:
                     self.send_html(render_page(ctx))
                 return

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import i18n
+import disk_usage
 import registry_cleanup
 import state as state_store
 
@@ -78,6 +79,11 @@ class JobContext:
     apply_targets: Any
     build_deleted_devices_preview: Any
     build_disk_usage_summary: Any
+    classify_docker_prune_fence: Any
+    transition_docker_prune_fence: Any
+    clear_docker_prune_fence: Any
+    complete_docker_prune_fence: Any
+    prune_docker_build_cache: Any
     build_internal_ids_preview: Any
     build_retained_devices_preview: Any
     build_apply_preview: Any
@@ -1013,6 +1019,62 @@ def run_disk_usage_job(ctx, lock_acquired=False):
         return False
     finally:
         release_run_lock(ctx)
+
+
+def run_docker_build_cache_prune_job(operation_id, ctx, lock_acquired=False):
+    owns_lock = False
+    try:
+        if not enter_run_lock(ctx, "docker_build_cache_prune", lock_acquired):
+            return False
+        owns_lock = True
+        fence = ctx.classify_docker_prune_fence()
+        if (
+            fence.get("kind") != "valid"
+            or fence.get("operation_id") != operation_id
+            or fence.get("phase") != "accepted"
+        ):
+            return False
+        if ctx.transition_docker_prune_fence(
+            operation_id,
+            {"accepted"},
+            "dispatching",
+            {"context": _("message.docker_prune_dispatching")},
+        ) is None:
+            return False
+        result = ctx.prune_docker_build_cache()
+        reclaimed = result["space_reclaimed"]
+        message = (
+            _("message.docker_prune_noop")
+            if reclaimed == 0
+            else _("message.docker_prune_finished", size=disk_usage.format_size(reclaimed))
+        )
+        cleared = ctx.complete_docker_prune_fence(
+            operation_id,
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "docker_build_cache_prune",
+                "last_message": message,
+                "last_details": [message],
+            },
+        )
+        if cleared is None:
+            raise RuntimeError(_("message.docker_prune_terminal_write_failed"))
+        return True
+    except Exception as exc:
+        try:
+            ctx.transition_docker_prune_fence(
+                operation_id,
+                state_store.DOCKER_PRUNE_ACTIVE_PHASES,
+                "resolution_required",
+                {"context": _("message.docker_prune_ambiguous"), "error": str(exc)[:2000]},
+            )
+        except Exception:
+            pass
+        return False
+    finally:
+        if owns_lock:
+            release_run_lock(ctx)
 
 
 def run_deleted_devices_preview_job(ctx, lock_acquired=False):

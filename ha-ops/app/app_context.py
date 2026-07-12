@@ -5,6 +5,7 @@ from pathlib import Path
 
 import backups as backup_policy
 import disk_usage
+import docker_api
 import git_auth
 import git_ops
 import jobs as job_logic
@@ -46,6 +47,7 @@ class AppContext:
         self.generated_deploy_key_path = self.work_dir / "generated_deploy_key"
         self.generated_deploy_key_pub_path = self.work_dir / "generated_deploy_key.pub"
         self.run_lock = threading.Lock()
+        self.docker_api = docker_api.DockerAPI()
 
     def utc_now(self):
         return state_store.utc_now()
@@ -100,6 +102,24 @@ class AppContext:
                 updates = {**updates, "last_details": details}
         return state_store.write_state(self.state_path, updates)
 
+    def classify_docker_prune_fence(self, state=None):
+        state = state if state is not None else self.read_state()
+        return state_store.classify_docker_prune_fence(state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
+
+    def transition_docker_prune_fence(self, operation_id, from_phases, phase, updates=None):
+        return state_store.transition_docker_prune_fence(
+            self.state_path, operation_id, from_phases, phase, updates=updates
+        )
+
+    def clear_docker_prune_fence(self, mode, identity, updates=None):
+        return state_store.clear_docker_prune_fence(self.state_path, mode, identity, updates=updates)
+
+    def complete_docker_prune_fence(self, operation_id, updates):
+        return state_store.complete_docker_prune_fence(self.state_path, operation_id, updates)
+
+    def prune_docker_build_cache(self):
+        return self.docker_api.prune_build_cache()
+
     def save_push_retry_has_pending_commit(self, repo_dir, branch, state=None):
         state = state if state is not None else self.read_state()
         if not state.get("save_push_retry_pending"):
@@ -148,6 +168,13 @@ class AppContext:
 
     def repair_startup_state(self):
         state = self.read_state()
+        fence = self.classify_docker_prune_fence(state)
+        if fence.get("kind") == "valid" and fence.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
+            self.transition_docker_prune_fence(
+                fence["operation_id"], state_store.DOCKER_PRUNE_ACTIVE_PHASES, "resolution_required",
+                {"context": _("message.docker_prune_interrupted")},
+            )
+            state = self.read_state()
         # v1 is authoritative independently of state.json.  Legacy files have
         # no lifecycle metadata and remain deliberately state-scoped below.
         manifest_status = registry_cleanup.rollback_manifest_status(self.work_dir)
@@ -956,6 +983,11 @@ class AppContext:
             apply_targets=self.apply_targets,
             build_apply_preview=self.build_apply_preview,
             build_disk_usage_summary=self.build_disk_usage_summary,
+            classify_docker_prune_fence=self.classify_docker_prune_fence,
+            transition_docker_prune_fence=self.transition_docker_prune_fence,
+            clear_docker_prune_fence=self.clear_docker_prune_fence,
+            complete_docker_prune_fence=self.complete_docker_prune_fence,
+            prune_docker_build_cache=self.prune_docker_build_cache,
             build_save_preview=self.build_save_preview,
             build_deleted_devices_preview=self.build_deleted_devices_preview,
             build_internal_ids_preview=self.build_internal_ids_preview,
@@ -1045,6 +1077,12 @@ class AppContext:
             Path("/backup"),
             self.run_command,
             self.call_supervisor,
+            docker_system_df=self.docker_api.disk_usage,
+        )
+
+    def run_docker_build_cache_prune_job(self, operation_id, lock_acquired=False):
+        return job_logic.run_docker_build_cache_prune_job(
+            operation_id, self.job_deps(), lock_acquired=lock_acquired
         )
 
     def run_disk_usage_job(self, lock_acquired=False):
