@@ -77,4 +77,5 @@ if [ "$requires_release_check" = "1" ]; then
 fi
 
 echo "Running HA Ops tests before push..."
-python3 -m unittest discover -s ha-ops/tests
+echo "Running parallel test group..."
+python3 -m pytest -n auto ha-ops/tests

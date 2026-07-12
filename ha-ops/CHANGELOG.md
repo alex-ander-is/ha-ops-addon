@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.3
+
+- Run the HA Ops pre-push test suite in parallel across available CPU cores.
+
 ## 0.9.2
 
 - Add version-negotiated Docker build-cache usage estimates and one-shot all-cache pruning.

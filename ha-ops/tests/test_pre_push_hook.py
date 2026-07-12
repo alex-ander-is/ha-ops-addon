@@ -23,8 +23,9 @@ class PrePushHookTests(unittest.TestCase):
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         python = self.fake_bin / "python3"
-        python.write_text("#!/bin/sh\nexit 0\n")
+        python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PYTHON_COMMAND_LOG"\n')
         python.chmod(0o755)
+        self.python_command_log = self.root / "python-command.log"
 
         run(["git", "init", "--bare", str(self.remote)], cwd=self.root)
         run(["git", "init", "-b", "main", str(self.repo)], cwd=self.root)
@@ -58,6 +59,7 @@ class PrePushHookTests(unittest.TestCase):
     def invoke_hook(self, stdin):
         env = os.environ.copy()
         env["PATH"] = str(self.fake_bin) + os.pathsep + env["PATH"]
+        env["PYTHON_COMMAND_LOG"] = str(self.python_command_log)
         return subprocess.run(
             [str(HOOK), "origin", str(self.remote)],
             cwd=self.repo,
@@ -87,6 +89,11 @@ class PrePushHookTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Running HA Ops tests before push", result.stdout)
+        self.assertIn("Running parallel test group", result.stdout)
+        self.assertEqual(
+            self.python_command_log.read_text(),
+            "-m pytest -n auto ha-ops/tests\n",
+        )
 
     def test_rejects_push_when_remote_main_moved(self):
         self.write_file("ha-ops/app.py", "print('remote change')\n")
