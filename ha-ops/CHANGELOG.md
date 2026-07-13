@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.4
+
+- Explain unavailable Docker build-cache access, including the administrator action required when HA Ops Protection mode is enabled.
+- Disable unavailable build-cache cleanup and require a delayed second confirmation when it is available.
+
 ## 0.9.3
 
 - Run the HA Ops pre-push test suite in parallel across available CPU cores.

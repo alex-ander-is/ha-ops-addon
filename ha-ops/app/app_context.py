@@ -5,6 +5,7 @@ from pathlib import Path
 
 import backups as backup_policy
 import disk_usage
+import docker_capability
 import docker_api
 import git_auth
 import git_ops
@@ -119,6 +120,15 @@ class AppContext:
 
     def prune_docker_build_cache(self):
         return self.docker_api.prune_build_cache()
+
+    def docker_build_cache_capability(self):
+        """Read the current Supervisor grants before any Docker operation."""
+        try:
+            payload = self.call_supervisor("GET", "/addons/self/info", timeout=5)
+            kind = docker_capability.classify_self_info(payload)
+        except Exception:
+            kind = docker_capability.UNKNOWN
+        return {"kind": kind, **docker_capability.details(kind, _)}
 
     def save_push_retry_has_pending_commit(self, repo_dir, branch, state=None):
         state = state if state is not None else self.read_state()
@@ -1070,6 +1080,7 @@ class AppContext:
         return job_logic.run_reset_git_state_job(self.job_deps(), lock_acquired=lock_acquired)
 
     def build_disk_usage_summary(self):
+        docker_capability_status = self.docker_build_cache_capability()
         return disk_usage.build_disk_usage_summary(
             self.config_dir,
             self.data_dir,
@@ -1078,6 +1089,7 @@ class AppContext:
             self.run_command,
             self.call_supervisor,
             docker_system_df=self.docker_api.disk_usage,
+            docker_capability_status=docker_capability_status,
         )
 
     def run_docker_build_cache_prune_job(self, operation_id, lock_acquired=False):

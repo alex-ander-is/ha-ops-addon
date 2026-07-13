@@ -1176,6 +1176,9 @@ def render_page(data):
       line-height: 1.4;
       max-width: 44rem;
     }}
+    .docker-prune-hint {{
+      color: #d80;
+    }}
     .action-flow {{
       margin: -2px 0 0;
       color: var(--ha-muted);
@@ -1874,10 +1877,11 @@ def render_page(data):
               <form method="post" action="disk-usage" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_disk_usage_disabled']}>{_('action.check_disk_usage')}</button>
               </form>
-              <form method="post" action="docker-build-cache-prune" data-async-form="true" data-confirm="{_('confirm.docker_build_cache_prune')}">
-                <button type="submit" class="warning" {data['docker_prune_disabled']}>{_('action.clear_docker_build_cache')}</button>
+              <form method="post" action="docker-build-cache-prune" data-delayed-confirm="true" data-async-form="false" data-capability-available="{data['docker_prune_available']}" data-action-ready="{data['docker_prune_ready']}">
+                <button type="submit" class="secondary delayed-confirm-button" disabled>{_('action.clear_docker_build_cache')}</button>
               </form>
             </div>
+            {data['docker_prune_hint_html']}
             <p class="action-flow">{_('text.disk_usage_flow')}</p>
             {data['docker_prune_status_html']}
           </section>
@@ -2162,6 +2166,11 @@ def render_page(data):
       }}
 
       window.addEventListener("pageshow", (event) => {{
+        if (event.persisted) {{
+          disableDelayedConfirmControllers();
+          window.location.reload();
+          return;
+        }}
         const internalReload = consumeInternalReload();
         const type = navigationType();
         if (!internalReload && (event.persisted || type === "reload" || type === "back_forward")) {{
@@ -2171,6 +2180,7 @@ def render_page(data):
       }});
 
       window.addEventListener("pagehide", () => {{
+        resetDelayedConfirmControllers();
         let internalReload = false;
         try {{
           internalReload = sessionStorage.getItem("haOpsInternalReload") === "1";
@@ -2180,12 +2190,12 @@ def render_page(data):
         }}
       }});
 
-      async function submitAsyncForm(form) {{
+      async function submitAsyncForm(form, terminalButton = null) {{
         const confirmation = form.getAttribute("data-confirm");
         if (confirmation && !window.confirm(confirmation)) {{
           return;
         }}
-        const button = form.querySelector("button[type='submit']");
+        const button = terminalButton || form.querySelector("button[type='submit']");
         const originalText = button ? button.textContent : "";
         if (button) {{
           button.disabled = true;
@@ -2227,13 +2237,72 @@ def render_page(data):
         }} catch (error) {{
           setClientStatus(error?.message || {js_t('error.network')});
         }} finally {{
-          if (button) {{
+          if (button && !terminalButton) {{
             button.disabled = false;
             button.textContent = originalText;
           }}
         }}
       }}
 
+      const delayedConfirmControllers = [];
+      function resetDelayedConfirmControllers() {{
+        for (const controller of delayedConfirmControllers) {{ controller.reset(); }}
+      }}
+      function disableDelayedConfirmControllers() {{
+        for (const controller of delayedConfirmControllers) {{ controller.disable(); }}
+      }}
+      for (const form of document.querySelectorAll("form[data-delayed-confirm='true']")) {{
+        const button = form.querySelector("button[type='submit']");
+        if (!button || form.getAttribute("data-action-ready") !== "true") {{ continue; }}
+        const initialText = button.textContent;
+        const initialClass = button.className;
+        button.style.minInlineSize = `${{Math.max(button.getBoundingClientRect().width, 88)}}px`;
+        button.disabled = false;
+        let state = "initial";
+        let delayTimer = null;
+        let expiryTimer = null;
+        const reset = () => {{
+          if (state === "unavailable") {{ return; }}
+          if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
+          if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
+          state = "initial";
+          button.disabled = false;
+          button.textContent = initialText;
+          button.className = initialClass;
+        }};
+        const disable = () => {{
+          if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
+          if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
+          state = "unavailable";
+          button.disabled = true;
+          button.textContent = initialText;
+          button.className = initialClass;
+        }};
+        const controller = {{ reset, disable }};
+        delayedConfirmControllers.push(controller);
+        form.addEventListener("submit", (event) => {{
+          event.preventDefault();
+          if (state === "submitted" || state === "delay" || state === "unavailable") {{ return; }}
+          if (state === "armed") {{
+            state = "submitted";
+            if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
+            button.disabled = true;
+            submitAsyncForm(form, button);
+            return;
+          }}
+          state = "delay";
+          button.disabled = true;
+          delayTimer = setTimeout(() => {{
+            if (state !== "delay") {{ return; }}
+            delayTimer = null;
+            state = "armed";
+            button.disabled = false;
+            button.classList.add("warning");
+            button.textContent = {js_t('action.confirm')};
+            expiryTimer = setTimeout(() => {{ if (state === "armed") {{ reset(); }} }}, 6000);
+          }}, 1500);
+        }});
+      }}
       for (const form of document.querySelectorAll("form[data-async-form='true']")) {{
         form.addEventListener("submit", (event) => {{
           event.preventDefault();

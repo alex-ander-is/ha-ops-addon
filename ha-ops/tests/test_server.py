@@ -17284,7 +17284,7 @@ devices:
                     self.assertNotIn(">Acknowledge</button>", page)
                     self.assertIn('action="docker-build-cache-prune"', page)
                     prune_form = page[page.index('action="docker-build-cache-prune"'):][:700]
-                    self.assertIn('<button type="submit" class="warning" disabled>', prune_form)
+                    self.assertIn('<button type="submit" class="secondary delayed-confirm-button" disabled>', prune_form)
 
             server.write_state({"docker_build_cache_prune_fence": dict(fence, phase="resolution_required")})
             page = server.render_page()
@@ -17405,15 +17405,200 @@ devices:
             self.assertIsNone(server.app_context.state_store.clear_docker_prune_fence(path, "operation", str(__import__("uuid").uuid4())))
             self.assertIsNotNone(server.app_context.state_store.clear_docker_prune_fence(path, "operation", operation_id))
 
+    def test_docker_build_cache_capability_is_fail_closed_and_explains_remedy(self):
+        server = load_server()
+        capability = server.app_context.docker_capability
+        cases = {
+            "available": ({"data": {"protected": False, "docker_api": True}}, capability.AVAILABLE),
+            "protected": ({"data": {"protected": True, "docker_api": True}}, capability.PROTECTION_ENABLED),
+            "docker api": ({"data": {"protected": False, "docker_api": False}}, capability.DOCKER_API_UNAVAILABLE),
+            "missing": ({"data": {"protected": False}}, capability.UNKNOWN),
+            "non boolean": ({"data": {"protected": "false", "docker_api": True}}, capability.UNKNOWN),
+            "malformed": ({"data": []}, capability.UNKNOWN),
+        }
+        for name, (payload, expected) in cases.items():
+            with self.subTest(name=name):
+                self.assertEqual(capability.classify_self_info(payload), expected)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": True, "docker_api": True}
+            }
+            page = server.render_page()
+            section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
+            self.assertIn('data-capability-available="false" data-action-ready="false"', section)
+            self.assertIn('class="secondary delayed-confirm-button" disabled', section)
+            self.assertIn('class=\'action-hint docker-prune-hint\'', section)
+            self.assertIn("Protection mode is enabled", section)
+            self.assertIn("turn off Protection mode", section)
+            self.assertIn("color: #d80", page)
+
+    def test_docker_build_cache_prune_rechecks_capability_before_mutating_state(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": True, "docker_api": True}
+            }
+            before = server.read_state()
+            response = self.post_json(server, "/docker-build-cache-prune")
+            self.assertEqual(response.responses[-1], 409)
+            self.assertEqual(server.read_state(), before)
+            payload = json.loads(response.wfile.getvalue().decode())
+            self.assertFalse(payload["ok"])
+            self.assertIn("Protection mode is enabled", payload["message"])
+
+    def test_disk_usage_skips_docker_after_unavailable_capability(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            calls = []
+
+            def call_supervisor(method, path, payload=None, timeout=None):
+                calls.append((method, path))
+                return {"data": {"protected": True, "docker_api": True}}
+
+            server.context().call_supervisor = call_supervisor
+            server.context().docker_api.disk_usage = lambda: self.fail("Docker must not be opened")
+            details = "\n".join(server.context().build_disk_usage_summary())
+            self.assertIn("Protection mode is enabled", details)
+            self.assertIn("turn off Protection mode", details)
+            self.assertIn(("GET", "/addons/self/info"), calls)
+
+    def test_docker_build_cache_readiness_matrix_has_disabled_reason(self):
+        server = load_server()
+        state_store = server.app_context.state_store
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            available = {"data": {"protected": False, "docker_api": True}}
+            unavailable = {"data": {"protected": True, "docker_api": True}}
+            cases = (
+                ("capability", unavailable, {}, "Protection mode is enabled"),
+                ("running", available, {"last_status": "running"}, "Another HA Ops operation is running"),
+                ("save retry", available, {"save_push_retry_pending": True}, "A Save push retry is pending"),
+                (
+                    "fence",
+                    available,
+                    {state_store.DOCKER_PRUNE_FENCE_KEY: {"schema": 1, "operation_id": "fence-id", "phase": "resolution_required", "accepted_at": "2026-07-13T00:00:00+00:00"}},
+                    "Resolve or acknowledge",
+                ),
+            )
+            for name, capability, state, hint in cases:
+                with self.subTest(name=name):
+                    server.context().call_supervisor = lambda method, path, payload=None, timeout=None, capability=capability: capability
+                    server.write_state(state)
+                    lock = server.context().run_lock if name == "running" else None
+                    if lock is not None:
+                        self.assertTrue(lock.acquire(blocking=False))
+                    try:
+                        page = server.render_page()
+                    finally:
+                        if lock is not None:
+                            lock.release()
+                    section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
+                    self.assertIn('data-action-ready="false"', section)
+                    self.assertIn("delayed-confirm-button\" disabled", section)
+                    self.assertIn("docker-prune-hint", section)
+                    self.assertIn(hint, section)
+                    server.write_state({"last_status": "idle", "save_push_retry_pending": False, state_store.DOCKER_PRUNE_FENCE_KEY: None})
+
+    def test_delayed_confirmation_script_has_terminal_reset_and_bfcache_guards(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": False, "docker_api": True}
+            }
+            page = server.render_page()
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        self.assertIn("const delayedConfirmControllers = [];", script)
+        self.assertIn("disableDelayedConfirmControllers();", script)
+        self.assertIn("window.location.reload();", script)
+        self.assertIn("if (event.persisted)", script)
+        self.assertIn("state === \"submitted\" || state === \"delay\"", script)
+        self.assertIn("setTimeout(() => {", script)
+        self.assertIn("}, 1500);", script)
+        self.assertIn("}, 6000);", script)
+        self.assertIn("submitAsyncForm(form, button);", script)
+        self.assertIn("button.textContent = \"Confirm\";", script)
+        self.assertNotIn("data-confirm=", page[page.index('action="docker-build-cache-prune"'):page.index('action="docker-build-cache-prune"') + 400])
+
+        controller = script[script.index("const delayedConfirmControllers = [];") : script.index(
+            'for (const form of document.querySelectorAll("form[data-async-form', script.index("const delayedConfirmControllers = [];"))
+        ]
+        harness = f"""
+const timers = new Map(); let nextTimer = 1; let now = 0; let fetches = 0;
+global.setTimeout = (fn, ms) => {{ const id = nextTimer++; timers.set(id, {{ fn, due: now + ms }}); return id; }};
+global.clearTimeout = (id) => timers.delete(id);
+function advance(ms) {{
+  now += ms;
+  for (;;) {{
+    const due = [...timers.entries()].filter(([, timer]) => timer.due <= now).sort((a, b) => a[1].due - b[1].due)[0];
+    if (!due) return;
+    timers.delete(due[0]); due[1].fn();
+  }}
+}}
+const listeners = {{}}; let reloads = 0;
+const button = {{
+  textContent: "Clear build cache", className: "secondary delayed-confirm-button", disabled: true,
+  style: {{}}, getBoundingClientRect: () => ({{ width: 160 }}),
+  classList: {{ add: (name) => {{ if (!button.className.split(" ").includes(name)) button.className += " " + name; }} }}
+}};
+const form = {{
+  getAttribute: (name) => name === "data-action-ready" ? "true" : null,
+  querySelector: () => button,
+  addEventListener: (name, listener) => {{ listeners[name] = listener; }}
+}};
+const unavailableButton = {{ textContent: "Clear build cache", className: "secondary delayed-confirm-button", disabled: true, style: {{}}, getBoundingClientRect: () => ({{ width: 160 }}), classList: {{ add() {{}} }} }};
+const unavailableForm = {{
+  getAttribute: (name) => name === "data-action-ready" ? "false" : null,
+  querySelector: () => unavailableButton,
+  addEventListener: () => {{ throw new Error("not-ready form must not initialise"); }}
+}};
+global.document = {{ querySelectorAll: (selector) => selector.includes("data-delayed-confirm") ? [form, unavailableForm] : [] }};
+global.submitAsyncForm = () => {{ fetches += 1; }};
+{controller}
+if (button.disabled) throw new Error("ready form was not enabled after controller bootstrap");
+if (!unavailableButton.disabled || unavailableButton.style.minInlineSize) throw new Error("not-ready form was initialised or enabled");
+const submit = () => listeners.submit({{ preventDefault() {{}} }});
+submit();
+if (!button.disabled || fetches !== 0) throw new Error("first activation must be delayed and fetch-free");
+if (button.style.minInlineSize !== "160px") throw new Error("initial width was not retained");
+advance(1499);
+if (!button.disabled || fetches !== 0 || button.style.minInlineSize !== "160px") throw new Error("delay ended too early or width changed");
+advance(1);
+if (button.disabled || button.textContent !== "Confirm" || button.style.minInlineSize !== "160px") throw new Error("confirm was not armed or width changed");
+advance(6000);
+if (button.disabled || button.textContent !== "Clear build cache" || button.style.minInlineSize !== "160px") throw new Error("expiry did not restore ordinary stable state");
+submit(); advance(1500); resetDelayedConfirmControllers(); resetDelayedConfirmControllers();
+if (button.disabled || button.textContent !== "Clear build cache" || button.style.minInlineSize !== "160px") throw new Error("ordinary reset was not canonical");
+submit(); advance(1500);
+disableDelayedConfirmControllers(); reloads += 1;
+if (!button.disabled || fetches !== 0 || reloads !== 1 || button.style.minInlineSize !== "160px") throw new Error("BFCache restore must stay disabled and reload before submit");
+submit();
+if (fetches !== 0) throw new Error("stale BFCache form submitted before fresh render");
+resetDelayedConfirmControllers(); resetDelayedConfirmControllers();
+advance(7000);
+if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error("terminal BFCache state was reset");
+"""
+        subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
+
     def test_disk_usage_controls_are_same_row_and_prune_copy_is_explicit(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             self.configure_paths(server, Path(tmp))
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": False, "docker_api": True}
+            }
             page = server.render_page()
         section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
         self.assertLess(section.index('action="disk-usage"'), section.index('action="docker-build-cache-prune"'))
-        self.assertIn("all Docker build cache not currently in use", section)
-        self.assertIn("cannot be restored", section)
+        self.assertIn('data-capability-available="true"', section)
+        self.assertIn('data-action-ready="true"', section)
+        self.assertIn('class="secondary delayed-confirm-button" disabled>Clear build cache</button>', section)
+        self.assertNotIn('class="warning"', section)
+        self.assertNotIn('docker-prune-hint', section)
 
 if __name__ == "__main__":
     unittest.main()

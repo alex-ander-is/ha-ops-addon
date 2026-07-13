@@ -574,6 +574,7 @@ def build_disk_usage_summary(
     call_supervisor=None,
     docker_socket_path=Path("/var/run/docker.sock"),
     docker_system_df=None,
+    docker_capability_status=None,
     optional_timeout_seconds=OPTIONAL_COMMAND_TIMEOUT_SECONDS,
     path_walk_max_seconds=PATH_WALK_MAX_SECONDS,
     path_walk_max_entries=PATH_WALK_MAX_ENTRIES,
@@ -675,7 +676,13 @@ def build_disk_usage_summary(
         lines.append(_("detail.disk_usage_optional_title", title=_("label.host")))
         lines.extend(host_output)
 
-    docker_output, docker_error = _docker_usage_lines(Path(docker_socket_path), docker_system_df, optional_timeout_seconds)
+    if docker_capability_status is not None and not docker_capability_status.get("available"):
+        docker_output = None
+        docker_error = " ".join(
+            part for part in (docker_capability_status.get("reason"), docker_capability_status.get("remedy")) if part
+        )
+    else:
+        docker_output, docker_error = _docker_usage_lines(Path(docker_socket_path), docker_system_df, optional_timeout_seconds)
     if docker_output is None:
         lines.append(_("detail.disk_usage_optional_unavailable", title=_("label.docker"), error=docker_error))
     else:

@@ -489,7 +489,26 @@ def render_page(ctx):
         action_disabled = "disabled"
         check_deleted_devices_disabled = "disabled"
     check_disk_usage_disabled = "disabled" if run_disabled or save_push_retry_pending else ""
-    docker_prune_disabled = "disabled" if run_disabled or save_push_retry_pending or docker_prune.get("kind") != "idle" else ""
+    docker_capability_status = ctx.docker_build_cache_capability()
+    docker_prune_ready = bool(
+        docker_capability_status["available"]
+        and not job_running
+        and not save_push_retry_pending
+        and docker_prune.get("kind") == "idle"
+    )
+    docker_prune_disabled = "" if docker_prune_ready else "disabled"
+    docker_prune_hint_html = ""
+    if not docker_capability_status["available"]:
+        docker_prune_hint_html = (
+            "<p class='action-hint docker-prune-hint'>"
+            f"{html.escape(docker_capability_status['reason'])} {html.escape(docker_capability_status['remedy'])}</p>"
+        )
+    elif job_running:
+        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.running')}</p>"
+    elif save_push_retry_pending:
+        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.save_retry')}</p>"
+    elif docker_prune.get("kind") != "idle":
+        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.fence')}</p>"
     if docker_prune.get("kind") == "valid" and docker_prune.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
         docker_prune_status_html = f"<p class='action-flow'>{_('message.docker_prune_phase_' + docker_prune['phase'])}</p>"
     elif docker_prune.get("phase") == "resolution_required":
@@ -762,6 +781,9 @@ def render_page(ctx):
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
             "check_disk_usage_disabled": check_disk_usage_disabled,
             "docker_prune_disabled": docker_prune_disabled,
+            "docker_prune_available": "true" if docker_capability_status["available"] else "false",
+            "docker_prune_ready": "true" if docker_prune_ready else "false",
+            "docker_prune_hint_html": docker_prune_hint_html,
             "docker_prune_status_html": docker_prune_status_html,
             "check_retained_devices_disabled": check_retained_devices_disabled,
             "check_internal_ids_disabled": check_internal_ids_disabled,
@@ -1191,6 +1213,14 @@ def create_handler(ctx):
             if parsed.path == "/docker-build-cache-prune":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
+                    return
+                capability = ctx.docker_build_cache_capability()
+                if not capability["available"]:
+                    message = f"{capability['reason']} {capability['remedy']}".strip()
+                    if self.wants_json():
+                        self.send_json({"ok": False, "message": message}, status=409)
+                    else:
+                        self.send_html(render_page(ctx), status=409)
                     return
                 ok, state, lock_acquired = reserve_action_slot(ctx, "docker_build_cache_prune")
                 if not ok:
