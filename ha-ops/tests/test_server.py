@@ -1026,6 +1026,24 @@ class ServerTests(unittest.TestCase):
         self.assertIn('details.addEventListener("scroll", () => {', script)
         self.assertIn("restoreLogScrollState();", script)
 
+    def test_log_wraps_long_lines(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+        self.assertIn(
+            ".details-card pre {\n"
+            "      flex: 1 1 auto;\n"
+            "      min-height: 0;\n"
+            "      white-space: pre-wrap;\n"
+            "      overflow-wrap: anywhere;",
+            page,
+        )
+
     def configure_paths(self, server, root):
         server.DATA_DIR = root / "data"
         server.WORK_DIR = server.DATA_DIR / "work"
@@ -13618,13 +13636,6 @@ class ServerTests(unittest.TestCase):
                     )
                 if command[0] == "docker":
                     return subprocess.CompletedProcess(command, 127, "", "docker: not found\n")
-                if command[0] == "journalctl":
-                    return subprocess.CompletedProcess(
-                        command,
-                        0,
-                        "Archived and active journals take up 12.0M in the file system.\n",
-                        "",
-                    )
                 return subprocess.CompletedProcess(command, 1, "", "unexpected command\n")
 
             server.context().run_command = fake_run_command
@@ -13651,8 +13662,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("logs", details)
             self.assertIn("App configs", details)
             self.assertIn("Docker: unavailable from HA Ops App", details)
-            self.assertIn("System journal:", details)
-            self.assertIn("12.0M", details)
+            self.assertNotIn("System journal:", details)
             self.assertIn("Disk usage summary finished.", details)
 
     def test_disk_usage_reads_supervisor_host_and_docker_socket_diagnostics(self):
@@ -13676,8 +13686,6 @@ class ServerTests(unittest.TestCase):
             def fake_run_command(command, env=None, cwd=None):
                 if command[0] == "df":
                     return subprocess.CompletedProcess(command, 0, "Filesystem Size Used Avail Use% Mounted on\n", "")
-                if command[0] == "journalctl":
-                    return subprocess.CompletedProcess(command, 127, "", "journalctl: not found\n")
                 return subprocess.CompletedProcess(command, 1, "", "unexpected command\n")
 
             def fake_call_supervisor(method, path, payload=None):
@@ -13824,7 +13832,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Storage: unavailable from HA Ops App (timed out after 0.01s).", details)
             self.assertIn("Host: unavailable from HA Ops App (timed out after 0.01s).", details)
             self.assertIn("Docker: unavailable from HA Ops App (timed out after 0.01s).", details)
-            self.assertIn("System journal: unavailable from HA Ops App (timed out after 0.01s).", details)
+            self.assertNotIn("System journal:", details)
 
     def test_disk_usage_treats_docker_socket_errors_as_optional(self):
         server = load_server()

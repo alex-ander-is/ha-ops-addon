@@ -1063,8 +1063,8 @@ def render_page(data):
     .details-card pre {{
       flex: 1 1 auto;
       min-height: 0;
-      white-space: pre;
-      overflow-wrap: normal;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
     }}
     .details-header {{
       display: flex;

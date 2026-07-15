@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.6
+
+- Wrap long Log lines so disk-usage and other diagnostic output remains readable in the HA Ops interface.
+- Omit unavailable system-journal diagnostics that HA Ops cannot inspect from its App container.
+
 ## 0.9.5
 
 - Detect a missing Docker API socket after the App has been granted Docker access, and explain that restarting HA Ops applies the runtime grant.

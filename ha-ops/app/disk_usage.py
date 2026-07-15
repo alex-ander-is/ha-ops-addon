@@ -423,15 +423,6 @@ def _command_lines(run_command, command, timeout=OPTIONAL_COMMAND_TIMEOUT_SECOND
     return None, lines[0] if lines else _("detail.disk_usage_command_failed")
 
 
-def _append_command_section(lines, title, command, run_command, max_lines=8, timeout=OPTIONAL_COMMAND_TIMEOUT_SECONDS):
-    output, error = _command_lines(run_command, command, timeout)
-    if output is None:
-        lines.append(_("detail.disk_usage_optional_unavailable", title=title, error=error))
-        return
-    lines.append(_("detail.disk_usage_optional_title", title=title))
-    lines.extend(output[:max_lines])
-
-
 def _host_info_lines(call_supervisor, timeout=OPTIONAL_COMMAND_TIMEOUT_SECONDS):
     if call_supervisor is None:
         return None, _("detail.disk_usage_supervisor_unavailable")
@@ -689,11 +680,4 @@ def build_disk_usage_summary(
         lines.append(_("detail.disk_usage_optional_title", title=_("label.docker")))
         lines.extend(docker_output)
 
-    _append_command_section(
-        lines,
-        _("label.system_journal"),
-        ["journalctl", "--disk-usage"],
-        run_command,
-        timeout=optional_timeout_seconds,
-    )
     return lines

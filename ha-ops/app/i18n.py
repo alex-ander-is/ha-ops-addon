@@ -298,7 +298,6 @@ EN_TEXT = {
     "label.retained_discovery_topics": "Retained Discovery Topics",
     "label.source": "Source",
     "label.system": "System",
-    "label.system_journal": "System journal",
     "label.time": "time",
     "label.target": "Target",
     "label.type": "Type",
