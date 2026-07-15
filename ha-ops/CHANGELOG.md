@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.5
+
+- Detect a missing Docker API socket after the App has been granted Docker access, and explain that restarting HA Ops applies the runtime grant.
+
 ## 0.9.4
 
 - Explain unavailable Docker build-cache access, including the administrator action required when HA Ops Protection mode is enabled.

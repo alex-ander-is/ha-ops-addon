@@ -4,6 +4,7 @@
 AVAILABLE = "available"
 PROTECTION_ENABLED = "protection_enabled"
 DOCKER_API_UNAVAILABLE = "docker_api_unavailable"
+RUNTIME_SOCKET_UNAVAILABLE = "runtime_socket_unavailable"
 UNKNOWN = "unknown"
 
 
@@ -33,6 +34,7 @@ def details(kind, translate):
     key = {
         PROTECTION_ENABLED: "docker_capability.protection_enabled",
         DOCKER_API_UNAVAILABLE: "docker_capability.docker_api_unavailable",
+        RUNTIME_SOCKET_UNAVAILABLE: "docker_capability.runtime_socket_unavailable",
         UNKNOWN: "docker_capability.unknown",
     }.get(kind)
     if key is None:

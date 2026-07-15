@@ -126,6 +126,8 @@ class AppContext:
         try:
             payload = self.call_supervisor("GET", "/addons/self/info", timeout=5)
             kind = docker_capability.classify_self_info(payload)
+            if kind == docker_capability.AVAILABLE and not self.docker_api.socket_is_available():
+                kind = docker_capability.RUNTIME_SOCKET_UNAVAILABLE
         except Exception:
             kind = docker_capability.UNKNOWN
         return {"kind": kind, **docker_capability.details(kind, _)}

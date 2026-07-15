@@ -17421,6 +17421,13 @@ devices:
                 self.assertEqual(capability.classify_self_info(payload), expected)
 
         with tempfile.TemporaryDirectory() as tmp:
+            socket_path = Path(tmp) / "docker.sock"
+            api = server.app_context.docker_api.DockerAPI(socket_path=socket_path)
+            self.assertFalse(api.socket_is_available())
+            socket_path.write_text("not a socket")
+            self.assertFalse(api.socket_is_available())
+
+        with tempfile.TemporaryDirectory() as tmp:
             self.configure_paths(server, Path(tmp))
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": True, "docker_api": True}
@@ -17433,6 +17440,25 @@ devices:
             self.assertIn("Protection mode is enabled", section)
             self.assertIn("turn off Protection mode", section)
             self.assertIn("color: #d80", page)
+
+    def test_docker_build_cache_capability_explains_missing_runtime_socket(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.context().docker_api.socket_is_available = lambda: False
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": False, "docker_api": True}
+            }
+            capability = server.context().docker_build_cache_capability()
+            page = server.render_page()
+
+        self.assertFalse(capability["available"])
+        self.assertEqual(capability["kind"], server.app_context.docker_capability.RUNTIME_SOCKET_UNAVAILABLE)
+        self.assertIn("Docker API socket is not mounted", capability["reason"])
+        self.assertIn("Restart HA Ops", capability["remedy"])
+        section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
+        self.assertIn('data-capability-available="false" data-action-ready="false"', section)
+        self.assertIn("Docker API socket is not mounted", section)
 
     def test_docker_build_cache_prune_rechecks_capability_before_mutating_state(self):
         server = load_server()
@@ -17470,7 +17496,9 @@ devices:
         server = load_server()
         state_store = server.app_context.state_store
         with tempfile.TemporaryDirectory() as tmp:
-            self.configure_paths(server, Path(tmp))
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().docker_api.socket_is_available = lambda: True
             available = {"data": {"protected": False, "docker_api": True}}
             unavailable = {"data": {"protected": True, "docker_api": True}}
             cases = (
@@ -17506,7 +17534,9 @@ devices:
     def test_delayed_confirmation_script_has_terminal_reset_and_bfcache_guards(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
-            self.configure_paths(server, Path(tmp))
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().docker_api.socket_is_available = lambda: True
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": False, "docker_api": True}
             }
@@ -17587,7 +17617,9 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
     def test_disk_usage_controls_are_same_row_and_prune_copy_is_explicit(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
-            self.configure_paths(server, Path(tmp))
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().docker_api.socket_is_available = lambda: True
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": False, "docker_api": True}
             }

@@ -103,6 +103,12 @@ class DockerAPI:
         self.connection_factory = connection_factory or _UnixSocketHTTPConnection
         self._version = None
 
+    def socket_is_available(self):
+        try:
+            return self.socket_path.is_socket()
+        except OSError:
+            return False
+
     def _request(self, method, path, body=None):
         connection = self.connection_factory(self.socket_path, timeout=self.timeout)
         try:

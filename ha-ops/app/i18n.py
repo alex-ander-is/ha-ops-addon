@@ -77,6 +77,8 @@ EN_TEXT = {
     "docker_capability.protection_enabled.remedy": "An administrator must turn off Protection mode for this installed App, restart HA Ops, then refresh this page.",
     "docker_capability.docker_api_unavailable.reason": "Docker build-cache access is unavailable because HA Ops was not granted Docker API access.",
     "docker_capability.docker_api_unavailable.remedy": "Check the installed App version and ask an administrator to restart or reinstall HA Ops, then refresh this page.",
+    "docker_capability.runtime_socket_unavailable.reason": "Docker build-cache access is unavailable because the Docker API socket is not mounted in the running HA Ops App.",
+    "docker_capability.runtime_socket_unavailable.remedy": "Restart HA Ops to apply its Docker API grant, then refresh this page.",
     "docker_capability.unknown.reason": "Docker build-cache access could not be verified.",
     "docker_capability.unknown.remedy": "Refresh this page or restart HA Ops and try again.",
     "docker_prune.disabled.running": "Another HA Ops operation is running. Wait for it to finish before clearing the build cache.",
