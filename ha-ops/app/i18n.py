@@ -81,7 +81,6 @@ EN_TEXT = {
     "docker_capability.runtime_socket_unavailable.remedy": "Restart HA Ops to apply its Docker API grant, then refresh this page.",
     "docker_capability.unknown.reason": "Docker build-cache access could not be verified.",
     "docker_capability.unknown.remedy": "Refresh this page or restart HA Ops and try again.",
-    "docker_prune.disabled.running": "Another HA Ops operation is running. Wait for it to finish before clearing the build cache.",
     "docker_prune.disabled.save_retry": "A Save push retry is pending. Resolve it before clearing the build cache.",
     "docker_prune.disabled.fence": "A previous build-cache cleanup needs attention. Resolve or acknowledge it before starting another cleanup.",
     "detail.disk_usage_filesystem_row": "  - {mount} on {filesystem}: {used} of {total}, {available} free",

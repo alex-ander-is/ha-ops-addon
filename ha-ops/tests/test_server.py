@@ -17511,7 +17511,7 @@ devices:
             unavailable = {"data": {"protected": True, "docker_api": True}}
             cases = (
                 ("capability", unavailable, {}, "Protection mode is enabled"),
-                ("running", available, {"last_status": "running"}, "Another HA Ops operation is running"),
+                ("running", available, {"last_status": "running"}, None),
                 ("save retry", available, {"save_push_retry_pending": True}, "A Save push retry is pending"),
                 (
                     "fence",
@@ -17535,8 +17535,11 @@ devices:
                     section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
                     self.assertIn('data-action-ready="false"', section)
                     self.assertIn("delayed-confirm-button\" disabled", section)
-                    self.assertIn("docker-prune-hint", section)
-                    self.assertIn(hint, section)
+                    if hint is None:
+                        self.assertNotIn("docker-prune-hint", section)
+                    else:
+                        self.assertIn("docker-prune-hint", section)
+                        self.assertIn(hint, section)
                     server.write_state({"last_status": "idle", "save_push_retry_pending": False, state_store.DOCKER_PRUNE_FENCE_KEY: None})
 
     def test_delayed_confirmation_script_has_terminal_reset_and_bfcache_guards(self):

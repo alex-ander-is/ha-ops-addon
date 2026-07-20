@@ -503,8 +503,6 @@ def render_page(ctx):
             "<p class='action-hint docker-prune-hint'>"
             f"{html.escape(docker_capability_status['reason'])} {html.escape(docker_capability_status['remedy'])}</p>"
         )
-    elif job_running:
-        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.running')}</p>"
     elif save_push_retry_pending:
         docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.save_retry')}</p>"
     elif docker_prune.get("kind") != "idle":
