@@ -409,7 +409,9 @@ def add_save_change_details(ctx, details, status):
 
 
 def default_save_commit_subject(release):
-    return f"Save Home Assistant config {release}"
+    date, separator, time = str(release).partition("_")
+    timestamp = f"{date}\u00a0•\u00a0{time}" if separator else date
+    return f"Save Home Assistant config {timestamp}"
 
 
 def normalize_save_commit_subject(commit_subject):

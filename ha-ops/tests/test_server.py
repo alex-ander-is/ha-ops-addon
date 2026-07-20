@@ -6354,7 +6354,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertIn("spellcheck='false' disabled>", page[subject_start:confirm_start])
             self.assertIn(
-                "name='default_commit_subject' value='Save Home Assistant config 2026-06-24_20-00-00'",
+                "name='default_commit_subject' value='Save Home Assistant config 2026-06-24\u00a0•\u00a020-00-00'",
                 page,
             )
             self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
@@ -6364,7 +6364,7 @@ class ServerTests(unittest.TestCase):
             subject_start = selected_page.index("name='commit_subject'")
             confirm_start = selected_page.index("Confirm Save to Git")
             self.assertIn(
-                "name='commit_subject' value='Save Home Assistant config 2026-06-24_20-00-00'",
+                "name='commit_subject' value='Save Home Assistant config 2026-06-24\u00a0•\u00a020-00-00'",
                 selected_page[subject_start:confirm_start],
             )
             self.assertNotIn("value='Custom HA Save Subject'", selected_page[subject_start:confirm_start])
@@ -6377,7 +6377,7 @@ class ServerTests(unittest.TestCase):
             root = Path(tmp)
             server.context().release_now = lambda: "2026-06-24_17-00-00"
             remote = self.prepare_empty_save_preview(server, root)
-            rendered_default = "Save Home Assistant config 2026-06-24_17-00-00"
+            rendered_default = "Save Home Assistant config 2026-06-24\u00a0•\u00a017-00-00"
             page = server.render_page()
             self.assertIn(f"name='commit_subject' value='{rendered_default}'", page)
             self.assertIn(f"name='default_commit_subject' value='{rendered_default}'", page)
@@ -6395,7 +6395,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(
                 self.remote_main_subject(remote),
-                "Save Home Assistant config 2026-06-24_18-00-00",
+                "Save Home Assistant config 2026-06-24\u00a0•\u00a018-00-00",
             )
 
     def test_save_ha_to_git_blank_commit_subject_falls_back_at_job_start(self):
@@ -6411,7 +6411,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(
                 self.remote_main_subject(remote),
-                "Save Home Assistant config 2026-06-24_19-00-00",
+                "Save Home Assistant config 2026-06-24\u00a0•\u00a019-00-00",
             )
 
     @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
