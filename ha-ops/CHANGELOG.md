@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.7
+
+- Hide the redundant build-cache warning while another HA Ops operation already disables the cleanup control.
+- Format automatic Home Assistant config Save commit timestamps with non-breaking spaces around the date/time separator.
+
 ## 0.9.6
 
 - Wrap long Log lines so disk-usage and other diagnostic output remains readable in the HA Ops interface.
