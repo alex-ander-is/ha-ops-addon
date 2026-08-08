@@ -60,6 +60,7 @@ EN_TEXT = {
     "detail.created_release_snapshot": "Created local release snapshot {release}.",
     "detail.device_registry_changed_after_deletion": "Entries changed after deletion, but removed {entries} did not return.",
     "detail.device_registry_new_deleted_devices": "There are {count} new {entries}; keeping them.",
+    "detail.save_deleted_registry_cleanup": "Important: run HA to Git Preview and Save now to commit this registry cleanup before the next Git to HA. Otherwise Git to HA can restore these deleted entries.",
     "detail.disk_usage_command_failed": "command failed",
     "detail.disk_usage_command_unavailable": "command unavailable",
     "detail.disk_usage_docker_api_failed": "Docker API returned HTTP {status}.",

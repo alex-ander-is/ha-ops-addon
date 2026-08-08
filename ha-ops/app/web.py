@@ -423,6 +423,7 @@ def render_page(ctx):
         else state_store.classify_docker_prune_fence(state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
     )
     last_status = state.get("last_status", "idle")
+    last_action = state.get("last_action")
     job_running = job_is_running(ctx, state)
     has_conflicts = bool(state.get("conflicts"))
     deleted_devices_recovery_active = state_store.deleted_devices_recovery_active(state)
@@ -485,6 +486,13 @@ def render_page(ctx):
         and state.get("last_deleted_devices_fingerprint")
     )
     check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
+    deleted_devices_save_hint_html = ""
+    if last_action == "deleted_devices_confirm" and last_status == "success":
+        deleted_devices_save_hint_html = (
+            "<p class='action-hint deleted-devices-save-hint' role='alert'>"
+            f"{_('detail.save_deleted_registry_cleanup')}"
+            "</p>"
+        )
     if save_push_retry_pending:
         action_disabled = "disabled"
         check_deleted_devices_disabled = "disabled"
@@ -777,6 +785,7 @@ def render_page(ctx):
             "save_preview_button_text": save_preview_button_text,
             "save_preview_hint_html": save_preview_hint_html,
             "check_deleted_devices_disabled": check_deleted_devices_disabled,
+            "deleted_devices_save_hint_html": deleted_devices_save_hint_html,
             "check_disk_usage_disabled": check_disk_usage_disabled,
             "docker_prune_disabled": docker_prune_disabled,
             "docker_prune_available": "true" if docker_capability_status["available"] else "false",

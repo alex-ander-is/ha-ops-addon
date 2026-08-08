@@ -1892,6 +1892,7 @@ def render_page(data):
                 <button type="submit" class="secondary" {data['check_deleted_devices_disabled']}>{_('action.check_deleted_devices')}</button>
               </form>
             </div>
+            {data['deleted_devices_save_hint_html']}
             <p class="action-flow">{_('text.deleted_devices_flow')}</p>
           </section>
           <section class="action-section">

@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.8
+
+- Remind users in the confirmation result and below Check deleted devices and entities to save the live registry to Git before the next Git-to-HA apply can restore old deleted entries.
+
 ## 0.9.7
 
 - Hide the redundant build-cache warning while another HA Ops operation already disables the cleanup control.

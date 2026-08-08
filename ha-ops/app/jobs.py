@@ -1734,6 +1734,7 @@ def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
             ctx.set_deleted_devices_rollback_phase(rollback_path, "confirmed")
         ctx.discard_deleted_devices_rollback(rollback_path)
         log_action(ctx, "deleted_devices confirm: confirmed and discarded rollback")
+        details.append(_("detail.save_deleted_registry_cleanup"))
         write_state(
             {
                 "last_run_at": utc_now(),

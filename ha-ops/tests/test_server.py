@@ -15341,7 +15341,18 @@ devices:
             self.assertTrue(server.run_deleted_devices_confirm_job())
             confirmed = server.read_state()
             self.assertEqual(confirmed["last_message"], "Confirmed deleted entities cleanup.")
+            self.assertTrue(
+                any(
+                    "Important: run HA to Git Preview and Save now to commit this registry cleanup" in detail
+                    for detail in confirmed["last_details"]
+                )
+            )
+            self.assertIn("run HA to Git Preview and Save now", server.render_page())
             self.assertNotIn("deleted_devices", server.render_page())
+            page = server.render_page()
+            section = page[page.index("<h2>Deleted devices and entities</h2>") : page.index("<h2>Retained Devices</h2>")]
+            self.assertIn("deleted-devices-save-hint", section)
+            self.assertIn("run HA to Git Preview and Save now", section)
 
     def test_deleted_devices_preview_includes_mixed_deleted_registry_entries(self):
         server = load_server()
