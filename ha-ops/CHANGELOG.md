@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.9
+
+- Clear uncommitted HA live-export leftovers before switching back to the configured Git branch, so a later preview or Save does not fail with a blocked checkout.
+
 ## 0.9.8
 
 - Remind users in the confirmation result and below Check deleted devices and entities to save the live registry to Git before the next Git-to-HA apply can restore old deleted entries.

@@ -15009,6 +15009,32 @@ devices:
             with self.assertRaisesRegex(RuntimeError, "homeassistant/configuration.yaml"):
                 server.app_context.job_logic.prepare_repo_checkout_for_sync(ctx.job_deps(), options, [], "Preview HA to Git")
 
+    def test_save_preview_discards_export_leftovers_before_switching_from_ha_live_to_main(self):
+        server = load_server()
+        sync = server.sync_logic
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            self.git(["init", str(repo)], root)
+            self.git(["checkout", "-b", "main"], repo)
+            registry = repo / "homeassistant" / ".storage" / "core.entity_registry"
+            registry.parent.mkdir(parents=True)
+            registry.write_text('{"data": "main"}\n')
+            self.git_commit_all(repo, "main")
+            self.git(["checkout", "-b", "ha-ops/ha-live"], repo)
+            registry.write_text('{"data": "exported"}\n')
+            self.git_commit_all(repo, "live export")
+            registry.write_text('{"data": "left behind by export"}\n')
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
+
+            conflicts = sync.merge_ha_live_into_git(repo, "main", ctx)
+
+            self.assertEqual(conflicts, [])
+            self.assertEqual(self.git(["branch", "--show-current"], repo).stdout.strip(), "main")
+            self.assertEqual(registry.read_text(), '{"data": "exported"}\n')
+            self.git(["merge", "--abort"], repo)
+            self.git(["reset", "--hard", "HEAD"], repo)
+
     def test_internal_ids_mixed_trigger_gets_mqtt_guard_condition(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

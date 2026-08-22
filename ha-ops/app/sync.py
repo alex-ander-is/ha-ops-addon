@@ -2516,9 +2516,9 @@ def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=Tr
 
 
 def merge_ha_live_into_git(repo_dir, main_branch, ctx):
-    git_checkout(repo_dir, main_branch, ctx)
     git_abort_merge(repo_dir, ctx)
     git_reset_hard(repo_dir, ctx)
+    git_checkout(repo_dir, main_branch, ctx)
     result = ctx.run_command(["git", "merge", "--no-commit", "--no-ff", HA_LIVE_BRANCH], cwd=repo_dir)
     conflicts = []
     if result.returncode != 0:
