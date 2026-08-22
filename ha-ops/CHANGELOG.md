@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.10
+
+- Clarify that the post-apply HA-to-Git preview only checks changes and does not modify Git yet.
+
 ## 0.9.9
 
 - Clear uncommitted HA live-export leftovers before switching back to the configured Git branch, so a later preview or Save does not fail with a blocked checkout.

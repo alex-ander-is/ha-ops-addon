@@ -897,7 +897,10 @@ class ServerTests(unittest.TestCase):
         i18n = server.app_context.job_logic.i18n
 
         self.assertEqual(i18n.EN_TEXT["message.preparing_save"], "Preparing HA to Git save.")
-        self.assertEqual(i18n.EN_TEXT["message.preparing_save_preview"], "Preparing HA to Git save preview.")
+        self.assertEqual(
+            i18n.EN_TEXT["message.preparing_save_preview"],
+            "Checking HA changes after Git → HA; Git unchanged.",
+        )
         self.assertEqual(i18n.EN_TEXT["message.preparing_apply"], "Preparing Git to HA apply.")
         self.assertEqual(i18n.EN_TEXT["message.preparing_apply_preview"], "Preparing Git to HA apply preview.")
 
@@ -14874,7 +14877,7 @@ devices:
             server.write_state(
                 {
                     "last_status": "running",
-                    "last_message": "Preparing HA to Git save preview.",
+                    "last_message": "Checking HA changes after Git → HA; Git unchanged.",
                     "last_details": [],
                 }
             )
@@ -14883,7 +14886,10 @@ devices:
             server.context().add_detail(details, "Committed pending Internal IDs migration changes to Git: abc123.")
             state = server.read_state()
 
-            self.assertEqual(state["last_message"], "Preparing HA to Git save preview.")
+            self.assertEqual(
+                state["last_message"],
+                "Checking HA changes after Git → HA; Git unchanged.",
+            )
             self.assertEqual(state["last_details"], ["Committed pending Internal IDs migration changes to Git: abc123."])
 
     def test_add_detail_does_not_restore_running_after_terminal_status(self):

@@ -377,7 +377,7 @@ EN_TEXT = {
     "message.preparing_apply": "Preparing Git to HA apply.",
     "message.preparing_apply_preview": "Preparing Git to HA apply preview.",
     "message.preparing_save": "Preparing HA to Git save.",
-    "message.preparing_save_preview": "Preparing HA to Git save preview.",
+    "message.preparing_save_preview": "Checking HA changes after Git → HA; Git unchanged.",
     "message.resetting_git_state": "Resetting Git state.",
     "message.previous_action_interrupted": "Previous action was interrupted by HA Ops restart.",
     "message.previous_stale_error_cleared": "Previous stale error was cleared. Run an action when ready.",
