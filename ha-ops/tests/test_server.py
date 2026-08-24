@@ -1793,7 +1793,6 @@ class ServerTests(unittest.TestCase):
             server.write_state(
                 {
                     "apply_preview_selected_paths": ["homeassistant/configuration.yaml"],
-                    "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
                 }
             )
             selected_page = server.render_page()
@@ -1804,6 +1803,13 @@ class ServerTests(unittest.TestCase):
             self.assertIn("<input type='radio' name='choice' value='ha'>", selected_page)
             self.assertIn("<button type='submit'>Confirm Apply to HA</button>", selected_page)
             self.assertNotIn("Select files to continue.", selected_page)
+
+            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+            kept_page = server.render_page()
+
+            self.assertIn("<input type='radio' name='choice' value='git'>", kept_page)
+            self.assertIn("<input type='radio' name='choice' value='ha' checked>", kept_page)
+            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", kept_page)
 
     def test_apply_selected_lovelace_storage_highlights_git_default_without_has_selector(self):
         server = load_server()
@@ -4471,6 +4477,47 @@ class ServerTests(unittest.TestCase):
         selected = server.app_context.job_logic.selected_preview_paths({}, paths, "save_preview_selected_paths")
 
         self.assertEqual(selected, [])
+
+    def test_apply_preview_conflict_defaults_selected_paths_to_git(self):
+        server = load_server()
+        preview = {
+            "paths": ["homeassistant/.storage/core.entity_registry"],
+            "conflicts": ["homeassistant/.storage/core.entity_registry"],
+        }
+
+        self.assertEqual(
+            server.app_context.job_logic.apply_preview_resolutions_for_current_preview(
+                {"apply_preview_selected_paths": ["homeassistant/.storage/core.entity_registry"]}, preview
+            ),
+            {"homeassistant/.storage/core.entity_registry": "git"},
+        )
+        self.assertEqual(
+            server.app_context.job_logic.apply_preview_resolutions_for_current_preview(
+                {
+                    "apply_preview_selected_paths": ["homeassistant/.storage/core.entity_registry"],
+                    "apply_preview_resolutions": {"homeassistant/.storage/core.entity_registry": "ha"},
+                },
+                preview,
+            ),
+            {"homeassistant/.storage/core.entity_registry": "ha"},
+        )
+        self.assertEqual(
+            server.app_context.job_logic.apply_preview_resolutions_for_current_preview(
+                {"apply_preview_selected_paths": ["homeassistant/configuration.yaml"]},
+                {
+                    "paths": ["homeassistant/.storage/core.entity_registry", "homeassistant/configuration.yaml"],
+                    "conflicts": ["homeassistant/.storage/core.entity_registry"],
+                },
+            ),
+            {
+                "homeassistant/.storage/core.entity_registry": "ha",
+                "homeassistant/configuration.yaml": "git",
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "Select at least one"):
+            server.app_context.job_logic.apply_preview_resolutions_for_current_preview(
+                {"apply_preview_selected_paths": []}, preview
+            )
 
     def test_web_handler_uses_context_for_health_and_post_actions(self):
         server = load_server()
@@ -12157,12 +12204,7 @@ class ServerTests(unittest.TestCase):
                 {"homeassistant/configuration.yaml", "homeassistant/packages/clean.yaml"},
             )
             self.assertEqual(state["last_preview_conflict_paths"], ["homeassistant/configuration.yaml"])
-            page = server.render_page()
-            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
             self.select_all_apply_preview_files(server)
-            self.assertFalse(server.run_apply_job())
-            self.assertIn("Choose HA or Git version", server.read_state()["last_message"])
-            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"}})
             page = server.render_page()
             self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
@@ -12434,7 +12476,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
             (server.CONFIG_DIR / "configuration.yaml").write_text("ha2\n")
-            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
+            self.select_all_apply_preview_files(server)
 
             self.assertFalse(server.run_apply_job())
             state = server.read_state()

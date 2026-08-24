@@ -444,7 +444,6 @@ def render_page(ctx):
     apply_preview_paths = [str(item) for item in (state.get("last_preview_paths") or []) if str(item)]
     apply_preview_resolutions = dict(state.get("apply_preview_resolutions") or {})
     apply_preview_selected_paths = [str(item) for item in (state.get("apply_preview_selected_paths") or []) if str(item)]
-    apply_preview_conflicts = bool(state.get("last_preview_conflicts"))
     apply_preview_conflict_paths = [str(item) for item in (state.get("last_preview_conflict_paths") or []) if str(item)]
     save_preview_text = state.get("last_save_preview") or ""
     save_diff_text = state.get("last_save_diff") or ""
@@ -619,7 +618,7 @@ def render_page(ctx):
             "</p>"
             f"{apply_preview_warnings_html}"
             f"<div data-transient='apply-preview'>"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', apply_preview_conflicts, diff_text, actions_disabled=job_running, selected_paths=apply_preview_selected_paths, required_paths=apply_preview_conflict_paths)}"
+            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', diff_text=diff_text, actions_disabled=job_running, selected_paths=apply_preview_selected_paths, required_paths=apply_preview_conflict_paths)}"
             "</div>"
             "</section>"
         )

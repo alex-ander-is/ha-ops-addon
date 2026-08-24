@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.9.11
+
+- Default selected Git-to-HA conflict files to the visibly checked Git version, so Confirm Apply to HA is the single approval while Keep Unchanged remains available as an explicit live-version override.
+
 ## 0.9.10
 
 - Clarify that the post-apply HA-to-Git preview only checks changes and does not modify Git yet.

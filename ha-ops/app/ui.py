@@ -536,13 +536,18 @@ def render_preview_decisions(
     files = []
     for path in paths:
         choice = resolutions.get(path)
+        selected = path in selected_paths
         status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
-        selected_choice = choice or (None if path in required_paths else preview_default_choice(direction))
+        if choice:
+            selected_choice = choice
+        elif direction == "apply":
+            selected_choice = preview_default_choice(direction) if selected or path not in required_paths else None
+        else:
+            selected_choice = None if require_all and path in required_paths else preview_default_choice(direction)
         change_label = change_labels.get(path)
         change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
         detail = diff_by_path.get(path) or _("text.diff_detail_unavailable")
         preview_key = html.escape(f"{direction}:{path}", quote=True)
-        selected = path in selected_paths
         files.append(
             f"<article class='preview-file' data-preview-file data-preview-key='{preview_key}'>"
             "<div class='preview-file-header'>"

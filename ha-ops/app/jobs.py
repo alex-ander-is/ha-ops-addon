@@ -212,11 +212,6 @@ def apply_preview_resolutions_for_current_preview(state, preview):
         raise RuntimeError(_("message.select_preview_files"))
     stored = dict(state.get("apply_preview_resolutions", {}))
     selected_set = set(selected)
-    conflict_paths = set(preview.get("conflicts") or [])
-    if preview.get("conflicts"):
-        missing = [path for path in selected if path in conflict_paths and path not in stored]
-        if missing:
-            raise RuntimeError(_("message.choose_apply_preview_conflicts", count=len(missing)))
     return {path: stored.get(path, "git") if path in selected_set else "ha" for path in paths}
 
 

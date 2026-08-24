@@ -153,12 +153,18 @@ Home Assistant heap files from changing after Preview and before Apply.
 
 Conflict previews must put every changed file in the Change List, including
 cleanly merged files. They separately track the subset of conflicted paths that
-requires an explicit HA/Git choice.
+offers an HA/Git choice.
 
-Conflict previews require explicit HA/Git choices for every selected conflicted
-path. The UI disables Confirm until all selected conflict paths are resolved,
-and the server must reject direct Save or Apply submissions when selected
-conflict choices are missing.
+Save conflict previews require an explicit HA/Git choice for every selected
+conflicted path. The UI disables Confirm until all selected Save conflict paths
+are resolved, and the server must reject direct Save submissions when a
+selected conflict choice is missing.
+
+Apply conflict previews default every selected conflicted path to Git. The
+selected Git radio is shown as the effective default, and Confirm Apply to HA
+is the single approval of the reviewed Git-to-live diff. Keep Unchanged remains
+an explicit HA/live override for that selected path. The server must use the
+same default; it must not require a separate resolution before Apply.
 
 Unselected preview paths must keep the current side and must not be processed:
 
@@ -229,9 +235,10 @@ Disabled button styling is global and intentional. New disabled buttons should
 inherit the pale gray background, muted text, muted border, and full opacity
 rule from `ui.py`.
 
-The conflict preview Confirm button is disabled only for conflict previews with
-missing choices. Non-conflict preview rows are a convenience selector, not a
-mandatory all-path approval list.
+The Save conflict preview Confirm button is disabled for missing choices. The
+Apply preview Confirm button is disabled until at least one path is selected;
+selected Apply conflict paths use the visible Git default. Non-conflict preview
+rows are a convenience selector, not a mandatory all-path approval list.
 
 ## Review Checklist
 
