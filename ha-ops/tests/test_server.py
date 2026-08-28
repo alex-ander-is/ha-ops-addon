@@ -17807,6 +17807,10 @@ global.window = {{ location: new URL("https://ha.example/api/hassio_ingress/abc1
 if (wsUrl() !== "wss://ha.example/api/hassio_ingress/abc123/ws") throw new Error(wsUrl());
 if (commandForAction("save") !== "save") throw new Error("relative save did not map");
 if (commandForAction("/api/hassio_ingress/abc123/apply") !== "apply") throw new Error("ingress apply did not map");
+global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_ops") }};
+if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(wsUrl());
+global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_ops/") }};
+if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(wsUrl());
 """
         subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
 

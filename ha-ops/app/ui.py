@@ -2112,7 +2112,13 @@ def render_page(data):
       function websocketBaseUrl() {{
         const base = new URL(window.location.href);
         if (!base.pathname.endsWith("/")) {{
-          base.pathname = base.pathname.slice(0, base.pathname.lastIndexOf("/") + 1);
+          const lastSlash = base.pathname.lastIndexOf("/");
+          const lastSegment = base.pathname.slice(lastSlash + 1);
+          if (lastSegment && !lastSegment.includes(".")) {{
+            base.pathname = `${{base.pathname}}/`;
+          }} else {{
+            base.pathname = base.pathname.slice(0, lastSlash + 1);
+          }}
         }}
         return base;
       }}

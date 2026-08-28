@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.1
+
+- Keep the WebSocket endpoint under Home Assistant's single-segment ingress URL when the page URL has no trailing slash, so live logs and preview updates stream without a manual refresh.
+
 ## 0.10.0
 
 - Add the WebSocket command/event transport MVP for HA Ops, keeping the server-rendered UI and no-JS POST fallback while updating open pages through streamed state, log, result, and server-rendered fragment frames.
