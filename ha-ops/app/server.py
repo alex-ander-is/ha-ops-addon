@@ -274,6 +274,8 @@ class _ServerModule(ModuleType):
                 _CTX.releases_dir = _CTX.data_dir / "releases"
             if name in {"DATA_DIR", "WORK_DIR"}:
                 _refresh_generated_key_paths()
+            if name in {"DATA_DIR", "STATE_PATH"}:
+                _CTX.operation_store = state_store.OperationStore(_CTX.state_path)
             return
         if name in _VALUE_ATTRS:
             setattr(_CTX, _VALUE_ATTRS[name], value)

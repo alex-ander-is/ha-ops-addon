@@ -209,3 +209,7 @@ For a private GitHub repository:
 5. Leave `git_ssh_key` empty to use the generated key.
 
 Raw `core.config_entries` is not applied from Git. HA Ops applies only the safe managed projection for supported fields.
+
+## Post-MVP follow-up
+
+- Replace the server-rendered DOM refresh flow with a component-based reactive DOM after the WebSocket command/event transport has settled. The MVP intentionally keeps SSR and no-JS POST fallback as the authoritative UI path.

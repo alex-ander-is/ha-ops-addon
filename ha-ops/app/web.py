@@ -1,8 +1,12 @@
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+import base64
+import hashlib
 import html
 import json
+import socket
+import struct
 import threading
 import uuid
 
@@ -840,8 +844,29 @@ def job_action(target):
     return name.removeprefix("run_").removesuffix("_job") or "mutation"
 
 
+PREVIEW_CONSUMING_ACTIONS = {"save", "apply"}
+
+
+def assert_command_readiness(ctx, action, expected_generation=None):
+    if action not in PREVIEW_CONSUMING_ACTIONS:
+        return expected_generation
+    guard = getattr(ctx, "assert_repaired_for_current_preview_read", None)
+    if guard is None:
+        return expected_generation
+    generation = guard(action)
+    if expected_generation is not None and int(generation) != int(expected_generation):
+        raise RuntimeError(state_store.READINESS_BLOCKED_MESSAGE)
+    return generation
+
+
 def start_reserved_background(ctx, target, *args, state_updates=None, lock_acquired=False):
     action = job_action(target)
+    try:
+        expected_generation = assert_command_readiness(ctx, action)
+    except RuntimeError:
+        if lock_acquired:
+            ctx.run_lock.release()
+        return False
     if not recovery_action_allowed(ctx, action):
         if lock_acquired:
             ctx.run_lock.release()
@@ -852,12 +877,22 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
         if not recovery_action_allowed(ctx, action):
             ctx.run_lock.release()
             return False
+        try:
+            assert_command_readiness(ctx, action, expected_generation)
+        except RuntimeError:
+            ctx.run_lock.release()
+            return False
         ok, reserved_lock = True, True
     else:
         ok, _state, reserved_lock = reserve_action_slot(ctx, action)
     if not ok:
         return False
     try:
+        try:
+            assert_command_readiness(ctx, action, expected_generation)
+        except RuntimeError:
+            release_action_slot(ctx, reserved_lock)
+            return False
         if state_updates:
             ctx.write_state(state_updates)
         start_background(target, *args, lock_acquired=reserved_lock)
@@ -865,6 +900,168 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
     except Exception:
         release_action_slot(ctx, reserved_lock)
         raise
+
+
+def command_result(ok, message="", **extra):
+    payload = {"ok": bool(ok), "message": message}
+    payload.update(extra)
+    return payload
+
+
+WS_FRAGMENT_NAMES = (
+    "top-grid",
+    "apply-preview-section",
+    "save-preview-section",
+    "deleted-devices-section",
+    "retained-devices-section",
+    "internal-ids-section",
+    "conflicts-section",
+)
+
+
+def ws_fragment_payload(ctx):
+    snapshot = _snapshot_payload(ctx)
+
+    class FragmentContext:
+        def __init__(self, wrapped, redacted_state):
+            self._wrapped = wrapped
+            self._redacted_state = redacted_state
+
+        def __getattr__(self, name):
+            return getattr(self._wrapped, name)
+
+        def read_state(self):
+            return dict(self._redacted_state)
+
+    page = render_page(FragmentContext(ctx, snapshot.get("state", {})))
+    fragments = {}
+    for name in WS_FRAGMENT_NAMES:
+        marker = f'data-ws-fragment="{name}"'
+        marker_at = page.find(marker)
+        if marker_at < 0:
+            continue
+        start = page.rfind("<", 0, marker_at)
+        if start < 0:
+            continue
+        tag_end = page.find(">", marker_at)
+        if tag_end < 0:
+            continue
+        tag = page[start + 1 : tag_end].split(None, 1)[0].lower().lstrip("/")
+        depth = 1
+        cursor = tag_end + 1
+        while depth > 0:
+            next_open = page.find(f"<{tag}", cursor)
+            next_close = page.find(f"</{tag}>", cursor)
+            if next_close < 0:
+                break
+            if 0 <= next_open < next_close:
+                open_end = page.find(">", next_open)
+                if open_end < 0:
+                    break
+                depth += 1
+                cursor = open_end + 1
+            else:
+                depth -= 1
+                cursor = next_close + len(tag) + 3
+        if depth == 0:
+            fragments[name] = page[start:cursor]
+    return fragments
+
+
+def _snapshot_payload(ctx):
+    if hasattr(ctx, "debug_snapshot"):
+        return ctx.debug_snapshot()
+    return {"state": state_store.redacted_state_snapshot(ctx.read_state())}
+
+
+def dispatch_command(ctx, command, body=None, start_job=None):
+    body = body or {}
+    if command == "state_get" or command == "replay":
+        return command_result(True, "state snapshot", **_snapshot_payload(ctx))
+    if command == "debug_snapshot":
+        return command_result(True, "debug snapshot", **_snapshot_payload(ctx))
+    if command == "diff_get":
+        try:
+            cursor = body.get("cursor")
+            if isinstance(cursor, str):
+                cursor = json.loads(cursor)
+            return command_result(True, "diff", diff=ctx.diff_get(cursor))
+        except Exception as exc:
+            return command_result(False, str(exc))
+    if command == "apply":
+        if start_job is None:
+            ok = start_reserved_background(ctx, ctx.run_apply_job)
+        else:
+            ok = start_job(ctx.run_apply_job)
+        return command_result(ok, _("message.apply_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
+    if command == "save":
+        raw_subject = body.get("commit_subject", [None])
+        raw_default = body.get("default_commit_subject", [None])
+        commit_subject = raw_subject[0] if isinstance(raw_subject, list) else raw_subject
+        default_subject = raw_default[0] if isinstance(raw_default, list) else raw_default
+        commit_subject = job_logic.save_commit_subject_from_submission(commit_subject, default_subject)
+        if start_job is None:
+            ok = start_reserved_background(ctx, ctx.run_save_job, commit_subject)
+        else:
+            ok = start_job(ctx.run_save_job, commit_subject)
+        return command_result(ok, _("message.save_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
+    return command_result(False, "unknown command")
+
+
+def ingress_route(path, *endpoints):
+    if path in endpoints:
+        return path
+    for endpoint in endpoints:
+        if path.endswith(endpoint) and path[: -len(endpoint)]:
+            return endpoint
+    return path
+
+
+def ws_state_frames(ctx):
+    snapshot = _snapshot_payload(ctx)
+    frames = [{"type": "state", **snapshot, "fragments": ws_fragment_payload(ctx)}]
+    details = snapshot.get("state", {}).get("last_details") or []
+    for line in details:
+        if line:
+            frames.append({"type": "log", "message": str(line)})
+    return frames
+
+
+def websocket_accept(key):
+    digest = hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+def read_ws_frame(rfile):
+    header = rfile.read(2)
+    if len(header) < 2:
+        return None
+    first, second = header
+    opcode = first & 0x0F
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", rfile.read(2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", rfile.read(8))[0]
+    mask = rfile.read(4) if second & 0x80 else b""
+    payload = rfile.read(length)
+    if mask:
+        payload = bytes(byte ^ mask[index % 4] for index, byte in enumerate(payload))
+    if opcode == 8:
+        return None
+    return payload.decode("utf-8", errors="replace")
+
+
+def write_ws_frame(wfile, payload):
+    data = json.dumps(payload).encode("utf-8")
+    if len(data) < 126:
+        header = bytes([0x81, len(data)])
+    elif len(data) < 65536:
+        header = bytes([0x81, 126]) + struct.pack("!H", len(data))
+    else:
+        header = bytes([0x81, 127]) + struct.pack("!Q", len(data))
+    wfile.write(header + data)
+    wfile.flush()
 
 
 def create_handler(ctx):
@@ -901,6 +1098,13 @@ def create_handler(ctx):
             else:
                 self.send_html(render_page(ctx), status=409)
 
+        def send_startup_repair_blocked(self):
+            message = state_store.READINESS_BLOCKED_MESSAGE
+            if self.wants_json():
+                self.send_json({"ok": False, "message": message}, status=409)
+            else:
+                self.send_html(render_page(ctx), status=409)
+
         def save_retry_pending(self):
             return bool(ctx.read_state().get("save_push_retry_pending"))
 
@@ -914,6 +1118,10 @@ def create_handler(ctx):
         def start_job(self, target, *args, state_updates=None, lock_acquired=False):
             if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
                 return True
+            readiness = ctx.readiness_snapshot() if hasattr(ctx, "readiness_snapshot") else {"status": state_store.READINESS_REPAIRED}
+            if job_action(target) in PREVIEW_CONSUMING_ACTIONS and readiness.get("status") != state_store.READINESS_REPAIRED:
+                self.send_startup_repair_blocked()
+                return False
             if not recovery_action_allowed(ctx, job_action(target)):
                 self.send_recovery_blocked()
             else:
@@ -922,17 +1130,77 @@ def create_handler(ctx):
 
         def do_GET(self):
             parsed = urlparse(self.path)
-            if parsed.path == "/health":
+            route = ingress_route(parsed.path, "/health", "/debug-snapshot", "/diff-get", "/ws")
+            if route == "/health":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True}).encode())
                 return
+            if route == "/debug-snapshot":
+                self.send_json(dispatch_command(ctx, "debug_snapshot"))
+                return
+            if route == "/diff-get":
+                query = parse_qs(parsed.query)
+                cursor = query.get("cursor", [""])[0]
+                result = dispatch_command(ctx, "diff_get", {"cursor": cursor})
+                self.send_json(result, status=200 if result.get("ok") else 409)
+                return
+            if route == "/ws":
+                key = self.headers.get("Sec-WebSocket-Key")
+                if not key:
+                    self.send_json({"ok": False, "message": _("error.missing_websocket_key")}, status=400)
+                    return
+                self.send_response(101)
+                self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade")
+                self.send_header("Sec-WebSocket-Accept", websocket_accept(key))
+                self.end_headers()
+                if getattr(self, "connection", None) is not None:
+                    self.connection.settimeout(0.5)
+                last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else 0
+                write_ws_frame(self.wfile, {"type": "ready", **dispatch_command(ctx, "replay")})
+                while True:
+                    try:
+                        message = read_ws_frame(self.rfile)
+                    except (socket.timeout, TimeoutError):
+                        next_sequence = (
+                            ctx.wait_for_state_change(last_sequence, timeout=0)
+                            if hasattr(ctx, "wait_for_state_change")
+                            else last_sequence
+                        )
+                        if next_sequence != last_sequence:
+                            last_sequence = next_sequence
+                            for frame in ws_state_frames(ctx):
+                                write_ws_frame(self.wfile, frame)
+                        continue
+                    if message is None:
+                        return
+                    try:
+                        payload = json.loads(message)
+                    except json.JSONDecodeError as exc:
+                        write_ws_frame(self.wfile, {"type": "result", "ok": False, "message": str(exc)})
+                        continue
+                    command = payload.get("command") or payload.get("type")
+                    result = dispatch_command(ctx, command, payload)
+                    write_ws_frame(
+                        self.wfile,
+                        {
+                            "id": payload.get("id"),
+                            "type": "result",
+                            **result,
+                        },
+                    )
+                    if command in {"state_get", "replay", "save", "apply", "diff_get"}:
+                        for frame in ws_state_frames(ctx):
+                            write_ws_frame(self.wfile, frame)
+                        last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence
 
             self.send_html(render_page(ctx))
 
         def do_POST(self):
             parsed = urlparse(self.path)
+            route = ingress_route(parsed.path, "/apply", "/save", "/deleted-devices-revert", "/disk-usage")
             length = int(self.headers.get("Content-Length", "0"))
             body = parse_qs(self.rfile.read(length).decode()) if length else {}
 
@@ -941,7 +1209,7 @@ def create_handler(ctx):
             # Disk usage is deliberately read-only and remains available.
             if (
                 state_store.deleted_devices_recovery_active(ctx.read_state())
-                and parsed.path not in {"/deleted-devices-revert", "/disk-usage"}
+                and route not in {"/deleted-devices-revert", "/disk-usage"}
             ):
                 self.send_recovery_blocked()
                 return
@@ -1041,14 +1309,15 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/apply":
+            if route == "/apply":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                if not self.start_job(ctx.run_apply_job):
+                result = dispatch_command(ctx, "apply", body, self.start_job)
+                if not result.get("ok"):
                     return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": _("message.apply_started")})
+                    self.send_json(result)
                 else:
                     self.send_html(render_page(ctx))
                 return
@@ -1317,16 +1586,12 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/save":
-                commit_subject = body.get("commit_subject", [None])[0]
-                default_commit_subject = body.get("default_commit_subject", [None])[0]
-                commit_subject = job_logic.save_commit_subject_from_submission(
-                    commit_subject, default_commit_subject
-                )
-                if not self.start_job(ctx.run_save_job, commit_subject):
+            if route == "/save":
+                result = dispatch_command(ctx, "save", body, self.start_job)
+                if not result.get("ok"):
                     return
                 if self.wants_json():
-                    self.send_json({"ok": True, "message": _("message.save_started")})
+                    self.send_json(result)
                 else:
                     self.send_html(render_page(ctx))
                 return

@@ -39,6 +39,16 @@ def release_run_lock(ctx):
     ctx.run_lock.release()
 
 
+def assert_repaired_generation(ctx, action, expected_generation=None):
+    guard = getattr(ctx, "assert_repaired_for_current_preview_read", None)
+    if guard is None:
+        return expected_generation
+    generation = guard(action)
+    if expected_generation is not None and int(generation) != int(expected_generation):
+        raise RuntimeError(state_store.READINESS_BLOCKED_MESSAGE)
+    return generation
+
+
 RECOVERY_READ_ONLY_ACTIONS = {"disk_usage"}
 
 
@@ -76,6 +86,7 @@ def record_service_branch_push_failure(ctx, details, branch, error):
 @dataclass(frozen=True)
 class JobContext:
     add_detail: Any
+    assert_repaired_for_current_preview_read: Any
     apply_targets: Any
     build_deleted_devices_preview: Any
     build_disk_usage_summary: Any
@@ -432,8 +443,10 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
     utc_now = ctx.utc_now
 
     try:
+        accepted_generation = assert_repaired_generation(ctx, "save")
         if not enter_run_lock(ctx, "save", lock_acquired):
             return False
+        assert_repaired_generation(ctx, "save", accepted_generation)
     except Exception as exc:
         try:
             release_run_lock(ctx)
@@ -1933,7 +1946,26 @@ def run_apply_job(ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
-    if not enter_run_lock(ctx, "apply", lock_acquired):
+    try:
+        accepted_generation = assert_repaired_generation(ctx, "apply")
+        if not enter_run_lock(ctx, "apply", lock_acquired):
+            return False
+        assert_repaired_generation(ctx, "apply", accepted_generation)
+    except Exception as exc:
+        try:
+            release_run_lock(ctx)
+        except RuntimeError:
+            pass
+        message = str(exc)
+        write_state(
+            {
+                "last_run_at": utc_now(),
+                "last_status": "error",
+                "last_action": "apply",
+                "last_message": message,
+                "last_details": [message],
+            }
+        )
         return False
 
     details = []

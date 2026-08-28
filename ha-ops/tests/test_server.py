@@ -2597,7 +2597,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("clearTransientDisplay();", submit_setup)
         self.assertNotIn("clearDisplayState();", submit_setup)
 
-    def test_running_page_auto_refreshes_until_job_finishes(self):
+    def test_running_page_uses_websocket_replay_until_job_finishes(self):
         server = load_server()
 
         class PageData(dict):
@@ -2609,7 +2609,9 @@ class ServerTests(unittest.TestCase):
 
         running_page = server.ui.render_page(PageData(job_running_json="true"))
         self.assertIn("const pageRenderedRunning = true;", running_page)
-        self.assertIn("reloadSoon(2000);", running_page)
+        self.assertIn("ensureWs();", running_page)
+        self.assertIn('command: "replay"', running_page)
+        self.assertNotIn("reloadSoon", running_page)
         self.assertNotIn("if (isRunning())", running_page)
 
     def test_startup_clears_empty_error_state(self):
@@ -17651,7 +17653,7 @@ devices:
         self.assertNotIn("data-confirm=", page[page.index('action="docker-build-cache-prune"'):page.index('action="docker-build-cache-prune"') + 400])
 
         controller = script[script.index("const delayedConfirmControllers = [];") : script.index(
-            'for (const form of document.querySelectorAll("form[data-async-form', script.index("const delayedConfirmControllers = [];"))
+            "const pageRenderedRunning", script.index("const delayedConfirmControllers = [];"))
         ]
         harness = f"""
 const timers = new Map(); let nextTimer = 1; let now = 0; let fetches = 0;
@@ -17672,12 +17674,14 @@ const button = {{
   classList: {{ add: (name) => {{ if (!button.className.split(" ").includes(name)) button.className += " " + name; }} }}
 }};
 const form = {{
+  dataset: {{}},
   getAttribute: (name) => name === "data-action-ready" ? "true" : null,
   querySelector: () => button,
   addEventListener: (name, listener) => {{ listeners[name] = listener; }}
 }};
 const unavailableButton = {{ textContent: "Clear build cache", className: "secondary delayed-confirm-button", disabled: true, style: {{}}, getBoundingClientRect: () => ({{ width: 160 }}), classList: {{ add() {{}} }} }};
 const unavailableForm = {{
+  dataset: {{}},
   getAttribute: (name) => name === "data-action-ready" ? "false" : null,
   querySelector: () => unavailableButton,
   addEventListener: () => {{ throw new Error("not-ready form must not initialise"); }}
@@ -17727,6 +17731,244 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
         self.assertIn('class="secondary delayed-confirm-button" disabled>Clear build cache</button>', section)
         self.assertNotIn('class="warning"', section)
         self.assertNotIn('docker-prune-hint', section)
+
+    def test_diff_bodies_are_artifactized_outside_state_and_debug_snapshot(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            raw_apply = "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+secret-looking raw body"
+            raw_save = "diff --git a/homeassistant/automations.yaml b/homeassistant/automations.yaml\n+raw save body"
+
+            server.write_state({
+                "last_diff": raw_apply,
+                "last_save_diff": raw_save,
+                "last_diff_generated_at": "2026-08-26T00:00:00+00:00",
+                "last_save_diff_generated_at": "2026-08-26T00:00:00+00:00",
+            })
+
+            state_file = server.STATE_PATH.read_text()
+            self.assertNotIn(raw_apply, state_file)
+            self.assertNotIn(raw_save, state_file)
+            hydrated = server.read_state()
+            self.assertEqual(hydrated["last_diff"], raw_apply)
+            self.assertEqual(hydrated["last_save_diff"], raw_save)
+            debug = server.context().debug_snapshot()
+            debug_json = json.dumps(debug)
+            self.assertNotIn(raw_apply, debug_json)
+            self.assertNotIn(raw_save, debug_json)
+            self.assertEqual(debug["state"]["last_diff"], "")
+            self.assertEqual(debug["state"]["last_save_diff"], "")
+            self.assertEqual(server.context().diff_get(hydrated["last_diff_cursor"]), raw_apply)
+
+    def test_diff_get_rejects_stale_generation_cursor_after_preview_replace(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"last_diff": "old apply diff", "last_preview_paths": ["homeassistant/a.yaml"]})
+            old_cursor = server.read_state()["last_diff_cursor"]
+            server.write_state({"last_diff": "new apply diff", "last_preview_paths": ["homeassistant/b.yaml"]})
+
+            with self.assertRaises(RuntimeError):
+                server.context().diff_get(old_cursor)
+            self.assertEqual(server.context().diff_get(server.read_state()["last_diff_cursor"]), "new apply diff")
+
+    def test_diff_cursor_survives_unrelated_state_writes(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"last_diff": "current apply diff", "last_preview_paths": ["homeassistant/a.yaml"]})
+            cursor = server.read_state()["last_diff_cursor"]
+            generation = cursor["generation"]
+
+            server.write_state({"last_message": "background status update", "last_status": "running"})
+
+            state = server.read_state()
+            self.assertEqual(state["operation_generation"], generation)
+            self.assertEqual(state["last_diff"], "current apply diff")
+            self.assertEqual(server.context().diff_get(cursor), "current apply diff")
+
+    def test_websocket_url_and_commands_are_ingress_relative(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            page = server.render_page()
+
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        snippet = script[
+            script.index("function websocketBaseUrl()") : script.index("async function submitViaWs", script.index("function websocketBaseUrl()"))
+        ]
+        harness = f"""
+global.window = {{ location: new URL("https://ha.example/api/hassio_ingress/abc123/") }};
+{snippet}
+if (wsUrl() !== "wss://ha.example/api/hassio_ingress/abc123/ws") throw new Error(wsUrl());
+if (commandForAction("save") !== "save") throw new Error("relative save did not map");
+if (commandForAction("/api/hassio_ingress/abc123/apply") !== "apply") throw new Error("ingress apply did not map");
+"""
+        subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
+
+    def test_ingress_prefixed_ws_route_accepts_upgrade(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            handler = server.web.create_handler(server.context())
+            request = handler.__new__(handler)
+            request.path = "/api/hassio_ingress/abc123/ws"
+            request.rfile = io.BytesIO()
+            request.wfile = io.BytesIO()
+            request.headers = Message()
+            request.headers["Sec-WebSocket-Key"] = "dGhlIHNhbXBsZSBub25jZQ=="
+            request.responses = []
+            request.response_headers = []
+            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+            request.end_headers = MethodType(lambda self: None, request)
+
+            request.do_GET()
+
+            self.assertEqual(request.responses[0], 101)
+            self.assertTrue(request.wfile.getvalue())
+
+    def test_save_apply_dispatch_fail_closed_during_startup_repair_for_post_and_ws_registry(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().operation_store.begin_repair()
+
+            save_response = self.post_json(
+                server,
+                "/save",
+                body=b"commit_subject=Save+Subject&default_commit_subject=Default",
+            )
+            apply_response = self.post_json(server, "/apply")
+            ws_save = server.web.dispatch_command(server.context(), "save", {"commit_subject": "WS Save"})
+            ws_apply = server.web.dispatch_command(server.context(), "apply")
+
+            self.assertEqual(save_response.responses[-1], 409)
+            self.assertEqual(apply_response.responses[-1], 409)
+            self.assertFalse(ws_save["ok"])
+            self.assertFalse(ws_apply["ok"])
+            self.assertNotEqual(server.read_state().get("last_status"), "running")
+
+    def test_state_replay_snapshot_uses_redacted_generation_not_raw_diff(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_diff": "raw apply diff body",
+                "last_preview_paths": ["homeassistant/configuration.yaml"],
+            })
+
+            replay = server.web.dispatch_command(server.context(), "replay")
+            payload = json.dumps(replay)
+            self.assertTrue(replay["ok"])
+            self.assertEqual(replay["readiness"]["status"], server.app_context.state_store.READINESS_REPAIRED)
+            self.assertIn("last_diff_cursor", replay["state"])
+            self.assertNotIn("raw apply diff body", payload)
+
+    def test_ws_replay_frames_carry_state_and_log_without_raw_diff(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_diff": "raw apply diff body",
+                "last_message": "Apply still running.",
+                "last_details": ["line one", "line two"],
+            })
+
+            frames = server.web.ws_state_frames(server.context())
+            payload = json.dumps(frames)
+            self.assertEqual(frames[0]["type"], "state")
+            self.assertEqual(frames[0]["state"]["last_message"], "Apply still running.")
+            self.assertEqual([frame["message"] for frame in frames[1:]], ["line one", "line two"])
+            self.assertNotIn("raw apply diff body", payload)
+
+    def test_ws_replay_frames_carry_server_rendered_preview_fragments(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_save_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+new",
+                "last_save_diff_generated_at": "2026-08-27T00:00:00+00:00",
+                "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                "save_preview_selected_paths": ["homeassistant/configuration.yaml"],
+            })
+
+            frames = server.web.ws_state_frames(server.context())
+            fragments = frames[0]["fragments"]
+
+            self.assertIn("top-grid", fragments)
+            self.assertIn("save-preview-section", fragments)
+            self.assertIn('data-ws-fragment="save-preview-section"', fragments["save-preview-section"])
+            self.assertIn("homeassistant/configuration.yaml", fragments["save-preview-section"])
+            self.assertIn("Confirm Save to Git", fragments["save-preview-section"])
+
+    def test_operation_store_state_change_sequence_advances_on_background_updates(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            initial = server.context().state_change_sequence()
+
+            server.write_state({"last_status": "running", "last_details": ["background line"]})
+            changed = server.context().wait_for_state_change(initial, timeout=0)
+
+            self.assertGreater(changed, initial)
+            frames = server.web.ws_state_frames(server.context())
+            self.assertEqual(frames[0]["state"]["last_details"], ["background line"])
+            self.assertEqual(frames[1]["message"], "background line")
+
+    def test_ws_command_path_does_not_write_http_response_after_upgrade_failure(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().operation_store.begin_repair()
+            result = server.web.dispatch_command(server.context(), "apply")
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["message"], server.app_context.state_store.READINESS_BLOCKED_MESSAGE)
+
+    def test_ws_mvp_has_no_reload_dependency_for_running_or_command_results(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"last_status": "running", "last_message": "Apply still running."})
+            page = server.render_page()
+
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        running_block = script[
+            script.index("const pageRenderedRunning") : script.index("function setPreviewFileExpanded", script.index("const pageRenderedRunning"))
+        ]
+        submit_block = script[
+            script.index("async function submitAsyncForm") : script.index("const delayedConfirmControllers")
+        ]
+        self.assertIn("ensureWs();", running_block)
+        self.assertNotIn("reloadSoon", script)
+        self.assertNotIn("window.location.reload", running_block)
+        self.assertNotIn("window.location.reload", submit_block)
+        self.assertIn("applyStateFrame(payload);", submit_block)
+
+    def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().operation_store.begin_repair()
+
+            self.assertFalse(server.run_save_job())
+            self.assertFalse(server.run_apply_job())
+            state = server.read_state()
+            self.assertIn("startup repair not complete", state["last_message"])
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.0
+
+- Add the WebSocket command/event transport MVP for HA Ops, keeping the server-rendered UI and no-JS POST fallback while updating open pages through streamed state, log, result, and server-rendered fragment frames.
+- Store large preview diffs as lazy artifacts behind cursors so state, replay, debug snapshots, and page bootstrap stay lightweight and redacted.
+- Add OperationStore readiness and generation guards so Save, Apply, replay, and lazy diff retrieval fail closed across startup repair, reconnect, stale previews, and HA ingress WebSocket paths.
+
 ## 0.9.11
 
 - Default selected Git-to-HA conflict files to the visibly checked Git version, so Confirm Apply to HA is the single approval while Keep Unchanged remains available as an explicit live-version override.

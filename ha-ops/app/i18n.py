@@ -200,6 +200,7 @@ EN_TEXT = {
     "error.invalid_conflict_choice": "Invalid conflict choice",
     "error.invalid_preview_choice": "Invalid preview choice",
     "error.invalid_preview_direction": "Invalid preview direction.",
+    "error.missing_websocket_key": "Missing WebSocket key.",
     "error.apply_delete_limit": "Apply would delete {deletions} file(s), above the limit of {limit}. Review the preview or raise max_apply_deletions.",
     "error.deleted_devices_cleanup_not_pending": "No deleted devices cleanup is pending confirmation.",
     "error.deleted_devices_pending_before_check": "Confirm or revert the pending deleted devices cleanup before checking again.",

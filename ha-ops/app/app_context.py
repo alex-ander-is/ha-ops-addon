@@ -48,6 +48,7 @@ class AppContext:
         self.generated_deploy_key_path = self.work_dir / "generated_deploy_key"
         self.generated_deploy_key_pub_path = self.work_dir / "generated_deploy_key.pub"
         self.run_lock = threading.Lock()
+        self.operation_store = state_store.OperationStore(self.state_path)
         self.docker_api = docker_api.DockerAPI()
 
     def utc_now(self):
@@ -89,7 +90,7 @@ class AppContext:
         return state_store.option_int(options, name, default, minimum)
 
     def read_state(self):
-        return state_store.read_state(self.state_path)
+        return self.operation_store.read_state()
 
     def write_state(self, updates):
         if "last_details" in updates and "last_message" in updates and updates.get("last_action"):
@@ -101,7 +102,28 @@ class AppContext:
                 if not details or str(details[-1]) != message:
                     details.append(message)
                 updates = {**updates, "last_details": details}
-        return state_store.write_state(self.state_path, updates)
+        return self.operation_store.write_state(updates)
+
+    def readiness_snapshot(self):
+        return self.operation_store.readiness_snapshot()
+
+    def assert_repaired_for_current_preview_read(self, reason="current-preview"):
+        return self.operation_store.assert_repaired_for_current_preview_read(reason)
+
+    def current_preview_snapshot(self):
+        return self.operation_store.current_preview_snapshot()
+
+    def debug_snapshot(self):
+        return self.operation_store.redacted_snapshot()
+
+    def diff_get(self, cursor):
+        return self.operation_store.diff_get(cursor)
+
+    def state_change_sequence(self):
+        return self.operation_store.state_change_sequence()
+
+    def wait_for_state_change(self, after_sequence, timeout=None):
+        return self.operation_store.wait_for_state_change(after_sequence, timeout=timeout)
 
     def classify_docker_prune_fence(self, state=None):
         state = state if state is not None else self.read_state()
@@ -179,6 +201,16 @@ class AppContext:
         )
 
     def repair_startup_state(self):
+        self.operation_store.begin_repair()
+        try:
+            result = self._repair_startup_state_locked()
+            self.operation_store.mark_repaired()
+            return result
+        except Exception as exc:
+            self.operation_store.mark_blocked(exc)
+            raise
+
+    def _repair_startup_state_locked(self):
         state = self.read_state()
         fence = self.classify_docker_prune_fence(state)
         if fence.get("kind") == "valid" and fence.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
@@ -992,6 +1024,7 @@ class AppContext:
     def job_deps(self):
         return job_logic.JobContext(
             add_detail=self.add_detail,
+            assert_repaired_for_current_preview_read=self.assert_repaired_for_current_preview_read,
             apply_targets=self.apply_targets,
             build_apply_preview=self.build_apply_preview,
             build_disk_usage_summary=self.build_disk_usage_summary,

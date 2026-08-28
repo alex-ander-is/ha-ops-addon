@@ -1821,7 +1821,7 @@ def render_page(data):
 </head>
 <body>
   <main>
-    <div class="top-grid">
+    <div class="top-grid" data-ws-fragment="top-grid">
       <section class="card control-card">
         <h1>{_('title.site')}</h1>
         <p>{_('site.description')}</p>
@@ -1929,17 +1929,17 @@ def render_page(data):
       </section>
     </div>
 
-    {data['apply_preview_section_html']}
+    <div data-ws-fragment="apply-preview-section">{data['apply_preview_section_html']}</div>
 
-    {data['save_preview_section_html']}
+    <div data-ws-fragment="save-preview-section">{data['save_preview_section_html']}</div>
 
-    {data['deleted_devices_section_html']}
+    <div data-ws-fragment="deleted-devices-section">{data['deleted_devices_section_html']}</div>
 
-    {data['retained_devices_section_html']}
+    <div data-ws-fragment="retained-devices-section">{data['retained_devices_section_html']}</div>
 
-    {data['internal_ids_section_html']}
+    <div data-ws-fragment="internal-ids-section">{data['internal_ids_section_html']}</div>
 
-    {data['conflicts_section_html']}
+    <div data-ws-fragment="conflicts-section">{data['conflicts_section_html']}</div>
 
     <section class="card wide">
       <h2>{_('heading.git_access')}</h2>
@@ -2103,16 +2103,152 @@ def render_page(data):
         }}
       }}
 
-      function reloadSoon(delay) {{
-        window.setTimeout(() => {{
-          markInternalReload();
-          window.location.reload();
-        }}, delay);
+      let haOpsSocket = null;
+      let haOpsSocketReady = false;
+      let haOpsSocketNextId = 1;
+      const haOpsSocketPending = new Map();
+      let haOpsReconnectTimer = null;
+
+      function websocketBaseUrl() {{
+        const base = new URL(window.location.href);
+        if (!base.pathname.endsWith("/")) {{
+          base.pathname = base.pathname.slice(0, base.pathname.lastIndexOf("/") + 1);
+        }}
+        return base;
       }}
 
-      const pageRenderedRunning = {data['job_running_json']};
-      if (pageRenderedRunning) {{
-        reloadSoon(2000);
+      function wsUrl() {{
+        const url = new URL("ws", websocketBaseUrl());
+        url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        return url.href;
+      }}
+
+      function applyStateFrame(payload) {{
+        if (!payload || !payload.state) {{ return; }}
+        const state = payload.state || {{}};
+        if (state.last_message) {{
+          setClientStatus(state.last_message);
+        }}
+        const badge = document.querySelector("[data-status-code]");
+        if (badge && state.last_status) {{
+          badge.dataset.statusCode = state.last_status;
+          badge.textContent = state.last_status === "success" ? "done" : state.last_status;
+          badge.className = `badge ${{state.last_status === "running" ? "running" : state.last_status === "error" ? "error" : ""}}`;
+        }}
+        const details = document.querySelector("[data-transient='details']");
+        if (details && Array.isArray(state.last_details)) {{
+          details.textContent = state.last_details.length ? state.last_details.join("\\n") : (state.last_message || "");
+          restoreLogScrollState();
+        }}
+        applyFragments(payload.fragments);
+      }}
+
+      function applyFragments(fragments) {{
+        if (!fragments || typeof fragments !== "object") {{ return; }}
+        storePreviewExpandedState();
+        for (const [name, markup] of Object.entries(fragments)) {{
+          const current = document.querySelector(`[data-ws-fragment="${{name}}"]`);
+          if (!current || typeof markup !== "string") {{ continue; }}
+          const template = document.createElement("template");
+          template.innerHTML = markup.trim();
+          const replacement = template.content.firstElementChild;
+          if (replacement && replacement.getAttribute("data-ws-fragment") === name) {{
+            current.replaceWith(replacement);
+          }}
+        }}
+        wireDynamicControls(document);
+        restorePreviewExpandedState();
+        restoreLogScrollState();
+        syncDetailsHeight();
+      }}
+
+      function scheduleWsReconnect() {{
+        if (haOpsReconnectTimer || !("WebSocket" in window)) {{ return; }}
+        haOpsReconnectTimer = window.setTimeout(() => {{
+          haOpsReconnectTimer = null;
+          ensureWs();
+        }}, 1200);
+      }}
+
+      function ensureWs() {{
+        if (!("WebSocket" in window)) {{ return null; }}
+        if (haOpsSocket && (haOpsSocket.readyState === WebSocket.OPEN || haOpsSocket.readyState === WebSocket.CONNECTING)) {{
+          return haOpsSocket;
+        }}
+        haOpsSocketReady = false;
+        haOpsSocket = new WebSocket(wsUrl());
+        haOpsSocket.addEventListener("open", () => {{
+          haOpsSocketReady = true;
+          if (haOpsReconnectTimer) {{
+            window.clearTimeout(haOpsReconnectTimer);
+            haOpsReconnectTimer = null;
+          }}
+          try {{
+            haOpsSocket.send(JSON.stringify({{ id: String(haOpsSocketNextId++), command: "replay" }}));
+          }} catch (_error) {{}}
+        }});
+        haOpsSocket.addEventListener("close", () => {{
+          haOpsSocketReady = false;
+          for (const pending of haOpsSocketPending.values()) {{
+            pending.reject(new Error("WebSocket disconnected"));
+          }}
+          haOpsSocketPending.clear();
+          scheduleWsReconnect();
+        }});
+        haOpsSocket.addEventListener("message", (event) => {{
+          let payload = {{}};
+          try {{ payload = JSON.parse(event.data); }} catch (_error) {{ return; }}
+          if (payload.type === "ready" || payload.type === "state" || payload.type === "replay") {{
+            applyStateFrame(payload);
+            return;
+          }}
+          if (payload.type === "log") {{
+            if (payload.message) {{ setClientStatus(payload.message); }}
+            return;
+          }}
+          if (payload.type !== "result" || !payload.id || !haOpsSocketPending.has(payload.id)) {{ return; }}
+          applyStateFrame(payload);
+          const pending = haOpsSocketPending.get(payload.id);
+          haOpsSocketPending.delete(payload.id);
+          pending.resolve(payload);
+        }});
+        return haOpsSocket;
+      }}
+
+      function commandForAction(action) {{
+        if (!action) {{ return ""; }}
+        const path = new URL(action, window.location.href).pathname;
+        const command = path.split("/").filter(Boolean).pop() || "";
+        if (command === "save") {{ return "save"; }}
+        if (command === "apply") {{ return "apply"; }}
+        return "";
+      }}
+
+      async function submitViaWs(form) {{
+        const command = commandForAction(form.getAttribute("action"));
+        if (!command) {{ return null; }}
+        const socket = ensureWs();
+        if (!socket) {{ return null; }}
+        if (!haOpsSocketReady) {{
+          await new Promise((resolve, reject) => {{
+            const timer = window.setTimeout(() => reject(new Error("WebSocket timeout")), 800);
+            socket.addEventListener("open", () => {{ window.clearTimeout(timer); resolve(); }}, {{ once: true }});
+            socket.addEventListener("error", () => {{ window.clearTimeout(timer); reject(new Error("WebSocket error")); }}, {{ once: true }});
+          }});
+        }}
+        const id = String(haOpsSocketNextId++);
+        const body = Object.fromEntries(new FormData(form).entries());
+        const pending = new Promise((resolve, reject) => {{
+          haOpsSocketPending.set(id, {{ resolve, reject }});
+          window.setTimeout(() => {{
+            if (haOpsSocketPending.has(id)) {{
+              haOpsSocketPending.delete(id);
+              reject(new Error("WebSocket command timeout"));
+            }}
+          }}, 5000);
+        }});
+        socket.send(JSON.stringify({{ id, command, ...body }}));
+        return pending;
       }}
 
       const previewExpandedStorageKey = "haOpsPreviewExpandedFiles";
@@ -2217,28 +2353,33 @@ def render_page(data):
         }}
 
         try {{
-          const response = await fetch(form.getAttribute("action"), {{
+          let payload = await submitViaWs(form);
+          if (payload === null) {{
+            const response = await fetch(form.getAttribute("action"), {{
             method: "POST",
             headers: {{
               "Accept": "application/json",
               "X-Requested-With": "fetch"
             }},
             body: new URLSearchParams(new FormData(form))
-          }});
+            }});
 
-          let payload = {{}};
-          try {{
-            payload = await response.json();
-          }} catch (_error) {{
-            payload = {{}};
+            try {{
+              payload = await response.json();
+            }} catch (_error) {{
+              payload = {{}};
+            }}
+
+            if (!response.ok) {{
+              payload = {{ ok: false, message: payload.message }};
+            }}
           }}
 
-          if (!response.ok || payload.ok === false) {{
+          if (payload.ok === false) {{
             setClientStatus(payload.message || {js_t('error.request_failed')});
-            reloadSoon(600);
           }} else {{
             setClientStatus(payload.message || {js_t('message.done_refreshing')});
-            reloadSoon(350);
+            applyStateFrame(payload);
           }}
         }} catch (error) {{
           setClientStatus(error?.message || {js_t('error.network')});
@@ -2257,84 +2398,98 @@ def render_page(data):
       function disableDelayedConfirmControllers() {{
         for (const controller of delayedConfirmControllers) {{ controller.disable(); }}
       }}
-      for (const form of document.querySelectorAll("form[data-delayed-confirm='true']")) {{
-        const button = form.querySelector("button[type='submit']");
-        if (!button || form.getAttribute("data-action-ready") !== "true") {{ continue; }}
-        const initialText = button.textContent;
-        const initialClass = button.className;
-        button.style.minInlineSize = `${{Math.max(button.getBoundingClientRect().width, 88)}}px`;
-        button.disabled = false;
-        let state = "initial";
-        let delayTimer = null;
-        let expiryTimer = null;
-        const reset = () => {{
-          if (state === "unavailable") {{ return; }}
-          if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
-          if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-          state = "initial";
+      function wireDynamicControls(root = document) {{
+        for (const form of root.querySelectorAll("form[data-delayed-confirm='true']")) {{
+          if (form.dataset.delayedConfirmBound === "true") {{ continue; }}
+          form.dataset.delayedConfirmBound = "true";
+          const button = form.querySelector("button[type='submit']");
+          if (!button || form.getAttribute("data-action-ready") !== "true") {{ continue; }}
+          const initialText = button.textContent;
+          const initialClass = button.className;
+          button.style.minInlineSize = `${{Math.max(button.getBoundingClientRect().width, 88)}}px`;
           button.disabled = false;
-          button.textContent = initialText;
-          button.className = initialClass;
-        }};
-        const disable = () => {{
-          if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
-          if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-          state = "unavailable";
-          button.disabled = true;
-          button.textContent = initialText;
-          button.className = initialClass;
-        }};
-        const controller = {{ reset, disable }};
-        delayedConfirmControllers.push(controller);
-        form.addEventListener("submit", (event) => {{
-          event.preventDefault();
-          if (state === "submitted" || state === "delay" || state === "unavailable") {{ return; }}
-          if (state === "armed") {{
-            state = "submitted";
+          let state = "initial";
+          let delayTimer = null;
+          let expiryTimer = null;
+          const reset = () => {{
+            if (state === "unavailable") {{ return; }}
+            if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
             if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-            button.disabled = true;
-            submitAsyncForm(form, button);
-            return;
-          }}
-          state = "delay";
-          button.disabled = true;
-          delayTimer = setTimeout(() => {{
-            if (state !== "delay") {{ return; }}
-            delayTimer = null;
-            state = "armed";
+            state = "initial";
             button.disabled = false;
-            button.classList.add("warning");
-            button.textContent = {js_t('action.confirm')};
-            expiryTimer = setTimeout(() => {{ if (state === "armed") {{ reset(); }} }}, 6000);
-          }}, 1500);
-        }});
-      }}
-      for (const form of document.querySelectorAll("form[data-async-form='true']")) {{
-        form.addEventListener("submit", (event) => {{
-          event.preventDefault();
-          submitAsyncForm(form);
-        }});
-      }}
-
-      for (const form of document.querySelectorAll("form[data-auto-submit='change']")) {{
-        for (const input of form.querySelectorAll("input, select")) {{
-          input.addEventListener("change", () => {{
+            button.textContent = initialText;
+            button.className = initialClass;
+          }};
+          const disable = () => {{
+            if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
+            if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
+            state = "unavailable";
+            button.disabled = true;
+            button.textContent = initialText;
+            button.className = initialClass;
+          }};
+          const controller = {{ reset, disable }};
+          delayedConfirmControllers.push(controller);
+          form.addEventListener("submit", (event) => {{
+            event.preventDefault();
+            if (state === "submitted" || state === "delay" || state === "unavailable") {{ return; }}
+            if (state === "armed") {{
+              state = "submitted";
+              if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
+              button.disabled = true;
+              submitAsyncForm(form, button);
+              return;
+            }}
+            state = "delay";
+            button.disabled = true;
+            delayTimer = setTimeout(() => {{
+              if (state !== "delay") {{ return; }}
+              delayTimer = null;
+              state = "armed";
+              button.disabled = false;
+              button.classList.add("warning");
+              button.textContent = {js_t('action.confirm')};
+              expiryTimer = setTimeout(() => {{ if (state === "armed") {{ reset(); }} }}, 6000);
+            }}, 1500);
+          }});
+        }}
+        for (const form of root.querySelectorAll("form[data-async-form='true']")) {{
+          if (form.dataset.asyncBound === "true") {{ continue; }}
+          form.dataset.asyncBound = "true";
+          form.addEventListener("submit", (event) => {{
+            event.preventDefault();
             submitAsyncForm(form);
           }});
         }}
-      }}
-
-      for (const button of document.querySelectorAll("button[data-checkbox-scope]")) {{
-        button.addEventListener("click", () => {{
-          const scope = button.getAttribute("data-checkbox-scope");
-          const action = button.getAttribute("data-checkbox-action");
-          const checked = action === "all";
-          for (const input of document.querySelectorAll(`[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
-            if (!input.disabled) {{
-              input.checked = checked;
-            }}
+        for (const form of root.querySelectorAll("form[data-auto-submit='change']")) {{
+          for (const input of form.querySelectorAll("input, select")) {{
+            if (input.dataset.autoSubmitBound === "true") {{ continue; }}
+            input.dataset.autoSubmitBound = "true";
+            input.addEventListener("change", () => {{
+              submitAsyncForm(form);
+            }});
           }}
-        }});
+        }}
+        for (const button of root.querySelectorAll("button[data-checkbox-scope]")) {{
+          if (button.dataset.checkboxBound === "true") {{ continue; }}
+          button.dataset.checkboxBound = "true";
+          button.addEventListener("click", () => {{
+            const scope = button.getAttribute("data-checkbox-scope");
+            const action = button.getAttribute("data-checkbox-action");
+            const checked = action === "all";
+            for (const input of document.querySelectorAll(`[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
+              if (!input.disabled) {{
+                input.checked = checked;
+              }}
+            }}
+          }});
+        }}
+      }}
+      wireDynamicControls(document);
+
+      const pageRenderedRunning = {data['job_running_json']};
+      if (pageRenderedRunning) {{
+        ensureWs();
       }}
 
       function setPreviewFileExpanded(file, expanded) {{
