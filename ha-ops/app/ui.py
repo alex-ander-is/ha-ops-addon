@@ -1941,17 +1941,17 @@ def render_page(data):
 
     <div data-ws-fragment="conflicts-section">{data['conflicts_section_html']}</div>
 
-    <section class="card wide">
+    <section class="card wide" data-ws-fragment="git-auth-section">
       <h2>{_('heading.git_access')}</h2>
       {data['git_auth_html']}
     </section>
 
-    <section class="card wide">
+    <section class="card wide" data-ws-fragment="managed-targets-section">
       <h2>{_('heading.managed_targets')}</h2>
       {data['targets_html']}
     </section>
 
-    <section class="card wide">
+    <section class="card wide" data-ws-fragment="release-snapshots-section">
       <h2>{_('heading.release_snapshots')}</h2>
       {data['releases_html']}
     </section>
@@ -2129,6 +2129,10 @@ def render_page(data):
         return url.href;
       }}
 
+      function webSocketAvailable() {{
+        return typeof window.WebSocket === "function";
+      }}
+
       function applyStateFrame(payload) {{
         if (!payload || !payload.state) {{ return; }}
         const state = payload.state || {{}};
@@ -2169,7 +2173,7 @@ def render_page(data):
       }}
 
       function scheduleWsReconnect() {{
-        if (haOpsReconnectTimer || !("WebSocket" in window)) {{ return; }}
+        if (haOpsReconnectTimer || !webSocketAvailable()) {{ return; }}
         haOpsReconnectTimer = window.setTimeout(() => {{
           haOpsReconnectTimer = null;
           ensureWs();
@@ -2177,7 +2181,7 @@ def render_page(data):
       }}
 
       function ensureWs() {{
-        if (!("WebSocket" in window)) {{ return null; }}
+        if (!webSocketAvailable()) {{ return null; }}
         if (haOpsSocket && (haOpsSocket.readyState === WebSocket.OPEN || haOpsSocket.readyState === WebSocket.CONNECTING)) {{
           return haOpsSocket;
         }}
@@ -2257,6 +2261,14 @@ def render_page(data):
         }});
         socket.send(JSON.stringify({{ id, command, ...body }}));
         return pending;
+      }}
+
+      if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) {{
+        window.__haOpsTestCloseWs = () => {{
+          if (haOpsSocket) {{
+            haOpsSocket.close();
+          }}
+        }};
       }}
 
       const previewExpandedStorageKey = "haOpsPreviewExpandedFiles";

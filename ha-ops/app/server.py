@@ -306,13 +306,14 @@ if _MODULE is not None:
 Handler = web.create_handler(_CTX)
 
 
-def main():
+def main(ctx=None):
+    ctx = ctx or _CTX
     try:
-        _CTX.log(f"Starting HA Ops { _CTX.addon_version() } on {_CTX.host}:{_CTX.port}")
-        _CTX.releases_dir.mkdir(parents=True, exist_ok=True)
-        _CTX.repair_startup_state()
-        _CTX.log_state_summary("Startup state")
-        httpd = ThreadingHTTPServer((_CTX.host, _CTX.port), web.create_handler(_CTX))
+        ctx.log(f"Starting HA Ops { ctx.addon_version() } on {ctx.host}:{ctx.port}")
+        ctx.releases_dir.mkdir(parents=True, exist_ok=True)
+        ctx.repair_startup_state()
+        ctx.log_state_summary("Startup state")
+        httpd = ThreadingHTTPServer((ctx.host, ctx.port), web.create_handler(ctx))
         httpd.serve_forever()
     except Exception:
         traceback.print_exc()

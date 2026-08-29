@@ -210,6 +210,36 @@ For a private GitHub repository:
 
 Raw `core.config_entries` is not applied from Git. HA Ops applies only the safe managed projection for supported fields.
 
+## Local Web Harness
+
+Run the safe local web interface without installing HA Ops into Home Assistant:
+
+```bash
+python3 ha-ops/dev_harness.py --port 8099 --keep-root
+```
+
+The harness binds only to `127.0.0.1` and prints an ingress-like URL such as
+`http://127.0.0.1:8099/api/hassio_ingress/local-ha-ops/`. It creates disposable
+`data/`, `homeassistant/`, `addon_configs/`, a fake Git remote, and a fake
+Supervisor. Preview jobs are synthetic deterministic jobs with test-only gates,
+so browser tests can hold `running`, check reconnect/replay, then release the
+job without touching live Home Assistant.
+
+Automated browser smoke:
+
+```bash
+PLAYWRIGHT_SHARED_ROOT=/Users/purportex/Applications/Playwright node ha-ops/tests/browser/run.mjs
+```
+
+Covered locally: page load, Preview Git to HA, Preview HA to Git, WebSocket
+connect/reconnect, live Log/state fragments, `diff-get` lazy diff resources,
+debug snapshot redaction, disabled/running controls, and fetch fallback when
+WebSocket is unavailable.
+
+Not covered locally: real Supervisor ingress proxying, live backups, Core
+restart/reload, App lifecycle actions, Docker socket effects, and writes to the
+real HA config or user Git remotes.
+
 ## Post-MVP follow-up
 
 - Replace the server-rendered DOM refresh flow with a component-based reactive DOM after the WebSocket command/event transport has settled. The MVP intentionally keeps SSR and no-JS POST fallback as the authoritative UI path.

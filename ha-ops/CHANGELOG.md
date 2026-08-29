@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.3
+
+- Add a safe local HA Ops web harness with disposable Home Assistant/App/Git fixtures, fake Supervisor responses, deterministic preview gates, and browser smoke coverage for WebSocket updates, reconnect replay, debug redaction, lazy diff retrieval, disabled controls, and fetch fallback.
+- Accept ingress-prefixed POST fallback routes for Preview Git to HA and Preview HA to Git, so non-WebSocket preview submissions reach the same background job path as direct routes.
+- Treat a non-callable WebSocket object as unavailable and fall back to fetch instead of failing the async form submission.
+
 ## 0.10.2
 
 - Send Preview HA to Git and Preview Git to HA through the WebSocket command registry so live logs and preview fragments update without falling back to the old refresh-oriented fetch path.

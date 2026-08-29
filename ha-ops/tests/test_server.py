@@ -46,6 +46,16 @@ def load_i18n():
     return module
 
 
+def load_dev_harness():
+    server = load_server()
+    sys.modules.pop("dev_harness", None)
+    spec = importlib.util.spec_from_file_location("dev_harness", ROOT / "app" / "dev_harness.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["dev_harness"] = module
+    spec.loader.exec_module(module)
+    return server, module
+
+
 class ServerTests(unittest.TestCase):
     def select_all_save_preview_files(self, server):
         state = server.read_state()
@@ -1063,7 +1073,10 @@ class ServerTests(unittest.TestCase):
         server.log = lambda message: None
 
     def post_json(self, server, path, body=b""):
-        handler = server.web.create_handler(server.context())
+        return self.post_json_context(server.web, server.context(), path, body=body)
+
+    def post_json_context(self, web_module, context, path, body=b""):
+        handler = web_module.create_handler(context)
         request = handler.__new__(handler)
         request.path = path
         request.rfile = io.BytesIO(body)
@@ -1078,8 +1091,33 @@ class ServerTests(unittest.TestCase):
         request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
         request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
         request.end_headers = MethodType(lambda self: None, request)
+        request.send_error = MethodType(lambda self, status, *args, **kwargs: self.responses.append(status), request)
         request.do_POST()
         return request
+
+    def get_json_context(self, web_module, context, path):
+        handler = web_module.create_handler(context)
+        request = handler.__new__(handler)
+        request.path = path
+        request.rfile = io.BytesIO()
+        request.wfile = io.BytesIO()
+        request.headers = Message()
+        request.responses = []
+        request.response_headers = []
+        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
+        request.end_headers = MethodType(lambda self: None, request)
+        request.send_error = MethodType(lambda self, status, *args, **kwargs: self.responses.append(status), request)
+        request.do_GET()
+        return request
+
+    def wait_until(self, predicate, timeout=3):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.01)
+        return bool(predicate())
 
     def git(self, args, cwd):
         return subprocess.run(["git"] + args, cwd=cwd, check=True, text=True, capture_output=True)
@@ -5344,7 +5382,7 @@ class ServerTests(unittest.TestCase):
             retry_payload = json.loads(retry_response.wfile.getvalue().decode())
             self.assertEqual(retry_response.responses[-1], 200)
             self.assertTrue(retry_payload["ok"])
-            self.assertEqual(retry_payload["message"], "Save HA to Git started. Refreshing...")
+            self.assertEqual(retry_payload["message"], "Save HA to Git started.")
             self.assertEqual(len(queued), 1)
             target, args, kwargs = queued.pop()
             target(*args, **kwargs)
@@ -17804,6 +17842,11 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
         harness = f"""
 global.window = {{ location: new URL("https://ha.example/api/hassio_ingress/abc123/") }};
 {snippet}
+global.window.WebSocket = function WebSocket() {{}};
+if (!webSocketAvailable()) throw new Error("function WebSocket should be available");
+global.window.WebSocket = undefined;
+if (webSocketAvailable()) throw new Error("undefined WebSocket must use fetch fallback");
+global.window.WebSocket = function WebSocket() {{}};
 if (wsUrl() !== "wss://ha.example/api/hassio_ingress/abc123/ws") throw new Error(wsUrl());
 if (commandForAction("save-preview") !== "save_preview") throw new Error("relative save preview did not map");
 if (commandForAction("preview") !== "preview") throw new Error("relative apply preview did not map");
@@ -17938,6 +17981,27 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             self.assertIn("homeassistant/configuration.yaml", fragments["save-preview-section"])
             self.assertIn("Confirm Save to Git", fragments["save-preview-section"])
 
+    def test_ws_replay_frames_carry_all_state_changing_control_fragments(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+            ctx.repair_startup_state()
+            ctx.run_lock.acquire()
+            try:
+                ctx.write_state({"last_status": "running", "last_message": "Apply still running."})
+                fragments = server.web.ws_state_frames(ctx)[0]["fragments"]
+            finally:
+                ctx.run_lock.release()
+
+            self.assertIn("top-grid", fragments)
+            self.assertIn("git-auth-section", fragments)
+            self.assertIn("managed-targets-section", fragments)
+            self.assertIn("release-snapshots-section", fragments)
+            self.assertIn("Generate Deploy Key", fragments["git-auth-section"])
+            self.assertIn("name='addon'", fragments["managed-targets-section"])
+            self.assertIn(" disabled", fragments["git-auth-section"])
+            self.assertIn(" disabled", fragments["managed-targets-section"])
+
     def test_operation_store_state_change_sequence_advances_on_background_updates(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -17996,6 +18060,128 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             self.assertFalse(server.run_apply_job())
             state = server.read_state()
             self.assertIn("startup repair not complete", state["last_message"])
+
+    def test_dev_harness_refuses_live_homeassistant_roots(self):
+        _server, harness = load_dev_harness()
+        for unsafe in ("/data", "/homeassistant", "/addon_configs", "/backup", "/Users/purportex/Work/HA/ha-config"):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaises(RuntimeError):
+                    harness.safe_root_guard(unsafe, explicit=True)
+
+    def test_dev_harness_seeds_disposable_fixture_tree_and_fake_repo(self):
+        _server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            fixture = harness.seed_fixture_root(Path(tmp))
+
+            self.assertTrue((fixture["data_dir"] / "options.json").exists())
+            self.assertTrue((fixture["config_dir"] / "configuration.yaml").exists())
+            self.assertTrue((fixture["addon_configs_dir"] / "local_mqtt" / "options.json").exists())
+            self.assertTrue((fixture["remote_dir"] / "HEAD").exists())
+            self.assertEqual(fixture["options"]["repo_path"], "ha-config")
+            self.assertTrue(str(fixture["root"]).startswith(str(Path(tempfile.gettempdir()).resolve())))
+
+    def test_dev_harness_fake_supervisor_records_and_rejects_live_risk_calls(self):
+        _server, harness = load_dev_harness()
+        fake = harness.FakeSupervisor()
+
+        addons = fake.call("GET", "/addons")
+        self.assertEqual(addons["addons"][0]["slug"], "local_mqtt")
+        with self.assertRaises(RuntimeError):
+            fake.call("POST", "/core/restart")
+
+        self.assertEqual(fake.calls[0]["path"], "/addons")
+        self.assertEqual(fake.calls[1]["path"], "/core/restart")
+        self.assertTrue(fake.calls[1]["forbidden"])
+
+    def test_dev_harness_preview_wrappers_preserve_action_identity(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+
+            self.assertEqual(server.web.job_action(ctx.run_preview_job), "preview")
+            self.assertEqual(server.web.job_action(ctx.run_save_preview_job), "save_preview")
+
+    def test_dev_harness_diagnostics_are_absent_from_default_context(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+
+            response = self.get_json_context(server.web, server.context(), "/__dev_harness__/diagnostics")
+
+            self.assertEqual(response.responses[-1], 404)
+            self.assertNotIn(b"dev_harness", response.wfile.getvalue())
+
+    def test_ingress_prefixed_post_preview_and_save_preview_use_normalized_routes(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+            ctx.repair_startup_state()
+
+            for action, endpoint in (("preview", "preview"), ("save_preview", "save-preview")):
+                with self.subTest(action=action):
+                    self.post_json_context(
+                        server.web,
+                        ctx,
+                        f"/api/hassio_ingress/local-ha-ops/__dev_harness__/arm",
+                        body=f"action={action}&gate=running".encode(),
+                    )
+                    first = self.post_json_context(
+                        server.web,
+                        ctx,
+                        f"/api/hassio_ingress/local-ha-ops/{endpoint}",
+                    )
+                    self.assertEqual(first.responses[-1], 200)
+                    self.assertTrue(
+                        self.wait_until(
+                            lambda: ctx.harness_controller.diagnostics(ctx)["gates"][f"{action}:running"]["held"]
+                        )
+                    )
+                    duplicate = self.post_json_context(
+                        server.web,
+                        ctx,
+                        f"/api/hassio_ingress/local-ha-ops/{endpoint}",
+                    )
+                    self.assertEqual(duplicate.responses[-1], 409)
+                    diagnostics = ctx.harness_controller.diagnostics(ctx)
+                    self.assertEqual(diagnostics["counters"]["started_jobs"][action], 1)
+                    self.assertEqual(diagnostics["counters"]["duplicate_rejections"][action], 1)
+
+                    self.post_json_context(
+                        server.web,
+                        ctx,
+                        f"/api/hassio_ingress/local-ha-ops/__dev_harness__/release",
+                        body=f"action={action}&gate=running".encode(),
+                    )
+                    self.assertTrue(
+                        self.wait_until(
+                            lambda: ctx.harness_controller.diagnostics(ctx)["counters"]["completed_jobs"].get(action) == 1
+                        )
+                    )
+                    self.assertEqual(ctx.read_state()["last_status"], "success")
+
+    def test_dev_harness_diagnostics_are_redacted_and_expose_no_raw_diff(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+            ctx.repair_startup_state()
+            ctx.harness_controller.arm("preview", "running")
+            self.post_json_context(server.web, ctx, "/preview")
+            self.assertTrue(
+                self.wait_until(lambda: ctx.harness_controller.diagnostics(ctx)["gates"]["preview:running"]["held"])
+            )
+            ctx.harness_controller.release("preview", "running")
+            self.assertTrue(
+                self.wait_until(lambda: ctx.harness_controller.diagnostics(ctx)["state"]["last_status"] == "success")
+            )
+
+            response = self.get_json_context(server.web, ctx, "/__dev_harness__/diagnostics")
+            payload = response.wfile.getvalue().decode()
+            snapshot = self.get_json_context(server.web, ctx, "/debug-snapshot").wfile.getvalue().decode()
+
+            self.assertEqual(response.responses[-1], 200)
+            self.assertIn("preview", payload)
+            self.assertNotIn("diff --git", payload)
+            self.assertNotIn("diff --git", snapshot)
 
 if __name__ == "__main__":
     unittest.main()

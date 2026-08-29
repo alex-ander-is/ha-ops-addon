@@ -807,7 +807,7 @@ def render_page(ctx):
                 options,
                 ctx.git_auth_mode,
                 ctx.load_generated_public_key,
-                disabled=save_push_retry_pending,
+                disabled=job_running or save_push_retry_pending,
             ),
             "targets_html": ui.render_targets(
                 target_state,
@@ -816,17 +816,17 @@ def render_page(ctx):
                 addon_slug_value,
                 addon_display_name,
                 ctx.addon_is_zigbee2mqtt,
-                disabled=save_push_retry_pending,
+                disabled=job_running or save_push_retry_pending,
             ),
             "organizer_html": ui.render_homeassistant_organizer(
                 homeassistant_organizer_enabled,
-                disabled=save_push_retry_pending,
+                disabled=job_running or save_push_retry_pending,
             ),
             "include_redundant_data_html": ui.render_include_redundant_data(
                 bool(state.get("include_redundant_data")),
                 job_running or save_push_retry_pending,
             ),
-            "releases_html": ui.render_releases(releases, disabled=save_push_retry_pending),
+            "releases_html": ui.render_releases(releases, disabled=job_running or save_push_retry_pending),
             "version": html.escape(ctx.addon_version()),
         }
     )
@@ -916,6 +916,9 @@ WS_FRAGMENT_NAMES = (
     "retained-devices-section",
     "internal-ids-section",
     "conflicts-section",
+    "git-auth-section",
+    "managed-targets-section",
+    "release-snapshots-section",
 )
 
 
@@ -976,6 +979,11 @@ def _snapshot_payload(ctx):
 
 def dispatch_command(ctx, command, body=None, start_job=None):
     body = body or {}
+    def record_duplicate_rejection(action):
+        recorder = getattr(ctx, "dev_harness_record_duplicate_rejection", None)
+        if recorder is not None and job_is_running(ctx):
+            recorder(action)
+
     if command == "state_get" or command == "replay":
         return command_result(True, "state snapshot", **_snapshot_payload(ctx))
     if command == "debug_snapshot":
@@ -995,6 +1003,8 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             )
         else:
             ok = start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+        if not ok:
+            record_duplicate_rejection("preview")
         return command_result(ok, _("message.apply_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "save_preview":
         if start_job is None:
@@ -1003,6 +1013,8 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             )
         else:
             ok = start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+        if not ok:
+            record_duplicate_rejection("save_preview")
         return command_result(ok, _("message.save_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "apply":
         if start_job is None:
@@ -1031,6 +1043,43 @@ def ingress_route(path, *endpoints):
         if path.endswith(endpoint) and path[: -len(endpoint)]:
             return endpoint
     return path
+
+
+GET_ENDPOINTS = ("/health", "/debug-snapshot", "/diff-get", "/ws", "/__dev_harness__/diagnostics")
+
+POST_ENDPOINTS = (
+    "/generate-key",
+    "/clear-display-state",
+    "/clear-preview",
+    "/apply",
+    "/save",
+    "/preview",
+    "/save-preview",
+    "/resolve-save-preview",
+    "/resolve-apply-preview",
+    "/select-save-preview",
+    "/select-apply-preview",
+    "/reset-git-state",
+    "/disk-usage",
+    "/docker-build-cache-prune",
+    "/docker-build-cache-prune-resolve",
+    "/deleted-devices-preview",
+    "/retained-devices-preview",
+    "/retained-devices-delete",
+    "/internal-ids-preview",
+    "/internal-ids-migrate",
+    "/deleted-devices-delete",
+    "/deleted-devices-confirm",
+    "/deleted-devices-revert",
+    "/approve-save-conflicts",
+    "/addons",
+    "/homeassistant-organizer",
+    "/include-redundant-data",
+    "/resolve-conflict",
+    "/rollback",
+    "/__dev_harness__/arm",
+    "/__dev_harness__/release",
+)
 
 
 def ws_state_frames(ctx):
@@ -1132,21 +1181,34 @@ def create_handler(ctx):
                 self.send_html(render_page(ctx), status=409)
 
         def start_job(self, target, *args, state_updates=None, lock_acquired=False):
+            action = job_action(target)
             if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
                 return True
             readiness = ctx.readiness_snapshot() if hasattr(ctx, "readiness_snapshot") else {"status": state_store.READINESS_REPAIRED}
-            if job_action(target) in PREVIEW_CONSUMING_ACTIONS and readiness.get("status") != state_store.READINESS_REPAIRED:
+            if action in PREVIEW_CONSUMING_ACTIONS and readiness.get("status") != state_store.READINESS_REPAIRED:
                 self.send_startup_repair_blocked()
                 return False
-            if not recovery_action_allowed(ctx, job_action(target)):
+            if not recovery_action_allowed(ctx, action):
                 self.send_recovery_blocked()
             else:
+                recorder = getattr(ctx, "dev_harness_record_duplicate_rejection", None)
+                if recorder is not None and job_is_running(ctx):
+                    recorder(action)
                 self.send_running_action()
             return False
 
         def do_GET(self):
             parsed = urlparse(self.path)
-            route = ingress_route(parsed.path, "/health", "/debug-snapshot", "/diff-get", "/ws")
+            route = ingress_route(parsed.path, *GET_ENDPOINTS)
+            dev_harness_get = getattr(ctx, "dev_harness_handle_get", None)
+            if dev_harness_get is not None:
+                result = dev_harness_get(route, parsed)
+                if result is not None:
+                    self.send_json(result, status=200 if result.get("ok", True) else int(result.get("status", 409)))
+                    return
+            if route.startswith("/__dev_harness__/"):
+                self.send_error(404)
+                return
             if route == "/health":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -1175,6 +1237,9 @@ def create_handler(ctx):
                 if getattr(self, "connection", None) is not None:
                     self.connection.settimeout(0.5)
                 last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else 0
+                replay_recorder = getattr(ctx, "dev_harness_record_ws_replay", None)
+                if replay_recorder is not None:
+                    replay_recorder()
                 write_ws_frame(self.wfile, {"type": "ready", **dispatch_command(ctx, "replay")})
                 while True:
                     try:
@@ -1216,9 +1281,18 @@ def create_handler(ctx):
 
         def do_POST(self):
             parsed = urlparse(self.path)
-            route = ingress_route(parsed.path, "/apply", "/save", "/deleted-devices-revert", "/disk-usage")
+            route = ingress_route(parsed.path, *POST_ENDPOINTS)
             length = int(self.headers.get("Content-Length", "0"))
             body = parse_qs(self.rfile.read(length).decode()) if length else {}
+            dev_harness_post = getattr(ctx, "dev_harness_handle_post", None)
+            if dev_harness_post is not None:
+                result = dev_harness_post(route, body)
+                if result is not None:
+                    self.send_json(result, status=200 if result.get("ok", True) else int(result.get("status", 409)))
+                    return
+            if route.startswith("/__dev_harness__/"):
+                self.send_error(404)
+                return
 
             # The recovery fence is authoritative at the HTTP boundary too:
             # reject before a direct endpoint can mutate state or queue work.
@@ -1230,7 +1304,7 @@ def create_handler(ctx):
                 self.send_recovery_blocked()
                 return
 
-            if parsed.path == "/generate-key":
+            if route == "/generate-key":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1272,7 +1346,7 @@ def create_handler(ctx):
                 self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/clear-display-state":
+            if route == "/clear-display-state":
                 ctx.clear_display_state()
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.display_state_cleared")})
@@ -1281,7 +1355,7 @@ def create_handler(ctx):
                     self.end_headers()
                 return
 
-            if parsed.path == "/clear-preview":
+            if route == "/clear-preview":
                 direction = body.get("direction", [""])[0]
                 if self.save_retry_pending() and direction != "save":
                     self.send_save_retry_pending()
@@ -1338,11 +1412,11 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path in {"/resolve-save-preview", "/resolve-apply-preview"}:
+            if route in {"/resolve-save-preview", "/resolve-apply-preview"}:
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                direction = "save" if parsed.path == "/resolve-save-preview" else "apply"
+                direction = "save" if route == "/resolve-save-preview" else "apply"
                 ok, state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
@@ -1399,7 +1473,7 @@ def create_handler(ctx):
                 finally:
                     release_action_slot(ctx, lock_acquired)
 
-            if parsed.path == "/preview":
+            if route == "/preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1412,11 +1486,11 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                     return
 
-            if parsed.path in {"/select-save-preview", "/select-apply-preview"}:
+            if route in {"/select-save-preview", "/select-apply-preview"}:
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                direction = "save" if parsed.path == "/select-save-preview" else "apply"
+                direction = "save" if route == "/select-save-preview" else "apply"
                 ok, state, lock_acquired = reserve_mutation_slot(ctx)
                 if not ok:
                     self.send_running_action()
@@ -1465,7 +1539,7 @@ def create_handler(ctx):
                 finally:
                     release_action_slot(ctx, lock_acquired)
 
-            if parsed.path == "/save-preview":
+            if route == "/save-preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1477,7 +1551,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/reset-git-state":
+            if route == "/reset-git-state":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1489,7 +1563,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/disk-usage":
+            if route == "/disk-usage":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1501,7 +1575,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/docker-build-cache-prune":
+            if route == "/docker-build-cache-prune":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1565,7 +1639,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/docker-build-cache-prune-resolve":
+            if route == "/docker-build-cache-prune-resolve":
                 ok, state, lock_acquired = reserve_action_slot(ctx, "docker_build_cache_prune_resolve")
                 if not ok:
                     self.send_running_action()
@@ -1612,7 +1686,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/deleted-devices-preview":
+            if route == "/deleted-devices-preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1624,7 +1698,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/retained-devices-preview":
+            if route == "/retained-devices-preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1636,7 +1710,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/retained-devices-delete":
+            if route == "/retained-devices-delete":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1649,7 +1723,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/internal-ids-preview":
+            if route == "/internal-ids-preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1661,7 +1735,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/internal-ids-migrate":
+            if route == "/internal-ids-migrate":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1674,7 +1748,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/deleted-devices-delete":
+            if route == "/deleted-devices-delete":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1687,7 +1761,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/deleted-devices-confirm":
+            if route == "/deleted-devices-confirm":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1700,7 +1774,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/deleted-devices-revert":
+            if route == "/deleted-devices-revert":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1713,7 +1787,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/approve-save-conflicts":
+            if route == "/approve-save-conflicts":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1751,7 +1825,7 @@ def create_handler(ctx):
                 finally:
                     release_action_slot(ctx, lock_acquired)
 
-            if parsed.path == "/addons":
+            if route == "/addons":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1763,7 +1837,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/homeassistant-organizer":
+            if route == "/homeassistant-organizer":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1783,7 +1857,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/include-redundant-data":
+            if route == "/include-redundant-data":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1808,7 +1882,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if parsed.path == "/resolve-conflict":
+            if route == "/resolve-conflict":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
@@ -1843,7 +1917,7 @@ def create_handler(ctx):
                 finally:
                     release_action_slot(ctx, lock_acquired)
 
-            if parsed.path == "/rollback":
+            if route == "/rollback":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return

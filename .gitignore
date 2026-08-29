@@ -1,3 +1,7 @@
 *.psd
 .codex-audit/
 ha-ops-hunk-storage/
+__pycache__/
+*.pyc
+ha-ops/.ha-ops-dev/
+ha-ops/tests/browser/artifacts/
