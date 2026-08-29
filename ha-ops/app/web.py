@@ -988,6 +988,22 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             return command_result(True, "diff", diff=ctx.diff_get(cursor))
         except Exception as exc:
             return command_result(False, str(exc))
+    if command == "preview":
+        if start_job is None:
+            ok = start_reserved_background(
+                ctx, ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES
+            )
+        else:
+            ok = start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+        return command_result(ok, _("message.apply_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
+    if command == "save_preview":
+        if start_job is None:
+            ok = start_reserved_background(
+                ctx, ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES
+            )
+        else:
+            ok = start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+        return command_result(ok, _("message.save_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "apply":
         if start_job is None:
             ok = start_reserved_background(ctx, ctx.run_apply_job)
@@ -1191,7 +1207,7 @@ def create_handler(ctx):
                             **result,
                         },
                     )
-                    if command in {"state_get", "replay", "save", "apply", "diff_get"}:
+                    if command in {"state_get", "replay", "save_preview", "preview", "save", "apply", "diff_get"}:
                         for frame in ws_state_frames(ctx):
                             write_ws_frame(self.wfile, frame)
                         last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence

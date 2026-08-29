@@ -17805,6 +17805,8 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
 global.window = {{ location: new URL("https://ha.example/api/hassio_ingress/abc123/") }};
 {snippet}
 if (wsUrl() !== "wss://ha.example/api/hassio_ingress/abc123/ws") throw new Error(wsUrl());
+if (commandForAction("save-preview") !== "save_preview") throw new Error("relative save preview did not map");
+if (commandForAction("preview") !== "preview") throw new Error("relative apply preview did not map");
 if (commandForAction("save") !== "save") throw new Error("relative save did not map");
 if (commandForAction("/api/hassio_ingress/abc123/apply") !== "apply") throw new Error("ingress apply did not map");
 global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_ops") }};
@@ -17813,6 +17815,27 @@ global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_op
 if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(wsUrl());
 """
         subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
+
+    def test_preview_commands_are_in_websocket_registry(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            calls = []
+
+            def start_job(target, *args, **kwargs):
+                calls.append((target.__name__, args, kwargs))
+                return True
+
+            save_result = server.web.dispatch_command(server.context(), "save_preview", start_job=start_job)
+            apply_result = server.web.dispatch_command(server.context(), "preview", start_job=start_job)
+
+            self.assertTrue(save_result["ok"])
+            self.assertTrue(apply_result["ok"])
+            self.assertEqual(calls[0][0], "run_save_preview_job")
+            self.assertEqual(calls[0][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES})
+            self.assertEqual(calls[1][0], "run_preview_job")
+            self.assertEqual(calls[1][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES})
 
     def test_ingress_prefixed_ws_route_accepts_upgrade(self):
         server = load_server()

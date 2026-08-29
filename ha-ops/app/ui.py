@@ -2225,6 +2225,8 @@ def render_page(data):
         if (!action) {{ return ""; }}
         const path = new URL(action, window.location.href).pathname;
         const command = path.split("/").filter(Boolean).pop() || "";
+        if (command === "save-preview") {{ return "save_preview"; }}
+        if (command === "preview") {{ return "preview"; }}
         if (command === "save") {{ return "save"; }}
         if (command === "apply") {{ return "apply"; }}
         return "";

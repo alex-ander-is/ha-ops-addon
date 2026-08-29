@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.2
+
+- Send Preview HA to Git and Preview Git to HA through the WebSocket command registry so live logs and preview fragments update without falling back to the old refresh-oriented fetch path.
+- Remove refresh wording from the main HA-to-Git and Git-to-HA start messages now that those flows stream updates into the open page.
+
 ## 0.10.1
 
 - Keep the WebSocket endpoint under Home Assistant's single-segment ingress URL when the page URL has no trailing slash, so live logs and preview updates stream without a manual refresh.
