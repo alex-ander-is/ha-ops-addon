@@ -1088,6 +1088,22 @@ def render_page(data):
     h1 {{
       font-size: 2rem;
     }}
+    .title-row {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 14px;
+    }}
+    .title-row h1 {{
+      margin-bottom: 0;
+    }}
+    .header-version {{
+      color: var(--ha-muted);
+      font-size: 1rem;
+      line-height: 1.55;
+      white-space: nowrap;
+    }}
     h2 {{
       font-size: 1.1rem;
     }}
@@ -1785,12 +1801,6 @@ def render_page(data):
       min-height: 1.4em;
       color: var(--ha-muted);
     }}
-    footer {{
-      margin-top: 18px;
-      color: var(--ha-muted);
-      font-size: 0.86rem;
-      text-align: center;
-    }}
     @media (max-width: 1347px) {{
       .top-grid {{
         grid-template-columns: minmax(0, 1fr);
@@ -1823,7 +1833,10 @@ def render_page(data):
   <main>
     <div class="top-grid" data-ws-fragment="top-grid">
       <section class="card control-card">
-        <h1>{_('title.site')}</h1>
+        <div class="title-row">
+          <h1>{_('title.site')}</h1>
+          <span class="header-version">{data['version']}</span>
+        </div>
         <p>{_('site.description')}</p>
         <dl>
           <dt>{_('field.repo_url')}</dt>
@@ -1955,7 +1968,6 @@ def render_page(data):
       <h2>{_('heading.release_snapshots')}</h2>
       {data['releases_html']}
     </section>
-    <footer>{_('footer.version', version=data['version'])}</footer>
   </main>
   <script>
     (() => {{

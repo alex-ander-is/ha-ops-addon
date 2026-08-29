@@ -867,6 +867,20 @@ class ServerTests(unittest.TestCase):
         finally:
             i18n.EN_TEXT[key] = original
 
+    def test_header_shows_version_next_to_title_without_footer_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+
+            page = server.render_page()
+
+            title_at = page.index("<h1>HA Ops</h1>")
+            version_at = page.index(f'<span class="header-version">{server.addon_version()}</span>')
+            description_at = page.index("Git-backed config deployer")
+            self.assertLess(title_at, version_at)
+            self.assertLess(version_at, description_at)
+            self.assertNotIn(f"<footer>HA Ops {server.addon_version()}</footer>", page)
+
     def test_run_save_job_status_message_comes_from_translation_catalog(self):
         server = load_server()
 

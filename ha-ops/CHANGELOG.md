@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.4
+
+- Move the HA Ops version from the page footer to the right side of the main title row, using the same muted text style as the page subtitle.
+
 ## 0.10.3
 
 - Add a safe local HA Ops web harness with disposable Home Assistant/App/Git fixtures, fake Supervisor responses, deterministic preview gates, and browser smoke coverage for WebSocket updates, reconnect replay, debug redaction, lazy diff retrieval, disabled controls, and fetch fallback.
