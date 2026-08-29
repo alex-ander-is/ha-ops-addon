@@ -1066,8 +1066,10 @@ class ServerTests(unittest.TestCase):
             ".details-card pre {\n"
             "      flex: 1 1 auto;\n"
             "      min-height: 0;\n"
+            "      margin: 0;\n"
             "      white-space: pre-wrap;\n"
-            "      overflow-wrap: anywhere;",
+            "      overflow-wrap: anywhere;\n"
+            "      overflow-y: auto;",
             page,
         )
 
@@ -18062,6 +18064,31 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
         self.assertNotIn("window.location.reload", running_block)
         self.assertNotIn("window.location.reload", submit_block)
         self.assertIn("applyStateFrame(payload);", submit_block)
+
+    def test_dynamic_fragments_keep_scrollable_log_and_preview_controls(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            page = server.render_page()
+
+        style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
+        wire_block = script[
+            script.index("function wireDynamicControls") : script.index("wireDynamicControls(document);", script.index("function wireDynamicControls"))
+        ]
+
+        self.assertIn("height: var(--details-card-height, 500px);", style)
+        self.assertIn("overflow-y: auto;", style)
+        script_prelude = script[: script.index("function setClientStatus")]
+        self.assertNotIn("document.querySelector(\".control-card\")", script_prelude)
+        self.assertNotIn("document.querySelector(\".details-card\")", script_prelude)
+        self.assertIn("const controlCard = document.querySelector(\".control-card\");", script[script.index("function syncDetailsHeight") : script.index("function observeDetailsHeight")])
+        self.assertIn("observeDetailsHeight();", script[script.index("function applyFragments") : script.index("function scheduleWsReconnect")])
+        self.assertIn(".preview-file-toggle", wire_block)
+        self.assertIn(".preview-expand-all, .preview-collapse-all", wire_block)
+        self.assertIn(".preview-wrap-button", wire_block)
+        self.assertIn(".diff-wrap-toggle", wire_block)
 
     def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):
         server = load_server()

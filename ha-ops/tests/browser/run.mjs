@@ -234,6 +234,69 @@ async function assertLogContains(page, expectedText, phase) {
   );
 }
 
+async function assertLogPanelLayout(page, expectedMode, phase) {
+  const metrics = await waitFor(`${phase} log layout`, async () => page.evaluate((mode) => {
+    const control = document.querySelector(".control-card");
+    const card = document.querySelector(".details-card");
+    const log = document.querySelector("[data-transient='details']");
+    if (!control || !card || !log) {
+      return null;
+    }
+    const controlRect = control.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    return {
+      cardHeight: cardRect.height,
+      controlHeight: controlRect.height,
+      logOverflowY: getComputedStyle(log).overflowY,
+      sameRow: Math.abs(controlRect.top - cardRect.top) < 2,
+    };
+  }).then((item) => {
+    if (!item || item.logOverflowY !== "auto" && item.logOverflowY !== "scroll") {
+      return null;
+    }
+    if (expectedMode === "matched") {
+      return item.sameRow && Math.abs(item.cardHeight - item.controlHeight) <= 2 ? item : null;
+    }
+    return !item.sameRow && Math.abs(item.cardHeight - 500) <= 2 ? item : null;
+  }), 5000);
+  assert(metrics, `${phase} log layout nodes missing`);
+  assert(metrics.logOverflowY === "auto" || metrics.logOverflowY === "scroll", `${phase} log overflow-y was ${metrics.logOverflowY}`);
+  if (expectedMode === "matched") {
+    assert(metrics.sameRow, `${phase} log and controls were not on the same row`);
+    assert(Math.abs(metrics.cardHeight - metrics.controlHeight) <= 2, `${phase} log height ${metrics.cardHeight} did not match control height ${metrics.controlHeight}`);
+  } else {
+    assert(!metrics.sameRow, `${phase} expected stacked mobile layout`);
+    assert(Math.abs(metrics.cardHeight - 500) <= 2, `${phase} mobile fallback log height was ${metrics.cardHeight}`);
+  }
+}
+
+async function assertPreviewExpansionControls(page, phase) {
+  const files = page.locator("[data-preview-file]");
+  const count = await files.count();
+  assert(count > 0, `${phase} had no preview files`);
+  const firstFile = files.first();
+  const firstDetail = firstFile.locator(".preview-file-detail");
+  assert(await firstDetail.evaluate((element) => element.hidden), `${phase} first detail started expanded`);
+
+  await firstFile.locator(".preview-file-toggle").first().click();
+  assert(!(await firstDetail.evaluate((element) => element.hidden)), `${phase} Expand did not show first detail`);
+
+  await firstFile.locator(".preview-file-detail-toggle").click();
+  assert(await firstDetail.evaluate((element) => element.hidden), `${phase} Collapse did not hide first detail`);
+
+  await page.locator(".preview-expand-all").first().click();
+  const expandedAfterAll = await files.evaluateAll((items) =>
+    items.every((item) => !item.querySelector(".preview-file-detail")?.hidden),
+  );
+  assert(expandedAfterAll, `${phase} Expand All did not show all details`);
+
+  await page.locator(".preview-collapse-all").first().click();
+  const collapsedAfterAll = await files.evaluateAll((items) =>
+    items.every((item) => item.querySelector(".preview-file-detail")?.hidden),
+  );
+  assert(collapsedAfterAll, `${phase} Collapse All did not hide all details`);
+}
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -304,6 +367,8 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await assertPreviouslyEnabledControlsRestored(page, beforeControls, `${action} after preview`);
   await assertLogContains(page, expectedText, `${action} success`);
   await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
+  await assertLogPanelLayout(page, "matched", `${action} after preview`);
+  await assertPreviewExpansionControls(page, `${action} after WebSocket fragment`);
 }
 
 async function main() {
@@ -314,13 +379,14 @@ async function main() {
     const baseUrl = info.baseUrl;
     browser = await chromium.launch({ headless: true });
 
-    const context = await browser.newContext();
+    const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
     await context.addInitScript(() => {
       window.__HA_OPS_ENABLE_TEST_HOOKS__ = true;
       window.__haOpsLoadId = `${Date.now()}-${Math.random()}`;
     });
     const page = await context.newPage();
     await page.goto(baseUrl);
+    await assertLogPanelLayout(page, "matched", "initial desktop");
 
     await runPreviewScenario(page, baseUrl, "preview", "Preview Git to HA", "Harness Git to HA preview finished.");
     await waitFor("first WebSocket replay", async () => {
@@ -399,6 +465,12 @@ async function main() {
       `fetch fallback did not POST ingress Preview HA to Git; posts=${fallbackPosts.join(",")}`,
     );
     await fallbackContext.close();
+
+    const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    const mobilePage = await mobileContext.newPage();
+    await mobilePage.goto(baseUrl);
+    await assertLogPanelLayout(mobilePage, "fallback", "initial mobile");
+    await mobileContext.close();
 
     const debugText = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.text()));
     assert(!debugText.includes("diff --git"), "debug snapshot leaked raw diff");

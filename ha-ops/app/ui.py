@@ -1061,15 +1061,17 @@ def render_page(data):
     .details-card {{
       display: flex;
       flex-direction: column;
-      height: var(--details-card-height, auto);
+      height: var(--details-card-height, 500px);
       min-height: 0;
       overflow: hidden;
     }}
     .details-card pre {{
       flex: 1 1 auto;
       min-height: 0;
+      margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      overflow-y: auto;
     }}
     .details-header {{
       display: flex;
@@ -1805,13 +1807,6 @@ def render_page(data):
       .top-grid {{
         grid-template-columns: minmax(0, 1fr);
       }}
-      .details-card {{
-        height: auto;
-        overflow: visible;
-      }}
-      .details-card pre {{
-        flex: none;
-      }}
     }}
     @media (max-width: 700px) {{
       main {{
@@ -1972,8 +1967,8 @@ def render_page(data):
   <script>
     (() => {{
       const clientStatus = document.getElementById("client-status");
-      const controlCard = document.querySelector(".control-card");
-      const detailsCard = document.querySelector(".details-card");
+      let detailsResizeObserver = null;
+      let detailsResizeListenerBound = false;
 
       function setClientStatus(message) {{
         if (clientStatus) {{
@@ -2062,6 +2057,8 @@ def render_page(data):
       }}
 
       function syncDetailsHeight() {{
+        const controlCard = document.querySelector(".control-card");
+        const detailsCard = document.querySelector(".details-card");
         if (!controlCard || !detailsCard) {{
           return;
         }}
@@ -2075,12 +2072,23 @@ def render_page(data):
         }}
       }}
 
-      if (controlCard && detailsCard) {{
-        const resizeObserver = new ResizeObserver(syncDetailsHeight);
-        resizeObserver.observe(controlCard);
-        window.addEventListener("resize", syncDetailsHeight);
+      function observeDetailsHeight() {{
+        const controlCard = document.querySelector(".control-card");
+        if (detailsResizeObserver) {{
+          detailsResizeObserver.disconnect();
+          detailsResizeObserver = null;
+        }}
+        if (controlCard && typeof ResizeObserver === "function") {{
+          detailsResizeObserver = new ResizeObserver(syncDetailsHeight);
+          detailsResizeObserver.observe(controlCard);
+        }}
+        if (!detailsResizeListenerBound) {{
+          detailsResizeListenerBound = true;
+          window.addEventListener("resize", syncDetailsHeight);
+        }}
         requestAnimationFrame(syncDetailsHeight);
       }}
+      observeDetailsHeight();
 
       function clearDisplayState() {{
         if (navigator.sendBeacon) {{
@@ -2181,6 +2189,7 @@ def render_page(data):
         wireDynamicControls(document);
         restorePreviewExpandedState();
         restoreLogScrollState();
+        observeDetailsHeight();
         syncDetailsHeight();
       }}
 
@@ -2516,6 +2525,59 @@ def render_page(data):
             }}
           }});
         }}
+        for (const button of root.querySelectorAll(".preview-file-toggle")) {{
+          if (button.dataset.previewToggleBound === "true") {{ continue; }}
+          button.dataset.previewToggleBound = "true";
+          button.addEventListener("click", () => {{
+            const file = button.closest("[data-preview-file]");
+            if (!file) {{
+              return;
+            }}
+            const expanded = button.getAttribute("aria-expanded") !== "true";
+            const nextFile = expanded ? null : file.nextElementSibling;
+            setPreviewFileExpanded(file, expanded);
+            if (nextFile && nextFile.matches("[data-preview-file]")) {{
+              requestAnimationFrame(() => {{
+                nextFile.scrollIntoView({{block: "start", inline: "nearest"}});
+              }});
+            }}
+          }});
+        }}
+        for (const button of root.querySelectorAll(".preview-expand-all, .preview-collapse-all")) {{
+          if (button.dataset.previewListBound === "true") {{ continue; }}
+          button.dataset.previewListBound = "true";
+          button.addEventListener("click", () => {{
+            const section = button.closest(".preview-decisions");
+            if (!section) {{
+              return;
+            }}
+            const expanded = button.classList.contains("preview-expand-all");
+            for (const file of section.querySelectorAll("[data-preview-file]")) {{
+              setPreviewFileExpanded(file, expanded);
+            }}
+          }});
+        }}
+        for (const button of root.querySelectorAll(".preview-wrap-button")) {{
+          if (button.dataset.previewWrapBound === "true") {{ continue; }}
+          button.dataset.previewWrapBound = "true";
+          button.addEventListener("click", () => {{
+            const file = button.closest("[data-preview-file]");
+            const diff = file ? file.querySelector(".conflict-diff") : null;
+            if (diff) {{
+              diff.classList.toggle("wrap-lines");
+            }}
+          }});
+        }}
+        for (const toggle of root.querySelectorAll(".diff-wrap-toggle")) {{
+          if (toggle.dataset.diffWrapBound === "true") {{ continue; }}
+          toggle.dataset.diffWrapBound = "true";
+          toggle.addEventListener("change", () => {{
+            const diff = toggle.closest(".conflict-diff");
+            if (diff) {{
+              diff.classList.toggle("wrap-lines", toggle.checked);
+            }}
+          }});
+        }}
       }}
       wireDynamicControls(document);
 
@@ -2540,55 +2602,6 @@ def render_page(data):
           toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
           toggle.textContent = expanded ? {js_t('button.collapse_diff')} : {js_t('button.expand_diff')};
         }}
-      }}
-
-      for (const button of document.querySelectorAll(".preview-file-toggle")) {{
-        button.addEventListener("click", () => {{
-          const file = button.closest("[data-preview-file]");
-          if (!file) {{
-            return;
-          }}
-          const expanded = button.getAttribute("aria-expanded") !== "true";
-          const nextFile = expanded ? null : file.nextElementSibling;
-          setPreviewFileExpanded(file, expanded);
-          if (nextFile && nextFile.matches("[data-preview-file]")) {{
-            requestAnimationFrame(() => {{
-              nextFile.scrollIntoView({{block: "start", inline: "nearest"}});
-            }});
-          }}
-        }});
-      }}
-
-      for (const button of document.querySelectorAll(".preview-expand-all, .preview-collapse-all")) {{
-        button.addEventListener("click", () => {{
-          const section = button.closest(".preview-decisions");
-          if (!section) {{
-            return;
-          }}
-          const expanded = button.classList.contains("preview-expand-all");
-          for (const file of section.querySelectorAll("[data-preview-file]")) {{
-            setPreviewFileExpanded(file, expanded);
-          }}
-        }});
-      }}
-
-      for (const button of document.querySelectorAll(".preview-wrap-button")) {{
-        button.addEventListener("click", () => {{
-          const file = button.closest("[data-preview-file]");
-          const diff = file ? file.querySelector(".conflict-diff") : null;
-          if (diff) {{
-            diff.classList.toggle("wrap-lines");
-          }}
-        }});
-      }}
-
-      for (const toggle of document.querySelectorAll(".diff-wrap-toggle")) {{
-        toggle.addEventListener("change", () => {{
-          const diff = toggle.closest(".conflict-diff");
-          if (diff) {{
-            diff.classList.toggle("wrap-lines", toggle.checked);
-          }}
-        }});
       }}
 
       restorePreviewExpandedState();

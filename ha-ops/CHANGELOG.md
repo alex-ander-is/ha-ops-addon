@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.5
+
+- Restore the HA Ops log panel as a fixed-height scroll area matched to the left control column, with a 500px fallback on stacked mobile layouts.
+- Keep preview Expand, Collapse, Expand All, Collapse All, and Wrap controls working after WebSocket fragment updates replace the preview markup.
+
 ## 0.10.4
 
 - Move the HA Ops version from the page footer to the right side of the main title row, using the same muted text style as the page subtitle.
