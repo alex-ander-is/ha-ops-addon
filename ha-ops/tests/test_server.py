@@ -4922,7 +4922,7 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(post_request.responses[-1], 400)
         response = json.loads(post_request.wfile.getvalue().decode())
         self.assertFalse(response["ok"])
-        self.assertIn("projection rewrite is pending", response["message"])
+        self.assertIn("organizer area split is paused", response["message"])
         self.assertEqual(
             ctx.calls,
             [
@@ -5145,7 +5145,7 @@ class ServerTests(unittest.TestCase):
             }
 
             error = server.sync_logic.organizer.OrganizerRemovedError
-            with self.assertRaisesRegex(error, "projection rewrite is pending"):
+            with self.assertRaisesRegex(error, "organizer area split is paused"):
                 server.apply_homeassistant_config(source, live, target)
 
             self.assertEqual((live / "configuration.yaml").read_text(), "live_only:\n")
@@ -5571,7 +5571,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("git_object", preview["diff"])
             self.assertNotIn("live_object", preview["diff"])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_apply_preview_organizer_diff_ignores_heap_order_rewrite(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5647,7 +5647,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("wardrobe_auto", preview["diff"])
             self.assertNotIn("bathroom_auto", preview["diff"])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_apply_preview_organizer_diff_ignores_route_only_items(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5758,7 +5758,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Battery attention changed", preview["diff"])
             self.assertIn("homeassistant/.ha-ops/areas/home/scripts.yaml", preview["paths"])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_apply_preview_organizer_diff_rejects_nested_heap_file(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5808,7 +5808,7 @@ class ServerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unreferenced organizer file.*home/nested/automations.yaml"):
                 server.build_apply_preview([target])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_apply_preview_organizer_diff_uses_git_organized_yaml_for_added_files(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -5913,7 +5913,7 @@ class ServerTests(unittest.TestCase):
             root = Path(tmp)
             self.configure_paths(server, root)
 
-            with self.assertRaisesRegex(RuntimeError, "projection rewrite is pending"):
+            with self.assertRaisesRegex(RuntimeError, "organizer area split is paused"):
                 server.set_homeassistant_organizer_enabled(True)
 
             self.assertIsNone(server.read_state().get("homeassistant_organizer_enabled"))
@@ -6153,7 +6153,7 @@ class ServerTests(unittest.TestCase):
                 "Save Home Assistant config 2026-06-24\u00a0•\u00a019-00-00",
             )
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_ha_to_git_uses_homeassistant_organizer_ui_toggle(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6335,7 +6335,7 @@ class ServerTests(unittest.TestCase):
             result = self.git(["--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"], root)
             self.assertNotIn("homeassistant/.ha-ops/areas", result.stdout)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_preserves_organizer_contract_docs(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6715,7 +6715,7 @@ class ServerTests(unittest.TestCase):
                 "battery_attention_scan:\n  alias: battery_attention_scan\n",
             )
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_diff_ignores_route_only_battery_attention(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6797,7 +6797,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_empty_save_preview_organizer_route_only_battery_attention_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6880,7 +6880,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_save_preview_paths"], [])
             self.assertEqual(state["save_preview_selected_paths"], [])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_mixed_home_file_route_only_move_is_noop(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7007,7 +7007,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_real_addition_does_not_duplicate_route_only_item(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7116,7 +7116,7 @@ class ServerTests(unittest.TestCase):
             saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
             self.assertEqual(saved_index["scripts"], {"count": 2, "ids": ["battery_attention_scan", "new_script"]})
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_include_redundant_data_hides_route_only_battery_attention(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7211,7 +7211,7 @@ class ServerTests(unittest.TestCase):
             )
             self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_mixed_route_only_item_and_real_deletion_preserves_live_item(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7321,7 +7321,7 @@ class ServerTests(unittest.TestCase):
             saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
             self.assertEqual(saved_index["scripts"], {"count": 1, "ids": ["battery_attention_scan"]})
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_selected_file_keeps_unchecked_index_at_git(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7432,7 +7432,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_status"], "success")
             self.assertEqual(state["save_preview_selected_paths"], [])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_organizer_diff_keeps_changed_battery_attention_payload(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7500,7 +7500,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview_paths"])
             self.assertIn("Battery attention changed", state["last_save_diff"])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_modified_route_only_battery_attention_removes_old_route(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -7583,7 +7583,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(saved_scripts.count("battery_attention_scan:"), 1)
             self.assertIn("Battery attention changed", saved_scripts)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_preview_stale_service_branch_conflicted_organizer_index_does_not_crash(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -11477,7 +11477,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_commit"], main_commit)
             self.assertNotEqual(state["last_preview_commit"], live_commit)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_partial_apply_organizer_paths_materializes_selected_heap_items_only(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

@@ -26,7 +26,10 @@ def homeassistant_organizer_preference(read_state):
 def set_homeassistant_organizer_enabled(enabled, write_state):
     value = bool(enabled)
     if value and not ORGANIZER_PROJECTION_AVAILABLE:
-        raise RuntimeError("Home Assistant organizer area split is paused while the projection rewrite is pending.")
+        raise RuntimeError(
+            "Home Assistant organizer area split is paused. Keep it disabled until "
+            "a new organizer design is explicitly approved."
+        )
     write_state({HOMEASSISTANT_ORGANIZER_STATE_KEY: value})
     return value
 

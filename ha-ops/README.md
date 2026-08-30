@@ -23,13 +23,10 @@ HA Ops manages Home Assistant config with Git-backed previews and service branch
 
 HA Ops has an opt-in contract for a virtual split of Home Assistant UI-managed
 automations, scripts, and scenes. Live Home Assistant keeps the normal heap
-files. The enabled area-first projection under
-`homeassistant/.ha-ops/areas/<area>/` is currently blocked pending the
-round-trip rewrite described in `docs/organizer-roundtrip-todo/README.md`.
-Keep organizer disabled for production Save and Apply flows; disabled targets
-use the heap files directly and remove stale generated `.ha-ops/areas`
-metadata. See `docs/organizer-contract.md` for the future activation,
-precedence, conflict semantics, and safety invariants.
+files. Keep organizer disabled for production Save and Apply flows; disabled
+targets use the heap files directly and remove stale generated `.ha-ops/areas`
+metadata. See `docs/organizer-contract.md` for the paused contract and safety
+invariants.
 
 ## Stable Entity References
 

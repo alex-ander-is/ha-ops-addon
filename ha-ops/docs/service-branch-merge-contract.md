@@ -210,8 +210,6 @@ Registry normalization is intentional diff noise suppression. It must hide only
 known volatile or order-only registry noise and must not hide real registry
 state changes.
 
-Useful reference: `ha-ops/docs/diff-stability-plan.md`.
-
 `include_redundant_data` intentionally bypasses the normal reduced diff view so
 Save can preserve registry data exactly as Home Assistant writes it.
 

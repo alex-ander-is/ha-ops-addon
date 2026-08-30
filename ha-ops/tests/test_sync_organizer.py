@@ -101,7 +101,7 @@ class SyncOrganizerTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertEqual((left / filename).read_text(), (right / filename).read_text())
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_unknown_base_conflicts_reports_heap_file_removed_by_organizer(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,7 +140,7 @@ class SyncOrganizerTests(unittest.TestCase):
 
             self.assertEqual(conflicts, ["homeassistant/automations.yaml"])
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_save_unknown_base_conflicts_ignores_identical_heap_file_removed_by_organizer(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,12 +335,12 @@ class SyncOrganizerTests(unittest.TestCase):
                 "organizer": {"enabled": True},
             }
 
-            with self.assertRaisesRegex(sync.organizer.OrganizerRemovedError, "projection rewrite is pending"):
+            with self.assertRaisesRegex(sync.organizer.OrganizerRemovedError, "organizer area split is paused"):
                 sync.apply_targets([target], [], self.context(sync, work))
 
             self.assertEqual((live / "configuration.yaml").read_text(), "live_only:\n")
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_organizer_enabled_true_exports_area_view(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:
@@ -403,11 +403,11 @@ class SyncOrganizerTests(unittest.TestCase):
                 sync.materialize_homeassistant_source(source, target, self.context(sync, work))
             message = str(raised.exception)
             self.assertIn("organizer view exists in Git", message)
-            self.assertIn("projection rewrite is pending", message)
+            self.assertIn("organizer projection is paused", message)
             self.assertIn("Use Save HA to Git with the organizer disabled", message)
             self.assertNotIn("Enable the Home Assistant Git layout toggle", message)
 
-    @unittest.skip("enabled .ha-ops/areas projection is pending the organizer rewrite")
+    @unittest.skip("enabled .ha-ops/areas projection is paused")
     def test_apply_materialize_organizer_source_excludes_unmanaged_area_files(self):
         sync = load_sync()
         with tempfile.TemporaryDirectory() as tmp:

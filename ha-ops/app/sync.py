@@ -316,9 +316,9 @@ def ensure_organized_view_is_enabled(src, target):
         root_name = organizer.organized_root_name(options)
         raise RuntimeError(
             f"Home Assistant organizer view exists in Git at {root_name}, but the .ha-ops/areas "
-            "projection rewrite is pending and the organizer must stay disabled. Use Save HA to Git "
-            "with the organizer disabled to convert Git back to heap YAML files, or remove the stale "
-            ".ha-ops/areas view from Git."
+            "organizer projection is paused and the organizer must stay disabled. Use Save HA to "
+            "Git with the organizer disabled to convert Git back to heap YAML files, or remove the "
+            "stale .ha-ops/areas view from Git."
         )
 
 

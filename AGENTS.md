@@ -15,6 +15,4 @@ parts of the branch, preview, conflict, `.storage`, and UI behavior that are
 intentional versus unsafe shortcuts.
 
 Before changing or reviewing `.ha-ops/areas` organizer behavior, also read
-`ha-ops/docs/organizer-contract.md` and
-`ha-ops/docs/organizer-roundtrip-todo/README.md`. The todo document captures the
-approved testing model for stable heap-to-area and area-to-heap round trips.
+`ha-ops/docs/organizer-contract.md`.

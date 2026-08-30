@@ -33,7 +33,7 @@ if ORGANIZER is not None and yaml is None:
     raise RuntimeError("PyYAML is required when app/organizer.py is present")
 
 
-PROJECTION_SKIP_REASON = "full .ha-ops/areas projection is pending the organizer rewrite"
+PROJECTION_SKIP_REASON = "full .ha-ops/areas projection is paused"
 
 
 def write_json(path, data):

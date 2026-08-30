@@ -1,9 +1,8 @@
 # Home Assistant Organizer Contract
 
-Status: design contract for the next organizer implementation. The previous
-implementation was removed to `app/organizer_legacy_area_split_backup.py` while
-the round-trip model is redesigned. See
-`ha-ops/docs/organizer-roundtrip-todo/README.md`.
+Status: paused design contract. The previous implementation was removed to
+`app/organizer_legacy_area_split_backup.py`; production Save and Apply flows
+must keep the organizer disabled unless a new design is explicitly approved.
 
 ## Goal
 

@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.12
+
+- Remove completed or cancelled HA Ops ToDo documents for reactive UI, diff stability, and organizer round-trip testing.
+- Update organizer paused messaging so it no longer points agents or users to a cancelled rewrite ToDo.
+
 ## 0.10.11
 
 - Restore the reactive Change List as a single card before Git Access, including the loading state while Preview or Save Preview is still running.

@@ -365,7 +365,7 @@ EN_TEXT = {
     "message.git_state_reset_started": "Git state reset started. Refreshing...",
     "message.fresh_system_backup_available": "Fresh system backup is now available. Run an action when ready.",
     "message.homeassistant_layout_updated": "Home Assistant Git layout updated. Refreshing...",
-    "message.homeassistant_organizer_blocked": "Home Assistant organizer area split is paused while the projection rewrite is pending.",
+    "message.homeassistant_organizer_blocked": "Home Assistant organizer area split is paused. Keep it disabled until a new organizer design is explicitly approved.",
     "message.command_accepted": "Command accepted.",
     "message.duplicate_command": "Duplicate command; returning the original result.",
     "message.loading_diff": "Loading diff detail…",
