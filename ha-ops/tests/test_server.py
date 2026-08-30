@@ -877,9 +877,11 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
             title_at = page.index("<h1>HA Ops</h1>")
-            version_at = page.index(f'<span class="header-version">{server.addon_version()}</span>')
+            version_at = page.index(f'<div class="badge version" data-testid="version-badge">{server.addon_version()}</div>')
+            status_at = page.index('data-testid="status-badge"')
             description_at = page.index("Git-backed config deployer")
-            self.assertLess(title_at, version_at)
+            self.assertLess(title_at, status_at)
+            self.assertLess(status_at, version_at)
             self.assertLess(version_at, description_at)
             self.assertNotIn(f"<footer>HA Ops {server.addon_version()}</footer>", page)
 
@@ -2028,7 +2030,7 @@ class ServerTests(unittest.TestCase):
             )
 
             page = server.render_page()
-            self.assertIn('<div class="badge conflicts" data-status-code="conflicts">conflicts</div>', page)
+            self.assertIn('<div class="badge conflicts" data-status-code="conflicts" data-testid="status-badge">conflicts</div>', page)
             self.assertIn("<h2>Git Conflicts</h2>", page)
 
             server.clear_display_state()
@@ -2145,7 +2147,7 @@ class ServerTests(unittest.TestCase):
 
             page = server.render_page()
 
-            self.assertIn('<div class="badge " data-status-code="success">done</div>', page)
+            self.assertIn('<div class="badge " data-status-code="success" data-testid="status-badge">done</div>', page)
             self.assertNotIn('<div class="badge ">success</div>', page)
 
     def test_stale_running_status_is_repaired_when_lock_is_free(self):
@@ -2160,7 +2162,7 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
 
             self.assertEqual(state["last_status"], "interrupted")
-            self.assertIn('<div class="badge interrupted" data-status-code="interrupted">interrupted</div>', page)
+            self.assertIn('<div class="badge interrupted" data-status-code="interrupted" data-testid="status-badge">interrupted</div>', page)
             self.assertIn('action="preview"', page)
             self.assertIn('<button type="submit" class="secondary" >Preview Git to HA</button>', page)
 
@@ -2185,7 +2187,7 @@ class ServerTests(unittest.TestCase):
                 try:
                     running_page = server.render_page()
                     self.assertIn(
-                        '<div class="badge running" data-status-code="running">CATALOG: running sentinel</div>',
+                        '<div class="badge running" data-status-code="running" data-testid="status-badge">CATALOG: running sentinel</div>',
                         running_page,
                     )
                 finally:
@@ -2201,7 +2203,7 @@ class ServerTests(unittest.TestCase):
                 )
                 conflicts_page = server.render_page()
                 self.assertIn(
-                    '<div class="badge conflicts" data-status-code="conflicts">CATALOG: conflicts sentinel</div>',
+                    '<div class="badge conflicts" data-status-code="conflicts" data-testid="status-badge">CATALOG: conflicts sentinel</div>',
                     conflicts_page,
                 )
                 self.assertNotIn(">conflicts</div>", conflicts_page)
@@ -2218,7 +2220,7 @@ class ServerTests(unittest.TestCase):
                 )
                 pending_page = server.render_page()
                 self.assertIn(
-                    '<div class="badge pending" data-status-code="pending decision">CATALOG: pending decision sentinel</div>',
+                    '<div class="badge pending" data-status-code="pending decision" data-testid="status-badge">CATALOG: pending decision sentinel</div>',
                     pending_page,
                 )
                 self.assertNotIn(">pending decision</div>", pending_page)
@@ -6365,7 +6367,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("- homeassistant/configuration.yaml", details)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
             page = server.render_page()
-            self.assertIn('<div class="badge " data-status-code="warning">warning</div>', page)
+            self.assertIn('<div class="badge " data-status-code="warning" data-testid="status-badge">warning</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
 
     def test_save_preview_save_all_uses_preview_approval(self):
@@ -13227,7 +13229,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("border-bottom: 0", page)
             self.assertIn(".action-flow", page)
             self.assertIn('<div class="details-header">', page)
-            self.assertLess(page.index("<h2>Log</h2>"), page.index('<div class="badge "'))
+            self.assertLess(page.index('data-testid="status-badge"'), page.index("<h2>Log</h2>"))
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)
             self.assertNotIn("Preview deletions", page)
@@ -15732,7 +15734,7 @@ devices:
 
             page = server.render_page()
 
-            self.assertIn('<div class="badge pending" data-status-code="pending decision">pending decision</div>', page)
+            self.assertIn('<div class="badge pending" data-status-code="pending decision" data-testid="status-badge">pending decision</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
             self.assertIn("<h2>Log</h2>", page)
             self.assertNotIn("<h2>Last Run Details</h2>", page)

@@ -537,13 +537,20 @@ async function main() {
     browser = await chromium.launch({ headless: true });
 
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+    const websockets = [];
     await context.addInitScript(() => {
       window.__HA_OPS_ENABLE_TEST_HOOKS__ = true;
       window.__haOpsLoadId = `${Date.now()}-${Math.random()}`;
     });
     const page = await context.newPage();
+    page.on("websocket", (ws) => websockets.push(ws.url()));
     await page.goto(baseUrl);
     await assertLogPanelLayout(page, "matched", "initial desktop");
+    await page.getByTestId("status-badge").waitFor();
+    await page.getByTestId("version-badge").getByText(/\d+\.\d+\.\d+/).waitFor();
+    assert((await page.getByTestId("connection-status").count()) === 0, "production connection badge should not float over the UI");
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert(websockets.length === 1, `idle page created repeated WebSockets: ${websockets.length}`);
 
     await runPreviewScenario(page, baseUrl, "preview", "Preview Git to HA", "Harness Git to HA preview finished.");
     await waitFor("first WebSocket replay", async () => {
@@ -603,7 +610,9 @@ async function main() {
     const fallbackErrors = [];
     fallbackPage.on("pageerror", (error) => fallbackErrors.push(error.message));
     await fallbackPage.goto(baseUrl);
-    await fallbackPage.getByTestId("connection-status").getByText("http").waitFor({ timeout: 5000 });
+    await waitFor("HTTP fallback status badge transport state", async () => {
+      return (await fallbackPage.getByTestId("status-badge").getAttribute("data-connection-state")) === "http";
+    });
     await runHttpFallbackFlow(fallbackPage, baseUrl, fallbackPosts, {
       previewAction: "preview",
       previewPath: "preview",

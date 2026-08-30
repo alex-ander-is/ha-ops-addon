@@ -869,10 +869,14 @@ def render_page(data):
     .title-row h1 {{
       margin-bottom: 0;
     }}
-    .header-version {{
-      color: var(--ha-muted);
-      font-size: 1rem;
-      line-height: 1.55;
+    .header-badges {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }}
+    .header-badges .badge {{
       white-space: nowrap;
     }}
     h2 {{
@@ -930,6 +934,16 @@ def render_page(data):
       background: color-mix(in srgb, var(--ha-warning) 14%, transparent);
       color: var(--ha-warning);
       border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
+    }}
+    .badge.transport {{
+      background: color-mix(in srgb, var(--ha-warning) 14%, transparent);
+      color: var(--ha-warning);
+      border-color: color-mix(in srgb, var(--ha-warning) 30%, transparent);
+    }}
+    .badge.version {{
+      background: color-mix(in srgb, var(--ha-muted) 10%, transparent);
+      color: var(--ha-muted);
+      border-color: color-mix(in srgb, var(--ha-muted) 28%, transparent);
     }}
     .actions {{
       display: flex;
@@ -1388,7 +1402,10 @@ def render_page(data):
       <section class="card control-card">
         <div class="title-row">
           <h1>{_('title.site')}</h1>
-          <span class="header-version">{data['version']}</span>
+          <div class="header-badges">
+            <div class="badge {data['badge_class']}" data-status-code="{data['status_code']}" data-testid="status-badge">{data['status']}</div>
+            <div class="badge version" data-testid="version-badge">{data['version']}</div>
+          </div>
         </div>
         <p>{_('site.description')}</p>
         <dl>
@@ -1489,7 +1506,6 @@ def render_page(data):
       <section class="card details-card">
         <div class="details-header">
           <h2>{_('heading.log')}</h2>
-          <div class="badge {data['badge_class']}" data-status-code="{data['status_code']}">{data['status']}</div>
         </div>
         <ha-ops-log>{data['details_html']}</ha-ops-log>
       </section>

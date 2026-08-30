@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.10
+
+- Move the HA Ops status badge into the page header next to the version badge and remove the floating connection badge from the production UI.
+- Keep idle WebSocket connections open without one-second reconnect churn by avoiding socket timeouts on buffered WebSocket reads.
+- Show degraded transport state through the header status badge only when it matters, while keeping normal operation results such as `done` visible after successful actions.
+
 ## 0.10.9
 
 - Stabilize the reactive preview UI so WebSocket reconnects do not flicker the connection state, diff rows stay in the page flow, expanded diffs remain open across refreshes, and diff lines are highlighted.

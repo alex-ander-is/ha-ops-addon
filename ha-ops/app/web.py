@@ -5,6 +5,7 @@ import base64
 import hashlib
 import html
 import json
+import select
 import socket
 import struct
 import threading
@@ -1418,8 +1419,6 @@ def create_handler(ctx):
                 self.send_header("Connection", "Upgrade")
                 self.send_header("Sec-WebSocket-Accept", websocket_accept(key))
                 self.end_headers()
-                if getattr(self, "connection", None) is not None:
-                    self.connection.settimeout(0.5)
                 last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else 0
                 replay_recorder = getattr(ctx, "dev_harness_record_ws_replay", None)
                 if replay_recorder is not None:
@@ -1428,6 +1427,10 @@ def create_handler(ctx):
                 last_revision = int(_snapshot_payload(ctx).get("state", {}).get("state_revision") or 0)
                 while True:
                     try:
+                        if getattr(self, "connection", None) is not None:
+                            readable, _, _ = select.select([self.connection], [], [], 0.5)
+                            if not readable:
+                                raise socket.timeout()
                         message = read_ws_frame(self.rfile)
                     except (socket.timeout, TimeoutError):
                         next_sequence = (

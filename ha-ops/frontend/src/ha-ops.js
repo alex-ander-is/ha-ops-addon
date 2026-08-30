@@ -277,9 +277,6 @@ class HaOpsApp extends LitElement {
 
   static styles = css`
     :host { display: contents; }
-    .connection { position: fixed; right: .75rem; bottom: .75rem; z-index: 20; padding: .35rem .6rem;
-      border: 1px solid var(--ha-ops-muted-border, #9aa0a6); border-radius: 999px;
-      color: var(--ha-ops-muted-text, #5f6368); background: var(--ha-ops-surface, #fff); font: 12px/1.2 system-ui; }
   `;
 
   constructor() {
@@ -294,6 +291,8 @@ class HaOpsApp extends LitElement {
     this.pending = new Map();
     this.nextRequestId = 1;
     this.reconnectTimer = null;
+    this.reconnectStableTimer = null;
+    this.reconnectDelayMs = 1200;
     this.replayPending = true;
     this.queuedFrames = [];
     this.shouldReconnect = false;
@@ -312,6 +311,7 @@ class HaOpsApp extends LitElement {
   disconnectedCallback() {
     this.removeEventListener("submit", this.onSubmit);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.shouldReconnect = false;
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
@@ -336,7 +336,6 @@ class HaOpsApp extends LitElement {
         @confirm=${this.confirmMutation}
         @cancel=${() => { this.confirmOpen = false; this.confirmForm = null; }}
       ></vaadin-confirm-dialog>
-      <span class="connection" role="status" data-testid="connection-status">${this.connection}</span>
     `;
   }
 
@@ -428,14 +427,14 @@ class HaOpsApp extends LitElement {
       return;
     }
     delete form.dataset.confirmed;
-    this.dispatchMutation(form).catch((error) => this.markUnknown(error));
+    this.dispatchMutation(form).catch((error) => this.handleCommandError(error));
   };
 
   onCommand = (event) => {
     event.stopPropagation();
     const { command, payload } = event.detail || {};
     this.dispatchCommand(command, new URL(command.replaceAll("_", "-"), baseUrl()).href, payload || {})
-      .catch((error) => this.markUnknown(error));
+      .catch((error) => this.handleCommandError(error));
   };
 
   confirmMutation = () => {
@@ -502,7 +501,8 @@ class HaOpsApp extends LitElement {
 
   connect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.connection = "connecting";
+    this.reconnectTimer = null;
+    this.setConnection("connecting");
     this.replayPending = true;
     if (typeof window.WebSocket !== "function") {
       this.socket = null;
@@ -512,18 +512,21 @@ class HaOpsApp extends LitElement {
     const socket = new WebSocket(websocketUrl());
     this.socket = socket;
     socket.addEventListener("open", () => {
-      this.connection = "replaying";
+      this.setConnection("replaying");
       socket.send(JSON.stringify({ id: String(this.nextRequestId++), command: "replay" }));
     });
     socket.addEventListener("message", (event) => this.receive(JSON.parse(event.data)));
     socket.addEventListener("close", () => {
       if (!this.shouldReconnect) return;
-      this.connection = "reconnecting";
+      this.setConnection("reconnecting");
+      if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
       for (const pending of this.pending.values()) {
         pending.reject(new Error(pending.sent ? "Command outcome is unknown after disconnect." : "WebSocket unavailable."));
       }
       this.pending.clear();
-      this.reconnectTimer = setTimeout(() => this.connect(), 1200);
+      const delay = this.reconnectDelayMs;
+      this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, 30000);
+      this.reconnectTimer = setTimeout(() => this.connect(), delay);
     });
   }
 
@@ -533,9 +536,9 @@ class HaOpsApp extends LitElement {
       const snapshot = await response.json();
       this.applyBaseline(snapshot);
       this.replayPending = false;
-      this.connection = "http";
+      this.setConnection("http");
     } catch (error) {
-      this.connection = "unknown";
+      this.setConnection("unknown");
       this.markUnknown(error);
     }
   }
@@ -544,7 +547,12 @@ class HaOpsApp extends LitElement {
     if (frame.type === "ready" || frame.type === "replay") {
       this.applyBaseline(frame);
       this.replayPending = false;
-      this.connection = "connected";
+      this.setConnection("connected");
+      if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
+      this.reconnectStableTimer = setTimeout(() => {
+        this.reconnectDelayMs = 1200;
+        this.reconnectStableTimer = null;
+      }, 10000);
       for (const queued of this.queuedFrames.splice(0)) this.receive(queued);
       return;
     }
@@ -574,7 +582,7 @@ class HaOpsApp extends LitElement {
     if (revision <= this.revision) return;
     if (base !== this.revision) {
       this.replayPending = true;
-      this.connection = "replaying";
+      this.setConnection("replaying");
       this.socket?.send(JSON.stringify({ id: String(this.nextRequestId++), command: "replay" }));
       return;
     }
@@ -589,11 +597,7 @@ class HaOpsApp extends LitElement {
     for (const control of this.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-radio-group, vaadin-select")) {
       if (!control.matches("[data-read-only-control]")) control.disabled = running || control.hasAttribute("data-server-disabled");
     }
-    const badge = this.querySelector("[data-status-code]");
-    if (badge) {
-      badge.dataset.statusCode = this.state.last_status || "idle";
-      badge.textContent = this.state.last_status === "success" ? "done" : (this.state.last_status || "idle");
-    }
+    this.updateStatusBadge();
     const log = this.querySelector("ha-ops-log");
     if (log) {
       const lines = Array.isArray(this.state.last_details) && this.state.last_details.length
@@ -610,9 +614,50 @@ class HaOpsApp extends LitElement {
   }
 
   markUnknown(error) {
-    this.connection = "unknown";
+    this.setConnection("unknown");
     const target = this.querySelector("#client-status");
     if (target) target.textContent = error.message;
+  }
+
+  handleCommandError(error) {
+    const message = error?.message || String(error);
+    if (
+      message.includes("unknown")
+      || message.includes("Connection state")
+      || message.includes("WebSocket unavailable")
+      || message.includes("disconnect")
+    ) {
+      this.markUnknown(new Error(message));
+      return;
+    }
+    const target = this.querySelector("#client-status");
+    if (target) target.textContent = message;
+    this.updateStatusBadge();
+  }
+
+  setConnection(connection) {
+    this.connection = connection;
+    this.updateStatusBadge();
+  }
+
+  isDegradedConnection() {
+    return ["reconnecting", "http", "unknown"].includes(this.connection);
+  }
+
+  updateStatusBadge() {
+    const badge = this.querySelector("[data-status-code]");
+    if (!badge) return;
+    const status = this.state.last_status || "idle";
+    badge.dataset.connectionState = this.connection;
+    if (this.connection === "unknown" || (status === "idle" && this.isDegradedConnection())) {
+      badge.dataset.statusCode = "transport";
+      badge.textContent = this.connection;
+      badge.className = "badge transport";
+      return;
+    }
+    badge.dataset.statusCode = status;
+    badge.textContent = status === "success" ? "done" : status;
+    badge.className = `badge ${status === "success" ? "" : status}`.trim();
   }
 }
 customElements.define("ha-ops-app", HaOpsApp);
