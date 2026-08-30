@@ -9,8 +9,8 @@
     "@vaadin/button": "25.2.8",
     "@vaadin/checkbox": "25.2.8",
     "@vaadin/confirm-dialog": "25.2.8",
+    "@vaadin/details": "25.2.8",
     "@vaadin/progress-bar": "25.2.8",
-    "@vaadin/radio-group": "25.2.8",
     "@vaadin/select": "25.2.8",
     "lit": "3.3.3"
   },

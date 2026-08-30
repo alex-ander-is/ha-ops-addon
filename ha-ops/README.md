@@ -25,8 +25,9 @@ HA Ops has an opt-in contract for a virtual split of Home Assistant UI-managed
 automations, scripts, and scenes. Live Home Assistant keeps the normal heap
 files. Keep organizer disabled for production Save and Apply flows; disabled
 targets use the heap files directly and remove stale generated `.ha-ops/areas`
-metadata. See `docs/organizer-contract.md` for the paused contract and safety
-invariants.
+metadata. Enabled `.ha-ops/areas` projection remains blocked pending a
+production-safe rewrite. See `docs/organizer-contract.md` for the paused
+contract and safety invariants.
 
 ## Stable Entity References
 

@@ -182,7 +182,7 @@ async function stateChangingControls(page) {
     return Array.from(document.querySelectorAll("form[method='post']"))
       .flatMap((form) => {
         const action = form.getAttribute("action") || "";
-        return Array.from(form.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-radio-group, vaadin-select, input:not([type='hidden']), textarea"))
+        return Array.from(form.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-details, vaadin-select, input:not([type='hidden']), textarea"))
           .filter((control) => control.getClientRects().length > 0)
           .map((control, index) => {
             const type = (control.getAttribute("type") || "").toLowerCase();
@@ -327,11 +327,24 @@ async function assertPreviewExpansionControls(page, phase) {
   const count = await files.count();
   assert(count > 0, `${phase} had no preview files`);
   const firstFile = files.first();
-  const firstToggle = firstFile.getByRole("button", { name: "Expand Diff" });
-  await firstToggle.click();
-  await firstFile.getByRole("button", { name: "Collapse Diff" }).waitFor();
-  await firstFile.getByRole("button", { name: "Collapse Diff" }).click();
-  await firstFile.getByRole("button", { name: "Expand Diff" }).waitFor();
+  await firstFile.locator("vaadin-details-summary").click();
+  await waitFor(`${phase} first details opened`, async () => {
+    return await firstFile.evaluate((item) => item.expanded === true) ? true : null;
+  });
+  await firstFile.locator("vaadin-details-summary").click();
+  await waitFor(`${phase} first details closed`, async () => {
+    return await firstFile.evaluate((item) => item.expanded === false) ? true : null;
+  });
+
+  if (count > 1) {
+    const secondFile = files.nth(1);
+    await firstFile.locator("vaadin-details-summary").click();
+    await secondFile.locator("vaadin-details-summary").click();
+    const firstTwoExpanded = await files.evaluateAll((items) =>
+      items.slice(0, 2).every((item) => item.expanded === true),
+    );
+    assert(firstTwoExpanded, `${phase} opening a second Details row closed the first row`);
+  }
 
   await page.getByRole("button", { name: "Expand All" }).last().click();
   const expandedAfterAll = await files.evaluateAll((items) =>
@@ -378,12 +391,15 @@ async function assertPreviewRowsAndControls(page, phase) {
     const root = item.shadowRoot;
     return {
       checkbox: Boolean(root?.querySelector("vaadin-checkbox")),
+      details: Boolean(root?.querySelector("vaadin-details")),
       radio: Boolean(root?.querySelector("vaadin-radio-group")),
+      haButton: Boolean(Array.from(root?.querySelectorAll("vaadin-button") || []).find((button) => button.textContent.trim() === "Use HA Version")),
+      gitButton: Boolean(Array.from(root?.querySelectorAll("vaadin-button") || []).find((button) => button.textContent.trim() === "Use Git Version")),
       path: root?.querySelector("code")?.textContent || "",
     };
   }));
-  const missing = controls.filter((item) => !item.checkbox || !item.radio || !item.path);
-  assert(missing.length === 0, `${phase} preview rows missing checkbox/radio/path: ${JSON.stringify(controls)}`);
+  const missing = controls.filter((item) => !item.checkbox || !item.details || !item.haButton || !item.gitButton || !item.path || item.radio);
+  assert(missing.length === 0, `${phase} preview rows missing checkbox/details/buttons/path or still had radio group: ${JSON.stringify(controls)}`);
 }
 
 function assert(condition, message) {
@@ -460,6 +476,10 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
   await assertPreviewRowsAndControls(page, `${action} after preview`);
   assert(diffGetRequests.length === diffRequestsBefore, `${action} fetched diff before explicit expansion`);
+  if (action === "preview") {
+    await assertDetailsControlEventIsolation(page, baseUrl, "apply", diffGetRequests, `${action} after preview`);
+    assert(diffGetRequests.length === diffRequestsBefore, `${action} row controls fetched diff before explicit expansion`);
+  }
   await assertLogPanelLayout(page, "matched", `${action} after preview`);
   await assertPreviewExpansionControls(page, `${action} after reactive state update`);
   assert(diffGetRequests.length > diffRequestsBefore, `${action} did not fetch diff after explicit expansion`);
@@ -537,6 +557,65 @@ async function assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, directio
   assert(selectedAfterStale.length === 0, `${direction} stale select repopulated replaced preview`);
 }
 
+async function assertDetailsControlEventIsolation(page, baseUrl, direction, diffGetRequests, phase) {
+  const snapshot = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
+  const state = snapshot.state;
+  const paths = direction === "save" ? state.last_save_preview_paths : state.last_preview_paths;
+  const path = paths?.[0];
+  assert(path, `${phase} had no preview path for event isolation`);
+  const file = page.getByTestId("preview-file").filter({ hasText: path }).first();
+  const checkbox = file.locator("vaadin-checkbox").first();
+  const haButton = file.getByRole("button", { name: "Use HA Version" });
+  const gitButton = file.getByRole("button", { name: "Use Git Version" });
+  const beforeRequests = diffGetRequests.length;
+
+  await checkbox.click();
+  await waitFor(`${phase} row selected`, async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const selected = direction === "save"
+      ? current.state.save_preview_selected_paths
+      : current.state.apply_preview_selected_paths;
+    return selected?.includes(path) ? current : null;
+  });
+  assert(await file.evaluate((item) => item.expanded === false), `${phase} checkbox click toggled Details`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} checkbox click fetched a diff`);
+
+  await haButton.click();
+  await waitFor(`${phase} HA choice persisted`, async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const resolutions = direction === "save"
+      ? current.state.save_preview_resolutions
+      : current.state.apply_preview_resolutions;
+    return resolutions?.[path] === "ha" ? current : null;
+  });
+  assert(await file.evaluate((item) => item.expanded === false), `${phase} HA button click toggled Details`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} HA button click fetched a diff`);
+
+  await gitButton.focus();
+  await page.keyboard.press("Enter");
+  await waitFor(`${phase} Git choice persisted`, async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const resolutions = direction === "save"
+      ? current.state.save_preview_resolutions
+      : current.state.apply_preview_resolutions;
+    return resolutions?.[path] === "git" ? current : null;
+  });
+  assert(await file.evaluate((item) => item.expanded === false), `${phase} Git keyboard activation toggled Details`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} Git keyboard activation fetched a diff`);
+
+  await haButton.focus();
+  await page.keyboard.press(" ");
+  await waitFor(`${phase} HA keyboard choice persisted`, async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const resolutions = direction === "save"
+      ? current.state.save_preview_resolutions
+      : current.state.apply_preview_resolutions;
+    return resolutions?.[path] === "ha" ? current : null;
+  });
+  assert(await file.evaluate((item) => item.expanded === false), `${phase} HA Space activation toggled Details`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} HA Space activation fetched a diff`);
+}
+
 async function assertSaveNormalChoiceControls(page, baseUrl) {
   const snapshot = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
   const state = snapshot.state;
@@ -544,13 +623,14 @@ async function assertSaveNormalChoiceControls(page, baseUrl) {
   assert(path, "save preview has no path for choice controls");
   const file = page.getByTestId("preview-file").filter({ hasText: path }).first();
   const checkbox = file.locator("vaadin-checkbox").first();
-  await checkbox.click();
+  const alreadySelected = await checkbox.evaluate((control) => control.checked);
+  if (!alreadySelected) await checkbox.click();
   await waitFor("save preview selected path", async () => {
     const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
     return current.state.save_preview_selected_paths?.includes(path) ? current : null;
   });
-  const valueAfterSelect = await file.locator("vaadin-radio-group").first().evaluate((control) => control.value);
-  assert(valueAfterSelect === "ha", `normal Save row defaulted to ${valueAfterSelect}, expected ha`);
+  const valueAfterSelect = await file.getByRole("button", { name: "Use HA Version" }).evaluate((control) => control.getAttribute("aria-pressed"));
+  assert(valueAfterSelect === "true", `normal Save row HA default active state was ${valueAfterSelect}`);
   await file.getByText("Use Git Version").click();
   await waitFor("save preview Git override", async () => {
     const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
@@ -580,7 +660,7 @@ async function assertMobilePreviewUsability(page, phase) {
       .sort((left, right) => right.right - left.right)
       .slice(0, 8);
     const controls = allElements()
-      .filter((element) => ["VAADIN-CHECKBOX", "VAADIN-RADIO-GROUP", "VAADIN-BUTTON"].includes(element.tagName))
+      .filter((element) => ["VAADIN-CHECKBOX", "VAADIN-DETAILS", "VAADIN-BUTTON"].includes(element.tagName))
       .filter((element) => element.closest("ha-ops-preview-file") || element.getRootNode()?.host?.closest?.("ha-ops-preview-file"))
       .map((control) => {
         const rect = control.getBoundingClientRect();

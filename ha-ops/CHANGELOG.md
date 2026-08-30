@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.13
+
+- Replace reactive Change List radio buttons with adjacent `Use HA Version` and `Use Git Version` action buttons.
+- Render preview files as independent Vaadin Details rows so multiple diffs can stay open while Expand All and Collapse All continue to work.
+- Keep per-file diff loading lazy and prevent checkbox or version-button activation from accidentally toggling the row.
+
 ## 0.10.12
 
 - Remove completed or cancelled HA Ops ToDo documents for reactive UI, diff stability, and organizer round-trip testing.

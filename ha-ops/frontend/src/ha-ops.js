@@ -2,9 +2,8 @@ import { LitElement, css, html, nothing, render } from "lit";
 import "@vaadin/button";
 import "@vaadin/checkbox";
 import "@vaadin/confirm-dialog";
+import "@vaadin/details";
 import "@vaadin/progress-bar";
-import "@vaadin/radio-group";
-import "@vaadin/radio-group/vaadin-radio-button.js";
 import "@vaadin/select";
 
 const MUTATING_METHOD = "post";
@@ -279,15 +278,16 @@ class HaOpsPreviewFile extends LitElement {
     direction: { type: String }, running: { type: Boolean },
   };
   static styles = css`
-    :host { display: block; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; }
-    header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; padding: .65rem .75rem; }
+    :host { display: block; }
+    vaadin-details { border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; }
+    vaadin-details-summary { width: 100%; }
+    vaadin-details-summary::part(content) { min-width: 0; width: 100%; }
+    .summary-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .65rem; width: 100%; }
     code { min-width: 0; overflow-wrap: anywhere; }
     .path { min-width: 0; display: flex; align-items: center; gap: .5rem; }
-    .choice { display: flex; justify-content: flex-end; min-width: 0; }
-    vaadin-radio-group { width: 100%; max-width: 100%; }
-    vaadin-radio-group::part(group-field) { display: flex; flex-wrap: wrap; gap: .25rem .75rem; }
-    vaadin-radio-button { max-width: 100%; }
-    vaadin-radio-button::part(label) { white-space: normal; overflow-wrap: anywhere; }
+    vaadin-checkbox::part(label) { white-space: normal; overflow-wrap: anywhere; }
+    .choice { display: flex; justify-content: flex-end; gap: .35rem; min-width: 0; flex-wrap: wrap; }
+    .choice vaadin-button[aria-pressed="true"] { font-weight: 700; }
     pre { margin: 0; padding: .75rem; overflow: auto; white-space: pre; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
     .line { display: block; min-height: 1.25em; color: var(--ha-ops-code-text, #24292f); }
     .add { color: var(--ha-ops-diff-add-text, #116329); background: var(--ha-ops-diff-add-bg, #dafbe1); }
@@ -300,7 +300,7 @@ class HaOpsPreviewFile extends LitElement {
     .meta { color: var(--ha-ops-muted-text, #57606a); font-weight: 600; }
     [role="status"] { padding: .75rem; color: var(--ha-ops-muted-text, #57606a); }
     @media (max-width: 700px) {
-      header { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+      .summary-row { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
       .path, .choice { justify-content: flex-start; }
       .path { flex-wrap: wrap; }
       vaadin-button { width: fit-content; }
@@ -327,33 +327,51 @@ class HaOpsPreviewFile extends LitElement {
   }
   render() {
     return html`
-      <header>
-        <div class="path">
-          <vaadin-checkbox
-            aria-label=${`${TEXT.includeFile || "Include file"} ${this.path}`}
-            .checked=${this.selected}
-            ?disabled=${this.running}
-            @change=${this.onSelectChange}></vaadin-checkbox>
-          <code>${this.path}</code>
-        </div>
-        <vaadin-button theme="secondary" ?disabled=${this.running} aria-expanded=${String(this.expanded)} @click=${() => this.setExpanded(!this.expanded)}>
-          ${this.expanded ? TEXT.collapse : TEXT.expand}
-        </vaadin-button>
-        <div class="choice">
-          <vaadin-radio-group
-            aria-label=${`${TEXT.versionChoice || "Version choice"} ${this.path}`}
-            .value=${this.choice || ""}
-            ?disabled=${this.running || !this.selected}
-            @change=${this.onChoiceChange}>
-            <vaadin-radio-button value="git">${TEXT.useGitVersion}</vaadin-radio-button>
-            <vaadin-radio-button value="ha">${TEXT.useHaVersion}</vaadin-radio-button>
-          </vaadin-radio-group>
-        </div>
-      </header>
-      ${this.expanded ? this.diffState === "loaded"
-        ? html`<pre aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
-        : html`<div role="status">${this.diffState === "stale" ? TEXT.unavailableDiff : TEXT.loadingDiff}</div>`
-        : nothing}
+      <vaadin-details
+        .opened=${this.expanded}
+        ?disabled=${this.running}
+        @opened-changed=${this.onOpenedChanged}>
+        <vaadin-details-summary slot="summary" aria-label=${`${this.path} ${this.expanded ? TEXT.collapse : TEXT.expand}`}>
+          <div class="summary-row">
+            <div class="path">
+              <vaadin-checkbox
+                label=${TEXT.includeFile || "Include file"}
+                aria-label=${`${TEXT.includeFile || "Include file"} ${this.path}`}
+                .checked=${this.selected}
+                ?disabled=${this.running}
+                @click=${this.stopTogglePropagation}
+                @keydown=${this.stopKeyboardTogglePropagation}
+                @change=${this.onSelectChange}></vaadin-checkbox>
+              <code>${this.path}</code>
+            </div>
+            <div
+              class="choice"
+              role="group"
+              aria-label=${`${TEXT.versionChoice || "Version choice"} ${this.path}`}
+              @click=${this.stopTogglePropagation}
+              @keydown=${this.stopKeyboardTogglePropagation}>
+              ${this.choiceButton("ha", TEXT.useHaVersion)}
+              ${this.choiceButton("git", TEXT.useGitVersion)}
+            </div>
+          </div>
+        </vaadin-details-summary>
+        ${this.expanded ? this.diffState === "loaded"
+          ? html`<pre aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
+          : html`<div role="status">${this.diffState === "stale" ? TEXT.unavailableDiff : TEXT.loadingDiff}</div>`
+          : nothing}
+      </vaadin-details>
+    `;
+  }
+  choiceButton(choice, label) {
+    const pressed = this.choice === choice;
+    return html`
+      <vaadin-button
+        theme=${pressed ? "primary small" : "secondary small"}
+        aria-pressed=${String(pressed)}
+        ?disabled=${this.running || !this.selected}
+        @click=${() => this.dispatchChoice(choice)}>
+        ${label}
+      </vaadin-button>
     `;
   }
   async setExpanded(expanded) {
@@ -371,6 +389,15 @@ class HaOpsPreviewFile extends LitElement {
       this.diffState = "stale";
     }
   }
+  onOpenedChanged = (event) => {
+    this.setExpanded(Boolean(event.detail?.value));
+  };
+  stopTogglePropagation = (event) => {
+    event.stopPropagation();
+  };
+  stopKeyboardTogglePropagation = (event) => {
+    if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+  };
   onSelectChange = (event) => {
     this.dispatchEvent(new CustomEvent("preview-select", {
       bubbles: true,
@@ -378,15 +405,14 @@ class HaOpsPreviewFile extends LitElement {
       detail: { path: this.path, selected: event.target.checked },
     }));
   };
-  onChoiceChange = (event) => {
-    const choice = event.detail?.value || event.target?.value || "";
-    if (!choice) return;
+  dispatchChoice(choice) {
+    if (!choice || this.running || !this.selected) return;
     this.dispatchEvent(new CustomEvent("preview-resolve", {
       bubbles: true,
       composed: true,
       detail: { path: this.path, choice },
     }));
-  };
+  }
 }
 customElements.define("ha-ops-preview-file", HaOpsPreviewFile);
 
@@ -434,8 +460,8 @@ class HaOpsPreview extends LitElement {
         <div class="actions">
           <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(true)}>${TEXT.selectAll}</vaadin-button>
           <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(false)}>${TEXT.selectNone}</vaadin-button>
-          <vaadin-button theme="secondary" @click=${() => this.setAll(true)}>${TEXT.expandAll}</vaadin-button>
-          <vaadin-button theme="secondary" @click=${() => this.setAll(false)}>${TEXT.collapseAll}</vaadin-button>
+          <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.setAll(true)}>${TEXT.expandAll}</vaadin-button>
+          <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.setAll(false)}>${TEXT.collapseAll}</vaadin-button>
         </div>
       </header>
       <div class="files">
@@ -457,7 +483,10 @@ class HaOpsPreview extends LitElement {
       </footer>
     `;
   }
-  setAll(expanded) { for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded); }
+  setAll(expanded) {
+    if (this.running) return;
+    for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded);
+  }
   selectAll(selected) {
     if (this.running) return;
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
@@ -832,7 +861,7 @@ class HaOpsApp extends LitElement {
   syncDom() {
     const running = this.state.last_status === "running" || Object.values(this.state.command_records || {})
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
-    for (const control of this.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-radio-group, vaadin-select")) {
+    for (const control of this.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-details, vaadin-select")) {
       if (!control.matches("[data-read-only-control]")) control.disabled = running || control.hasAttribute("data-server-disabled");
     }
     this.updateStatusBadge();
