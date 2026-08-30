@@ -781,6 +781,10 @@ WS_MUTATING_COMMANDS = {
     "save_preview",
     "apply",
     "save",
+    "resolve_save_preview",
+    "resolve_apply_preview",
+    "select_save_preview",
+    "select_apply_preview",
     "reset_git_state",
     "disk_usage",
     "deleted_devices_preview",
@@ -793,6 +797,173 @@ WS_MUTATING_COMMANDS = {
     "deleted_devices_revert",
     "rollback",
 }
+
+
+class StalePreviewDecision(RuntimeError):
+    pass
+
+
+def body_first(body, key, default=""):
+    value = (body or {}).get(key, default)
+    if isinstance(value, list):
+        return value[0] if value else default
+    return value
+
+
+def _canonical_list(value):
+    return sorted(str(item) for item in (value or []) if str(item))
+
+
+def _canonical_dict(value):
+    if not isinstance(value, dict):
+        return {}
+    return {str(key): str(value[key]) for key in sorted(value)}
+
+
+def _cursor_identity(cursor):
+    if not isinstance(cursor, dict):
+        return None
+    return {
+        key: cursor.get(key)
+        for key in ("schema", "kind", "generation", "artifact", "sha256", "bytes")
+        if key in cursor
+    }
+
+
+def preview_identity_for_state(state, direction):
+    if direction == "save":
+        return {
+            "direction": "save",
+            "commit": state.get("last_save_preview_commit"),
+            "fingerprint": state.get("last_save_preview_fingerprint"),
+            "paths": _canonical_list(state.get("last_save_preview_paths")),
+            "conflict_paths": _canonical_list(state.get("last_save_preview_conflict_paths")),
+            "diff_cursor": _cursor_identity(state.get("last_save_diff_cursor")),
+        }
+    return {
+        "direction": "apply",
+        "commit": state.get("last_preview_commit"),
+        "fingerprint": state.get("last_preview_fingerprint"),
+        "live_fingerprints": _canonical_dict(state.get("last_preview_live_fingerprints")),
+        "paths": _canonical_list(state.get("last_preview_paths")),
+        "conflict_paths": _canonical_list(state.get("last_preview_conflict_paths")),
+        "diff_cursor": _cursor_identity(state.get("last_diff_cursor")),
+    }
+
+
+def _parse_preview_identity(value):
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if isinstance(value, str):
+        if not value:
+            return None
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(value, dict):
+        return None
+    identity = {
+        "direction": value.get("direction"),
+        "commit": value.get("commit"),
+        "fingerprint": value.get("fingerprint"),
+        "paths": _canonical_list(value.get("paths")),
+        "conflict_paths": _canonical_list(value.get("conflict_paths")),
+        "diff_cursor": _cursor_identity(value.get("diff_cursor")),
+    }
+    if value.get("direction") == "apply":
+        identity["live_fingerprints"] = _canonical_dict(value.get("live_fingerprints"))
+    return identity
+
+
+def assert_preview_decision_identity(state, direction, body):
+    current = preview_identity_for_state(state, direction)
+    if not current.get("paths"):
+        return
+    if _parse_preview_identity((body or {}).get("preview_identity")) != current:
+        raise StalePreviewDecision(_("error.preview_stale_decision"))
+
+
+def mutate_preview_decision(ctx, direction, action, body):
+    ok, state, lock_acquired = reserve_mutation_slot(ctx)
+    if not ok:
+        return command_result(False, _("error.running_action"), status=409)
+    try:
+        assert_preview_decision_identity(state, direction, body)
+        paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
+        selected_key = "save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths"
+        resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
+        conflict_paths_key = "last_save_preview_conflict_paths" if direction == "save" else "last_preview_conflict_paths"
+        paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
+        path_set = set(paths)
+        if action == "resolve":
+            raw_path = body_first(body, "path")
+            choice = body_first(body, "choice")
+            safe_path = git_ops.safe_repo_relative_path(raw_path)
+            if choice not in {"ha", "git"}:
+                raise RuntimeError(_("error.invalid_preview_choice"))
+            if safe_path not in paths:
+                raise RuntimeError(_("error.preview_path_not_pending"))
+            resolutions = dict(state.get(resolutions_key) or {})
+            resolutions[safe_path] = choice
+            conflict_paths = [str(item) for item in (state.get(conflict_paths_key) or paths) if str(item)]
+            remaining = [path for path in conflict_paths if path not in resolutions]
+            ctx.write_state(
+                {
+                    resolutions_key: resolutions,
+                    "last_run_at": ctx.utc_now(),
+                    "last_status": "idle",
+                    "last_action": f"resolve_{direction}_preview",
+                    "last_message": (
+                        _("message.resolved_preview_file", path=safe_path, remaining=len(remaining))
+                        if remaining
+                        else _("message.resolved_all_preview_files", direction=direction)
+                    ),
+                }
+            )
+        else:
+            selection_action = body_first(body, "selection_action")
+            if selection_action == "all":
+                selected = paths
+            elif selection_action == "none":
+                selected = []
+            else:
+                raw_path = body_first(body, "path")
+                safe_path = git_ops.safe_repo_relative_path(raw_path)
+                if safe_path not in path_set:
+                    raise RuntimeError(_("error.preview_path_not_pending"))
+                selected_set = {str(item) for item in (state.get(selected_key) or []) if str(item) in path_set}
+                if body_first(body, "selected") == "1":
+                    selected_set.add(safe_path)
+                else:
+                    selected_set.discard(safe_path)
+                selected = [path for path in paths if path in selected_set]
+            ctx.write_state(
+                {
+                    selected_key: selected,
+                    "last_run_at": ctx.utc_now(),
+                    "last_status": "idle",
+                    "last_action": f"select_{direction}_preview",
+                    "last_message": _("message.selected_preview_files", count=len(selected)),
+                }
+            )
+        return command_result(True, ctx.read_state().get("last_message", ""))
+    except StalePreviewDecision as exc:
+        return command_result(False, str(exc), status=409)
+    except Exception as exc:
+        if action == "resolve":
+            ctx.write_state(
+                {
+                    "last_run_at": ctx.utc_now(),
+                    "last_status": "error",
+                    "last_action": f"resolve_{direction}_preview",
+                    "last_message": str(exc),
+                    "last_details": [str(exc)],
+                }
+            )
+        return command_result(False, str(exc), status=400)
+    finally:
+        release_action_slot(ctx, lock_acquired)
 
 
 def assert_command_readiness(ctx, action, expected_generation=None):
@@ -937,6 +1108,17 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         else:
             command_id = None
             envelope_payload = body
+    if command in {"resolve_save_preview", "resolve_apply_preview", "select_save_preview", "select_apply_preview"}:
+        direction = "save" if command.endswith("save_preview") else "apply"
+        action = "resolve" if command.startswith("resolve_") else "select"
+        result = mutate_preview_decision(ctx, direction, action, envelope_payload)
+        if command_id:
+            ctx.update_command(
+                command_id,
+                "terminal",
+                {"ok": bool(result.get("ok")), "message": str(result.get("message", ""))},
+            )
+        return result
     if command == "preview":
         if start_job is None:
             ok = start_reserved_background(
@@ -1276,7 +1458,19 @@ def create_handler(ctx):
                             **result,
                         },
                     )
-                    if command in {"state_get", "replay", "save_preview", "preview", "save", "apply", "diff_get"}:
+                    if command in {
+                        "state_get",
+                        "replay",
+                        "save_preview",
+                        "preview",
+                        "save",
+                        "apply",
+                        "diff_get",
+                        "resolve_save_preview",
+                        "resolve_apply_preview",
+                        "select_save_preview",
+                        "select_apply_preview",
+                    }:
                         for frame in ws_state_frames(ctx, base_revision=last_revision):
                             write_ws_frame(self.wfile, frame)
                             last_revision = int(frame.get("revision") or last_revision)
@@ -1450,61 +1644,13 @@ def create_handler(ctx):
                     self.send_save_retry_pending()
                     return
                 direction = "save" if route == "/resolve-save-preview" else "apply"
-                ok, state, lock_acquired = reserve_mutation_slot(ctx)
-                if not ok:
-                    self.send_running_action()
-                    return
-                raw_path = body.get("path", [""])[0]
-                choice = body.get("choice", [""])[0]
-                try:
-                    safe_path = git_ops.safe_repo_relative_path(raw_path)
-                    if choice not in {"ha", "git"}:
-                        raise RuntimeError(_("error.invalid_preview_choice"))
-                    paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
-                    resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
-                    conflict_paths_key = "last_save_preview_conflict_paths" if direction == "save" else "last_preview_conflict_paths"
-                    paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
-                    if safe_path not in paths:
-                        raise RuntimeError(_("error.preview_path_not_pending"))
-                    resolutions = dict(state.get(resolutions_key) or {})
-                    resolutions[safe_path] = choice
-                    conflict_paths = [str(item) for item in (state.get(conflict_paths_key) or paths) if str(item)]
-                    remaining = [path for path in conflict_paths if path not in resolutions]
-                    ctx.write_state(
-                        {
-                            resolutions_key: resolutions,
-                            "last_run_at": ctx.utc_now(),
-                            "last_status": "idle",
-                            "last_action": f"resolve_{direction}_preview",
-                            "last_message": (
-                                _("message.resolved_preview_file", path=safe_path, remaining=len(remaining))
-                                if remaining
-                                else _("message.resolved_all_preview_files", direction=direction)
-                            ),
-                        }
-                    )
-                    if self.wants_json():
-                        self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
-                    else:
-                        self.send_html(render_page(ctx))
-                    return
-                except Exception as exc:
-                    ctx.write_state(
-                        {
-                            "last_run_at": ctx.utc_now(),
-                            "last_status": "error",
-                            "last_action": f"resolve_{direction}_preview",
-                            "last_message": str(exc),
-                            "last_details": [str(exc)],
-                        }
-                    )
-                    if self.wants_json():
-                        self.send_json({"ok": False, "message": str(exc)}, status=400)
-                    else:
-                        self.send_html(render_page(ctx), status=400)
-                    return
-                finally:
-                    release_action_slot(ctx, lock_acquired)
+                result = mutate_preview_decision(ctx, direction, "resolve", body)
+                status = int(result.pop("status", 200 if result.get("ok") else 400))
+                if self.wants_json():
+                    self.send_json(result, status=status)
+                else:
+                    self.send_html(render_page(ctx), status=status)
+                return
 
             if route == "/preview":
                 if self.save_retry_pending():
@@ -1524,53 +1670,13 @@ def create_handler(ctx):
                     self.send_save_retry_pending()
                     return
                 direction = "save" if route == "/select-save-preview" else "apply"
-                ok, state, lock_acquired = reserve_mutation_slot(ctx)
-                if not ok:
-                    self.send_running_action()
-                    return
-                try:
-                    paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
-                    selected_key = "save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths"
-                    paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
-                    path_set = set(paths)
-                    action = body.get("selection_action", [""])[0]
-                    if action == "all":
-                        selected = paths
-                    elif action == "none":
-                        selected = []
-                    else:
-                        raw_path = body.get("path", [""])[0]
-                        safe_path = git_ops.safe_repo_relative_path(raw_path)
-                        if safe_path not in path_set:
-                            raise RuntimeError(_("error.preview_path_not_pending"))
-                        selected_set = {str(item) for item in (state.get(selected_key) or []) if str(item) in path_set}
-                        if body.get("selected", [""])[0] == "1":
-                            selected_set.add(safe_path)
-                        else:
-                            selected_set.discard(safe_path)
-                        selected = [path for path in paths if path in selected_set]
-                    ctx.write_state(
-                        {
-                            selected_key: selected,
-                            "last_run_at": ctx.utc_now(),
-                            "last_status": "idle",
-                            "last_action": f"select_{direction}_preview",
-                            "last_message": _("message.selected_preview_files", count=len(selected)),
-                        }
-                    )
-                    if self.wants_json():
-                        self.send_json({"ok": True, "message": ctx.read_state().get("last_message", "")})
-                    else:
-                        self.send_html(render_page(ctx))
-                    return
-                except Exception as exc:
-                    if self.wants_json():
-                        self.send_json({"ok": False, "message": str(exc)}, status=400)
-                    else:
-                        self.send_html(render_page(ctx), status=400)
-                    return
-                finally:
-                    release_action_slot(ctx, lock_acquired)
+                result = mutate_preview_decision(ctx, direction, "select", body)
+                status = int(result.pop("status", 200 if result.get("ok") else 400))
+                if self.wants_json():
+                    self.send_json(result, status=status)
+                else:
+                    self.send_html(render_page(ctx), status=status)
+                return
 
             if route == "/save-preview":
                 if self.save_retry_pending():

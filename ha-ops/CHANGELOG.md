@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.9
+
+- Stabilize the reactive preview UI so WebSocket reconnects do not flicker the connection state, diff rows stay in the page flow, expanded diffs remain open across refreshes, and diff lines are highlighted.
+- Keep Change List selection and HA/Git resolution decisions server-authoritative, reject stale preview decisions after preview replacement, and keep same-preview decisions from invalidating current diff cursors.
+- Isolate HA Ops reactive UI theme variables so opening the App does not change the surrounding Home Assistant theme.
+
 ## 0.10.8
 
 - Restore the reactive preview completion controls so users can run Git to HA through Apply and HA to Git through Save after reviewing preview files.

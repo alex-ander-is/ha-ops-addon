@@ -68,8 +68,6 @@ PREVIEW_GENERATION_FIELDS = {
     "last_preview_paths",
     "last_preview_conflicts",
     "last_preview_conflict_paths",
-    "apply_preview_resolutions",
-    "apply_preview_selected_paths",
     "last_save_preview",
     "last_save_diff_generated_at",
     "last_save_preview_commit",
@@ -78,8 +76,6 @@ PREVIEW_GENERATION_FIELDS = {
     "last_save_preview_paths",
     "last_save_preview_conflicts",
     "last_save_preview_conflict_paths",
-    "save_preview_resolutions",
-    "save_preview_selected_paths",
 }
 
 # A cleanup rollback can outlive the App process.  Keep the recovery contract

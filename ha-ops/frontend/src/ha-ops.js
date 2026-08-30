@@ -9,11 +9,72 @@ import "@vaadin/select";
 const MUTATING_METHOD = "post";
 const TEXT = window.__HA_OPS_TEXT__ || {};
 const WS_COMMANDS = new Set([
-  "preview", "save_preview", "apply", "save", "reset_git_state", "disk_usage",
+  "preview", "save_preview", "apply", "save", "select_save_preview", "select_apply_preview",
+  "resolve_save_preview", "resolve_apply_preview", "reset_git_state", "disk_usage",
   "deleted_devices_preview", "retained_devices_preview", "retained_devices_delete",
   "internal_ids_preview", "internal_ids_migrate", "deleted_devices_delete",
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
+
+function sortedStrings(items) {
+  return [...(items || [])].map((item) => String(item)).filter(Boolean).sort();
+}
+
+function sortedObject(value) {
+  return Object.fromEntries(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function cursorIdentity(cursor) {
+  if (!cursor || typeof cursor !== "object") return null;
+  const identity = {};
+  for (const key of ["schema", "kind", "generation", "artifact", "sha256", "bytes"]) {
+    if (Object.hasOwn(cursor, key)) identity[key] = cursor[key];
+  }
+  return identity;
+}
+
+function cursorKey(cursor) {
+  return JSON.stringify(cursorIdentity(cursor));
+}
+
+function previewIdentity(state, direction) {
+  if (direction === "save") {
+    return {
+      direction: "save",
+      commit: state.last_save_preview_commit ?? null,
+      fingerprint: state.last_save_preview_fingerprint ?? null,
+      paths: sortedStrings(state.last_save_preview_paths),
+      conflict_paths: sortedStrings(state.last_save_preview_conflict_paths),
+      diff_cursor: cursorIdentity(state.last_save_diff_cursor),
+    };
+  }
+  return {
+    direction: "apply",
+    commit: state.last_preview_commit ?? null,
+    fingerprint: state.last_preview_fingerprint ?? null,
+    live_fingerprints: sortedObject(state.last_preview_live_fingerprints),
+    paths: sortedStrings(state.last_preview_paths),
+    conflict_paths: sortedStrings(state.last_preview_conflict_paths),
+    diff_cursor: cursorIdentity(state.last_diff_cursor),
+  };
+}
+
+function commandDirection(command) {
+  if (command === "select_save_preview" || command === "resolve_save_preview") return "save";
+  if (command === "select_apply_preview" || command === "resolve_apply_preview") return "apply";
+  return null;
+}
+
+function highlightedDiffLines(diff) {
+  return String(diff || "").split("\n").map((line) => {
+    let kind = "ctx";
+    if (line.startsWith("+") && !line.startsWith("+++")) kind = "add";
+    else if (line.startsWith("-") && !line.startsWith("---")) kind = "del";
+    else if (line.startsWith("@@")) kind = "hunk";
+    else if (line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++")) kind = "meta";
+    return html`<span class=${`line ${kind}`}>${line || " "}</span>`;
+  });
+}
 
 function uuid() {
   if (globalThis.crypto?.randomUUID) {
@@ -107,17 +168,23 @@ class HaOpsPreviewFile extends LitElement {
     expanded: { type: Boolean }, diff: { type: String }, diffState: { type: String },
   };
   static styles = css`
-    :host { display: block; border: 1px solid var(--ha-border); border-radius: 8px; overflow: hidden; }
+    :host { display: block; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; }
     header { display: flex; align-items: center; gap: .75rem; padding: .65rem .75rem; }
     code { min-width: 0; overflow-wrap: anywhere; }
-    pre { margin: 0; padding: .75rem; overflow: auto; white-space: pre; border-top: 1px solid var(--ha-border); }
-    [role="status"] { padding: .75rem; color: var(--ha-muted); }
+    pre { margin: 0; padding: .75rem; overflow: auto; white-space: pre; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
+    .line { display: block; min-height: 1.25em; color: var(--ha-ops-code-text, #24292f); }
+    .add { color: var(--ha-ops-diff-add-text, #116329); background: var(--ha-ops-diff-add-bg, #dafbe1); }
+    .del { color: var(--ha-ops-diff-del-text, #82071e); background: var(--ha-ops-diff-del-bg, #ffebe9); }
+    .hunk { color: var(--ha-ops-diff-hunk-text, #0550ae); background: var(--ha-ops-diff-hunk-bg, #ddf4ff); }
+    .meta { color: var(--ha-ops-muted-text, #57606a); font-weight: 600; }
+    [role="status"] { padding: .75rem; color: var(--ha-ops-muted-text, #57606a); }
   `;
   constructor() {
     super(); this.path = ""; this.cursor = null; this.generation = 0; this.expanded = false; this.diff = ""; this.diffState = "idle";
   }
   willUpdate(changed) {
-    if (changed.has("cursor") || changed.has("generation")) { this.expanded = false; this.diff = ""; this.diffState = "idle"; }
+    const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
+    if (cursorChanged || changed.has("generation")) { this.expanded = false; this.diff = ""; this.diffState = "idle"; }
   }
   render() {
     return html`
@@ -128,7 +195,7 @@ class HaOpsPreviewFile extends LitElement {
         <code>${this.path}</code>
       </header>
       ${this.expanded ? this.diffState === "loaded"
-        ? html`<pre aria-label="Diff detail">${this.diff}</pre>`
+        ? html`<pre aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
         : html`<div role="status">${this.diffState === "stale" ? TEXT.unavailableDiff : TEXT.loadingDiff}</div>`
         : nothing}
     `;
@@ -229,6 +296,7 @@ class HaOpsApp extends LitElement {
     this.reconnectTimer = null;
     this.replayPending = true;
     this.queuedFrames = [];
+    this.shouldReconnect = false;
   }
 
   connectedCallback() {
@@ -236,6 +304,7 @@ class HaOpsApp extends LitElement {
     this.addEventListener("submit", this.onSubmit);
     this.upgradeControls();
     this.observeLayout();
+    this.shouldReconnect = true;
     this.connect();
     if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) window.__haOpsTestCloseWs = () => this.socket?.close();
   }
@@ -243,6 +312,7 @@ class HaOpsApp extends LitElement {
   disconnectedCallback() {
     this.removeEventListener("submit", this.onSubmit);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.shouldReconnect = false;
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
   }
@@ -380,7 +450,10 @@ class HaOpsApp extends LitElement {
 
   async dispatchMutation(form) {
     const command = commandForAction(form.action);
-    return this.dispatchCommand(command, form.action, formPayload(form));
+    const payload = formPayload(form);
+    const direction = commandDirection(command);
+    if (direction) payload.preview_identity = previewIdentity(this.state, direction);
+    return this.dispatchCommand(command, form.action, payload);
   }
 
   async dispatchCommand(command, action, payload = {}) {
@@ -428,6 +501,7 @@ class HaOpsApp extends LitElement {
   }
 
   connect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.connection = "connecting";
     this.replayPending = true;
     if (typeof window.WebSocket !== "function") {
@@ -443,7 +517,8 @@ class HaOpsApp extends LitElement {
     });
     socket.addEventListener("message", (event) => this.receive(JSON.parse(event.data)));
     socket.addEventListener("close", () => {
-      this.connection = "disconnected";
+      if (!this.shouldReconnect) return;
+      this.connection = "reconnecting";
       for (const pending of this.pending.values()) {
         pending.reject(new Error(pending.sent ? "Command outcome is unknown after disconnect." : "WebSocket unavailable."));
       }

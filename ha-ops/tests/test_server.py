@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from types import MethodType
+from urllib.parse import urlencode
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1058,6 +1059,11 @@ class ServerTests(unittest.TestCase):
         request.send_error = MethodType(lambda self, status, *args, **kwargs: self.responses.append(status), request)
         request.do_POST()
         return request
+
+    def preview_identity_body(self, server, direction, values):
+        payload = dict(values)
+        payload["preview_identity"] = json.dumps(server.web.preview_identity_for_state(server.read_state(), direction))
+        return urlencode(payload).encode()
 
     def get_json_context(self, web_module, context, path):
         handler = web_module.create_handler(context)
@@ -3977,7 +3983,11 @@ class ServerTests(unittest.TestCase):
         ctx = FakeContext()
         handler = server.web.create_handler(ctx)
         request = handler.__new__(handler)
-        body = b"path=homeassistant/configuration.yaml&choice=ha"
+        body = urlencode({
+            "path": "homeassistant/configuration.yaml",
+            "choice": "ha",
+            "preview_identity": json.dumps(server.web.preview_identity_for_state(ctx.state, "apply")),
+        }).encode()
         request.path = "/resolve-apply-preview"
         request.rfile = io.BytesIO(body)
         request.wfile = io.BytesIO()
@@ -4054,22 +4064,34 @@ class ServerTests(unittest.TestCase):
             return request
 
         ctx = FakeContext()
+        save_identity = json.dumps(server.web.preview_identity_for_state(ctx.state, "save"))
+        apply_identity = json.dumps(server.web.preview_identity_for_state(ctx.state, "apply"))
 
-        request = invoke(ctx, "/select-save-preview", b"path=homeassistant/configuration.yaml&selected=1")
+        request = invoke(ctx, "/select-save-preview", urlencode({
+            "path": "homeassistant/configuration.yaml",
+            "selected": "1",
+            "preview_identity": save_identity,
+        }).encode())
         response = json.loads(request.wfile.getvalue().decode())
         self.assertEqual(request.responses[-1], 200)
         self.assertTrue(response["ok"])
         self.assertEqual(ctx.state["save_preview_selected_paths"], ["homeassistant/configuration.yaml"])
         self.assertEqual(ctx.calls, [])
 
-        request = invoke(ctx, "/select-save-preview", b"path=homeassistant/configuration.yaml")
+        request = invoke(ctx, "/select-save-preview", urlencode({
+            "path": "homeassistant/configuration.yaml",
+            "preview_identity": save_identity,
+        }).encode())
         response = json.loads(request.wfile.getvalue().decode())
         self.assertEqual(request.responses[-1], 200)
         self.assertTrue(response["ok"])
         self.assertEqual(ctx.state["save_preview_selected_paths"], [])
         self.assertEqual(ctx.calls, [])
 
-        request = invoke(ctx, "/select-apply-preview", b"selection_action=all")
+        request = invoke(ctx, "/select-apply-preview", urlencode({
+            "selection_action": "all",
+            "preview_identity": apply_identity,
+        }).encode())
         response = json.loads(request.wfile.getvalue().decode())
         self.assertEqual(request.responses[-1], 200)
         self.assertTrue(response["ok"])
@@ -4079,14 +4101,21 @@ class ServerTests(unittest.TestCase):
         )
         self.assertEqual(ctx.calls, [])
 
-        request = invoke(ctx, "/select-apply-preview", b"selection_action=none")
+        request = invoke(ctx, "/select-apply-preview", urlencode({
+            "selection_action": "none",
+            "preview_identity": apply_identity,
+        }).encode())
         response = json.loads(request.wfile.getvalue().decode())
         self.assertEqual(request.responses[-1], 200)
         self.assertTrue(response["ok"])
         self.assertEqual(ctx.state["apply_preview_selected_paths"], [])
         self.assertEqual(ctx.calls, [])
 
-        request = invoke(ctx, "/select-apply-preview", b"path=../configuration.yaml&selected=1")
+        request = invoke(ctx, "/select-apply-preview", urlencode({
+            "path": "../configuration.yaml",
+            "selected": "1",
+            "preview_identity": apply_identity,
+        }).encode())
         response = json.loads(request.wfile.getvalue().decode())
         self.assertEqual(request.responses[-1], 400)
         self.assertFalse(response["ok"])
@@ -17309,6 +17338,270 @@ devices:
             self.assertEqual(state["operation_generation"], generation)
             self.assertEqual(state["last_diff"], "current apply diff")
             self.assertEqual(server.context().diff_get(cursor), "current apply diff")
+
+    def test_apply_preview_decisions_keep_generation_and_diff_cursor_current(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_diff": "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+apply",
+                "last_preview_commit": "apply-commit-a",
+                "last_preview_fingerprint": "apply-fingerprint-a",
+                "last_preview_live_fingerprints": {
+                    "homeassistant/a.yaml": "live-a",
+                    "homeassistant/b.yaml": "live-b",
+                },
+                "last_preview_paths": ["homeassistant/a.yaml", "homeassistant/b.yaml"],
+                "last_preview_conflict_paths": ["homeassistant/a.yaml"],
+            })
+            identity = server.web.preview_identity_for_state(server.read_state(), "apply")
+            cursor = server.read_state()["last_diff_cursor"]
+            generation = server.read_state()["operation_generation"]
+            revision = server.read_state()["state_revision"]
+
+            select = server.web.dispatch_command(
+                server.context(),
+                "select_apply_preview",
+                {
+                    "command_id": "33333333-3333-4333-8333-333333333333",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/a.yaml",
+                        "selected": "1",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+            resolve = server.web.dispatch_command(
+                server.context(),
+                "resolve_apply_preview",
+                {
+                    "command_id": "44444444-4444-4444-8444-444444444444",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/a.yaml",
+                        "choice": "ha",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+
+            state = server.read_state()
+            self.assertTrue(select["ok"])
+            self.assertTrue(resolve["ok"])
+            self.assertEqual(state["apply_preview_selected_paths"], ["homeassistant/a.yaml"])
+            self.assertEqual(state["apply_preview_resolutions"], {"homeassistant/a.yaml": "ha"})
+            self.assertEqual(state["operation_generation"], generation)
+            self.assertGreater(state["state_revision"], revision)
+            self.assertEqual(server.context().diff_get(cursor), "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+apply")
+
+    def test_save_preview_decisions_keep_generation_and_diff_cursor_current(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_save_diff": "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+save",
+                "last_save_preview_commit": "save-commit-a",
+                "last_save_preview_fingerprint": "save-fingerprint-a",
+                "last_save_preview_paths": ["homeassistant/a.yaml", "homeassistant/b.yaml"],
+                "last_save_preview_conflict_paths": ["homeassistant/a.yaml"],
+            })
+            identity = server.web.preview_identity_for_state(server.read_state(), "save")
+            cursor = server.read_state()["last_save_diff_cursor"]
+            generation = server.read_state()["operation_generation"]
+            revision = server.read_state()["state_revision"]
+
+            select = server.web.dispatch_command(
+                server.context(),
+                "select_save_preview",
+                {
+                    "command_id": "55555555-5555-4555-8555-555555555555",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/a.yaml",
+                        "selected": "1",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+            resolve = server.web.dispatch_command(
+                server.context(),
+                "resolve_save_preview",
+                {
+                    "command_id": "66666666-6666-4666-8666-666666666666",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/a.yaml",
+                        "choice": "git",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+
+            state = server.read_state()
+            self.assertTrue(select["ok"])
+            self.assertTrue(resolve["ok"])
+            self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/a.yaml"])
+            self.assertEqual(state["save_preview_resolutions"], {"homeassistant/a.yaml": "git"})
+            self.assertEqual(state["operation_generation"], generation)
+            self.assertGreater(state["state_revision"], revision)
+            self.assertEqual(server.context().diff_get(cursor), "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+save")
+
+    def test_same_preview_identity_accepts_controls_captured_before_decision_refresh(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({
+                "last_diff": "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+apply",
+                "last_preview_commit": "apply-commit-a",
+                "last_preview_fingerprint": "apply-fingerprint-a",
+                "last_preview_live_fingerprints": {"homeassistant/a.yaml": "live-a", "homeassistant/b.yaml": "live-b"},
+                "last_preview_paths": ["homeassistant/a.yaml", "homeassistant/b.yaml"],
+            })
+            identity = server.web.preview_identity_for_state(server.read_state(), "apply")
+            generation = server.read_state()["operation_generation"]
+
+            first = server.web.dispatch_command(
+                server.context(),
+                "select_apply_preview",
+                {
+                    "command_id": "77777777-7777-4777-8777-777777777777",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/a.yaml",
+                        "selected": "1",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+            second = server.web.dispatch_command(
+                server.context(),
+                "select_apply_preview",
+                {
+                    "command_id": "88888888-8888-4888-8888-888888888888",
+                    "generation": generation,
+                    "payload": {
+                        "path": "homeassistant/b.yaml",
+                        "selected": "1",
+                        "preview_identity": identity,
+                    },
+                },
+            )
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertEqual(
+                server.read_state()["apply_preview_selected_paths"],
+                ["homeassistant/a.yaml", "homeassistant/b.yaml"],
+            )
+
+    def test_stale_preview_identity_rejects_same_path_decisions_after_preview_replace(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            path = "homeassistant/configuration.yaml"
+            server.write_state({
+                "last_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+old",
+                "last_save_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+old-save",
+                "last_preview_commit": "apply-old",
+                "last_preview_fingerprint": "apply-old-fingerprint",
+                "last_preview_live_fingerprints": {path: "old-live"},
+                "last_preview_paths": [path],
+                "last_preview_conflict_paths": [path],
+                "last_save_preview_commit": "save-old",
+                "last_save_preview_fingerprint": "save-old-fingerprint",
+                "last_save_preview_paths": [path],
+                "last_save_preview_conflict_paths": [path],
+            })
+            old_apply_identity = server.web.preview_identity_for_state(server.read_state(), "apply")
+            old_save_identity = server.web.preview_identity_for_state(server.read_state(), "save")
+            server.write_state({
+                "last_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+new",
+                "last_save_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+new-save",
+                "last_preview_commit": "apply-new",
+                "last_preview_fingerprint": "apply-new-fingerprint",
+                "last_preview_live_fingerprints": {path: "new-live"},
+                "last_preview_paths": [path],
+                "last_preview_conflict_paths": [path],
+                "apply_preview_selected_paths": [],
+                "apply_preview_resolutions": {},
+                "last_save_preview_commit": "save-new",
+                "last_save_preview_fingerprint": "save-new-fingerprint",
+                "last_save_preview_paths": [path],
+                "last_save_preview_conflict_paths": [path],
+                "save_preview_selected_paths": [],
+                "save_preview_resolutions": {},
+            })
+            current_generation = server.read_state()["operation_generation"]
+            cases = [
+                ("select_apply_preview", "99999999-9999-4999-8999-999999999991", {"path": path, "selected": "1", "preview_identity": old_apply_identity}),
+                ("resolve_apply_preview", "99999999-9999-4999-8999-999999999992", {"path": path, "choice": "ha", "preview_identity": old_apply_identity}),
+                ("select_save_preview", "99999999-9999-4999-8999-999999999993", {"path": path, "selected": "1", "preview_identity": old_save_identity}),
+                ("resolve_save_preview", "99999999-9999-4999-8999-999999999994", {"path": path, "choice": "git", "preview_identity": old_save_identity}),
+            ]
+
+            for command, command_id, payload in cases:
+                with self.subTest(command=command):
+                    result = server.web.dispatch_command(
+                        server.context(),
+                        command,
+                        {
+                            "command_id": command_id,
+                            "generation": current_generation,
+                            "payload": payload,
+                        },
+                    )
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["status"], 409)
+
+            state = server.read_state()
+            self.assertEqual(state["apply_preview_selected_paths"], [])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            self.assertEqual(state["save_preview_selected_paths"], [])
+            self.assertEqual(state["save_preview_resolutions"], {})
+
+    def test_legacy_preview_decisions_without_identity_fail_closed_for_non_empty_preview(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            path = "homeassistant/configuration.yaml"
+            server.write_state({
+                "last_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+apply",
+                "last_save_diff": "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n+save",
+                "last_preview_commit": "apply-commit",
+                "last_preview_fingerprint": "apply-fingerprint",
+                "last_preview_live_fingerprints": {path: "live"},
+                "last_preview_paths": [path],
+                "last_preview_conflict_paths": [path],
+                "last_save_preview_commit": "save-commit",
+                "last_save_preview_fingerprint": "save-fingerprint",
+                "last_save_preview_paths": [path],
+                "last_save_preview_conflict_paths": [path],
+            })
+            cases = [
+                ("/select-apply-preview", {"path": path, "selected": "1"}),
+                ("/resolve-apply-preview", {"path": path, "choice": "ha"}),
+                ("/select-save-preview", {"path": path, "selected": "1"}),
+                ("/resolve-save-preview", {"path": path, "choice": "git"}),
+            ]
+
+            for route, payload in cases:
+                with self.subTest(route=route):
+                    response = self.post_json(server, route, body=urlencode(payload).encode())
+                    self.assertEqual(response.responses[-1], 409)
+                    result = json.loads(response.wfile.getvalue().decode())
+                    self.assertFalse(result["ok"])
+
+            state = server.read_state()
+            self.assertEqual(state["apply_preview_selected_paths"], [])
+            self.assertEqual(state["apply_preview_resolutions"], {})
+            self.assertEqual(state["save_preview_selected_paths"], [])
+            self.assertEqual(state["save_preview_resolutions"], {})
 
     def test_websocket_url_and_commands_are_ingress_relative(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()

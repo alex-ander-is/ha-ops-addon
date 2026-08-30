@@ -302,6 +302,7 @@ class HarnessScenarioController:
 
     def _write_apply_preview(self, ctx, details):
         path = "homeassistant/configuration.yaml"
+        second_path = "homeassistant/packages/harness.yaml"
         diff = (
             "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n"
             "--- a/homeassistant/configuration.yaml\n"
@@ -310,6 +311,13 @@ class HarnessScenarioController:
             " default_config:\n"
             "+input_boolean:\n"
             "+  harness_git_only:\n"
+            "diff --git a/homeassistant/packages/harness.yaml b/homeassistant/packages/harness.yaml\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/homeassistant/packages/harness.yaml\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+input_boolean:\n"
+            "+  harness_git_package:\n"
         )
         ctx.write_state(
             {
@@ -325,9 +333,9 @@ class HarnessScenarioController:
                 "last_preview_deletions": 0,
                 "last_preview_storage_changes": False,
                 "last_preview_storage_paths": [],
-                "last_preview_live_fingerprints": {path: "live-fingerprint"},
+                "last_preview_live_fingerprints": {path: "live-fingerprint", second_path: "missing"},
                 "last_preview_warnings": [],
-                "last_preview_paths": [path],
+                "last_preview_paths": [path, second_path],
                 "last_preview_conflicts": False,
                 "last_preview_conflict_paths": [],
                 "apply_preview_resolutions": {},
@@ -337,6 +345,7 @@ class HarnessScenarioController:
 
     def _write_save_preview(self, ctx, details):
         path = "homeassistant/configuration.yaml"
+        second_path = "homeassistant/packages/live_harness.yaml"
         diff = (
             "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n"
             "--- a/homeassistant/configuration.yaml\n"
@@ -345,8 +354,19 @@ class HarnessScenarioController:
             " default_config:\n"
             "+input_boolean:\n"
             "+  harness_live_only:\n"
+            "diff --git a/homeassistant/packages/live_harness.yaml b/homeassistant/packages/live_harness.yaml\n"
+            "new file mode 100644\n"
+            "--- /dev/null\n"
+            "+++ b/homeassistant/packages/live_harness.yaml\n"
+            "@@ -0,0 +1,2 @@\n"
+            "+input_boolean:\n"
+            "+  harness_live_package:\n"
         )
-        summary = "Save preview changes (1):\n- Modified: homeassistant/configuration.yaml"
+        summary = (
+            "Save preview changes (2):\n"
+            "- Modified: homeassistant/configuration.yaml\n"
+            "- Added: homeassistant/packages/live_harness.yaml"
+        )
         ctx.write_state(
             {
                 "last_run_at": ctx.utc_now(),
@@ -360,7 +380,7 @@ class HarnessScenarioController:
                 "last_save_preview_commit": "harness-save-preview",
                 "last_save_preview_fingerprint": "harness-save-preview-fingerprint",
                 "last_save_preview_warnings": [],
-                "last_save_preview_paths": [path],
+                "last_save_preview_paths": [path, second_path],
                 "last_save_preview_conflicts": False,
                 "last_save_preview_conflict_paths": [],
                 "last_save_commit_subject": "Harness save preview",

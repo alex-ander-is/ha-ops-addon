@@ -224,6 +224,7 @@ EN_TEXT = {
     "error.preview_diff_changed": "Run Preview Git to HA again. The live diff changed since the last preview.",
     "error.preview_live_changed": "Run Preview Git to HA again. Live Home Assistant automations/scripts/scenes changed since the last preview.",
     "error.preview_path_not_pending": "Preview path is not pending",
+    "error.preview_stale_decision": "This Change List belongs to an older preview. Replay state and try again.",
     "error.request_failed": "Request failed.",
     "error.running_action": "Another HA Ops action is already running.",
     "error.save_conflict_path_not_pending": "Save conflict path is not pending",

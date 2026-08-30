@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -9,6 +10,45 @@ const sharedRoot = process.env.PLAYWRIGHT_SHARED_ROOT || "/Users/purportex/Appli
 const runtime = await import(pathToFileURL(path.join(sharedRoot, "src/runtime.mjs")).href);
 const { chromium } = runtime;
 const PREVIEW_BUTTONS = ["Preview Git to HA", "Preview HA to Git"];
+
+function sortedStrings(items) {
+  return [...(items || [])].map((item) => String(item)).filter(Boolean).sort();
+}
+
+function sortedObject(value) {
+  return Object.fromEntries(Object.entries(value || {}).sort(([left], [right]) => left.localeCompare(right)));
+}
+
+function cursorIdentity(cursor) {
+  if (!cursor || typeof cursor !== "object") return null;
+  return Object.fromEntries(
+    ["schema", "kind", "generation", "artifact", "sha256", "bytes"]
+      .filter((key) => Object.hasOwn(cursor, key))
+      .map((key) => [key, cursor[key]]),
+  );
+}
+
+function previewIdentity(state, direction) {
+  if (direction === "save") {
+    return {
+      direction: "save",
+      commit: state.last_save_preview_commit ?? null,
+      fingerprint: state.last_save_preview_fingerprint ?? null,
+      paths: sortedStrings(state.last_save_preview_paths),
+      conflict_paths: sortedStrings(state.last_save_preview_conflict_paths),
+      diff_cursor: cursorIdentity(state.last_save_diff_cursor),
+    };
+  }
+  return {
+    direction: "apply",
+    commit: state.last_preview_commit ?? null,
+    fingerprint: state.last_preview_fingerprint ?? null,
+    live_fingerprints: sortedObject(state.last_preview_live_fingerprints),
+    paths: sortedStrings(state.last_preview_paths),
+    conflict_paths: sortedStrings(state.last_preview_conflict_paths),
+    diff_cursor: cursorIdentity(state.last_diff_cursor),
+  };
+}
 
 function startHarness() {
   const child = spawn(
@@ -373,6 +413,78 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await assertPreviewExpansionControls(page, `${action} after reactive state update`);
 }
 
+async function postPreviewDecision(baseUrl, command, generation, payload) {
+  const response = await fetch(`${baseUrl}${command.replaceAll("_", "-")}`, {
+    method: "POST",
+    headers: { Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "fetch" },
+    body: JSON.stringify({
+      command_id: randomUUID(),
+      command,
+      generation,
+      payload,
+    }),
+  });
+  return response.json();
+}
+
+async function assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, direction) {
+  const snapshot = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
+  const state = snapshot.state;
+  const identity = previewIdentity(state, direction);
+  const paths = direction === "save" ? state.last_save_preview_paths : state.last_preview_paths;
+  const cursor = direction === "save" ? state.last_save_diff_cursor : state.last_diff_cursor;
+  assert(paths.length >= 2, `${direction} preview did not expose two browser decision paths`);
+
+  await page.getByRole("button", { name: "Expand All" }).last().click();
+  await page.getByText(direction === "save" ? "harness_live_package" : "harness_git_package").waitFor({ timeout: 5000 });
+
+  const selectCommand = direction === "save" ? "select_save_preview" : "select_apply_preview";
+  const resolveCommand = direction === "save" ? "resolve_save_preview" : "resolve_apply_preview";
+  const first = await postPreviewDecision(baseUrl, selectCommand, state.operation_generation, {
+    path: paths[0],
+    selected: "1",
+    preview_identity: identity,
+  });
+  assert(first.ok, `${direction} same-preview select rejected: ${JSON.stringify(first)}`);
+  await waitFor(`${direction} first decision refresh`, async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const selected = direction === "save"
+      ? current.state.save_preview_selected_paths
+      : current.state.apply_preview_selected_paths;
+    return selected?.includes(paths[0]) ? current : null;
+  });
+
+  const second = await postPreviewDecision(baseUrl, resolveCommand, state.operation_generation, {
+    path: paths[1],
+    choice: direction === "save" ? "git" : "ha",
+    preview_identity: identity,
+  });
+  assert(second.ok, `${direction} old same-preview resolve rejected after refresh: ${JSON.stringify(second)}`);
+
+  const diff = await page.evaluate(async (savedCursor) => {
+    return fetch(`diff-get?cursor=${encodeURIComponent(JSON.stringify(savedCursor))}`).then((response) => response.json());
+  }, cursor);
+  assert(diff.ok, `${direction} diff cursor failed after same-preview decisions: ${JSON.stringify(diff)}`);
+  const expanded = await page.getByTestId("preview-file").evaluateAll((items) => items.every((item) => item.expanded === true));
+  assert(expanded, `${direction} expanded diff state was lost after decision refresh`);
+
+  const oldIdentity = identity;
+  await page.getByRole("button", { name: direction === "save" ? "Preview HA to Git" : "Preview Git to HA" }).click();
+  await page.getByText(direction === "save" ? "Harness HA to Git preview finished." : "Harness Git to HA preview finished.").waitFor({ timeout: 5000 });
+  const afterReplace = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
+  const stale = await postPreviewDecision(baseUrl, selectCommand, afterReplace.state.operation_generation, {
+    path: paths[0],
+    selected: "1",
+    preview_identity: oldIdentity,
+  });
+  assert(!stale.ok, `${direction} stale select mutated replaced preview: ${JSON.stringify(stale)}`);
+  const afterStale = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
+  const selectedAfterStale = direction === "save"
+    ? afterStale.state.save_preview_selected_paths
+    : afterStale.state.apply_preview_selected_paths;
+  assert(selectedAfterStale.length === 0, `${direction} stale select repopulated replaced preview`);
+}
+
 async function runHttpFallbackFlow(page, baseUrl, posts, flow) {
   const before = await diagnostics(baseUrl);
   const beforePreviewComplete = before.counters.completed_jobs[flow.previewAction] || 0;
@@ -446,6 +558,7 @@ async function main() {
       return fetch(`diff-get?cursor=${encodeURIComponent(JSON.stringify(cursor))}`).then((response) => response.json());
     }, applyCursor);
     assert(applyDiff.ok && applyDiff.diff.includes("harness_git_only"), "apply diff_get did not return harness diff");
+    await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "apply");
 
     await runPreviewScenario(page, baseUrl, "save_preview", "Preview HA to Git", "Harness HA to Git preview finished.");
     const saveCursor = await page.evaluate(async () => {
@@ -456,6 +569,7 @@ async function main() {
       return fetch(`diff-get?cursor=${encodeURIComponent(JSON.stringify(cursor))}`).then((response) => response.json());
     }, saveCursor);
     assert(saveDiff.ok && saveDiff.diff.includes("harness_live_only"), "save diff_get did not return harness diff");
+    await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "save");
 
     await harnessPost(baseUrl, "__dev_harness__/arm", { action: "preview", gate: "running" });
     await page.getByRole("button", { name: "Preview Git to HA" }).click();
