@@ -439,6 +439,7 @@ async function main() {
     });
     await fallbackContext.addInitScript(() => {
       Object.defineProperty(window, "WebSocket", { value: undefined, configurable: true });
+      Object.defineProperty(window.crypto, "randomUUID", { value: undefined, configurable: true });
       window.__haOpsLoadId = `${Date.now()}-${Math.random()}`;
     });
     const fallbackPage = await fallbackContext.newPage();

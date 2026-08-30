@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.7
+
+- Fall back from `crypto.randomUUID()` when Home Assistant ingress does not expose it, keeping reactive command dispatch working in the App UI.
+- Cover the fallback in the local browser smoke scenario.
+
 ## 0.10.6
 
 - Replace WebSocket HTML fragments with a Lit 3 reactive state/revision client and pinned Vaadin 25 OSS controls, including mobile layout and visibly disabled controls.
