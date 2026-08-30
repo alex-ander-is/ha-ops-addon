@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.8
+
+- Restore the reactive preview completion controls so users can run Git to HA through Apply and HA to Git through Save after reviewing preview files.
+- Update the browser smoke coverage to exercise those full user flows through the HTTP fallback path without `crypto.randomUUID()`.
+
 ## 0.10.7
 
 - Fall back from `crypto.randomUUID()` when Home Assistant ingress does not expose it, keeping reactive command dispatch working in the App UI.

@@ -1528,6 +1528,8 @@ def render_page(data):
       collapseAll: {js_t('button.collapse_all')},
       applyPreview: {js_t('heading.git_to_ha')},
       savePreview: {js_t('heading.ha_to_git')},
+      apply: {js_t('action.apply')},
+      save: {js_t('action.save')},
       loadingDiff: {js_t('message.loading_diff')},
       unavailableDiff: {js_t('text.diff_detail_unavailable')},
       confirm: {js_t('action.confirm')}

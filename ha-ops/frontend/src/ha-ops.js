@@ -152,16 +152,19 @@ class HaOpsPreviewFile extends LitElement {
 customElements.define("ha-ops-preview-file", HaOpsPreviewFile);
 
 class HaOpsPreview extends LitElement {
-  static properties = { state: { type: Object }, direction: { type: String } };
+  static properties = { state: { type: Object }, direction: { type: String }, running: { type: Boolean } };
   static styles = css`
     :host { display: grid; gap: .65rem; margin-top: 1rem; }
     header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
     .actions { display: flex; gap: .5rem; }
     .files { display: grid; gap: .5rem; }
+    footer { display: flex; justify-content: flex-end; }
   `;
-  constructor() { super(); this.state = {}; this.direction = "apply"; }
+  constructor() { super(); this.state = {}; this.direction = "apply"; this.running = false; }
   get paths() { return this.direction === "save" ? this.state.last_save_preview_paths || [] : this.state.last_preview_paths || []; }
   get cursor() { return this.direction === "save" ? this.state.last_save_diff_cursor : this.state.last_diff_cursor; }
+  get finalCommand() { return this.direction === "save" ? "save" : "apply"; }
+  get finalLabel() { return this.direction === "save" ? TEXT.save : TEXT.apply; }
   render() {
     if (!this.paths.length) return nothing;
     return html`
@@ -177,9 +180,22 @@ class HaOpsPreview extends LitElement {
           data-testid="preview-file" .path=${path} .cursor=${this.cursor}
           .generation=${Number(this.state.operation_generation || 0)}></ha-ops-preview-file>`)}
       </div>
+      <footer>
+        <vaadin-button theme="primary" ?disabled=${this.running} @click=${() => this.runFinalAction()}>
+          ${this.finalLabel}
+        </vaadin-button>
+      </footer>
     `;
   }
   setAll(expanded) { for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded); }
+  runFinalAction() {
+    if (this.running) return;
+    this.dispatchEvent(new CustomEvent("ha-ops-command", {
+      bubbles: true,
+      composed: true,
+      detail: { command: this.finalCommand, payload: {} },
+    }));
+  }
 }
 customElements.define("ha-ops-preview", HaOpsPreview);
 
@@ -236,9 +252,11 @@ class HaOpsApp extends LitElement {
       <slot></slot>
       <section data-testid="reactive-previews">
         ${this.state.last_preview_paths?.length
-          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} direction="apply"></ha-ops-preview>` : nothing}
+          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="apply"
+              @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
         ${this.state.last_save_preview_paths?.length
-          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} direction="save"></ha-ops-preview>` : nothing}
+          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="save"
+              @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
       </section>
       <vaadin-confirm-dialog
         .opened=${this.confirmOpen}
@@ -343,6 +361,13 @@ class HaOpsApp extends LitElement {
     this.dispatchMutation(form).catch((error) => this.markUnknown(error));
   };
 
+  onCommand = (event) => {
+    event.stopPropagation();
+    const { command, payload } = event.detail || {};
+    this.dispatchCommand(command, new URL(command.replaceAll("_", "-"), baseUrl()).href, payload || {})
+      .catch((error) => this.markUnknown(error));
+  };
+
   confirmMutation = () => {
     const form = this.confirmForm;
     this.confirmOpen = false;
@@ -355,11 +380,15 @@ class HaOpsApp extends LitElement {
 
   async dispatchMutation(form) {
     const command = commandForAction(form.action);
+    return this.dispatchCommand(command, form.action, formPayload(form));
+  }
+
+  async dispatchCommand(command, action, payload = {}) {
     const envelope = {
       command_id: uuid(),
       command,
       generation: Number(this.state.operation_generation || 0),
-      payload: formPayload(form),
+      payload,
     };
     const socket = this.socket;
     if (WS_COMMANDS.has(command) && socket && socket.readyState === window.WebSocket.OPEN && !this.replayPending) {
@@ -375,14 +404,27 @@ class HaOpsApp extends LitElement {
     if (socket && socket.readyState !== window.WebSocket?.CLOSED) {
       throw new Error("Connection state is unknown; the command was not retried.");
     }
-    const response = await fetch(form.action, {
+    const response = await fetch(action, {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "fetch" },
       body: JSON.stringify(envelope),
     });
-    const payload = await response.json();
-    if (!response.ok || !payload.ok) throw new Error(payload.message || "Command rejected");
-    return payload;
+    const resultPayload = await response.json();
+    if (!response.ok || !resultPayload.ok) throw new Error(resultPayload.message || "Command rejected");
+    await this.pollHttpCommand(envelope.command_id);
+    return resultPayload;
+  }
+
+  async pollHttpCommand(commandId) {
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      await this.loadHttpBaseline();
+      const status = this.state.command_records?.[commandId]?.status;
+      if (status === "terminal") return;
+      if (status === "failed_unknown") throw new Error("Command outcome is unknown.");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new Error("Command did not finish before the HTTP fallback timeout.");
   }
 
   connect() {
@@ -485,6 +527,11 @@ class HaOpsApp extends LitElement {
       log.status = this.state.last_status || "idle";
     }
     this.upgradeControls();
+  }
+
+  isRunning() {
+    return this.state.last_status === "running" || Object.values(this.state.command_records || {})
+      .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
   }
 
   markUnknown(error) {

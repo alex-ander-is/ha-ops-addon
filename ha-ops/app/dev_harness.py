@@ -248,8 +248,12 @@ class HarnessScenarioController:
                 raise RuntimeError(f"dev harness gate timed out: {action}/{gate}")
             if action == "preview":
                 self._write_apply_preview(ctx, details)
-            else:
+            elif action == "save_preview":
                 self._write_save_preview(ctx, details)
+            elif action == "apply":
+                self._write_apply_complete(ctx, details)
+            else:
+                self._write_save_complete(ctx, details)
             with self._lock:
                 self.counters["completed_jobs"][action] = self.counters["completed_jobs"].get(action, 0) + 1
                 self.events.append({"action": action, "phase": "terminal"})
@@ -365,9 +369,35 @@ class HarnessScenarioController:
             }
         )
 
+    def _write_apply_complete(self, ctx, details):
+        ctx.write_state(
+            {
+                **state_store.APPLY_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "apply",
+                "last_message": "Harness Git automation applied to HA.",
+                "last_details": [*details, "Harness Git automation applied to HA."],
+                "post_apply_save_recommended": True,
+            }
+        )
+
+    def _write_save_complete(self, ctx, details):
+        ctx.write_state(
+            {
+                **state_store.SAVE_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "save",
+                "last_message": "Harness live HA changes committed to Git.",
+                "last_details": [*details, "Harness live HA changes committed to Git."],
+                "post_apply_save_recommended": False,
+            }
+        )
+
     def _normalize_action(self, action):
         action = str(action or "").replace("-", "_")
-        if action not in {"preview", "save_preview"}:
+        if action not in {"preview", "save_preview", "apply", "save"}:
             raise RuntimeError(f"unsupported dev harness action: {action}")
         return action
 
@@ -435,6 +465,12 @@ class DevHarnessContext(app_context.AppContext):
 
     def run_save_preview_job(self, lock_acquired=False):
         return self.harness_controller.run_job(self, "save_preview", lock_acquired=lock_acquired)
+
+    def run_apply_job(self, lock_acquired=False):
+        return self.harness_controller.run_job(self, "apply", lock_acquired=lock_acquired)
+
+    def run_save_job(self, commit_subject=None, lock_acquired=False):
+        return self.harness_controller.run_job(self, "save", lock_acquired=lock_acquired)
 
     def dev_harness_record_duplicate_rejection(self, action):
         self.harness_controller.record_duplicate_rejection(action)

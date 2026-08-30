@@ -373,6 +373,49 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await assertPreviewExpansionControls(page, `${action} after reactive state update`);
 }
 
+async function runHttpFallbackFlow(page, baseUrl, posts, flow) {
+  const before = await diagnostics(baseUrl);
+  const beforePreviewComplete = before.counters.completed_jobs[flow.previewAction] || 0;
+  const beforeFinalComplete = before.counters.completed_jobs[flow.finalAction] || 0;
+
+  const previewResponse = page.waitForResponse(
+    (response) => response.request().method() === "POST" && response.url().endsWith(`/${flow.previewPath}`),
+    { timeout: 5000 },
+  );
+  await page.getByRole("button", { name: flow.previewButton }).click();
+  const previewPayload = await (await previewResponse.catch(async (error) => {
+    throw new Error(`${error.message}; clientStatus=${await page.locator("#client-status").textContent()}`);
+  })).json();
+  assert(previewPayload.ok, `fetch fallback ${flow.previewButton} rejected: ${JSON.stringify(previewPayload)}`);
+  await waitFor(`fetch fallback ${flow.previewButton} completion`, async () => {
+    const state = await diagnostics(baseUrl);
+    return (state.counters.completed_jobs[flow.previewAction] || 0) > beforePreviewComplete ? state : null;
+  });
+  await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
+
+  const finalResponse = page.waitForResponse(
+    (response) => response.request().method() === "POST" && response.url().endsWith(`/${flow.finalPath}`),
+    { timeout: 5000 },
+  );
+  await page.getByRole("button", { name: flow.finalButton }).click();
+  const finalPayload = await (await finalResponse).json();
+  assert(finalPayload.ok, `fetch fallback ${flow.finalButton} rejected: ${JSON.stringify(finalPayload)}`);
+  await waitFor(`fetch fallback ${flow.finalButton} completion`, async () => {
+    const state = await diagnostics(baseUrl);
+    return (state.counters.completed_jobs[flow.finalAction] || 0) > beforeFinalComplete ? state : null;
+  });
+  await page.getByTestId("operation-log").getByText(flow.finalText).waitFor({ timeout: 5000 });
+  await assertStatus(page, "success", `fetch fallback ${flow.finalButton}`);
+  assert(
+    posts.some((item) => item.endsWith(`/api/hassio_ingress/local-ha-ops/${flow.previewPath}`)),
+    `fetch fallback did not POST ingress ${flow.previewButton}; posts=${posts.join(",")}`,
+  );
+  assert(
+    posts.some((item) => item.endsWith(`/api/hassio_ingress/local-ha-ops/${flow.finalPath}`)),
+    `fetch fallback did not POST ingress ${flow.finalButton}; posts=${posts.join(",")}`,
+  );
+}
+
 async function main() {
   const { child, ready } = startHarness();
   let browser;
@@ -447,35 +490,25 @@ async function main() {
     fallbackPage.on("pageerror", (error) => fallbackErrors.push(error.message));
     await fallbackPage.goto(baseUrl);
     await fallbackPage.getByTestId("connection-status").getByText("http").waitFor({ timeout: 5000 });
-    const beforeFallback = await diagnostics(baseUrl);
-    const beforePreviewComplete = beforeFallback.counters.completed_jobs.preview || 0;
-    const beforeSavePreviewComplete = beforeFallback.counters.completed_jobs.save_preview || 0;
-    const previewFallbackResponse = fallbackPage.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/preview"), { timeout: 5000 });
-    await fallbackPage.getByRole("button", { name: "Preview Git to HA" }).click();
-    const previewFallbackPayload = await (await previewFallbackResponse.catch(async (error) => {
-      throw new Error(`${error.message}; pageErrors=${fallbackErrors.join(" | ")}; clientStatus=${await fallbackPage.locator("#client-status").textContent()}`);
-    })).json();
-    assert(previewFallbackPayload.ok, `fetch fallback Preview Git to HA rejected: ${JSON.stringify(previewFallbackPayload)}`);
-    await waitFor("fetch fallback Preview Git to HA completion", async () => {
-      const state = await diagnostics(baseUrl);
-      return (state.counters.completed_jobs.preview || 0) > beforePreviewComplete ? state : null;
+    await runHttpFallbackFlow(fallbackPage, baseUrl, fallbackPosts, {
+      previewAction: "preview",
+      previewPath: "preview",
+      previewButton: "Preview Git to HA",
+      finalAction: "apply",
+      finalPath: "apply",
+      finalButton: "Apply Git to HA",
+      finalText: "Harness Git automation applied to HA.",
     });
-    const saveFallbackResponse = fallbackPage.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/save-preview"));
-    await fallbackPage.getByRole("button", { name: "Preview HA to Git" }).click();
-    const saveFallbackPayload = await (await saveFallbackResponse).json();
-    assert(saveFallbackPayload.ok, `fetch fallback Preview HA to Git rejected: ${JSON.stringify(saveFallbackPayload)}`);
-    await waitFor("fetch fallback Preview HA to Git completion", async () => {
-      const state = await diagnostics(baseUrl);
-      return (state.counters.completed_jobs.save_preview || 0) > beforeSavePreviewComplete ? state : null;
+    await runHttpFallbackFlow(fallbackPage, baseUrl, fallbackPosts, {
+      previewAction: "save_preview",
+      previewPath: "save-preview",
+      previewButton: "Preview HA to Git",
+      finalAction: "save",
+      finalPath: "save",
+      finalButton: "Save HA to Git",
+      finalText: "Harness live HA changes committed to Git.",
     });
-    assert(
-      fallbackPosts.some((item) => item.endsWith("/api/hassio_ingress/local-ha-ops/preview")),
-      `fetch fallback did not POST ingress Preview Git to HA; posts=${fallbackPosts.join(",")}`,
-    );
-    assert(
-      fallbackPosts.some((item) => item.endsWith("/api/hassio_ingress/local-ha-ops/save-preview")),
-      `fetch fallback did not POST ingress Preview HA to Git; posts=${fallbackPosts.join(",")}`,
-    );
+    assert(fallbackErrors.length === 0, `fetch fallback page errors: ${fallbackErrors.join(" | ")}`);
     await fallbackContext.close();
 
     const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
