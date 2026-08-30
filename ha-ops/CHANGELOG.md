@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.6
+
+- Replace WebSocket HTML fragments with a Lit 3 reactive state/revision client and pinned Vaadin 25 OSS controls, including mobile layout and visibly disabled controls.
+- Persist idempotent command records before scheduling work, return existing results for duplicate command IDs, and fail unresolved accepted/running commands closed after restart.
+- Load preview diff detail lazily per file and reject stale generation references without exposing raw diffs in replay or debug snapshots.
+- Rewrite the local browser scenarios around HA Ops host-level test IDs, accessible names, reconnect/replay, HTTP fallback, and Lit preview components.
+
 ## 0.10.5
 
 - Restore the HA Ops log panel as a fixed-height scroll area matched to the left control column, with a 500px fallback on stacked mobile layouts.

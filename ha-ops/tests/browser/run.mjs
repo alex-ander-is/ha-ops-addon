@@ -125,7 +125,7 @@ async function runningDomSnapshot(page, buttonName) {
     status: await page.locator("[data-status-code]").getAttribute("data-status-code"),
     buttonDisabled: await button.isDisabled(),
     buttonText: await button.textContent(),
-    details: await page.locator("[data-transient='details']").textContent(),
+    details: await page.getByTestId("operation-log").textContent(),
   };
 }
 
@@ -142,7 +142,7 @@ async function stateChangingControls(page) {
     return Array.from(document.querySelectorAll("form[method='post']"))
       .flatMap((form) => {
         const action = form.getAttribute("action") || "";
-        return Array.from(form.querySelectorAll("button, input:not([type='hidden']), select, textarea"))
+        return Array.from(form.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-radio-group, vaadin-select, input:not([type='hidden']), textarea"))
           .filter((control) => control.getClientRects().length > 0)
           .map((control, index) => {
             const type = (control.getAttribute("type") || "").toLowerCase();
@@ -203,7 +203,11 @@ async function assertPreviouslyEnabledControlsRestored(page, beforeControls, pha
 
 async function assertPreviewButtonState(page, buttonName, expectedDisabled, phase) {
   const button = page.getByRole("button", { name: buttonName });
-  const actual = await button.isDisabled();
+  const match = await waitFor(`${buttonName} ${phase} disabled=${expectedDisabled}`, async () => {
+    const value = await button.isDisabled();
+    return value === expectedDisabled ? { value } : null;
+  });
+  const actual = match.value;
   assert(
     actual === expectedDisabled,
     `${buttonName} ${phase} disabled state was ${actual}, expected ${expectedDisabled}`,
@@ -227,7 +231,7 @@ async function assertStatusNot(page, unexpectedStatus, phase) {
 }
 
 async function assertLogContains(page, expectedText, phase) {
-  const logText = await page.locator("[data-transient='details']").textContent();
+  const logText = await page.getByTestId("operation-log").textContent();
   assert(
     (logText || "").includes(expectedText),
     `${phase} log did not contain ${expectedText}; log=${JSON.stringify(logText)}`,
@@ -238,7 +242,8 @@ async function assertLogPanelLayout(page, expectedMode, phase) {
   const metrics = await waitFor(`${phase} log layout`, async () => page.evaluate((mode) => {
     const control = document.querySelector(".control-card");
     const card = document.querySelector(".details-card");
-    const log = document.querySelector("[data-transient='details']");
+    const host = document.querySelector("ha-ops-log");
+    const log = host?.shadowRoot?.querySelector("pre");
     if (!control || !card || !log) {
       return null;
     }
@@ -271,28 +276,25 @@ async function assertLogPanelLayout(page, expectedMode, phase) {
 }
 
 async function assertPreviewExpansionControls(page, phase) {
-  const files = page.locator("[data-preview-file]");
+  const files = page.getByTestId("preview-file");
   const count = await files.count();
   assert(count > 0, `${phase} had no preview files`);
   const firstFile = files.first();
-  const firstDetail = firstFile.locator(".preview-file-detail");
-  assert(await firstDetail.evaluate((element) => element.hidden), `${phase} first detail started expanded`);
+  const firstToggle = firstFile.getByRole("button", { name: "Expand Diff" });
+  await firstToggle.click();
+  await firstFile.getByRole("button", { name: "Collapse Diff" }).waitFor();
+  await firstFile.getByRole("button", { name: "Collapse Diff" }).click();
+  await firstFile.getByRole("button", { name: "Expand Diff" }).waitFor();
 
-  await firstFile.locator(".preview-file-toggle").first().click();
-  assert(!(await firstDetail.evaluate((element) => element.hidden)), `${phase} Expand did not show first detail`);
-
-  await firstFile.locator(".preview-file-detail-toggle").click();
-  assert(await firstDetail.evaluate((element) => element.hidden), `${phase} Collapse did not hide first detail`);
-
-  await page.locator(".preview-expand-all").first().click();
+  await page.getByRole("button", { name: "Expand All" }).last().click();
   const expandedAfterAll = await files.evaluateAll((items) =>
-    items.every((item) => !item.querySelector(".preview-file-detail")?.hidden),
+    items.every((item) => item.expanded === true),
   );
   assert(expandedAfterAll, `${phase} Expand All did not show all details`);
 
-  await page.locator(".preview-collapse-all").first().click();
+  await page.getByRole("button", { name: "Collapse All" }).last().click();
   const collapsedAfterAll = await files.evaluateAll((items) =>
-    items.every((item) => item.querySelector(".preview-file-detail")?.hidden),
+    items.every((item) => item.expanded === false),
   );
   assert(collapsedAfterAll, `${phase} Collapse All did not hide all details`);
 }
@@ -305,7 +307,7 @@ function assert(condition, message) {
 
 async function submitDuplicateFromBrowser(page, buttonName) {
   return page.evaluate((name) => {
-    const buttons = Array.from(document.querySelectorAll("button[type='submit']"));
+    const buttons = Array.from(document.querySelectorAll("vaadin-button"));
     const button = buttons.find((candidate) => (candidate.textContent || "").trim() === name);
     const form = button?.closest("form");
     if (!form) {
@@ -360,7 +362,7 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   assert((duplicateState.counters.started_jobs[action] || 0) === 1, `${action} duplicate started another job`);
 
   await harnessPost(baseUrl, "__dev_harness__/release", { action, gate: "running" });
-  await page.getByText(expectedText).waitFor({ timeout: 5000 });
+  await page.getByTestId("operation-log").getByText(expectedText).waitFor({ timeout: 5000 });
   assert((await page.evaluate(() => window.__haOpsLoadId)) === loadId, "page reloaded during WebSocket update");
   await assertStatus(page, "success", `${action} after preview`);
   await assertPreviewButtonsState(page, false, `${action} after preview`);
@@ -368,7 +370,7 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await assertLogContains(page, expectedText, `${action} success`);
   await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
   await assertLogPanelLayout(page, "matched", `${action} after preview`);
-  await assertPreviewExpansionControls(page, `${action} after WebSocket fragment`);
+  await assertPreviewExpansionControls(page, `${action} after reactive state update`);
 }
 
 async function main() {
@@ -440,18 +442,27 @@ async function main() {
       window.__haOpsLoadId = `${Date.now()}-${Math.random()}`;
     });
     const fallbackPage = await fallbackContext.newPage();
+    const fallbackErrors = [];
+    fallbackPage.on("pageerror", (error) => fallbackErrors.push(error.message));
     await fallbackPage.goto(baseUrl);
+    await fallbackPage.getByTestId("connection-status").getByText("http").waitFor({ timeout: 5000 });
     const beforeFallback = await diagnostics(baseUrl);
     const beforePreviewComplete = beforeFallback.counters.completed_jobs.preview || 0;
     const beforeSavePreviewComplete = beforeFallback.counters.completed_jobs.save_preview || 0;
+    const previewFallbackResponse = fallbackPage.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/preview"), { timeout: 5000 });
     await fallbackPage.getByRole("button", { name: "Preview Git to HA" }).click();
-    await fallbackPage.getByText("Git to HA preview started.").waitFor({ timeout: 5000 });
+    const previewFallbackPayload = await (await previewFallbackResponse.catch(async (error) => {
+      throw new Error(`${error.message}; pageErrors=${fallbackErrors.join(" | ")}; clientStatus=${await fallbackPage.locator("#client-status").textContent()}`);
+    })).json();
+    assert(previewFallbackPayload.ok, `fetch fallback Preview Git to HA rejected: ${JSON.stringify(previewFallbackPayload)}`);
     await waitFor("fetch fallback Preview Git to HA completion", async () => {
       const state = await diagnostics(baseUrl);
       return (state.counters.completed_jobs.preview || 0) > beforePreviewComplete ? state : null;
     });
+    const saveFallbackResponse = fallbackPage.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/save-preview"));
     await fallbackPage.getByRole("button", { name: "Preview HA to Git" }).click();
-    await fallbackPage.getByText("HA to Git preview started.").waitFor({ timeout: 5000 });
+    const saveFallbackPayload = await (await saveFallbackResponse).json();
+    assert(saveFallbackPayload.ok, `fetch fallback Preview HA to Git rejected: ${JSON.stringify(saveFallbackPayload)}`);
     await waitFor("fetch fallback Preview HA to Git completion", async () => {
       const state = await diagnostics(baseUrl);
       return (state.counters.completed_jobs.save_preview || 0) > beforeSavePreviewComplete ? state : null;

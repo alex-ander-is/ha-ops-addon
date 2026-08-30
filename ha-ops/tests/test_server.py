@@ -9,6 +9,7 @@ import threading
 import time
 import unicodedata
 import unittest
+import uuid
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
@@ -842,11 +843,11 @@ class ServerTests(unittest.TestCase):
                         ],
                     }
                 )
-                page = server.render_page()
-                self.assertNotIn("CATALOG save changes 3:", page)
-                self.assertIn("<span class='preview-file-change'>CATALOG_ADDED</span>", page)
-                self.assertIn("<span class='preview-file-change'>CATALOG_DELETED</span>", page)
-                self.assertIn("<span class='preview-file-change'>CATALOG_MODIFIED</span>", page)
+                summary = server.read_state()["last_save_preview"]
+                self.assertIn("CATALOG save changes 3:", summary)
+                self.assertIn("- CATALOG_ADDED: homeassistant/added.yaml", summary)
+                self.assertIn("- CATALOG_DELETED: homeassistant/deleted.yaml", summary)
+                self.assertIn("- CATALOG_MODIFIED: homeassistant/modified.yaml", summary)
         finally:
             i18n.EN_TEXT.update(originals)
 
@@ -986,72 +987,20 @@ class ServerTests(unittest.TestCase):
         self.assertIn("CATALOG: deleted_devices message sentinel.", page)
         self.assertNotIn("Checking Home Assistant deleted_devices.", page)
 
-    def test_render_page_escapes_translation_text_in_inline_script_literals(self):
+    def test_render_page_uses_external_reactive_module_without_inline_transport(self):
         server = load_server()
-        i18n = server.web.i18n
-        replacements = {
-            "message.no_log_entries": 'No log "quoted" and backslash \\ sentinel {braces} 😀 <tag>',
-            "message.working": 'Working "quoted" and backslash \\ sentinel {braces} 😀 <tag>',
-            "error.request_failed": 'Request "failed" and backslash \\ sentinel {braces} 😀 <tag>',
-            "message.done_refreshing": 'Done "refreshing" and backslash \\ sentinel {braces} 😀 <tag>',
-            "error.network": 'Network "error" and backslash \\ sentinel {braces} 😀 <tag>',
-            "button.collapse_diff": 'Collapse "diff" and backslash \\ sentinel {braces} 😀 <tag>',
-            "button.expand_diff": 'Expand "diff" and backslash \\ sentinel {braces} 😀 <tag>',
-        }
-        originals = {key: i18n.EN_TEXT[key] for key in replacements}
-
-        def script_literal(value):
-            return (
-                json.dumps(value, ensure_ascii=False)
-                .replace("<", "\\u003c")
-                .replace(">", "\\u003e")
-                .replace("&", "\\u0026")
-            )
-
-        try:
-            i18n.EN_TEXT.update(replacements)
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                self.configure_paths(server, root)
-                server.get_installed_addons = lambda: []
-
-                page = server.render_page()
-        finally:
-            i18n.EN_TEXT.update(originals)
-
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        self.assertIn(f"details.textContent = {script_literal(replacements['message.no_log_entries'])};", script)
-        self.assertIn(f"button.textContent = {script_literal(replacements['message.working'])};", script)
-        self.assertIn(f"setClientStatus({script_literal(replacements['message.working'])});", script)
-        self.assertIn(f"payload.message || {script_literal(replacements['error.request_failed'])}", script)
-        self.assertIn(f"payload.message || {script_literal(replacements['message.done_refreshing'])}", script)
-        self.assertIn(f"error?.message || {script_literal(replacements['error.network'])}", script)
-        self.assertIn(
-            "toggle.textContent = expanded ? "
-            f"{script_literal(replacements['button.collapse_diff'])} : "
-            f"{script_literal(replacements['button.expand_diff'])};",
-            script,
-        )
-        for value in replacements.values():
-            self.assertNotIn(f'"{value}"', script)
+        page = server.render_page()
+        self.assertIn('<ha-ops-app data-testid="ha-ops-app">', page)
+        self.assertIn('<script type="module" src="assets/ha-ops.js"></script>', page)
+        self.assertNotIn("function applyFragments", page)
+        self.assertNotIn("data-ws-fragment", page)
 
     def test_log_scroll_sticks_to_bottom_unless_user_scrolls_up(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-
-            page = server.render_page()
-
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        self.assertIn('const logScrollStorageKey = "haOpsLogScrollState";', script)
-        self.assertIn("return details.scrollHeight - details.scrollTop - details.clientHeight <= 4;", script)
-        self.assertIn("if (!state || state.sticky !== false)", script)
-        self.assertIn("details.scrollTop = details.scrollHeight;", script)
-        self.assertIn("details.scrollTop = Math.min(state.scrollTop, maxScrollTop);", script)
-        self.assertIn('details.addEventListener("scroll", () => {', script)
-        self.assertIn("restoreLogScrollState();", script)
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn('sessionStorage.getItem("haOpsLogScrollState")', script)
+        self.assertIn("log.scrollHeight - log.scrollTop - log.clientHeight <= 4", script)
+        self.assertIn("saved?.sticky === false", script)
+        self.assertIn("log.scrollTop = log.scrollHeight", script)
 
     def test_log_wraps_long_lines(self):
         server = load_server()
@@ -1063,15 +1012,14 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
         self.assertIn(
-            ".details-card pre {\n"
+            ".details-card ha-ops-log {\n"
             "      flex: 1 1 auto;\n"
             "      min-height: 0;\n"
-            "      margin: 0;\n"
-            "      white-space: pre-wrap;\n"
-            "      overflow-wrap: anywhere;\n"
-            "      overflow-y: auto;",
+            "      display: block;",
             page,
         )
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("white-space: pre-wrap", script)
 
     def configure_paths(self, server, root):
         server.DATA_DIR = root / "data"
@@ -1554,7 +1502,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("2026-05-14T21:52:16+02:00", page)
             self.assertNotIn("2026-05-14T19:52:16+00:00", page)
 
-    def test_render_page_shows_apply_preview_warnings_outside_diff(self):
+    def test_initial_page_has_only_the_reactive_preview_dom_contract(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1562,395 +1510,26 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
             server.write_state(
                 {
-                    "last_diff": "## homeassistant\nNo file changes.",
-                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
-                    "last_preview_warnings": ["registry item would be removed"],
-                }
-            )
-
-            page = server.render_page()
-
-            self.assertIn("Apply Preview", page)
-            self.assertIn("apply-preview-warning", page)
-            self.assertIn("registry item would be removed", page)
-            self.assertLess(page.index("apply-preview-warning"), page.index("data-transient='apply-preview'"))
-
-    def test_render_page_shows_save_preview_warnings_outside_diff(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-            server.write_state(
-                {
-                    "last_save_preview": "Save preview changes (1):\n- Added: .editorconfig",
-                    "last_save_diff": "diff --git a/.editorconfig b/.editorconfig",
-                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
-                    "last_save_preview_warnings": ["editor settings are Git-only candidates"],
-                }
-            )
-
-            page = server.render_page()
-
-            self.assertIn("Save Preview", page)
-            self.assertIn("editor settings are Git-only candidates", page)
-            self.assertLess(page.index("editor settings are Git-only candidates"), page.index("data-transient='save-preview'"))
-
-    def test_save_preview_renders_collapsed_change_list_with_save_choices_and_footer_actions(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-            server.write_state(
-                {
-                    "last_save_preview": (
-                        "Save preview changes (2):\n"
-                        "- Modified: homeassistant/configuration.yaml\n"
-                        "- Added: homeassistant/packages/lights.yaml"
-                    ),
-                    "last_save_diff": "\n".join(
-                        [
-                            "diff -ruN /tmp/repo/homeassistant/configuration.yaml /tmp/preview/homeassistant/configuration.yaml",
-                            "--- /tmp/repo/homeassistant/configuration.yaml",
-                            "+++ /tmp/preview/homeassistant/configuration.yaml",
-                            "@@ -1 +1 @@",
-                            "-git",
-                            "+ha",
-                            "diff -ruN /tmp/repo/homeassistant/packages/lights.yaml /tmp/preview/homeassistant/packages/lights.yaml",
-                            "--- /tmp/repo/homeassistant/packages/lights.yaml",
-                            "+++ /tmp/preview/homeassistant/packages/lights.yaml",
-                            "@@ -0,0 +1 @@",
-                            "+light:",
-                        ]
-                    ),
-                    "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
-                    "last_save_preview_paths": [
-                        "homeassistant/configuration.yaml",
-                        "homeassistant/packages/lights.yaml",
-                    ],
-                }
-            )
-
-            page = server.render_page()
-
-            self.assertIn("<h3>Change List</h3>", page)
-            self.assertIn("action='select-save-preview'", page)
-            self.assertIn("name='selection_action' value='all'", page)
-            self.assertIn("name='selection_action' value='none'", page)
-            self.assertIn("Select All", page)
-            self.assertIn("Select None", page)
-            self.assertIn("preview-expand-all", page)
-            self.assertIn("preview-collapse-all", page)
-            self.assertIn("border-radius: 0;", page)
-            self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
-            self.assertIn("<div class='preview-file-detail' hidden>", page)
-            self.assertIn("name='selected' value='1'", page)
-            self.assertIn("homeassistant/<strong>configuration.yaml</strong>", page)
-            self.assertIn("homeassistant/packages/<strong>lights.yaml</strong>", page)
-            self.assertIn("<span class='preview-file-change'>Modified</span>", page)
-            self.assertIn("<span class='preview-file-change'>Added</span>", page)
-            self.assertIn("Use HA Version", page)
-            self.assertIn("data-preview-key='save:homeassistant/configuration.yaml'", page)
-            self.assertIn("data-preserve-preview-expanded='true'", page)
-            self.assertIn(
-                "<input type='radio' name='choice' value='ha' checked disabled>",
-                page,
-            )
-            self.assertIn("<input type='radio' name='choice' value='git' disabled>", page)
-            self.assertIn("preview-choice-toggle", page)
-            self.assertIn("data-auto-submit='change'", page)
-            self.assertNotIn("Use Git Version", page)
-            self.assertNotIn("Save preview changes (2):", page)
-            self.assertNotIn("preview-summary", page)
-            detail = page.index("<div class='preview-file-detail' hidden>")
-            detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
-            detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
-            detail_choice_slot = page.index("data-preview-choice-slot='detail'", detail_actions)
-            self.assertLess(page.index("Wrap Lines"), detail)
-            self.assertLess(page.index("Use HA Version"), detail)
-            self.assertLess(page.index("Keep Unchanged"), detail)
-            self.assertLess(detail_collapse, detail_choice_slot)
-            self.assertIn(".preview-file-detail-actions {\n      justify-content: space-between;", page)
-            self.assertIn("data-preview-choice-slot='detail'></span>", page)
-            self.assertIn("for (const toggle of toggles)", page)
-            self.assertIn('nextFile.scrollIntoView({block: "start", inline: "nearest"});', page)
-            self.assertIn('sessionStorage.setItem(previewExpandedStorageKey, JSON.stringify(keys));', page)
-            self.assertIn('sessionStorage.removeItem(previewExpandedStorageKey);', page)
-            self.assertLess(page.index("preview-file-list"), page.index("Confirm Save to Git"))
-            self.assertIn("Commit Subject: <input type='text' name='commit_subject'", page)
-            self.assertIn("value='Save Home Assistant config ", page)
-            self.assertIn("<input type='hidden' name='default_commit_subject' value='Save Home Assistant config ", page)
-            self.assertIn("name='commit_subject'", page)
-            disabled_subject = page.index("name='commit_subject'")
-            self.assertLess(disabled_subject, page.index("<button type='submit' disabled>Confirm Save to Git</button>"))
-            self.assertIn("spellcheck='false' disabled>", page[disabled_subject : page.index("Confirm Save to Git")])
-            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
-            self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
-            self.assertLess(page.index("Confirm Save to Git"), page.index("Cancel"))
-
-            server.write_state({"save_preview_selected_paths": ["homeassistant/configuration.yaml"]})
-            selected_page = server.render_page()
-
-            self.assertIn("name='selected' value='1' checked", selected_page)
-            self.assertIn("<input type='radio' name='choice' value='ha' checked>", selected_page)
-            self.assertIn("<input type='radio' name='choice' value='git'>", selected_page)
-            enabled_subject = selected_page.index("name='commit_subject'")
-            self.assertLess(enabled_subject, selected_page.index("<button type='submit'>Confirm Save to Git</button>"))
-            self.assertNotIn("disabled", selected_page[enabled_subject : selected_page.index("Confirm Save to Git")])
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
-            self.assertNotIn("Select files to continue.", selected_page)
-
-            server.write_state({"save_push_retry_pending": True})
-            retry_page = server.render_page()
-
-            self.assertNotIn("name='commit_subject'", retry_page)
-            self.assertNotIn("name='default_commit_subject'", retry_page)
-            self.assertIn(
-                "A Save commit has already been created. Confirm Save will retry pushing that commit to Git.",
-                retry_page,
-            )
-            self.assertIn("name='selected' value='1' checked disabled", retry_page)
-            self.assertIn("name='selected' value='1' disabled", retry_page)
-            self.assertIn("<input type='radio' name='choice' value='ha' checked disabled>", retry_page)
-            self.assertIn("<input type='radio' name='choice' value='git' disabled>", retry_page)
-            self.assertIn("<button type='submit' class='secondary' disabled>Select All</button>", retry_page)
-            self.assertIn("<button type='submit' class='secondary' disabled>Select None</button>", retry_page)
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", retry_page)
-            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", retry_page)
-            self.assertRegex(
-                retry_page,
-                r"<button type=\"submit\" class=\"[^\"]+\" disabled>(Preview HA to Git|Review Post-Apply HA Changes)</button>",
-            )
-            self.assertIn("<input type='checkbox' name='include_redundant_data' value='1' disabled>", retry_page)
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", retry_page)
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Reset Git State</button>", retry_page)
-            self.assertNotIn("Select files to continue.", retry_page)
-
-            server.write_state(
-                {
-                    "conflicts": ["homeassistant/configuration.yaml"],
-                    "conflict_type": "save_unknown_base",
-                    "save_push_retry_pending": True,
-                    "save_push_retry_commit": "pending-save",
-                }
-            )
-            retry_conflicts_page = server.render_page()
-            self.assertIn("<button type='submit' disabled>Approve HA to Git</button>", retry_conflicts_page)
-            self.assertIn(
-                "<button type='submit' class='secondary' disabled>Use HA Version</button>",
-                retry_conflicts_page,
-            )
-            self.assertIn(
-                "<button type='submit' class='secondary' disabled>Use Git Version</button>",
-                retry_conflicts_page,
-            )
-            self.assertNotIn("<button type='submit'>Approve HA to Git</button>", retry_conflicts_page)
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", retry_conflicts_page)
-            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", retry_conflicts_page)
-
-            server.write_state(
-                {
-                    "last_retained_devices_generated_at": "2026-06-24T12:00:00+00:00",
-                    "last_retained_devices_rows": [
-                        {
-                            "selected": True,
-                            "identifiers": ["mqtt", "zigbee2mqtt_0xabc123fffed45678"],
-                            "name": "detached_button",
-                            "manufacturer": "Example",
-                            "model": "Battery button",
-                            "retained_topics": [
-                                "homeassistant/device_automation/0xabc123fffed45678/action_hold/config"
-                            ],
-                        }
-                    ],
-                    "deleted_devices_pending_confirmation": True,
-                    "deleted_devices_rollback_path": "/tmp/rollback",
-                }
-            )
-            retry_cleanup_page = server.render_page()
-            self.assertIn("<button type='submit' disabled>Delete retained devices</button>", retry_cleanup_page)
-            self.assertIn(
-                "<button type='submit' class='secondary' disabled>Confirm Changes</button>",
-                retry_cleanup_page,
-            )
-            self.assertIn("<button type='submit' disabled>Revert Changes</button>", retry_cleanup_page)
-
-    def test_apply_preview_renders_collapsed_change_list_with_apply_choices_and_footer_actions(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-            server.write_state(
-                {
-                    "last_diff": "\n".join(
-                        [
-                            "## homeassistant",
-                            "diff -ruN /tmp/apply-preview/baseline/configuration.yaml /tmp/apply-preview/preview/configuration.yaml",
-                            "--- /tmp/apply-preview/baseline/configuration.yaml",
-                            "+++ /tmp/apply-preview/preview/configuration.yaml",
-                            "@@ -1 +1 @@",
-                            "-ha",
-                            "+git",
-                        ]
-                    ),
                     "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
                     "last_preview_paths": ["homeassistant/configuration.yaml"],
-                    "last_preview_conflicts": True,
-                    "last_preview_conflict_paths": ["homeassistant/configuration.yaml"],
-                }
-            )
-
-            page = server.render_page()
-
-            self.assertIn("<h3>Change List</h3>", page)
-            self.assertIn("action='select-apply-preview'", page)
-            self.assertIn("name='selection_action' value='all'", page)
-            self.assertIn("name='selection_action' value='none'", page)
-            self.assertIn("Select All", page)
-            self.assertIn("Select None", page)
-            self.assertIn("preview-expand-all", page)
-            self.assertIn("preview-collapse-all", page)
-            self.assertIn("aria-expanded='false'>Expand Diff</button>", page)
-            self.assertIn("<div class='preview-file-detail' hidden>", page)
-            self.assertIn("name='selected' value='1'", page)
-            self.assertIn("homeassistant/<strong>configuration.yaml</strong>", page)
-            self.assertIn("data-preview-key='apply:homeassistant/configuration.yaml'", page)
-            self.assertIn("Wrap Lines", page)
-            self.assertIn("Use Git Version", page)
-            self.assertIn(
-                "<input type='radio' name='choice' value='git' disabled>",
-                page,
-            )
-            self.assertIn("<input type='radio' name='choice' value='ha' disabled>", page)
-            self.assertIn("preview-choice-toggle", page)
-            self.assertNotIn("Use HA Version", page)
-            self.assertNotIn("## homeassistant", page)
-            self.assertNotIn("preview-summary", page)
-            detail = page.index("<div class='preview-file-detail' hidden>")
-            detail_actions = page.index("<div class='preview-file-actions preview-file-detail-actions'>")
-            detail_collapse = page.index("preview-file-detail-toggle", detail_actions)
-            detail_choice_slot = page.index("data-preview-choice-slot='detail'", detail_actions)
-            self.assertLess(page.index("Wrap Lines"), detail)
-            self.assertLess(page.index("Use Git Version"), detail)
-            self.assertLess(page.index("Keep Unchanged"), detail)
-            self.assertLess(detail_collapse, detail_choice_slot)
-            self.assertIn(".preview-file-detail-actions {\n      justify-content: space-between;", page)
-            self.assertIn("data-preview-choice-slot='detail'></span>", page)
-            self.assertIn('nextFile.scrollIntoView({block: "start", inline: "nearest"});', page)
-            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
-            self.assertIn("<span class='preview-confirm-hint'>Select files to continue.</span>", page)
-            self.assertLess(page.index("preview-file-list"), page.index("Confirm Apply to HA"))
-            self.assertLess(page.index("Confirm Apply to HA"), page.index("Cancel"))
-
-            server.write_state(
-                {
-                    "apply_preview_selected_paths": ["homeassistant/configuration.yaml"],
-                }
-            )
-            selected_page = server.render_page()
-
-            self.assertIn("name='selected' value='1' checked", selected_page)
-            self.assertIn("preview-choice-option preview-choice-option-selected", selected_page)
-            self.assertIn("<input type='radio' name='choice' value='git' checked>", selected_page)
-            self.assertIn("<input type='radio' name='choice' value='ha'>", selected_page)
-            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", selected_page)
-            self.assertNotIn("Select files to continue.", selected_page)
-
-            server.write_state({"apply_preview_resolutions": {"homeassistant/configuration.yaml": "ha"}})
-            kept_page = server.render_page()
-
-            self.assertIn("<input type='radio' name='choice' value='git'>", kept_page)
-            self.assertIn("<input type='radio' name='choice' value='ha' checked>", kept_page)
-            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", kept_page)
-
-    def test_apply_selected_lovelace_storage_highlights_git_default_without_has_selector(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-            server.write_state(
-                {
-                    "last_status": "idle",
-                    "last_preview": "Apply preview changes (4):\n- Modified: homeassistant/.storage/lovelace.lovelace",
-                    "last_diff": "\n".join(
-                        [
-                            "## homeassistant",
-                            "diff -ruN /tmp/apply-preview/baseline/.storage/lovelace.lovelace /tmp/apply-preview/preview/.storage/lovelace.lovelace",
-                            "--- /tmp/apply-preview/baseline/.storage/lovelace.lovelace",
-                            "+++ /tmp/apply-preview/preview/.storage/lovelace.lovelace",
-                            "@@ -1 +1 @@",
-                            '-{"data":{"config":{"title":"Live"}}}',
-                            '+{"data":{"config":{"title":"Git"}}}',
-                        ]
-                    ),
-                    "last_preview_paths": [
-                        "homeassistant/configuration.yaml",
-                        "homeassistant/.storage/lovelace.lovelace",
-                        "homeassistant/scripts.yaml",
-                        "homeassistant/scenes.yaml",
-                    ],
-                    "apply_preview_selected_paths": ["homeassistant/.storage/lovelace.lovelace"],
-                }
-            )
-
-            page = server.render_page()
-
-            self.assertIn("homeassistant/.storage/<strong>lovelace.lovelace</strong>", page)
-            self.assertIn(
-                "<label class='preview-choice-option preview-choice-option-selected'>"
-                "<input type='radio' name='choice' value='git' checked>"
-                "<span>Use Git Version</span>",
-                page,
-            )
-            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
-
-    def test_running_preview_disables_save_and_apply_cancel_actions(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-            server.write_state(
-                {
-                    "last_status": "running",
-                    "last_save_preview": "Save preview changes (1):\n- Modified: homeassistant/configuration.yaml",
                     "last_save_diff_generated_at": "2026-05-14T19:52:16+00:00",
-                    "last_save_preview_paths": ["homeassistant/configuration.yaml"],
-                    "last_diff": "\n".join(
-                        [
-                            "## homeassistant",
-                            "diff -ruN /tmp/apply-preview/baseline/configuration.yaml /tmp/apply-preview/preview/configuration.yaml",
-                            "--- /tmp/apply-preview/baseline/configuration.yaml",
-                            "+++ /tmp/apply-preview/preview/configuration.yaml",
-                            "@@ -1 +1 @@",
-                            "-ha",
-                            "+git",
-                        ]
-                    ),
-                    "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
-                    "last_preview_paths": ["homeassistant/configuration.yaml"],
+                    "last_save_preview_paths": ["homeassistant/scripts.yaml"],
                 }
             )
 
-            server.context().run_lock.acquire()
-            try:
-                page = server.render_page()
-            finally:
-                server.context().run_lock.release()
+            page = server.render_page()
 
-            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
-            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
-            self.assertEqual(page.count("<button type='submit' class='secondary' disabled>Cancel</button>"), 2)
-            self.assertIn("<input type='radio' name='choice' value='ha' checked disabled>", page)
-            self.assertIn("<input type='radio' name='choice' value='git' checked disabled>", page)
-            self.assertEqual(page.count("Keep Unchanged"), 2)
-            self.assertIn(
-                "<input type='checkbox' name='include_redundant_data' value='1' disabled>",
-                page,
-            )
+        app_markup = page.split('<ha-ops-app data-testid="ha-ops-app">', 1)[1].split("</ha-ops-app>", 1)[0]
+        reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        built_script = (ROOT / "app" / "static" / "ha-ops.js").read_text()
+        self.assertNotIn("data-server-preview", page)
+        self.assertNotIn("<ha-ops-preview", app_markup)
+        self.assertNotIn("preview-file-toggle", app_markup)
+        self.assertNotIn("action='select-apply-preview'", app_markup)
+        self.assertNotIn("action='select-save-preview'", app_markup)
+        self.assertEqual(reactive_script.count('data-testid="reactive-previews"'), 1)
+        self.assertNotIn("data-server-preview", reactive_script)
+        self.assertNotIn("data-server-preview", built_script)
 
     def test_running_job_disables_save_conflict_actions(self):
         server = load_server()
@@ -2641,32 +2220,20 @@ class ServerTests(unittest.TestCase):
             i18n.EN_TEXT.update(originals)
 
     def test_async_actions_do_not_clear_persisted_state_before_submit(self):
-        server = load_server()
-
-        page = server.render_page()
-        submit_start = page.index("async function submitAsyncForm")
-        submit_end = page.index("try {", submit_start)
-        submit_setup = page[submit_start:submit_end]
-
-        self.assertIn("clearTransientDisplay();", submit_setup)
-        self.assertNotIn("clearDisplayState();", submit_setup)
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        submit_start = script.index("async dispatchMutation(form)")
+        submit_end = script.index("connect()", submit_start)
+        submit_block = script[submit_start:submit_end]
+        self.assertNotIn("clear-display-state", submit_block)
+        self.assertIn("command_id: uuid()", submit_block)
 
     def test_running_page_uses_websocket_replay_until_job_finishes(self):
         server = load_server()
-
-        class PageData(dict):
-            def __missing__(self, key):
-                return ""
-
-        idle_page = server.ui.render_page(PageData(job_running_json="false"))
-        self.assertIn("const pageRenderedRunning = false;", idle_page)
-
-        running_page = server.ui.render_page(PageData(job_running_json="true"))
-        self.assertIn("const pageRenderedRunning = true;", running_page)
-        self.assertIn("ensureWs();", running_page)
-        self.assertIn('command: "replay"', running_page)
-        self.assertNotIn("reloadSoon", running_page)
-        self.assertNotIn("if (isRunning())", running_page)
+        page = server.render_page()
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("<ha-ops-app", page)
+        self.assertIn('command: "replay"', script)
+        self.assertNotIn("window.location.reload", script)
 
     def test_startup_clears_empty_error_state(self):
         server = load_server()
@@ -6451,31 +6018,10 @@ class ServerTests(unittest.TestCase):
             self.assertIn("homeassistant/packages/second.yaml", state["last_save_preview_paths"])
             self.assertEqual(state["save_preview_selected_paths"], [])
 
-            page = server.render_page()
-            subject_start = page.index("name='commit_subject'")
-            confirm_start = page.index("Confirm Save to Git")
-            self.assertIn(
-                "name='commit_subject' value='Custom HA Save Subject'",
-                page[subject_start:confirm_start],
-            )
-            self.assertIn("spellcheck='false' disabled>", page[subject_start:confirm_start])
-            self.assertIn(
-                "name='default_commit_subject' value='Save Home Assistant config 2026-06-24\u00a0•\u00a020-00-00'",
-                page,
-            )
-            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
-
             server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
-            selected_page = server.render_page()
-            subject_start = selected_page.index("name='commit_subject'")
-            confirm_start = selected_page.index("Confirm Save to Git")
-            self.assertIn(
-                "name='commit_subject' value='Save Home Assistant config 2026-06-24\u00a0•\u00a020-00-00'",
-                selected_page[subject_start:confirm_start],
-            )
-            self.assertNotIn("value='Custom HA Save Subject'", selected_page[subject_start:confirm_start])
-            self.assertNotIn("disabled", selected_page[subject_start:confirm_start])
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", selected_page)
+            selected_state = server.read_state()
+            self.assertEqual(selected_state["last_save_commit_subject"], "Custom HA Save Subject")
+            self.assertEqual(selected_state["save_preview_selected_paths"], ["homeassistant/packages/second.yaml"])
 
     def test_save_ha_to_git_recomputes_unchanged_default_commit_subject_at_job_start(self):
         server = load_server()
@@ -6484,10 +6030,6 @@ class ServerTests(unittest.TestCase):
             server.context().release_now = lambda: "2026-06-24_17-00-00"
             remote = self.prepare_empty_save_preview(server, root)
             rendered_default = "Save Home Assistant config 2026-06-24\u00a0•\u00a017-00-00"
-            page = server.render_page()
-            self.assertIn(f"name='commit_subject' value='{rendered_default}'", page)
-            self.assertIn(f"name='default_commit_subject' value='{rendered_default}'", page)
-
             commit_subject = server.app_context.job_logic.save_commit_subject_from_submission(
                 rendered_default,
                 rendered_default,
@@ -6796,11 +6338,6 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
             self.assertIn('<div class="badge " data-status-code="warning">warning</div>', page)
             self.assertNotIn('<div class="badge error">error</div>', page)
-            self.assertIn("Save Preview", page)
-            self.assertIn("Confirm Save to Git", page)
-            self.assertIn("homeassistant/configuration.yaml", page)
-            self.assertIn("git", page)
-            self.assertIn("ha", page)
 
     def test_save_preview_save_all_uses_preview_approval(self):
         server = load_server()
@@ -6826,11 +6363,6 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
             self.assertEqual(state["save_preview_selected_paths"], [])
-            page = server.render_page()
-            self.assertIn("Confirm Save to Git", page)
-            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
-            self.assertIn("homeassistant/configuration.yaml", page)
-
             self.assertFalse(server.run_save_job())
             self.assertIn("Select at least one preview file", server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
@@ -8525,14 +8057,10 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            page = server.render_page()
-            self.assertIn("<button type='submit' disabled>Confirm Save to Git</button>", page)
             self.select_all_save_preview_files(server)
             self.assertFalse(server.run_save_job())
             self.assertIn("Choose HA or Git version", server.read_state()["last_message"])
             server.write_state({"save_preview_resolutions": {"homeassistant/packages/a.yaml": "git"}})
-            page = server.render_page()
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", page)
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "show", "main:homeassistant/packages/a.yaml"],
@@ -8600,13 +8128,12 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            page = server.render_page()
-            self.assertIn("Save Preview", page)
-            self.assertIn("homeassistant/.storage/core.device_registry", page)
-            self.assertNotIn("sw_version", page)
-            self.assertNotIn("modified_at", page)
-            self.assertNotIn("git-modified-at", page)
-            self.assertNotIn("live-modified-at", page)
+            diff = server.read_state()["last_save_diff"]
+            self.assertIn("homeassistant/.storage/core.device_registry", diff)
+            self.assertNotIn("sw_version", diff)
+            self.assertNotIn("modified_at", diff)
+            self.assertNotIn("git-modified-at", diff)
+            self.assertNotIn("live-modified-at", diff)
 
     def test_save_unknown_base_entity_registry_conflict_diff_hides_hidden_fields(self):
         server = load_server()
@@ -8674,14 +8201,13 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            page = server.render_page()
-            self.assertIn("Save Preview", page)
-            self.assertIn("homeassistant/.storage/core.entity_registry", page)
-            self.assertNotIn("supported_features", page)
-            self.assertNotIn("modified_at", page)
-            self.assertNotIn("suggested_object_id", page)
-            self.assertNotIn("git_object", page)
-            self.assertNotIn("live_object", page)
+            diff = server.read_state()["last_save_diff"]
+            self.assertIn("homeassistant/.storage/core.entity_registry", diff)
+            self.assertNotIn("supported_features", diff)
+            self.assertNotIn("modified_at", diff)
+            self.assertNotIn("suggested_object_id", diff)
+            self.assertNotIn("git_object", diff)
+            self.assertNotIn("live_object", diff)
 
     def test_save_unknown_base_use_git_keeps_git_version(self):
         server = load_server()
@@ -10536,8 +10062,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
             self.assertEqual(server.git_head_or_unborn(root / "data" / "ha-config"), pending_commit)
             self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertIn("Confirm Save to Git", server.render_page())
-
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
             self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
@@ -10756,10 +10280,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["save_push_retry_commit"], server.git_head_or_unborn(root / "data" / "ha-config"))
             self.assertEqual(state["last_save_preview_paths"], ["homeassistant/packages/new.yaml"])
             self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
-            page = server.render_page()
-            self.assertIn("Confirm Save to Git", page)
-            self.assertIn("<button type='submit'>Confirm Save to Git</button>", page)
-            self.assertIn("<button type='submit' class='secondary'>Cancel</button>", page)
 
     def test_stale_save_push_retry_flag_clears_when_no_unpushed_commit_exists(self):
         server = load_server()
@@ -11629,11 +11149,6 @@ class ServerTests(unittest.TestCase):
             state = server.read_state()
             self.assertTrue(state["last_preview_storage_changes"])
             self.assertEqual(state["apply_preview_selected_paths"], [])
-            page = server.render_page()
-            self.assertIn("Confirm Apply to HA", page)
-            self.assertIn("<button type='submit' disabled>Confirm Apply to HA</button>", page)
-            self.assertIn("homeassistant/.storage/input_boolean", page)
-
             self.assertFalse(server.run_apply_job())
             self.assertIn("Select at least one preview file", server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / ".storage" / "input_boolean").read_text(), "live-storage\n")
@@ -11841,9 +11356,6 @@ class ServerTests(unittest.TestCase):
             live_commit = self.git(["rev-parse", "ha-ops/ha-live"], repo_dir).stdout.strip()
             self.assertEqual(state["last_preview_commit"], main_commit)
             self.assertNotEqual(state["last_preview_commit"], live_commit)
-            page = server.render_page()
-            self.assertIn("data-preview-key='apply:homeassistant/configuration.yaml'", page)
-            self.assertNotIn("data-preview-key='apply:homeassistant/automations.yaml'", page)
             self.assertIn("git_auto", (server.CONFIG_DIR / "automations.yaml").read_text())
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "ha-config\n")
             self.assertIn("ha_script", (server.CONFIG_DIR / "scripts.yaml").read_text())
@@ -12261,8 +11773,6 @@ class ServerTests(unittest.TestCase):
             )
             self.assertEqual(state["last_preview_conflict_paths"], ["homeassistant/configuration.yaml"])
             self.select_all_apply_preview_files(server)
-            page = server.render_page()
-            self.assertIn("<button type='submit'>Confirm Apply to HA</button>", page)
             self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
             self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), "git\n")
             self.assertEqual((server.CONFIG_DIR / "packages" / "clean.yaml").read_text(), "git-clean\n")
@@ -14596,7 +14106,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("grid-template-columns: 24px 82px minmax(0, 1fr) 96px 96px", page)
             self.assertIn(".internal-id-row summary::before", page)
             self.assertIn(".internal-id-summary {\n      display: contents;", page)
-            self.assertIn('document.querySelectorAll(`[data-checkbox-scope="${scope}"] input[type="checkbox"]`)', page)
+            reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('this.querySelectorAll(`[data-checkbox-scope="${button.dataset.checkboxScope}"] input[type="checkbox"]`)', reactive_script)
             self.assertNotIn("View diff:", page)
             self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
             self.assertIn("run Preview Git to HA", page)
@@ -17047,22 +16558,15 @@ devices:
             server.get_installed_addons = lambda: []
 
             self.assertTrue(server.run_save_preview_job())
-            page = server.render_page()
             state = server.read_state()
             repo = server.DATA_DIR / "ha-config"
 
-            self.assertIn("Save Preview", page)
-            self.assertNotIn("Save preview changes (2):", page)
-            self.assertIn("<span class='preview-file-change'>Modified</span>", page)
-            self.assertIn("<span class='preview-file-change'>Added</span>", page)
-            self.assertIn("- homeassistant/configuration.yaml", page)
-            self.assertIn("- homeassistant/packages/lights.yaml", page)
-            self.assertIn("diff-del", page)
-            self.assertIn("diff-add", page)
-            self.assertIn("diff-changed", page)
-            self.assertNotIn("secrets.yaml", page)
-            self.assertNotIn("home-assistant_v2.db", page)
-            self.assertIn("last_save_diff", state)
+            self.assertIn("- Modified: homeassistant/configuration.yaml", state["last_save_preview"])
+            self.assertIn("- Added: homeassistant/packages/lights.yaml", state["last_save_preview"])
+            self.assertIn("homeassistant/configuration.yaml", state["last_save_diff"])
+            self.assertIn("homeassistant/packages/lights.yaml", state["last_save_diff"])
+            self.assertNotIn("secrets.yaml", state["last_save_preview"])
+            self.assertNotIn("home-assistant_v2.db", state["last_save_preview"])
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "base\n")
             self.assertEqual(self.repo_status(repo), "")
 
@@ -17433,7 +16937,7 @@ devices:
                     self.assertNotIn(">Acknowledge</button>", page)
                     self.assertIn('action="docker-build-cache-prune"', page)
                     prune_form = page[page.index('action="docker-build-cache-prune"'):][:700]
-                    self.assertIn('<button type="submit" class="secondary delayed-confirm-button" disabled>', prune_form)
+                    self.assertIn('<button type="submit" class="secondary" disabled>', prune_form)
 
             server.write_state({"docker_build_cache_prune_fence": dict(fence, phase="resolution_required")})
             page = server.render_page()
@@ -17584,7 +17088,7 @@ devices:
             page = server.render_page()
             section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
             self.assertIn('data-capability-available="false" data-action-ready="false"', section)
-            self.assertIn('class="secondary delayed-confirm-button" disabled', section)
+            self.assertIn('class="secondary" disabled', section)
             self.assertIn('class=\'action-hint docker-prune-hint\'', section)
             self.assertIn("Protection mode is enabled", section)
             self.assertIn("turn off Protection mode", section)
@@ -17675,7 +17179,7 @@ devices:
                             lock.release()
                     section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
                     self.assertIn('data-action-ready="false"', section)
-                    self.assertIn("delayed-confirm-button\" disabled", section)
+                    self.assertIn('class="secondary" disabled', section)
                     if hint is None:
                         self.assertNotIn("docker-prune-hint", section)
                     else:
@@ -17683,7 +17187,7 @@ devices:
                         self.assertIn(hint, section)
                     server.write_state({"last_status": "idle", "save_push_retry_pending": False, state_store.DOCKER_PRUNE_FENCE_KEY: None})
 
-    def test_delayed_confirmation_script_has_terminal_reset_and_bfcache_guards(self):
+    def test_docker_prune_uses_vaadin_confirmation_and_server_disabled_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -17693,80 +17197,13 @@ devices:
                 "data": {"protected": False, "docker_api": True}
             }
             page = server.render_page()
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        self.assertIn("const delayedConfirmControllers = [];", script)
-        self.assertIn("disableDelayedConfirmControllers();", script)
-        self.assertIn("window.location.reload();", script)
-        self.assertIn("if (event.persisted)", script)
-        self.assertIn("state === \"submitted\" || state === \"delay\"", script)
-        self.assertIn("setTimeout(() => {", script)
-        self.assertIn("}, 1500);", script)
-        self.assertIn("}, 6000);", script)
-        self.assertIn("submitAsyncForm(form, button);", script)
-        self.assertIn("button.textContent = \"Confirm\";", script)
-        self.assertNotIn("data-confirm=", page[page.index('action="docker-build-cache-prune"'):page.index('action="docker-build-cache-prune"') + 400])
-
-        controller = script[script.index("const delayedConfirmControllers = [];") : script.index(
-            "const pageRenderedRunning", script.index("const delayedConfirmControllers = [];"))
-        ]
-        harness = f"""
-const timers = new Map(); let nextTimer = 1; let now = 0; let fetches = 0;
-global.setTimeout = (fn, ms) => {{ const id = nextTimer++; timers.set(id, {{ fn, due: now + ms }}); return id; }};
-global.clearTimeout = (id) => timers.delete(id);
-function advance(ms) {{
-  now += ms;
-  for (;;) {{
-    const due = [...timers.entries()].filter(([, timer]) => timer.due <= now).sort((a, b) => a[1].due - b[1].due)[0];
-    if (!due) return;
-    timers.delete(due[0]); due[1].fn();
-  }}
-}}
-const listeners = {{}}; let reloads = 0;
-const button = {{
-  textContent: "Clear build cache", className: "secondary delayed-confirm-button", disabled: true,
-  style: {{}}, getBoundingClientRect: () => ({{ width: 160 }}),
-  classList: {{ add: (name) => {{ if (!button.className.split(" ").includes(name)) button.className += " " + name; }} }}
-}};
-const form = {{
-  dataset: {{}},
-  getAttribute: (name) => name === "data-action-ready" ? "true" : null,
-  querySelector: () => button,
-  addEventListener: (name, listener) => {{ listeners[name] = listener; }}
-}};
-const unavailableButton = {{ textContent: "Clear build cache", className: "secondary delayed-confirm-button", disabled: true, style: {{}}, getBoundingClientRect: () => ({{ width: 160 }}), classList: {{ add() {{}} }} }};
-const unavailableForm = {{
-  dataset: {{}},
-  getAttribute: (name) => name === "data-action-ready" ? "false" : null,
-  querySelector: () => unavailableButton,
-  addEventListener: () => {{ throw new Error("not-ready form must not initialise"); }}
-}};
-global.document = {{ querySelectorAll: (selector) => selector.includes("data-delayed-confirm") ? [form, unavailableForm] : [] }};
-global.submitAsyncForm = () => {{ fetches += 1; }};
-{controller}
-if (button.disabled) throw new Error("ready form was not enabled after controller bootstrap");
-if (!unavailableButton.disabled || unavailableButton.style.minInlineSize) throw new Error("not-ready form was initialised or enabled");
-const submit = () => listeners.submit({{ preventDefault() {{}} }});
-submit();
-if (!button.disabled || fetches !== 0) throw new Error("first activation must be delayed and fetch-free");
-if (button.style.minInlineSize !== "160px") throw new Error("initial width was not retained");
-advance(1499);
-if (!button.disabled || fetches !== 0 || button.style.minInlineSize !== "160px") throw new Error("delay ended too early or width changed");
-advance(1);
-if (button.disabled || button.textContent !== "Confirm" || button.style.minInlineSize !== "160px") throw new Error("confirm was not armed or width changed");
-advance(6000);
-if (button.disabled || button.textContent !== "Clear build cache" || button.style.minInlineSize !== "160px") throw new Error("expiry did not restore ordinary stable state");
-submit(); advance(1500); resetDelayedConfirmControllers(); resetDelayedConfirmControllers();
-if (button.disabled || button.textContent !== "Clear build cache" || button.style.minInlineSize !== "160px") throw new Error("ordinary reset was not canonical");
-submit(); advance(1500);
-disableDelayedConfirmControllers(); reloads += 1;
-if (!button.disabled || fetches !== 0 || reloads !== 1 || button.style.minInlineSize !== "160px") throw new Error("BFCache restore must stay disabled and reload before submit");
-submit();
-if (fetches !== 0) throw new Error("stale BFCache form submitted before fresh render");
-resetDelayedConfirmControllers(); resetDelayedConfirmControllers();
-advance(7000);
-if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error("terminal BFCache state was reset");
-"""
-        subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
+        section = page[page.index('action="docker-build-cache-prune"'):page.index("</form>", page.index('action="docker-build-cache-prune"'))]
+        self.assertIn("data-confirm=", section)
+        self.assertNotIn(" disabled", section)
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("<vaadin-confirm-dialog", script)
+        self.assertIn("confirmMutation", script)
+        self.assertIn('form.dataset.confirmed = "true"', script)
 
     def test_disk_usage_controls_are_same_row_and_prune_copy_is_explicit(self):
         server = load_server()
@@ -17782,7 +17219,8 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
         self.assertLess(section.index('action="disk-usage"'), section.index('action="docker-build-cache-prune"'))
         self.assertIn('data-capability-available="true"', section)
         self.assertIn('data-action-ready="true"', section)
-        self.assertIn('class="secondary delayed-confirm-button" disabled>Clear build cache</button>', section)
+        self.assertIn('class="secondary" >Clear build cache</button>', section)
+        self.assertIn('data-confirm="', section)
         self.assertNotIn('class="warning"', section)
         self.assertNotIn('docker-prune-hint', section)
 
@@ -17828,6 +17266,34 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
                 server.context().diff_get(old_cursor)
             self.assertEqual(server.context().diff_get(server.read_state()["last_diff_cursor"]), "new apply diff")
 
+    def test_diff_get_returns_only_requested_file_detail(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            diff = "\n".join([
+                "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml",
+                "--- a/homeassistant/a.yaml",
+                "+++ b/homeassistant/a.yaml",
+                "@@ -1 +1 @@",
+                "-old-a",
+                "+new-a",
+                "diff --git a/homeassistant/b.yaml b/homeassistant/b.yaml",
+                "--- a/homeassistant/b.yaml",
+                "+++ b/homeassistant/b.yaml",
+                "@@ -1 +1 @@",
+                "-old-b",
+                "+new-b",
+            ])
+            server.write_state({"last_diff": diff, "last_preview_paths": ["homeassistant/a.yaml", "homeassistant/b.yaml"]})
+            cursor = server.read_state()["last_diff_cursor"]
+
+            result = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor, "path": "homeassistant/b.yaml"})
+
+            self.assertTrue(result["ok"])
+            self.assertIn("new-b", result["diff"])
+            self.assertNotIn("new-a", result["diff"])
+
     def test_diff_cursor_survives_unrelated_state_writes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -17845,35 +17311,10 @@ if (!button.disabled || button.style.minInlineSize !== "160px") throw new Error(
             self.assertEqual(server.context().diff_get(cursor), "current apply diff")
 
     def test_websocket_url_and_commands_are_ingress_relative(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            page = server.render_page()
-
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        snippet = script[
-            script.index("function websocketBaseUrl()") : script.index("async function submitViaWs", script.index("function websocketBaseUrl()"))
-        ]
-        harness = f"""
-global.window = {{ location: new URL("https://ha.example/api/hassio_ingress/abc123/") }};
-{snippet}
-global.window.WebSocket = function WebSocket() {{}};
-if (!webSocketAvailable()) throw new Error("function WebSocket should be available");
-global.window.WebSocket = undefined;
-if (webSocketAvailable()) throw new Error("undefined WebSocket must use fetch fallback");
-global.window.WebSocket = function WebSocket() {{}};
-if (wsUrl() !== "wss://ha.example/api/hassio_ingress/abc123/ws") throw new Error(wsUrl());
-if (commandForAction("save-preview") !== "save_preview") throw new Error("relative save preview did not map");
-if (commandForAction("preview") !== "preview") throw new Error("relative apply preview did not map");
-if (commandForAction("save") !== "save") throw new Error("relative save did not map");
-if (commandForAction("/api/hassio_ingress/abc123/apply") !== "apply") throw new Error("ingress apply did not map");
-global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_ops") }};
-if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(wsUrl());
-global.window = {{ location: new URL("http://home-assistant.local/07ef30c0_ha_ops/") }};
-if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(wsUrl());
-"""
-        subprocess.run(["node", "-e", harness], check=True, text=True, capture_output=True)
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn('const url = new URL("ws", baseUrl());', script)
+        self.assertIn('url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";', script)
+        self.assertIn('return name.replaceAll("-", "_");', script)
 
     def test_preview_commands_are_in_websocket_registry(self):
         server = load_server()
@@ -17892,9 +17333,9 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             self.assertTrue(save_result["ok"])
             self.assertTrue(apply_result["ok"])
             self.assertEqual(calls[0][0], "run_save_preview_job")
-            self.assertEqual(calls[0][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES})
+            self.assertEqual(calls[0][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": None})
             self.assertEqual(calls[1][0], "run_preview_job")
-            self.assertEqual(calls[1][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES})
+            self.assertEqual(calls[1][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": None})
 
     def test_ingress_prefixed_ws_route_accepts_upgrade(self):
         server = load_server()
@@ -17973,10 +17414,50 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             payload = json.dumps(frames)
             self.assertEqual(frames[0]["type"], "state")
             self.assertEqual(frames[0]["state"]["last_message"], "Apply still running.")
-            self.assertEqual([frame["message"] for frame in frames[1:]], ["line one", "line two"])
+            self.assertEqual(frames[0]["state"]["last_details"], ["line one", "line two"])
             self.assertNotIn("raw apply diff body", payload)
 
-    def test_ws_replay_frames_carry_server_rendered_preview_fragments(self):
+    def test_debug_and_ws_snapshots_redact_sensitive_status_and_log_values(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            command_id = "abababab-abab-4bab-8bab-abababababab"
+            secrets = {
+                "token": "token=top-secret-token",
+                "url": "https://operator:password@github.com/private/home-config.git",
+                "host": "home-assistant.private.example",
+                "path": "/config/secrets.yaml",
+            }
+            message = "Failure at {url} on {host} with {token}".format(**secrets)
+            detail = "Could not read {path}; Authorization: Bearer bearer-secret-value".format(**secrets)
+            server.write_state({
+                "last_message": message,
+                "last_details": [detail],
+                "command_records": {
+                    command_id: {
+                        "command_id": command_id,
+                        "command": "preview",
+                        "status": "terminal",
+                        "result": {"ok": False, "message": message},
+                    },
+                },
+            })
+
+            debug = server.context().debug_snapshot()
+            replay = server.web.dispatch_command(server.context(), "replay")
+            frames = server.web.ws_state_frames(server.context())
+            payload = json.dumps({"debug": debug, "replay": replay, "frames": frames})
+
+            for secret in secrets.values():
+                self.assertNotIn(secret, payload)
+            self.assertNotIn("bearer-secret-value", payload)
+            self.assertIn("[REDACTED_URL]", payload)
+            self.assertIn("[REDACTED_HOST]", payload)
+            self.assertIn("[REDACTED_PATH]", payload)
+            self.assertIn("[REDACTED]", payload)
+
+    def test_ws_replay_frames_carry_redacted_state_without_fragments(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -17989,15 +17470,12 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             })
 
             frames = server.web.ws_state_frames(server.context())
-            fragments = frames[0]["fragments"]
+            self.assertEqual(frames[0]["type"], "state")
+            self.assertNotIn("fragments", frames[0])
+            self.assertEqual(frames[0]["state"]["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
+            self.assertEqual(frames[0]["state"]["last_save_diff"], "")
 
-            self.assertIn("top-grid", fragments)
-            self.assertIn("save-preview-section", fragments)
-            self.assertIn('data-ws-fragment="save-preview-section"', fragments["save-preview-section"])
-            self.assertIn("homeassistant/configuration.yaml", fragments["save-preview-section"])
-            self.assertIn("Confirm Save to Git", fragments["save-preview-section"])
-
-    def test_ws_replay_frames_carry_all_state_changing_control_fragments(self):
+    def test_ws_patch_uses_explicit_base_and_revision(self):
         server, harness = load_dev_harness()
         with tempfile.TemporaryDirectory() as tmp:
             ctx = harness.create_context(root=Path(tmp), keep_root=True)
@@ -18005,18 +17483,14 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             ctx.run_lock.acquire()
             try:
                 ctx.write_state({"last_status": "running", "last_message": "Apply still running."})
-                fragments = server.web.ws_state_frames(ctx)[0]["fragments"]
+                state = ctx.read_state()
+                frame = server.web.ws_state_frames(ctx, base_revision=state["state_revision"] - 1)[0]
             finally:
                 ctx.run_lock.release()
 
-            self.assertIn("top-grid", fragments)
-            self.assertIn("git-auth-section", fragments)
-            self.assertIn("managed-targets-section", fragments)
-            self.assertIn("release-snapshots-section", fragments)
-            self.assertIn("Generate Deploy Key", fragments["git-auth-section"])
-            self.assertIn("name='addon'", fragments["managed-targets-section"])
-            self.assertIn(" disabled", fragments["git-auth-section"])
-            self.assertIn(" disabled", fragments["managed-targets-section"])
+            self.assertEqual(frame["type"], "state_patch")
+            self.assertEqual(frame["base_revision"], frame["revision"] - 1)
+            self.assertEqual(frame["patch"]["last_status"], "running")
 
     def test_operation_store_state_change_sequence_advances_on_background_updates(self):
         server = load_server()
@@ -18031,7 +17505,81 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             self.assertGreater(changed, initial)
             frames = server.web.ws_state_frames(server.context())
             self.assertEqual(frames[0]["state"]["last_details"], ["background line"])
-            self.assertEqual(frames[1]["message"], "background line")
+
+    def test_durable_command_claim_deduplicates_ws_and_http_dispatch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            command_id = "11111111-1111-4111-8111-111111111111"
+            generation = server.read_state()["operation_generation"]
+            envelope = {
+                "command_id": command_id,
+                "generation": generation,
+                "payload": {},
+            }
+            scheduled = []
+
+            def start_job(target, *args, **kwargs):
+                scheduled.append((target.__name__, args, kwargs))
+                return True
+
+            first = server.web.dispatch_command(server.context(), "preview", envelope, start_job=start_job)
+            duplicate = server.web.dispatch_command(server.context(), "preview", envelope, start_job=start_job)
+
+            self.assertTrue(first["ok"])
+            self.assertTrue(duplicate["ok"])
+            self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(len(scheduled), 1)
+            self.assertEqual(server.read_state()["command_records"][command_id]["status"], "accepted")
+
+    def test_restart_marks_unresolved_durable_command_failed_unknown(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            command_id = "22222222-2222-4222-8222-222222222222"
+            store = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            generation = store.read_state()["operation_generation"]
+            claimed, _record = store.claim_command(command_id, "preview", generation, {})
+            self.assertTrue(claimed)
+            store.update_command(command_id, "running")
+
+            restarted = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            restarted.begin_repair()
+            restarted.mark_repaired()
+
+            record = restarted.read_state()["command_records"][command_id]
+            self.assertEqual(record["status"], "failed_unknown")
+            self.assertFalse(record["result"]["ok"])
+
+    def test_terminal_command_id_remains_deduplicated_after_more_than_200_commands(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            store = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            generation = store.read_state()["operation_generation"]
+            first_id = None
+
+            for index in range(201):
+                command_id = str(uuid.UUID(int=index + 1))
+                first_id = first_id or command_id
+                claimed, _record = store.claim_command(command_id, "preview", generation, {})
+                self.assertTrue(claimed)
+                terminal = store.update_command(
+                    command_id,
+                    "terminal",
+                    {"ok": True, "message": f"completed {index}"},
+                )
+                self.assertEqual(terminal["status"], "terminal")
+
+            claimed, record = store.claim_command(first_id, "preview", generation, {})
+
+            self.assertFalse(claimed)
+            self.assertEqual(record["status"], "terminal")
+            self.assertEqual(record["result"], {"ok": True, "message": "completed 0"})
+            self.assertEqual(len(store.read_state()["command_records"]), 201)
 
     def test_ws_command_path_does_not_write_http_response_after_upgrade_failure(self):
         server = load_server()
@@ -18052,20 +17600,13 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             server.write_state({"last_status": "running", "last_message": "Apply still running."})
             page = server.render_page()
 
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        running_block = script[
-            script.index("const pageRenderedRunning") : script.index("function setPreviewFileExpanded", script.index("const pageRenderedRunning"))
-        ]
-        submit_block = script[
-            script.index("async function submitAsyncForm") : script.index("const delayedConfirmControllers")
-        ]
-        self.assertIn("ensureWs();", running_block)
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("this.connect();", script)
         self.assertNotIn("reloadSoon", script)
-        self.assertNotIn("window.location.reload", running_block)
-        self.assertNotIn("window.location.reload", submit_block)
-        self.assertIn("applyStateFrame(payload);", submit_block)
+        self.assertNotIn("window.location.reload", script)
+        self.assertIn("this.applyPatch(frame)", script)
 
-    def test_dynamic_fragments_keep_scrollable_log_and_preview_controls(self):
+    def test_reactive_components_keep_scrollable_log_and_preview_controls(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -18073,22 +17614,15 @@ if (wsUrl() !== "ws://home-assistant.local/07ef30c0_ha_ops/ws") throw new Error(
             page = server.render_page()
 
         style = page.split("<style>", 1)[1].split("</style>", 1)[0]
-        script = page.split("<script>", 1)[1].split("</script>", 1)[0]
-        wire_block = script[
-            script.index("function wireDynamicControls") : script.index("wireDynamicControls(document);", script.index("function wireDynamicControls"))
-        ]
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
 
         self.assertIn("height: var(--details-card-height, 500px);", style)
         self.assertIn("overflow-y: auto;", style)
-        script_prelude = script[: script.index("function setClientStatus")]
-        self.assertNotIn("document.querySelector(\".control-card\")", script_prelude)
-        self.assertNotIn("document.querySelector(\".details-card\")", script_prelude)
-        self.assertIn("const controlCard = document.querySelector(\".control-card\");", script[script.index("function syncDetailsHeight") : script.index("function observeDetailsHeight")])
-        self.assertIn("observeDetailsHeight();", script[script.index("function applyFragments") : script.index("function scheduleWsReconnect")])
-        self.assertIn(".preview-file-toggle", wire_block)
-        self.assertIn(".preview-expand-all, .preview-collapse-all", wire_block)
-        self.assertIn(".preview-wrap-button", wire_block)
-        self.assertIn(".diff-wrap-toggle", wire_block)
+        self.assertIn("observeLayout()", script)
+        self.assertIn("setAll(expanded)", script)
+        self.assertIn("setExpanded(expanded)", script)
+        self.assertIn('data-testid="reactive-previews"', script)
+        self.assertIn("customElements.define(\"ha-ops-preview\"", script)
 
     def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):
         server = load_server()

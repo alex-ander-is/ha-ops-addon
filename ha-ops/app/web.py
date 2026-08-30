@@ -443,26 +443,11 @@ def render_page(ctx):
         deleted_devices_pending_confirmation,
         deleted_devices_rollback_path,
     )
-    diff_text = state.get("last_diff", "")
-    preview_warnings = [str(item) for item in (state.get("last_preview_warnings") or []) if str(item)]
-    apply_preview_paths = [str(item) for item in (state.get("last_preview_paths") or []) if str(item)]
-    apply_preview_resolutions = dict(state.get("apply_preview_resolutions") or {})
-    apply_preview_selected_paths = [str(item) for item in (state.get("apply_preview_selected_paths") or []) if str(item)]
-    apply_preview_conflict_paths = [str(item) for item in (state.get("last_preview_conflict_paths") or []) if str(item)]
-    save_preview_text = state.get("last_save_preview") or ""
-    save_diff_text = state.get("last_save_diff") or ""
-    save_preview_paths = [str(item) for item in (state.get("last_save_preview_paths") or []) if str(item)]
-    save_preview_resolutions = dict(state.get("save_preview_resolutions") or {})
-    save_preview_selected_paths = [str(item) for item in (state.get("save_preview_selected_paths") or []) if str(item)]
-    save_preview_conflicts = bool(state.get("last_save_preview_conflicts"))
-    save_preview_conflict_paths = [str(item) for item in (state.get("last_save_preview_conflict_paths") or []) if str(item)]
     save_push_retry_pending = bool(state.get("save_push_retry_pending"))
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
     retained_devices_rows = state.get("last_retained_devices_rows") or []
     internal_ids_rows = state.get("last_internal_ids_rows") or []
-    save_details_text = save_diff_text or save_preview_text
-    save_summary_text = save_preview_text if save_diff_text and save_diff_text != save_preview_text else ""
     run_disabled = "disabled" if job_running else ""
     action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
     apply_action = "apply"
@@ -603,58 +588,6 @@ def render_page(ctx):
             f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'), job_running or save_push_retry_pending)}"
             "</section>"
         )
-    apply_preview_section_html = ""
-    if state.get("last_diff_generated_at") or diff_text:
-        apply_preview_warnings_html = ""
-        if preview_warnings:
-            warning_items = "".join(f"<li>{html.escape(item)}</li>" for item in preview_warnings)
-            apply_preview_warnings_html = (
-                "<div class='apply-preview-warning' role='alert'>"
-                f"<strong>{_('heading.warnings')}</strong>"
-                f"<ul>{warning_items}</ul>"
-                "</div>"
-            )
-        apply_preview_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{_('heading.apply_preview')}</h2>"
-            f"<p>{_('label.generated_at')} "
-            f"<span data-transient='apply-generated'>{html.escape(ctx.format_time(state.get('last_diff_generated_at'), options))}</span>"
-            "</p>"
-            f"{apply_preview_warnings_html}"
-            f"<div data-transient='apply-preview'>"
-            f"{ui.render_preview_decisions(apply_preview_paths, apply_preview_resolutions, 'apply', diff_text=diff_text, actions_disabled=job_running, selected_paths=apply_preview_selected_paths, required_paths=apply_preview_conflict_paths)}"
-            "</div>"
-            "</section>"
-        )
-    save_preview_section_html = ""
-    if (not has_conflicts or save_push_retry_pending) and (
-        state.get("last_save_diff_generated_at") or save_preview_text or save_diff_text
-    ):
-        default_save_commit_subject = job_logic.default_save_commit_subject(ctx.release_now())
-        save_commit_subject = default_save_commit_subject
-        if state.get("last_save_commit_subject") and not save_preview_selected_paths:
-            save_commit_subject = state.get("last_save_commit_subject")
-        save_preview_warnings_html = ""
-        if state.get("last_save_preview_warnings"):
-            warning_items = "".join(f"<li>{html.escape(item)}</li>" for item in state["last_save_preview_warnings"])
-            save_preview_warnings_html = (
-                "<div class='apply-preview-warning' role='alert'>"
-                f"<strong>{_('heading.warnings')}</strong>"
-                f"<ul>{warning_items}</ul>"
-                "</div>"
-            )
-        save_preview_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{_('heading.save_preview')}</h2>"
-            f"<p>{_('label.generated_at')} "
-            f"<span data-transient='save-generated'>{html.escape(ctx.format_time(state.get('last_save_diff_generated_at'), options))}</span>"
-            "</p>"
-            f"{save_preview_warnings_html}"
-            f"<div data-transient='save-preview'>"
-            f"{ui.render_preview_decisions(save_preview_paths, save_preview_resolutions, 'save', save_preview_conflicts, save_details_text, save_summary_text, job_running, selected_paths=save_preview_selected_paths, required_paths=save_preview_conflict_paths, save_commit_subject=save_commit_subject, default_save_commit_subject=default_save_commit_subject, save_commit_subject_disabled=save_push_retry_pending, retry_only=save_push_retry_pending)}"
-            "</div>"
-            "</section>"
-        )
     deleted_devices_section_html = ""
     if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
         deleted_devices_heading = _("heading.deleted_devices_preview")
@@ -776,8 +709,6 @@ def render_page(ctx):
             "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
             "auth_mode": html.escape(ctx.git_auth_mode(options)),
             "details_html": html.escape(details),
-            "apply_preview_section_html": apply_preview_section_html,
-            "save_preview_section_html": save_preview_section_html,
             "deleted_devices_section_html": deleted_devices_section_html,
             "retained_devices_section_html": retained_devices_section_html,
             "internal_ids_section_html": internal_ids_section_html,
@@ -845,6 +776,23 @@ def job_action(target):
 
 
 PREVIEW_CONSUMING_ACTIONS = {"save", "apply"}
+WS_MUTATING_COMMANDS = {
+    "preview",
+    "save_preview",
+    "apply",
+    "save",
+    "reset_git_state",
+    "disk_usage",
+    "deleted_devices_preview",
+    "retained_devices_preview",
+    "retained_devices_delete",
+    "internal_ids_preview",
+    "internal_ids_migrate",
+    "deleted_devices_delete",
+    "deleted_devices_confirm",
+    "deleted_devices_revert",
+    "rollback",
+}
 
 
 def assert_command_readiness(ctx, action, expected_generation=None):
@@ -859,7 +807,7 @@ def assert_command_readiness(ctx, action, expected_generation=None):
     return generation
 
 
-def start_reserved_background(ctx, target, *args, state_updates=None, lock_acquired=False):
+def start_reserved_background(ctx, target, *args, state_updates=None, lock_acquired=False, command_id=None):
     action = job_action(target)
     try:
         expected_generation = assert_command_readiness(ctx, action)
@@ -895,7 +843,27 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
             return False
         if state_updates:
             ctx.write_state(state_updates)
-        start_background(target, *args, lock_acquired=reserved_lock)
+        if command_id:
+            def run_claimed_command():
+                ctx.update_command(command_id, "running")
+                try:
+                    target(*args, lock_acquired=reserved_lock)
+                    final_state = ctx.read_state()
+                    ctx.update_command(
+                        command_id,
+                        "terminal",
+                        {
+                            "ok": final_state.get("last_status") not in {"error", "interrupted"},
+                            "status": final_state.get("last_status"),
+                            "message": final_state.get("last_message", ""),
+                        },
+                    )
+                except BaseException as exc:
+                    ctx.update_command(command_id, "terminal", {"ok": False, "message": str(exc)})
+                    raise
+            start_background(run_claimed_command)
+        else:
+            start_background(target, *args, lock_acquired=reserved_lock)
         return True
     except Exception:
         release_action_slot(ctx, reserved_lock)
@@ -906,69 +874,6 @@ def command_result(ok, message="", **extra):
     payload = {"ok": bool(ok), "message": message}
     payload.update(extra)
     return payload
-
-
-WS_FRAGMENT_NAMES = (
-    "top-grid",
-    "apply-preview-section",
-    "save-preview-section",
-    "deleted-devices-section",
-    "retained-devices-section",
-    "internal-ids-section",
-    "conflicts-section",
-    "git-auth-section",
-    "managed-targets-section",
-    "release-snapshots-section",
-)
-
-
-def ws_fragment_payload(ctx):
-    snapshot = _snapshot_payload(ctx)
-
-    class FragmentContext:
-        def __init__(self, wrapped, redacted_state):
-            self._wrapped = wrapped
-            self._redacted_state = redacted_state
-
-        def __getattr__(self, name):
-            return getattr(self._wrapped, name)
-
-        def read_state(self):
-            return dict(self._redacted_state)
-
-    page = render_page(FragmentContext(ctx, snapshot.get("state", {})))
-    fragments = {}
-    for name in WS_FRAGMENT_NAMES:
-        marker = f'data-ws-fragment="{name}"'
-        marker_at = page.find(marker)
-        if marker_at < 0:
-            continue
-        start = page.rfind("<", 0, marker_at)
-        if start < 0:
-            continue
-        tag_end = page.find(">", marker_at)
-        if tag_end < 0:
-            continue
-        tag = page[start + 1 : tag_end].split(None, 1)[0].lower().lstrip("/")
-        depth = 1
-        cursor = tag_end + 1
-        while depth > 0:
-            next_open = page.find(f"<{tag}", cursor)
-            next_close = page.find(f"</{tag}>", cursor)
-            if next_close < 0:
-                break
-            if 0 <= next_open < next_close:
-                open_end = page.find(">", next_open)
-                if open_end < 0:
-                    break
-                depth += 1
-                cursor = open_end + 1
-            else:
-                depth -= 1
-                cursor = next_close + len(tag) + 3
-        if depth == 0:
-            fragments[name] = page[start:cursor]
-    return fragments
 
 
 def _snapshot_payload(ctx):
@@ -984,6 +889,14 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         if recorder is not None and job_is_running(ctx):
             recorder(action)
 
+    def finalize_rejected(command_id, ok):
+        if command_id and not ok:
+            ctx.update_command(
+                command_id,
+                "terminal",
+                {"ok": False, "message": state_store.READINESS_BLOCKED_MESSAGE},
+            )
+
     if command == "state_get" or command == "replay":
         return command_result(True, "state snapshot", **_snapshot_payload(ctx))
     if command == "debug_snapshot":
@@ -993,46 +906,99 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             cursor = body.get("cursor")
             if isinstance(cursor, str):
                 cursor = json.loads(cursor)
-            return command_result(True, "diff", diff=ctx.diff_get(cursor))
+            diff = ctx.diff_get(cursor)
+            path = body.get("path")
+            if isinstance(path, list):
+                path = path[0] if path else ""
+            if path:
+                by_path, _summary = ui.split_preview_diff_by_path(diff, [str(path)])
+                diff = by_path.get(str(path), "")
+                if not diff:
+                    raise RuntimeError(_("error.diff_file_missing"))
+            return command_result(True, "diff", diff=diff)
         except Exception as exc:
             return command_result(False, str(exc))
+    if command in WS_MUTATING_COMMANDS:
+        envelope_payload = body.get("payload", {})
+        command_id = body.get("command_id")
+        generation = body.get("generation")
+        if command_id is not None:
+            try:
+                claimed, record = ctx.claim_command(command_id, command, generation, envelope_payload)
+            except Exception as exc:
+                return command_result(False, str(exc))
+            if not claimed:
+                return command_result(
+                    True,
+                    _("message.duplicate_command"),
+                    duplicate=True,
+                    command_record=record,
+                )
+        else:
+            command_id = None
+            envelope_payload = body
     if command == "preview":
         if start_job is None:
             ok = start_reserved_background(
-                ctx, ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES
+                ctx, ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id
             )
         else:
-            ok = start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+            ok = start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id)
         if not ok:
             record_duplicate_rejection("preview")
+        finalize_rejected(command_id, ok)
         return command_result(ok, _("message.apply_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "save_preview":
         if start_job is None:
             ok = start_reserved_background(
-                ctx, ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES
+                ctx, ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id
             )
         else:
-            ok = start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES)
+            ok = start_job(ctx.run_save_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id)
         if not ok:
             record_duplicate_rejection("save_preview")
+        finalize_rejected(command_id, ok)
         return command_result(ok, _("message.save_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "apply":
         if start_job is None:
-            ok = start_reserved_background(ctx, ctx.run_apply_job)
+            ok = start_reserved_background(ctx, ctx.run_apply_job, command_id=command_id)
         else:
-            ok = start_job(ctx.run_apply_job)
+            ok = start_job(ctx.run_apply_job, command_id=command_id)
+        finalize_rejected(command_id, ok)
         return command_result(ok, _("message.apply_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "save":
-        raw_subject = body.get("commit_subject", [None])
-        raw_default = body.get("default_commit_subject", [None])
+        raw_subject = envelope_payload.get("commit_subject", [None])
+        raw_default = envelope_payload.get("default_commit_subject", [None])
         commit_subject = raw_subject[0] if isinstance(raw_subject, list) else raw_subject
         default_subject = raw_default[0] if isinstance(raw_default, list) else raw_default
         commit_subject = job_logic.save_commit_subject_from_submission(commit_subject, default_subject)
         if start_job is None:
-            ok = start_reserved_background(ctx, ctx.run_save_job, commit_subject)
+            ok = start_reserved_background(ctx, ctx.run_save_job, commit_subject, command_id=command_id)
         else:
-            ok = start_job(ctx.run_save_job, commit_subject)
+            ok = start_job(ctx.run_save_job, commit_subject, command_id=command_id)
+        finalize_rejected(command_id, ok)
         return command_result(ok, _("message.save_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
+    job_commands = {
+        "reset_git_state": (ctx.run_reset_git_state_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.git_state_reset_started"),
+        "disk_usage": (ctx.run_disk_usage_job, [], None, "message.disk_usage_started"),
+        "deleted_devices_preview": (ctx.run_deleted_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.deleted_devices_check_started"),
+        "retained_devices_preview": (ctx.run_retained_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.retained_devices_check_started"),
+        "retained_devices_delete": (ctx.run_retained_devices_delete_job, [envelope_payload.get("candidate", [])], None, "message.retained_devices_delete_started"),
+        "internal_ids_preview": (ctx.run_internal_ids_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.internal_ids_check_started"),
+        "internal_ids_migrate": (ctx.run_internal_ids_migrate_job, [envelope_payload.get("candidate", [])], None, "message.internal_ids_migration_started"),
+        "deleted_devices_delete": (ctx.run_deleted_devices_delete_job, [], None, "message.deleted_devices_delete_started"),
+        "deleted_devices_confirm": (ctx.run_deleted_devices_confirm_job, [], None, "message.deleted_devices_cleanup_confirm_started"),
+        "deleted_devices_revert": (ctx.run_deleted_devices_revert_job, [], None, "message.deleted_devices_cleanup_revert_started"),
+        "rollback": (ctx.run_rollback_job, [envelope_payload.get("release", "")], None, "message.rollback_started"),
+    }
+    if command in job_commands:
+        target, args, state_updates, message_key = job_commands[command]
+        if start_job is None:
+            ok = start_reserved_background(ctx, target, *args, state_updates=state_updates, command_id=command_id)
+        else:
+            ok = start_job(target, *args, state_updates=state_updates, command_id=command_id)
+        finalize_rejected(command_id, ok)
+        return command_result(ok, _("message.command_accepted") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     return command_result(False, "unknown command")
 
 
@@ -1082,14 +1048,19 @@ POST_ENDPOINTS = (
 )
 
 
-def ws_state_frames(ctx):
+def ws_state_frames(ctx, base_revision=None):
     snapshot = _snapshot_payload(ctx)
-    frames = [{"type": "state", **snapshot, "fragments": ws_fragment_payload(ctx)}]
-    details = snapshot.get("state", {}).get("last_details") or []
-    for line in details:
-        if line:
-            frames.append({"type": "log", "message": str(line)})
-    return frames
+    state = snapshot.get("state", {})
+    revision = int(state.get("state_revision") or 0)
+    if base_revision is not None and revision > int(base_revision):
+        return [{
+            "type": "state_patch",
+            "base_revision": int(base_revision),
+            "revision": revision,
+            "patch": state,
+            "readiness": snapshot.get("readiness", {}),
+        }]
+    return [{"type": "state", "revision": revision, **snapshot}]
 
 
 def websocket_accept(key):
@@ -1138,6 +1109,14 @@ def create_handler(ctx):
             self.wfile.write(content.encode("utf-8"))
 
         def send_json(self, payload, status=200):
+            command_id = getattr(self, "active_command_id", None)
+            if command_id and not getattr(self, "command_scheduled", False) and isinstance(payload, dict):
+                ctx.update_command(
+                    command_id,
+                    "terminal",
+                    {"ok": bool(payload.get("ok", status < 400)), "message": str(payload.get("message", ""))},
+                )
+                self.active_command_id = None
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -1180,9 +1159,18 @@ def create_handler(ctx):
             else:
                 self.send_html(render_page(ctx), status=409)
 
-        def start_job(self, target, *args, state_updates=None, lock_acquired=False):
+        def start_job(self, target, *args, state_updates=None, lock_acquired=False, command_id=None):
             action = job_action(target)
-            if start_reserved_background(ctx, target, *args, state_updates=state_updates, lock_acquired=lock_acquired):
+            command_id = command_id or getattr(self, "active_command_id", None)
+            if start_reserved_background(
+                ctx,
+                target,
+                *args,
+                state_updates=state_updates,
+                lock_acquired=lock_acquired,
+                command_id=command_id,
+            ):
+                self.command_scheduled = True
                 return True
             readiness = ctx.readiness_snapshot() if hasattr(ctx, "readiness_snapshot") else {"status": state_store.READINESS_REPAIRED}
             if action in PREVIEW_CONSUMING_ACTIONS and readiness.get("status") != state_store.READINESS_REPAIRED:
@@ -1215,13 +1203,27 @@ def create_handler(ctx):
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True}).encode())
                 return
+            if parsed.path.endswith("/assets/ha-ops.js") or parsed.path == "/assets/ha-ops.js":
+                asset = Path(__file__).parent / "static" / "ha-ops.js"
+                try:
+                    content = asset.read_bytes()
+                except OSError:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.end_headers()
+                self.wfile.write(content)
+                return
             if route == "/debug-snapshot":
                 self.send_json(dispatch_command(ctx, "debug_snapshot"))
                 return
             if route == "/diff-get":
                 query = parse_qs(parsed.query)
                 cursor = query.get("cursor", [""])[0]
-                result = dispatch_command(ctx, "diff_get", {"cursor": cursor})
+                path = query.get("path", [""])[0]
+                result = dispatch_command(ctx, "diff_get", {"cursor": cursor, "path": path})
                 self.send_json(result, status=200 if result.get("ok") else 409)
                 return
             if route == "/ws":
@@ -1241,6 +1243,7 @@ def create_handler(ctx):
                 if replay_recorder is not None:
                     replay_recorder()
                 write_ws_frame(self.wfile, {"type": "ready", **dispatch_command(ctx, "replay")})
+                last_revision = int(_snapshot_payload(ctx).get("state", {}).get("state_revision") or 0)
                 while True:
                     try:
                         message = read_ws_frame(self.rfile)
@@ -1252,8 +1255,9 @@ def create_handler(ctx):
                         )
                         if next_sequence != last_sequence:
                             last_sequence = next_sequence
-                            for frame in ws_state_frames(ctx):
+                            for frame in ws_state_frames(ctx, base_revision=last_revision):
                                 write_ws_frame(self.wfile, frame)
+                                last_revision = int(frame.get("revision") or last_revision)
                         continue
                     if message is None:
                         return
@@ -1273,8 +1277,9 @@ def create_handler(ctx):
                         },
                     )
                     if command in {"state_get", "replay", "save_preview", "preview", "save", "apply", "diff_get"}:
-                        for frame in ws_state_frames(ctx):
+                        for frame in ws_state_frames(ctx, base_revision=last_revision):
                             write_ws_frame(self.wfile, frame)
+                            last_revision = int(frame.get("revision") or last_revision)
                         last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence
 
             self.send_html(render_page(ctx))
@@ -1283,7 +1288,35 @@ def create_handler(ctx):
             parsed = urlparse(self.path)
             route = ingress_route(parsed.path, *POST_ENDPOINTS)
             length = int(self.headers.get("Content-Length", "0"))
-            body = parse_qs(self.rfile.read(length).decode()) if length else {}
+            raw_body = self.rfile.read(length) if length else b""
+            if "application/json" in self.headers.get("Content-Type", ""):
+                try:
+                    body = json.loads(raw_body.decode()) if raw_body else {}
+                except json.JSONDecodeError as exc:
+                    self.send_json({"ok": False, "message": str(exc)}, status=400)
+                    return
+            else:
+                body = parse_qs(raw_body.decode()) if raw_body else {}
+            envelope_commands = {"/preview", "/save-preview", "/apply", "/save"}
+            if isinstance(body, dict) and "command_id" in body and route not in envelope_commands:
+                command = str(body.get("command") or route.removeprefix("/").replace("-", "_"))
+                payload = body.get("payload")
+                try:
+                    claimed, record = ctx.claim_command(
+                        body.get("command_id"),
+                        command,
+                        body.get("generation"),
+                        payload,
+                    )
+                except Exception as exc:
+                    self.send_json({"ok": False, "message": str(exc)}, status=409)
+                    return
+                if not claimed:
+                    self.send_json({"ok": True, "message": _("message.duplicate_command"), "duplicate": True, "command_record": record})
+                    return
+                self.active_command_id = body.get("command_id")
+                self.command_scheduled = False
+                body = {key: value if isinstance(value, list) else [value] for key, value in payload.items()}
             dev_harness_post = getattr(ctx, "dev_harness_handle_post", None)
             if dev_harness_post is not None:
                 result = dev_harness_post(route, body)

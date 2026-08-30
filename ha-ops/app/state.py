@@ -1,6 +1,7 @@
 import json
 import os
 import hashlib
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -31,6 +32,28 @@ DIFF_CURSOR_FIELDS = {
     "last_diff": "last_diff_cursor",
     "last_save_diff": "last_save_diff_cursor",
 }
+REDACTED_TEXT_FIELDS = {
+    "last_message",
+    "last_details",
+    "last_preview_warnings",
+    "last_save_preview_warnings",
+}
+REDACTED_VALUE = "[REDACTED]"
+REDACTED_URL = "[REDACTED_URL]"
+REDACTED_PATH = "[REDACTED_PATH]"
+REDACTED_HOST = "[REDACTED_HOST]"
+SENSITIVE_VALUE_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|password|secret|token)\b\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+URL_RE = re.compile(r"\b(?:https?|ssh|git)://[^\s\"'<>]+|\bgit@[A-Za-z0-9.-]+:[^\s\"'<>]+")
+WINDOWS_PATH_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])[A-Z]:\\(?:[^\\\s]+\\)*[^\\\s,;]+")
+UNIX_PATH_RE = re.compile(r"(?<![A-Za-z0-9_])/(?:[^/\s,;]+/)*[^/\s,;]+")
+IPV4_RE = re.compile(r"\b(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\b")
+HOSTNAME_RE = re.compile(
+    r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}\b"
+)
 PREVIEW_GENERATION_FIELDS = {
     *DIFF_FIELDS.keys(),
     *DIFF_CURSOR_FIELDS.values(),
@@ -410,6 +433,8 @@ def default_state():
         "conflict_type": None,
         "save_conflict_resolutions": {},
         "operation_generation": 0,
+        "state_revision": 0,
+        "command_records": {},
     }
 
 
@@ -478,10 +503,39 @@ def sanitize_state_for_persistence(current):
     return current
 
 
+def redact_sensitive_text(value):
+    text = str(value)
+    text = BEARER_RE.sub(REDACTED_VALUE, text)
+    text = SENSITIVE_VALUE_RE.sub(lambda match: match.group(1) + REDACTED_VALUE, text)
+    text = URL_RE.sub(REDACTED_URL, text)
+    text = WINDOWS_PATH_RE.sub(REDACTED_PATH, text)
+    text = UNIX_PATH_RE.sub(REDACTED_PATH, text)
+    text = IPV4_RE.sub(REDACTED_HOST, text)
+    return HOSTNAME_RE.sub(REDACTED_HOST, text)
+
+
+def redact_diagnostic_value(value):
+    if isinstance(value, str):
+        return redact_sensitive_text(value)
+    if isinstance(value, list):
+        return [redact_diagnostic_value(item) for item in value]
+    if isinstance(value, dict):
+        return {key: redact_diagnostic_value(item) for key, item in value.items()}
+    return value
+
+
 def redacted_state_snapshot(current):
     snapshot = sanitize_state_for_persistence(current)
     for field in DIFF_FIELDS:
         snapshot[field] = ""
+    for field in REDACTED_TEXT_FIELDS:
+        snapshot[field] = redact_diagnostic_value(snapshot.get(field))
+    for command_id, record in snapshot.get("command_records", {}).items():
+        if isinstance(record, dict) and record.get("result") is not None:
+            snapshot["command_records"][command_id] = {
+                **record,
+                "result": redact_diagnostic_value(record.get("result")),
+            }
     return snapshot
 
 
@@ -494,6 +548,7 @@ def write_state(path, updates):
     with STATE_LOCK:
         current = read_state(path, hydrate_diffs=False)
         current.update(updates)
+        current["state_revision"] = int(current.get("state_revision") or 0) + 1
         current["operation_generation"] = int(current.get("operation_generation") or 0)
         advance_generation = any(key in PREVIEW_GENERATION_FIELDS for key in updates)
         if updates.get("deleted_devices_pending_confirmation") is True:
@@ -552,6 +607,18 @@ class OperationStore:
                 int(current.get("operation_generation") or 0),
                 int(self._readiness_generation),
             )
+            now = datetime.now(timezone.utc).isoformat()
+            records = dict(current.get("command_records") or {})
+            for command_id, record in records.items():
+                if record.get("status") in {"accepted", "running"}:
+                    records[command_id] = {
+                        **record,
+                        "status": "failed_unknown",
+                        "updated_at": now,
+                        "result": {"ok": False, "message": "Command outcome is unknown after HA Ops restart."},
+                    }
+            current["command_records"] = records
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
             _replace_state(self.path, current)
             self._readiness_generation = int(current.get("operation_generation") or 0)
             self._readiness = READINESS_REPAIRED
@@ -608,6 +675,75 @@ class OperationStore:
             self._condition.notify_all()
             return current
 
+    def claim_command(self, command_id, command, generation, payload):
+        """Durably claim one browser mutation before any work is scheduled."""
+        try:
+            parsed = uuid.UUID(str(command_id))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("command_id must be a UUID") from exc
+        canonical_id = str(parsed)
+        if canonical_id != str(command_id).lower():
+            raise ValueError("command_id must use canonical UUID form")
+        if not isinstance(command, str) or not command:
+            raise ValueError("command is required")
+        if not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+        canonical_payload = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        payload_digest = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            records = dict(current.get("command_records") or {})
+            existing = records.get(canonical_id)
+            if existing is not None:
+                if existing.get("command") != command or existing.get("payload_sha256") != payload_digest:
+                    raise ValueError("command_id was already used for a different command")
+                return False, dict(existing)
+            current_generation = int(current.get("operation_generation") or 0)
+            if int(generation) != current_generation:
+                raise RuntimeError("stale command generation; replay state and try again")
+            now = datetime.now(timezone.utc).isoformat()
+            record = {
+                "command_id": canonical_id,
+                "command": command,
+                "generation": current_generation,
+                "payload_sha256": payload_digest,
+                "status": "accepted",
+                "accepted_at": now,
+                "updated_at": now,
+                "job_id": canonical_id,
+                "result": None,
+            }
+            records[canonical_id] = record
+            current["command_records"] = records
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return True, dict(record)
+
+    def update_command(self, command_id, status, result=None):
+        if status not in {"accepted", "running", "terminal", "failed_unknown"}:
+            raise ValueError("invalid command status")
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            records = dict(current.get("command_records") or {})
+            record = records.get(str(command_id))
+            if record is None:
+                return None
+            record = {
+                **record,
+                "status": status,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "result": result if result is not None else record.get("result"),
+            }
+            records[str(command_id)] = record
+            current["command_records"] = records
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return dict(record)
+
     def current_preview_snapshot(self, hydrate_diffs=True):
         with self._lock:
             generation = self.assert_repaired_for_current_preview_read()
@@ -618,8 +754,10 @@ class OperationStore:
 
     def redacted_snapshot(self):
         with self._lock:
+            readiness = self.readiness_snapshot()
+            readiness["message"] = redact_sensitive_text(readiness.get("message", ""))
             return {
-                "readiness": self.readiness_snapshot(),
+                "readiness": readiness,
                 "state": redacted_state_snapshot(read_state(self.path, hydrate_diffs=False)),
             }
 

@@ -231,15 +231,17 @@ Automated browser smoke:
 PLAYWRIGHT_SHARED_ROOT=/Users/purportex/Applications/Playwright node ha-ops/tests/browser/run.mjs
 ```
 
-Covered locally: page load, Preview Git to HA, Preview HA to Git, WebSocket
-connect/reconnect, live Log/state fragments, `diff-get` lazy diff resources,
-debug snapshot redaction, disabled/running controls, and fetch fallback when
-WebSocket is unavailable.
+Covered locally: Lit/Vaadin page load, Preview Git to HA, Preview HA to Git,
+WebSocket connect/reconnect and revision replay, lazy per-file `diff-get`, debug
+snapshot redaction, disabled/running controls, mobile layout, and HTTP dispatch
+when WebSocket is known to be unavailable before a command is sent.
 
 Not covered locally: real Supervisor ingress proxying, live backups, Core
 restart/reload, App lifecycle actions, Docker socket effects, and writes to the
 real HA config or user Git remotes.
 
-## Post-MVP follow-up
-
-- Replace the server-rendered DOM refresh flow with a component-based reactive DOM after the WebSocket command/event transport has settled. The MVP intentionally keeps SSR and no-JS POST fallback as the authoritative UI path.
+The UI requires JavaScript. Its HTTP fallback is a JavaScript command-transport
+fallback used only when WebSocket is known to be unavailable; there is no
+server-rendered/no-JavaScript preview or POST control layer. The server remains
+authoritative for state, selection, command status, and mutations; the browser
+does not optimistically apply command results.

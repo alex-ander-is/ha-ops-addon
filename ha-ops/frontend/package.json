@@ -1,0 +1,20 @@
+{
+  "name": "ha-ops-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/ha-ops.js --bundle --format=esm --minify --target=es2022 --outfile=../app/static/ha-ops.js"
+  },
+  "dependencies": {
+    "@vaadin/button": "25.2.8",
+    "@vaadin/checkbox": "25.2.8",
+    "@vaadin/confirm-dialog": "25.2.8",
+    "@vaadin/progress-bar": "25.2.8",
+    "@vaadin/radio-group": "25.2.8",
+    "@vaadin/select": "25.2.8",
+    "lit": "3.3.3"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9"
+  }
+}

@@ -300,102 +300,6 @@ def render_conflicts(conflicts, conflict_type=None, actions_disabled=False):
     )
 
 
-def preview_default_choice(direction):
-    return "ha" if direction == "save" else "git"
-
-
-def preview_choice_control(path, direction, path_action, selected_choice=None, actions_disabled=False):
-    escaped_path = html.escape(path, quote=True)
-    if direction == "save":
-        primary_choice = "ha"
-        primary_label = _("action.use_ha_version")
-        keep_choice = "git"
-    else:
-        primary_choice = "git"
-        primary_label = _("action.use_git_version")
-        keep_choice = "ha"
-    disabled = " disabled" if actions_disabled else ""
-    primary_checked = " checked" if selected_choice == primary_choice else ""
-    keep_checked = " checked" if selected_choice == keep_choice else ""
-    primary_classes = "preview-choice-option"
-    keep_classes = "preview-choice-option"
-    if selected_choice == primary_choice:
-        primary_classes += " preview-choice-option-selected"
-    if selected_choice == keep_choice:
-        keep_classes += " preview-choice-option-selected"
-    if actions_disabled:
-        primary_classes += " preview-choice-option-disabled"
-        keep_classes += " preview-choice-option-disabled"
-    return (
-        f"<form class='preview-choice-toggle' method='post' action='{path_action}' "
-        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true' "
-        "data-preserve-preview-expanded='true'>"
-        f"<input type='hidden' name='path' value='{escaped_path}'>"
-        f"<label class='{primary_classes}'>"
-        f"<input type='radio' name='choice' value='{primary_choice}'{primary_checked}{disabled}>"
-        f"<span>{primary_label}</span>"
-        "</label>"
-        f"<label class='{keep_classes}'>"
-        f"<input type='radio' name='choice' value='{keep_choice}'{keep_checked}{disabled}>"
-        f"<span>{_('action.keep_unchanged')}</span>"
-        "</label>"
-        "</form>"
-    )
-
-
-def preview_selection_control(path, direction, selected=False, actions_disabled=False):
-    action = "select-save-preview" if direction == "save" else "select-apply-preview"
-    escaped_path = html.escape(path, quote=True)
-    checked = " checked" if selected else ""
-    disabled = " disabled" if actions_disabled else ""
-    return (
-        f"<form class='preview-file-select-form' method='post' action='{action}' "
-        "data-async-form='true' data-auto-submit='change' data-preserve-display-state='true' "
-        "data-preserve-preview-expanded='true'>"
-        f"<input type='hidden' name='path' value='{escaped_path}'>"
-        f"<input type='checkbox' name='selected' value='1'{checked}{disabled}>"
-        "</form>"
-    )
-
-
-def preview_selection_button(direction, selection_action, label, actions_disabled=False):
-    action = "select-save-preview" if direction == "save" else "select-apply-preview"
-    disabled = " disabled" if actions_disabled else ""
-    return (
-        f"<form method='post' action='{action}' data-async-form='true' "
-        "data-preserve-display-state='true' data-preserve-preview-expanded='true'>"
-        f"<input type='hidden' name='selection_action' value='{selection_action}'>"
-        f"<button type='submit' class='secondary'{disabled}>{label}</button>"
-        "</form>"
-    )
-
-
-def preview_wrap_button():
-    return f"<button type='button' class='secondary preview-wrap-button'>{_('button.wrap_lines')}</button>"
-
-
-def render_preview_path(path):
-    path = str(path)
-    if "/" not in path:
-        return f"<code><strong>{html.escape(path)}</strong></code>"
-    parent, filename = path.rsplit("/", 1)
-    return f"<code>{html.escape(parent)}/<strong>{html.escape(filename)}</strong></code>"
-
-
-def preview_change_labels_by_path(summary_text):
-    labels = {}
-    for line in str(summary_text or "").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("- ") or ":" not in stripped:
-            continue
-        label, path = stripped[2:].split(":", 1)
-        label = label.strip()
-        path = path.strip()
-        if label and path:
-            labels[path] = label
-    return labels
-
-
 def diff_path_relative(path):
     if not path or path == "/dev/null":
         return None
@@ -498,152 +402,6 @@ def split_preview_diff_by_path(detail, paths):
             summary.append(line)
     flush()
     return {path: "\n".join(lines) for path, lines in chunks.items()}, "\n".join(summary).strip()
-
-
-def render_preview_decisions(
-    paths,
-    resolutions,
-    direction,
-    require_all=False,
-    diff_text="",
-    summary_text="",
-    actions_disabled=False,
-    selected_paths=None,
-    required_paths=None,
-    save_commit_subject="",
-    default_save_commit_subject=None,
-    save_commit_subject_disabled=False,
-    retry_only=False,
-):
-    action_label = _("action.confirm_save") if direction == "save" else _("action.confirm_apply")
-    path_action = "resolve-save-preview" if direction == "save" else "resolve-apply-preview"
-    all_action = "save" if direction == "save" else "apply"
-    selected_paths = set(selected_paths or [])
-    required_paths = set(required_paths if required_paths is not None else (paths if require_all else []))
-    selected_missing = [path for path in selected_paths if path in required_paths and path not in resolutions]
-    decision_controls_disabled = actions_disabled or retry_only
-    needs_file_selection = bool(paths and not selected_paths and not actions_disabled and not retry_only)
-    confirm_disabled = (
-        " disabled" if actions_disabled or (not retry_only and (not selected_paths or (require_all and selected_missing))) else ""
-    )
-    cancel_disabled = " disabled" if actions_disabled else ""
-    cancel_direction = "save" if direction == "save" else "apply"
-    diff_by_path, diff_summary = split_preview_diff_by_path(diff_text or "", paths)
-    change_labels = preview_change_labels_by_path(summary_text)
-    summary_parts = []
-    if diff_summary and not paths:
-        summary_parts.append(render_conflict_detail(diff_summary, include_wrap_control=False))
-    files = []
-    for path in paths:
-        choice = resolutions.get(path)
-        selected = path in selected_paths
-        status = f"<span class='decision-status'>{html.escape(choice.upper())}</span>" if choice else ""
-        if choice:
-            selected_choice = choice
-        elif direction == "apply":
-            selected_choice = preview_default_choice(direction) if selected or path not in required_paths else None
-        else:
-            selected_choice = None if require_all and path in required_paths else preview_default_choice(direction)
-        change_label = change_labels.get(path)
-        change = f"<span class='preview-file-change'>{html.escape(change_label)}</span>" if change_label else ""
-        detail = diff_by_path.get(path) or _("text.diff_detail_unavailable")
-        preview_key = html.escape(f"{direction}:{path}", quote=True)
-        files.append(
-            f"<article class='preview-file' data-preview-file data-preview-key='{preview_key}'>"
-            "<div class='preview-file-header'>"
-            "<div class='preview-file-title'>"
-            f"{preview_selection_control(path, direction, selected, actions_disabled=decision_controls_disabled)}"
-            f"<button type='button' class='secondary preview-file-toggle' aria-expanded='false'>{_('button.expand_diff')}</button>"
-            f"{render_preview_path(path)}{change}{status}"
-            "</div>"
-            "<div class='preview-file-header-actions'>"
-            f"{preview_wrap_button()}"
-            "<span class='preview-choice-slot' data-preview-choice-slot='header'>"
-            f"{preview_choice_control(path, direction, path_action, selected_choice, actions_disabled=decision_controls_disabled or not selected)}"
-            "</span>"
-            "</div>"
-            "</div>"
-            "<div class='preview-file-detail' hidden>"
-            f"{render_conflict_detail(detail, include_wrap_control=False)}"
-            "<div class='preview-file-actions preview-file-detail-actions'>"
-            f"<button type='button' class='secondary preview-file-toggle preview-file-detail-toggle' aria-expanded='true'>{_('button.collapse_diff')}</button>"
-            "<span class='preview-choice-slot' data-preview-choice-slot='detail'></span>"
-            "</div>"
-            "</div>"
-            "</article>"
-        )
-    if not paths and not summary_parts:
-        summary_parts.append(f"<p class='muted'>{_('text.no_file_changes')}</p>")
-    global_controls = (
-        "<div class='preview-list-controls'>"
-        f"{preview_selection_button(direction, 'all', _('button.select_all'), actions_disabled=decision_controls_disabled)}"
-        f"{preview_selection_button(direction, 'none', _('button.select_none'), actions_disabled=decision_controls_disabled)}"
-        "<span class='preview-list-control-spacer' aria-hidden='true'></span>"
-        f"<button type='button' class='secondary preview-expand-all'>{_('button.expand_all')}</button>"
-        f"<button type='button' class='secondary preview-collapse-all'>{_('button.collapse_all')}</button>"
-        "</div>"
-        if paths
-        else ""
-    )
-    footer = ""
-    if paths:
-        confirm_hint = f"<span class='preview-confirm-hint'>{_('message.select_preview_files_to_continue')}</span>" if needs_file_selection else "<span></span>"
-        if direction == "save":
-            input_disabled = " disabled" if confirm_disabled or save_commit_subject_disabled else ""
-            escaped_subject = html.escape(str(save_commit_subject or ""), quote=True)
-            escaped_default_subject = html.escape(
-                str(save_commit_subject if default_save_commit_subject is None else default_save_commit_subject),
-                quote=True,
-            )
-            subject_control = (
-                f"<input type='hidden' name='default_commit_subject' value='{escaped_default_subject}'>"
-                "<label class='commit-subject-control'>"
-                f"{_('label.commit_subject')}<input type='text' name='commit_subject' value='{escaped_subject}' autocomplete='off' spellcheck='false'{input_disabled}>"
-                "</label>"
-                if not retry_only
-                else f"<p class='muted'>{_('notice.save_push_retry_pending')}</p>"
-            )
-            footer = (
-                "<div class='preview-footer-actions preview-footer-actions-save'>"
-                "<div class='preview-confirm-actions preview-confirm-actions-save'>"
-                f"<form class='preview-confirm-form' method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
-                f"{subject_control}"
-                f"<button type='submit'{confirm_disabled}>{action_label}</button>"
-                "</form>"
-                "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
-                f"<input type='hidden' name='direction' value='{cancel_direction}'>"
-                f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
-                "</form>"
-                "</div>"
-                f"{confirm_hint}"
-                "</div>"
-            )
-        else:
-            footer = (
-                "<div class='preview-footer-actions'>"
-                f"{confirm_hint}"
-                "<div class='preview-confirm-actions'>"
-                f"<form method='post' action='{all_action}' data-async-form='true' data-preserve-display-state='true'>"
-                f"<button type='submit'{confirm_disabled}>{action_label}</button>"
-                "</form>"
-                "<form method='post' action='clear-preview' data-async-form='true' data-preserve-display-state='true'>"
-                f"<input type='hidden' name='direction' value='{cancel_direction}'>"
-                f"<button type='submit' class='secondary'{cancel_disabled}>{_('button.cancel')}</button>"
-                "</form>"
-                "</div>"
-                "</div>"
-            )
-    return (
-        "<div class='preview-decisions'>"
-        "<div class='preview-list-header'>"
-        f"<h3>{_('heading.change_list')}</h3>"
-        f"{global_controls}"
-        "</div>"
-        f"{''.join(summary_parts)}"
-        f"<div class='preview-file-list'>{''.join(files)}</div>"
-        f"{footer}"
-        "</div>"
-    )
 
 
 def render_deleted_devices_table(rows):
@@ -1004,7 +762,7 @@ def render_git_auth(options, git_auth_mode, load_generated_public_key, disabled=
 
 
 def render_page(data):
-    return f"""<!doctype html>
+    page = f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -1028,6 +786,14 @@ def render_page(data):
       --ha-shadow: var(--ha-card-box-shadow, none);
       --ha-font: var(--paper-font-common-base_-_font-family, system-ui, sans-serif);
       --ha-code-bg: var(--secondary-background-color, rgba(127, 127, 127, 0.08));
+      --lumo-primary-color: var(--ha-primary);
+      --lumo-primary-text-color: var(--ha-primary);
+      --lumo-body-text-color: var(--ha-text);
+      --lumo-secondary-text-color: var(--ha-muted);
+      --lumo-base-color: var(--ha-card-bg);
+      --ha-ops-surface: var(--ha-card-bg);
+      --ha-ops-muted-text: #6b7280;
+      --ha-ops-muted-border: #d1d5db;
     }}
     * {{
       box-sizing: border-box;
@@ -1065,9 +831,12 @@ def render_page(data):
       min-height: 0;
       overflow: hidden;
     }}
-    .details-card pre {{
+    .details-card ha-ops-log {{
       flex: 1 1 auto;
       min-height: 0;
+      display: block;
+    }}
+    .details-card pre {{
       margin: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
@@ -1226,219 +995,6 @@ def render_page(data):
       color: var(--ha-muted);
       line-height: 1.4;
     }}
-    .apply-preview-warning {{
-      display: grid;
-      gap: 8px;
-      margin: 12px 0;
-      padding: 12px 14px;
-      border: 1px solid color-mix(in srgb, var(--ha-warning) 45%, transparent);
-      border-left: 5px solid var(--ha-warning);
-      border-radius: calc(var(--ha-radius) - 4px);
-      background: color-mix(in srgb, var(--ha-warning) 14%, var(--ha-card-bg));
-      color: var(--ha-text);
-    }}
-    .apply-preview-warning ul {{
-      margin: 0;
-      padding-left: 20px;
-      color: var(--ha-muted);
-      line-height: 1.45;
-    }}
-    .preview-decisions {{
-      display: grid;
-      gap: 10px;
-      margin: 12px 0;
-    }}
-    .preview-list-header {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }}
-    .preview-list-header h3 {{
-      margin: 0;
-      font-size: 1rem;
-    }}
-    .preview-list-controls,
-    .preview-confirm-actions,
-    .preview-file-actions,
-    .preview-file-header-actions {{
-      display: flex;
-      justify-content: flex-end;
-      align-items: center;
-      gap: 8px;
-      flex-wrap: wrap;
-    }}
-    .preview-footer-actions {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }}
-    .preview-footer-actions-save {{
-      align-items: stretch;
-      flex-direction: column;
-    }}
-    .preview-confirm-actions-save {{
-      width: 100%;
-    }}
-    .preview-confirm-form {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1 1 520px;
-      min-width: 0;
-    }}
-    .commit-subject-control {{
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1 1 auto;
-      min-width: 0;
-      color: var(--ha-muted);
-      font-weight: 700;
-    }}
-    .commit-subject-control input {{
-      flex: 1 1 auto;
-      min-width: 0;
-      border: 1px solid var(--ha-border);
-      border-radius: calc(var(--ha-radius) - 6px);
-      padding: 9px 10px;
-      color: var(--ha-text);
-      background: var(--ha-card-bg);
-      font: inherit;
-    }}
-    .commit-subject-control input:disabled {{
-      border-color: #d1d5db;
-      background: #e5e7eb;
-      color: #6b7280;
-      opacity: 1;
-    }}
-    .preview-confirm-hint {{
-      color: var(--ha-muted);
-      font-weight: 700;
-      text-align: left;
-    }}
-    .preview-list-control-spacer {{
-      width: 1px;
-      height: 28px;
-      margin: 0 4px;
-      background: var(--ha-border);
-    }}
-    .preview-file-list {{
-      display: grid;
-      gap: 8px;
-    }}
-    .preview-file {{
-      border: 1px solid var(--ha-border);
-      border-radius: calc(var(--ha-radius) - 4px);
-      background: var(--ha-card-bg);
-      overflow: hidden;
-    }}
-    .preview-file-header {{
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 12px;
-      align-items: center;
-      padding: 10px 12px;
-    }}
-    .preview-file-title {{
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }}
-    .preview-file-select-form {{
-      display: inline-flex;
-      align-items: center;
-      flex: 0 0 auto;
-      margin: 0;
-    }}
-    .preview-file-select-form input[type="checkbox"] {{
-      width: 18px;
-      height: 18px;
-      margin: 0;
-    }}
-    .preview-file-title code {{
-      overflow-wrap: anywhere;
-    }}
-    .preview-file-title code strong {{
-      color: var(--ha-text);
-    }}
-    .preview-file-change {{
-      color: var(--ha-muted);
-      font-size: 0.86rem;
-      font-weight: 600;
-      white-space: nowrap;
-    }}
-    .preview-file-detail {{
-      border-top: 1px solid var(--ha-border);
-    }}
-    .preview-file-detail-actions {{
-      justify-content: space-between;
-      padding: 10px 12px;
-      border-top: 1px solid var(--ha-border);
-      background: var(--ha-card-bg);
-    }}
-    .preview-choice-slot {{
-      display: inline-flex;
-    }}
-    .preview-choice-toggle {{
-      display: inline-grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      min-width: 280px;
-      border: 1px solid var(--ha-border);
-      border-radius: 999px;
-      overflow: hidden;
-      background: var(--ha-card-bg);
-    }}
-    .preview-choice-option {{
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 38px;
-      padding: 0 12px;
-      color: var(--ha-text);
-      cursor: pointer;
-      font-size: 0.92rem;
-      font-weight: 600;
-      white-space: nowrap;
-    }}
-    .preview-choice-option + .preview-choice-option {{
-      border-left: 1px solid var(--ha-border);
-    }}
-    .preview-choice-option input {{
-      position: absolute;
-      opacity: 0;
-      pointer-events: none;
-    }}
-    .preview-choice-option-selected,
-    .preview-choice-option:has(input:checked) {{
-      background: var(--ha-primary);
-      color: var(--ha-primary-contrast);
-    }}
-    .preview-choice-option-disabled,
-    .preview-choice-option:has(input:disabled) {{
-      background: #e5e7eb;
-      color: #6b7280;
-      cursor: default;
-    }}
-    .preview-choice-option-selected.preview-choice-option-disabled,
-    .preview-choice-option:has(input:checked:disabled) {{
-      background: #d1d5db;
-      color: #4b5563;
-    }}
-    .preview-footer-actions {{
-      margin-top: 4px;
-    }}
-    .decision-status {{
-      display: inline-block;
-      margin-left: 8px;
-      color: var(--ha-muted);
-      font-size: 12px;
-      font-weight: 700;
-    }}
     td.actions {{
       margin-top: 0;
       flex-direction: row;
@@ -1489,13 +1045,17 @@ def render_page(data):
     }}
     button:disabled,
     button.secondary:disabled,
-    button.warning:disabled {{
+    button.warning:disabled,
+    vaadin-button[disabled] {{
       background: #e5e7eb;
       color: #6b7280;
       border-color: #d1d5db;
       cursor: default;
       opacity: 1;
+      --vaadin-button-background: #e5e7eb;
+      --vaadin-button-text-color: #6b7280;
     }}
+    vaadin-button[disabled]::part(label) {{ color: #6b7280; }}
     pre {{
       margin: 0;
       background: var(--ha-code-bg);
@@ -1815,9 +1375,6 @@ def render_page(data):
       .card {{
         padding: 16px;
       }}
-      .preview-file-header {{
-        grid-template-columns: minmax(0, 1fr);
-      }}
       dl {{
         grid-template-columns: 1fr;
       }}
@@ -1825,8 +1382,9 @@ def render_page(data):
   </style>
 </head>
 <body>
+  <ha-ops-app data-testid="ha-ops-app">
   <main>
-    <div class="top-grid" data-ws-fragment="top-grid">
+    <div class="top-grid">
       <section class="card control-card">
         <div class="title-row">
           <h1>{_('title.site')}</h1>
@@ -1890,8 +1448,8 @@ def render_page(data):
               <form method="post" action="disk-usage" data-async-form="true">
                 <button type="submit" class="secondary" {data['check_disk_usage_disabled']}>{_('action.check_disk_usage')}</button>
               </form>
-              <form method="post" action="docker-build-cache-prune" data-delayed-confirm="true" data-async-form="false" data-capability-available="{data['docker_prune_available']}" data-action-ready="{data['docker_prune_ready']}">
-                <button type="submit" class="secondary delayed-confirm-button" disabled>{_('action.clear_docker_build_cache')}</button>
+              <form method="post" action="docker-build-cache-prune" data-confirm="{_('confirm.docker_build_cache_prune')}" data-async-form="false" data-capability-available="{data['docker_prune_available']}" data-action-ready="{data['docker_prune_ready']}">
+                <button type="submit" class="secondary" {data['docker_prune_disabled']}>{_('action.clear_docker_build_cache')}</button>
               </form>
             </div>
             {data['docker_prune_hint_html']}
@@ -1933,680 +1491,49 @@ def render_page(data):
           <h2>{_('heading.log')}</h2>
           <div class="badge {data['badge_class']}" data-status-code="{data['status_code']}">{data['status']}</div>
         </div>
-        <pre data-transient="details">{data['details_html']}</pre>
+        <ha-ops-log>{data['details_html']}</ha-ops-log>
       </section>
     </div>
 
-    <div data-ws-fragment="apply-preview-section">{data['apply_preview_section_html']}</div>
+    <div>{data['deleted_devices_section_html']}</div>
 
-    <div data-ws-fragment="save-preview-section">{data['save_preview_section_html']}</div>
+    <div>{data['retained_devices_section_html']}</div>
 
-    <div data-ws-fragment="deleted-devices-section">{data['deleted_devices_section_html']}</div>
+    <div>{data['internal_ids_section_html']}</div>
 
-    <div data-ws-fragment="retained-devices-section">{data['retained_devices_section_html']}</div>
+    <div>{data['conflicts_section_html']}</div>
 
-    <div data-ws-fragment="internal-ids-section">{data['internal_ids_section_html']}</div>
-
-    <div data-ws-fragment="conflicts-section">{data['conflicts_section_html']}</div>
-
-    <section class="card wide" data-ws-fragment="git-auth-section">
+    <section class="card wide">
       <h2>{_('heading.git_access')}</h2>
       {data['git_auth_html']}
     </section>
 
-    <section class="card wide" data-ws-fragment="managed-targets-section">
+    <section class="card wide">
       <h2>{_('heading.managed_targets')}</h2>
       {data['targets_html']}
     </section>
 
-    <section class="card wide" data-ws-fragment="release-snapshots-section">
+    <section class="card wide">
       <h2>{_('heading.release_snapshots')}</h2>
       {data['releases_html']}
     </section>
   </main>
+  </ha-ops-app>
   <script>
-    (() => {{
-      const clientStatus = document.getElementById("client-status");
-      let detailsResizeObserver = null;
-      let detailsResizeListenerBound = false;
-
-      function setClientStatus(message) {{
-        if (clientStatus) {{
-          clientStatus.textContent = message || "";
-        }}
-      }}
-
-      function isRunning() {{
-        const badge = document.querySelector(".badge");
-        return badge && badge.dataset.statusCode === "running";
-      }}
-
-      function clearTransientDisplay() {{
-        const details = document.querySelector("[data-transient='details']");
-        const applyPreview = document.querySelector("[data-transient='apply-preview']");
-        const savePreview = document.querySelector("[data-transient='save-preview']");
-        const deletedDevicesPreview = document.querySelector("[data-transient='deleted-devices-preview']");
-        const applyGenerated = document.querySelector("[data-transient='apply-generated']");
-        const saveGenerated = document.querySelector("[data-transient='save-generated']");
-        const deletedDevicesGenerated = document.querySelector("[data-transient='deleted-devices-generated']");
-        if (details) {{
-          details.textContent = {js_t('message.no_log_entries')};
-        }}
-        if (applyPreview) {{
-          applyPreview.textContent = "";
-        }}
-        if (savePreview) {{
-          savePreview.textContent = "";
-        }}
-        if (deletedDevicesPreview) {{
-          deletedDevicesPreview.innerHTML = "";
-        }}
-        if (applyGenerated) {{
-          applyGenerated.textContent = "";
-        }}
-        if (saveGenerated) {{
-          saveGenerated.textContent = "";
-        }}
-        if (deletedDevicesGenerated) {{
-          deletedDevicesGenerated.textContent = "";
-        }}
-      }}
-
-      const logScrollStorageKey = "haOpsLogScrollState";
-
-      function logIsScrolledToBottom(details) {{
-        return details.scrollHeight - details.scrollTop - details.clientHeight <= 4;
-      }}
-
-      function readLogScrollState() {{
-        try {{
-          return JSON.parse(sessionStorage.getItem(logScrollStorageKey) || "null");
-        }} catch (_error) {{
-          return null;
-        }}
-      }}
-
-      function writeLogScrollState(details) {{
-        try {{
-          sessionStorage.setItem(logScrollStorageKey, JSON.stringify({{
-            sticky: logIsScrolledToBottom(details),
-            scrollTop: details.scrollTop
-          }}));
-        }} catch (_error) {{}}
-      }}
-
-      function restoreLogScrollState() {{
-        const details = document.querySelector("[data-transient='details']");
-        if (!details) {{
-          return;
-        }}
-        const state = readLogScrollState();
-        const restore = () => {{
-          if (!state || state.sticky !== false) {{
-            details.scrollTop = details.scrollHeight;
-          }} else if (Number.isFinite(state.scrollTop)) {{
-            const maxScrollTop = Math.max(0, details.scrollHeight - details.clientHeight);
-            details.scrollTop = Math.min(state.scrollTop, maxScrollTop);
-          }}
-          writeLogScrollState(details);
-        }};
-        requestAnimationFrame(restore);
-        details.addEventListener("scroll", () => {{
-          writeLogScrollState(details);
-        }}, {{passive: true}});
-      }}
-
-      function syncDetailsHeight() {{
-        const controlCard = document.querySelector(".control-card");
-        const detailsCard = document.querySelector(".details-card");
-        if (!controlCard || !detailsCard) {{
-          return;
-        }}
-        const controlRect = controlCard.getBoundingClientRect();
-        const detailsRect = detailsCard.getBoundingClientRect();
-        const sameRow = Math.abs(controlRect.top - detailsRect.top) < 2;
-        if (sameRow) {{
-          detailsCard.style.setProperty("--details-card-height", `${{controlRect.height}}px`);
-        }} else {{
-          detailsCard.style.removeProperty("--details-card-height");
-        }}
-      }}
-
-      function observeDetailsHeight() {{
-        const controlCard = document.querySelector(".control-card");
-        if (detailsResizeObserver) {{
-          detailsResizeObserver.disconnect();
-          detailsResizeObserver = null;
-        }}
-        if (controlCard && typeof ResizeObserver === "function") {{
-          detailsResizeObserver = new ResizeObserver(syncDetailsHeight);
-          detailsResizeObserver.observe(controlCard);
-        }}
-        if (!detailsResizeListenerBound) {{
-          detailsResizeListenerBound = true;
-          window.addEventListener("resize", syncDetailsHeight);
-        }}
-        requestAnimationFrame(syncDetailsHeight);
-      }}
-      observeDetailsHeight();
-
-      function clearDisplayState() {{
-        if (navigator.sendBeacon) {{
-          navigator.sendBeacon("clear-display-state", new Blob([""], {{
-            type: "application/x-www-form-urlencoded"
-          }}));
-          return;
-        }}
-        fetch("clear-display-state", {{
-          method: "POST",
-          keepalive: true,
-          headers: {{
-            "Accept": "application/json",
-            "X-Requested-With": "fetch"
-          }}
-        }}).catch(() => {{}});
-      }}
-
-      function markInternalReload() {{
-        try {{
-          sessionStorage.setItem("haOpsInternalReload", "1");
-        }} catch (_error) {{}}
-      }}
-
-      function consumeInternalReload() {{
-        try {{
-          const value = sessionStorage.getItem("haOpsInternalReload") === "1";
-          sessionStorage.removeItem("haOpsInternalReload");
-          return value;
-        }} catch (_error) {{
-          return false;
-        }}
-      }}
-
-      let haOpsSocket = null;
-      let haOpsSocketReady = false;
-      let haOpsSocketNextId = 1;
-      const haOpsSocketPending = new Map();
-      let haOpsReconnectTimer = null;
-
-      function websocketBaseUrl() {{
-        const base = new URL(window.location.href);
-        if (!base.pathname.endsWith("/")) {{
-          const lastSlash = base.pathname.lastIndexOf("/");
-          const lastSegment = base.pathname.slice(lastSlash + 1);
-          if (lastSegment && !lastSegment.includes(".")) {{
-            base.pathname = `${{base.pathname}}/`;
-          }} else {{
-            base.pathname = base.pathname.slice(0, lastSlash + 1);
-          }}
-        }}
-        return base;
-      }}
-
-      function wsUrl() {{
-        const url = new URL("ws", websocketBaseUrl());
-        url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return url.href;
-      }}
-
-      function webSocketAvailable() {{
-        return typeof window.WebSocket === "function";
-      }}
-
-      function applyStateFrame(payload) {{
-        if (!payload || !payload.state) {{ return; }}
-        const state = payload.state || {{}};
-        if (state.last_message) {{
-          setClientStatus(state.last_message);
-        }}
-        const badge = document.querySelector("[data-status-code]");
-        if (badge && state.last_status) {{
-          badge.dataset.statusCode = state.last_status;
-          badge.textContent = state.last_status === "success" ? "done" : state.last_status;
-          badge.className = `badge ${{state.last_status === "running" ? "running" : state.last_status === "error" ? "error" : ""}}`;
-        }}
-        const details = document.querySelector("[data-transient='details']");
-        if (details && Array.isArray(state.last_details)) {{
-          details.textContent = state.last_details.length ? state.last_details.join("\\n") : (state.last_message || "");
-          restoreLogScrollState();
-        }}
-        applyFragments(payload.fragments);
-      }}
-
-      function applyFragments(fragments) {{
-        if (!fragments || typeof fragments !== "object") {{ return; }}
-        storePreviewExpandedState();
-        for (const [name, markup] of Object.entries(fragments)) {{
-          const current = document.querySelector(`[data-ws-fragment="${{name}}"]`);
-          if (!current || typeof markup !== "string") {{ continue; }}
-          const template = document.createElement("template");
-          template.innerHTML = markup.trim();
-          const replacement = template.content.firstElementChild;
-          if (replacement && replacement.getAttribute("data-ws-fragment") === name) {{
-            current.replaceWith(replacement);
-          }}
-        }}
-        wireDynamicControls(document);
-        restorePreviewExpandedState();
-        restoreLogScrollState();
-        observeDetailsHeight();
-        syncDetailsHeight();
-      }}
-
-      function scheduleWsReconnect() {{
-        if (haOpsReconnectTimer || !webSocketAvailable()) {{ return; }}
-        haOpsReconnectTimer = window.setTimeout(() => {{
-          haOpsReconnectTimer = null;
-          ensureWs();
-        }}, 1200);
-      }}
-
-      function ensureWs() {{
-        if (!webSocketAvailable()) {{ return null; }}
-        if (haOpsSocket && (haOpsSocket.readyState === WebSocket.OPEN || haOpsSocket.readyState === WebSocket.CONNECTING)) {{
-          return haOpsSocket;
-        }}
-        haOpsSocketReady = false;
-        haOpsSocket = new WebSocket(wsUrl());
-        haOpsSocket.addEventListener("open", () => {{
-          haOpsSocketReady = true;
-          if (haOpsReconnectTimer) {{
-            window.clearTimeout(haOpsReconnectTimer);
-            haOpsReconnectTimer = null;
-          }}
-          try {{
-            haOpsSocket.send(JSON.stringify({{ id: String(haOpsSocketNextId++), command: "replay" }}));
-          }} catch (_error) {{}}
-        }});
-        haOpsSocket.addEventListener("close", () => {{
-          haOpsSocketReady = false;
-          for (const pending of haOpsSocketPending.values()) {{
-            pending.reject(new Error("WebSocket disconnected"));
-          }}
-          haOpsSocketPending.clear();
-          scheduleWsReconnect();
-        }});
-        haOpsSocket.addEventListener("message", (event) => {{
-          let payload = {{}};
-          try {{ payload = JSON.parse(event.data); }} catch (_error) {{ return; }}
-          if (payload.type === "ready" || payload.type === "state" || payload.type === "replay") {{
-            applyStateFrame(payload);
-            return;
-          }}
-          if (payload.type === "log") {{
-            if (payload.message) {{ setClientStatus(payload.message); }}
-            return;
-          }}
-          if (payload.type !== "result" || !payload.id || !haOpsSocketPending.has(payload.id)) {{ return; }}
-          applyStateFrame(payload);
-          const pending = haOpsSocketPending.get(payload.id);
-          haOpsSocketPending.delete(payload.id);
-          pending.resolve(payload);
-        }});
-        return haOpsSocket;
-      }}
-
-      function commandForAction(action) {{
-        if (!action) {{ return ""; }}
-        const path = new URL(action, window.location.href).pathname;
-        const command = path.split("/").filter(Boolean).pop() || "";
-        if (command === "save-preview") {{ return "save_preview"; }}
-        if (command === "preview") {{ return "preview"; }}
-        if (command === "save") {{ return "save"; }}
-        if (command === "apply") {{ return "apply"; }}
-        return "";
-      }}
-
-      async function submitViaWs(form) {{
-        const command = commandForAction(form.getAttribute("action"));
-        if (!command) {{ return null; }}
-        const socket = ensureWs();
-        if (!socket) {{ return null; }}
-        if (!haOpsSocketReady) {{
-          await new Promise((resolve, reject) => {{
-            const timer = window.setTimeout(() => reject(new Error("WebSocket timeout")), 800);
-            socket.addEventListener("open", () => {{ window.clearTimeout(timer); resolve(); }}, {{ once: true }});
-            socket.addEventListener("error", () => {{ window.clearTimeout(timer); reject(new Error("WebSocket error")); }}, {{ once: true }});
-          }});
-        }}
-        const id = String(haOpsSocketNextId++);
-        const body = Object.fromEntries(new FormData(form).entries());
-        const pending = new Promise((resolve, reject) => {{
-          haOpsSocketPending.set(id, {{ resolve, reject }});
-          window.setTimeout(() => {{
-            if (haOpsSocketPending.has(id)) {{
-              haOpsSocketPending.delete(id);
-              reject(new Error("WebSocket command timeout"));
-            }}
-          }}, 5000);
-        }});
-        socket.send(JSON.stringify({{ id, command, ...body }}));
-        return pending;
-      }}
-
-      if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) {{
-        window.__haOpsTestCloseWs = () => {{
-          if (haOpsSocket) {{
-            haOpsSocket.close();
-          }}
-        }};
-      }}
-
-      const previewExpandedStorageKey = "haOpsPreviewExpandedFiles";
-
-      function storePreviewExpandedState() {{
-        const keys = [];
-        for (const file of document.querySelectorAll("[data-preview-file]")) {{
-          const detail = file.querySelector(".preview-file-detail");
-          const key = file.getAttribute("data-preview-key");
-          if (key && detail && !detail.hidden) {{
-            keys.push(key);
-          }}
-        }}
-        try {{
-          if (keys.length) {{
-            sessionStorage.setItem(previewExpandedStorageKey, JSON.stringify(keys));
-          }} else {{
-            sessionStorage.removeItem(previewExpandedStorageKey);
-          }}
-        }} catch (_error) {{}}
-      }}
-
-      function restorePreviewExpandedState() {{
-        let keys = [];
-        try {{
-          keys = JSON.parse(sessionStorage.getItem(previewExpandedStorageKey) || "[]");
-          sessionStorage.removeItem(previewExpandedStorageKey);
-        }} catch (_error) {{
-          keys = [];
-        }}
-        if (!Array.isArray(keys) || !keys.length) {{
-          return;
-        }}
-        const wanted = new Set(keys);
-        for (const file of document.querySelectorAll("[data-preview-file]")) {{
-          const key = file.getAttribute("data-preview-key");
-          if (wanted.has(key)) {{
-            setPreviewFileExpanded(file, true);
-          }}
-        }}
-      }}
-
-      function navigationType() {{
-        const entries = performance.getEntriesByType
-          ? performance.getEntriesByType("navigation")
-          : [];
-        if (entries && entries[0] && entries[0].type) {{
-          return entries[0].type;
-        }}
-        if (performance.navigation && performance.navigation.type === 1) {{
-          return "reload";
-        }}
-        if (performance.navigation && performance.navigation.type === 2) {{
-          return "back_forward";
-        }}
-        return "navigate";
-      }}
-
-      window.addEventListener("pageshow", (event) => {{
-        if (event.persisted) {{
-          disableDelayedConfirmControllers();
-          window.location.reload();
-          return;
-        }}
-        const internalReload = consumeInternalReload();
-        const type = navigationType();
-        if (!internalReload && (event.persisted || type === "reload" || type === "back_forward")) {{
-          clearTransientDisplay();
-          clearDisplayState();
-        }}
-      }});
-
-      window.addEventListener("pagehide", () => {{
-        resetDelayedConfirmControllers();
-        let internalReload = false;
-        try {{
-          internalReload = sessionStorage.getItem("haOpsInternalReload") === "1";
-        }} catch (_error) {{}}
-        if (!internalReload && !isRunning()) {{
-          clearDisplayState();
-        }}
-      }});
-
-      async function submitAsyncForm(form, terminalButton = null) {{
-        const confirmation = form.getAttribute("data-confirm");
-        if (confirmation && !window.confirm(confirmation)) {{
-          return;
-        }}
-        const button = terminalButton || form.querySelector("button[type='submit']");
-        const originalText = button ? button.textContent : "";
-        if (button) {{
-          button.disabled = true;
-          button.textContent = {js_t('message.working')};
-        }}
-        setClientStatus({js_t('message.working')});
-        if (form.getAttribute("data-preserve-preview-expanded") === "true") {{
-          storePreviewExpandedState();
-        }}
-        const preserveDisplayState = form.getAttribute("data-preserve-display-state") === "true";
-        if (!preserveDisplayState) {{
-          clearTransientDisplay();
-        }}
-
-        try {{
-          let payload = await submitViaWs(form);
-          if (payload === null) {{
-            const response = await fetch(form.getAttribute("action"), {{
-            method: "POST",
-            headers: {{
-              "Accept": "application/json",
-              "X-Requested-With": "fetch"
-            }},
-            body: new URLSearchParams(new FormData(form))
-            }});
-
-            try {{
-              payload = await response.json();
-            }} catch (_error) {{
-              payload = {{}};
-            }}
-
-            if (!response.ok) {{
-              payload = {{ ok: false, message: payload.message }};
-            }}
-          }}
-
-          if (payload.ok === false) {{
-            setClientStatus(payload.message || {js_t('error.request_failed')});
-          }} else {{
-            setClientStatus(payload.message || {js_t('message.done_refreshing')});
-            applyStateFrame(payload);
-          }}
-        }} catch (error) {{
-          setClientStatus(error?.message || {js_t('error.network')});
-        }} finally {{
-          if (button && !terminalButton) {{
-            button.disabled = false;
-            button.textContent = originalText;
-          }}
-        }}
-      }}
-
-      const delayedConfirmControllers = [];
-      function resetDelayedConfirmControllers() {{
-        for (const controller of delayedConfirmControllers) {{ controller.reset(); }}
-      }}
-      function disableDelayedConfirmControllers() {{
-        for (const controller of delayedConfirmControllers) {{ controller.disable(); }}
-      }}
-      function wireDynamicControls(root = document) {{
-        for (const form of root.querySelectorAll("form[data-delayed-confirm='true']")) {{
-          if (form.dataset.delayedConfirmBound === "true") {{ continue; }}
-          form.dataset.delayedConfirmBound = "true";
-          const button = form.querySelector("button[type='submit']");
-          if (!button || form.getAttribute("data-action-ready") !== "true") {{ continue; }}
-          const initialText = button.textContent;
-          const initialClass = button.className;
-          button.style.minInlineSize = `${{Math.max(button.getBoundingClientRect().width, 88)}}px`;
-          button.disabled = false;
-          let state = "initial";
-          let delayTimer = null;
-          let expiryTimer = null;
-          const reset = () => {{
-            if (state === "unavailable") {{ return; }}
-            if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
-            if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-            state = "initial";
-            button.disabled = false;
-            button.textContent = initialText;
-            button.className = initialClass;
-          }};
-          const disable = () => {{
-            if (delayTimer !== null) {{ clearTimeout(delayTimer); delayTimer = null; }}
-            if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-            state = "unavailable";
-            button.disabled = true;
-            button.textContent = initialText;
-            button.className = initialClass;
-          }};
-          const controller = {{ reset, disable }};
-          delayedConfirmControllers.push(controller);
-          form.addEventListener("submit", (event) => {{
-            event.preventDefault();
-            if (state === "submitted" || state === "delay" || state === "unavailable") {{ return; }}
-            if (state === "armed") {{
-              state = "submitted";
-              if (expiryTimer !== null) {{ clearTimeout(expiryTimer); expiryTimer = null; }}
-              button.disabled = true;
-              submitAsyncForm(form, button);
-              return;
-            }}
-            state = "delay";
-            button.disabled = true;
-            delayTimer = setTimeout(() => {{
-              if (state !== "delay") {{ return; }}
-              delayTimer = null;
-              state = "armed";
-              button.disabled = false;
-              button.classList.add("warning");
-              button.textContent = {js_t('action.confirm')};
-              expiryTimer = setTimeout(() => {{ if (state === "armed") {{ reset(); }} }}, 6000);
-            }}, 1500);
-          }});
-        }}
-        for (const form of root.querySelectorAll("form[data-async-form='true']")) {{
-          if (form.dataset.asyncBound === "true") {{ continue; }}
-          form.dataset.asyncBound = "true";
-          form.addEventListener("submit", (event) => {{
-            event.preventDefault();
-            submitAsyncForm(form);
-          }});
-        }}
-        for (const form of root.querySelectorAll("form[data-auto-submit='change']")) {{
-          for (const input of form.querySelectorAll("input, select")) {{
-            if (input.dataset.autoSubmitBound === "true") {{ continue; }}
-            input.dataset.autoSubmitBound = "true";
-            input.addEventListener("change", () => {{
-              submitAsyncForm(form);
-            }});
-          }}
-        }}
-        for (const button of root.querySelectorAll("button[data-checkbox-scope]")) {{
-          if (button.dataset.checkboxBound === "true") {{ continue; }}
-          button.dataset.checkboxBound = "true";
-          button.addEventListener("click", () => {{
-            const scope = button.getAttribute("data-checkbox-scope");
-            const action = button.getAttribute("data-checkbox-action");
-            const checked = action === "all";
-            for (const input of document.querySelectorAll(`[data-checkbox-scope="${{scope}}"] input[type="checkbox"]`)) {{
-              if (!input.disabled) {{
-                input.checked = checked;
-              }}
-            }}
-          }});
-        }}
-        for (const button of root.querySelectorAll(".preview-file-toggle")) {{
-          if (button.dataset.previewToggleBound === "true") {{ continue; }}
-          button.dataset.previewToggleBound = "true";
-          button.addEventListener("click", () => {{
-            const file = button.closest("[data-preview-file]");
-            if (!file) {{
-              return;
-            }}
-            const expanded = button.getAttribute("aria-expanded") !== "true";
-            const nextFile = expanded ? null : file.nextElementSibling;
-            setPreviewFileExpanded(file, expanded);
-            if (nextFile && nextFile.matches("[data-preview-file]")) {{
-              requestAnimationFrame(() => {{
-                nextFile.scrollIntoView({{block: "start", inline: "nearest"}});
-              }});
-            }}
-          }});
-        }}
-        for (const button of root.querySelectorAll(".preview-expand-all, .preview-collapse-all")) {{
-          if (button.dataset.previewListBound === "true") {{ continue; }}
-          button.dataset.previewListBound = "true";
-          button.addEventListener("click", () => {{
-            const section = button.closest(".preview-decisions");
-            if (!section) {{
-              return;
-            }}
-            const expanded = button.classList.contains("preview-expand-all");
-            for (const file of section.querySelectorAll("[data-preview-file]")) {{
-              setPreviewFileExpanded(file, expanded);
-            }}
-          }});
-        }}
-        for (const button of root.querySelectorAll(".preview-wrap-button")) {{
-          if (button.dataset.previewWrapBound === "true") {{ continue; }}
-          button.dataset.previewWrapBound = "true";
-          button.addEventListener("click", () => {{
-            const file = button.closest("[data-preview-file]");
-            const diff = file ? file.querySelector(".conflict-diff") : null;
-            if (diff) {{
-              diff.classList.toggle("wrap-lines");
-            }}
-          }});
-        }}
-        for (const toggle of root.querySelectorAll(".diff-wrap-toggle")) {{
-          if (toggle.dataset.diffWrapBound === "true") {{ continue; }}
-          toggle.dataset.diffWrapBound = "true";
-          toggle.addEventListener("change", () => {{
-            const diff = toggle.closest(".conflict-diff");
-            if (diff) {{
-              diff.classList.toggle("wrap-lines", toggle.checked);
-            }}
-          }});
-        }}
-      }}
-      wireDynamicControls(document);
-
-      const pageRenderedRunning = {data['job_running_json']};
-      if (pageRenderedRunning) {{
-        ensureWs();
-      }}
-
-      function setPreviewFileExpanded(file, expanded) {{
-        const detail = file.querySelector(".preview-file-detail");
-        const toggles = file.querySelectorAll(".preview-file-toggle");
-        const choice = file.querySelector(".preview-choice-toggle");
-        const headerSlot = file.querySelector("[data-preview-choice-slot='header']");
-        const detailSlot = file.querySelector("[data-preview-choice-slot='detail']");
-        if (detail) {{
-          detail.hidden = !expanded;
-        }}
-        if (choice && headerSlot && detailSlot) {{
-          (expanded ? detailSlot : headerSlot).appendChild(choice);
-        }}
-        for (const toggle of toggles) {{
-          toggle.setAttribute("aria-expanded", expanded ? "true" : "false");
-          toggle.textContent = expanded ? {js_t('button.collapse_diff')} : {js_t('button.expand_diff')};
-        }}
-      }}
-
-      restorePreviewExpandedState();
-      restoreLogScrollState();
-    }})();
+    window.__HA_OPS_REACTIVE_UI__ = true;
+    window.__HA_OPS_TEXT__ = {{
+      expand: {js_t('button.expand_diff')},
+      collapse: {js_t('button.collapse_diff')},
+      expandAll: {js_t('button.expand_all')},
+      collapseAll: {js_t('button.collapse_all')},
+      applyPreview: {js_t('heading.git_to_ha')},
+      savePreview: {js_t('heading.ha_to_git')},
+      loadingDiff: {js_t('message.loading_diff')},
+      unavailableDiff: {js_t('text.diff_detail_unavailable')},
+      confirm: {js_t('action.confirm')}
+    }};
   </script>
+  <script type="module" src="assets/ha-ops.js"></script>
 </body>
 </html>"""
+    return page

@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 ha-ops/.ha-ops-dev/
 ha-ops/tests/browser/artifacts/
+ha-ops/frontend/node_modules/

@@ -125,6 +125,12 @@ class AppContext:
     def wait_for_state_change(self, after_sequence, timeout=None):
         return self.operation_store.wait_for_state_change(after_sequence, timeout=timeout)
 
+    def claim_command(self, command_id, command, generation, payload):
+        return self.operation_store.claim_command(command_id, command, generation, payload)
+
+    def update_command(self, command_id, status, result=None):
+        return self.operation_store.update_command(command_id, status, result=result)
+
     def classify_docker_prune_fence(self, state=None):
         state = state if state is not None else self.read_state()
         return state_store.classify_docker_prune_fence(state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
