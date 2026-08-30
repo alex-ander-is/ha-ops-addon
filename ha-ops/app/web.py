@@ -1228,6 +1228,7 @@ POST_ENDPOINTS = (
     "/rollback",
     "/__dev_harness__/arm",
     "/__dev_harness__/release",
+    "/__dev_harness__/clear-previews",
 )
 
 

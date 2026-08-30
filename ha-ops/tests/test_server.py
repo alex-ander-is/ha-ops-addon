@@ -1516,6 +1516,31 @@ class ServerTests(unittest.TestCase):
             root = Path(tmp)
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
+
+            page = server.render_page()
+
+        app_markup = page.split('<ha-ops-app data-testid="ha-ops-app">', 1)[1].split("</ha-ops-app>", 1)[0]
+        main_markup = page.split("<main>", 1)[1].split("</main>", 1)[0]
+        reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        built_script = (ROOT / "app" / "static" / "ha-ops.js").read_text()
+        self.assertNotIn("data-server-preview", page)
+        self.assertNotIn("<ha-ops-preview", app_markup)
+        self.assertNotIn('data-testid="diff-section"', app_markup)
+        self.assertNotIn("preview-file-toggle", app_markup)
+        self.assertNotIn("action='select-apply-preview'", app_markup)
+        self.assertNotIn("action='select-save-preview'", app_markup)
+        self.assertEqual(app_markup.count('data-testid="reactive-previews"'), 1)
+        self.assertLess(main_markup.index('data-testid="reactive-previews"'), main_markup.index("<h2>Git Access</h2>"))
+        self.assertNotIn('data-testid="reactive-previews"', reactive_script)
+        self.assertNotIn("data-server-preview", reactive_script)
+        self.assertNotIn("data-server-preview", built_script)
+
+    def test_preview_initial_render_still_leaves_client_owning_diff_card(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
             server.write_state(
                 {
                     "last_diff_generated_at": "2026-05-14T19:52:16+00:00",
@@ -1528,16 +1553,51 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
         app_markup = page.split('<ha-ops-app data-testid="ha-ops-app">', 1)[1].split("</ha-ops-app>", 1)[0]
-        reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
-        built_script = (ROOT / "app" / "static" / "ha-ops.js").read_text()
-        self.assertNotIn("data-server-preview", page)
+        self.assertEqual(app_markup.count('data-testid="reactive-previews"'), 1)
+        self.assertLess(app_markup.index('data-testid="reactive-previews"'), app_markup.index("<h2>Git Access</h2>"))
         self.assertNotIn("<ha-ops-preview", app_markup)
-        self.assertNotIn("preview-file-toggle", app_markup)
-        self.assertNotIn("action='select-apply-preview'", app_markup)
-        self.assertNotIn("action='select-save-preview'", app_markup)
-        self.assertEqual(reactive_script.count('data-testid="reactive-previews"'), 1)
-        self.assertNotIn("data-server-preview", reactive_script)
-        self.assertNotIn("data-server-preview", built_script)
+        self.assertNotIn('data-testid="diff-section"', app_markup)
+
+    def test_reactive_diff_section_source_contract_covers_running_and_controls(self):
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);", script)
+        self.assertIn("const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);", script)
+        self.assertIn("const previewRunning = this.isPreviewGenerationRunning();", script)
+        self.assertIn("const visible = hasApplyPaths || hasSavePaths || previewRunning;", script)
+        self.assertIn("const loading = previewRunning && !hasApplyPaths && !hasSavePaths;", script)
+        self.assertIn('data-testid="diff-section"', script)
+        self.assertIn("TEXT.loadingPreviewDiff", script)
+        self.assertIn("select_save_preview", script)
+        self.assertIn("select_apply_preview", script)
+        self.assertIn("resolve_save_preview", script)
+        self.assertIn("resolve_apply_preview", script)
+
+    def test_reactive_diff_text_bootstrap_includes_preview_controls(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.get_installed_addons = lambda: []
+            page = server.render_page()
+        self.assertIn("loadingPreviewDiff", page)
+        self.assertIn("Loading Diff...", page)
+        self.assertIn("includeFile", page)
+        self.assertIn("Include preview file", page)
+        self.assertIn("versionChoice", page)
+        self.assertIn("Preview version choice", page)
+        self.assertIn("useGitVersion", page)
+        self.assertIn("Use Git Version", page)
+        self.assertIn("useHaVersion", page)
+        self.assertIn("Use HA Version", page)
+
+    def test_reactive_diff_highlighter_pairs_changed_line_substrings(self):
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertIn("function changedRanges(oldText, newText)", script)
+        self.assertIn("renderChangedText(line.slice(1), changedRange)", script)
+        self.assertIn('class="diff-changed"', script)
+        self.assertIn("while (blockIndex < lines.length && lines[blockIndex].startsWith(\"-\")", script)
+        self.assertIn("while (blockIndex < lines.length && lines[blockIndex].startsWith(\"+\")", script)
+        self.assertNotIn("unsafeHTML", script)
 
     def test_running_job_disables_save_conflict_actions(self):
         server = load_server()
@@ -17916,7 +17976,8 @@ devices:
         self.assertIn("observeLayout()", script)
         self.assertIn("setAll(expanded)", script)
         self.assertIn("setExpanded(expanded)", script)
-        self.assertIn('data-testid="reactive-previews"', script)
+        self.assertIn('querySelector("#reactive-previews[data-testid=', script)
+        self.assertIn("syncPreviewMount()", script)
         self.assertIn("customElements.define(\"ha-ops-preview\"", script)
 
     def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):

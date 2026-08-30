@@ -270,6 +270,13 @@ async function assertStatusNot(page, unexpectedStatus, phase) {
   assert(actual !== unexpectedStatus, `${phase} status was unexpectedly ${unexpectedStatus}`);
 }
 
+async function waitForInteractiveTransport(page, phase) {
+  await waitFor(`${phase} interactive transport`, async () => {
+    const connection = await page.getByTestId("status-badge").getAttribute("data-connection-state");
+    return ["connected", "http"].includes(connection) ? { connection } : null;
+  }, 7000);
+}
+
 async function assertLogContains(page, expectedText, phase) {
   const logText = await page.getByTestId("operation-log").textContent();
   assert(
@@ -339,6 +346,46 @@ async function assertPreviewExpansionControls(page, phase) {
   assert(collapsedAfterAll, `${phase} Collapse All did not hide all details`);
 }
 
+async function assertDiffSectionMountedBeforeGitAccess(page, phase, expectedLoading) {
+  await page.getByTestId("reactive-previews").waitFor({ timeout: 5000 });
+  const counts = await page.evaluate(() => ({
+    hosts: document.querySelectorAll('[data-testid="reactive-previews"]').length,
+    cards: document.querySelectorAll('section.card.wide[data-testid="diff-section"]').length,
+  }));
+  assert(counts.hosts === 1, `${phase} reactive preview host count was ${counts.hosts}`);
+  assert(counts.cards === 1, `${phase} diff section count was ${counts.cards}`);
+  const placement = await page.evaluate(() => {
+    const diff = document.querySelector('section.card.wide[data-testid="diff-section"]');
+    const gitAccess = Array.from(document.querySelectorAll("section.card.wide"))
+      .find((section) => section.querySelector("h2")?.textContent?.trim() === "Git Access");
+    return {
+      diffTop: diff?.getBoundingClientRect().top ?? null,
+      gitTop: gitAccess?.getBoundingClientRect().top ?? null,
+      loading: diff?.textContent?.includes("Loading Diff...") ?? false,
+    };
+  });
+  assert(placement.diffTop !== null && placement.gitTop !== null, `${phase} missing diff or Git Access section`);
+  assert(placement.diffTop < placement.gitTop, `${phase} diff section was not before Git Access`);
+  assert(placement.loading === expectedLoading, `${phase} loading state was ${placement.loading}, expected ${expectedLoading}`);
+}
+
+async function assertPreviewRowsAndControls(page, phase) {
+  await assertDiffSectionMountedBeforeGitAccess(page, phase, false);
+  const files = page.getByTestId("preview-file");
+  const count = await files.count();
+  assert(count > 0, `${phase} had no preview files`);
+  const controls = await files.evaluateAll((items) => items.map((item) => {
+    const root = item.shadowRoot;
+    return {
+      checkbox: Boolean(root?.querySelector("vaadin-checkbox")),
+      radio: Boolean(root?.querySelector("vaadin-radio-group")),
+      path: root?.querySelector("code")?.textContent || "",
+    };
+  }));
+  const missing = controls.filter((item) => !item.checkbox || !item.radio || !item.path);
+  assert(missing.length === 0, `${phase} preview rows missing checkbox/radio/path: ${JSON.stringify(controls)}`);
+}
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -358,10 +405,11 @@ async function submitDuplicateFromBrowser(page, buttonName) {
   }, buttonName);
 }
 
-async function runPreviewScenario(page, baseUrl, action, buttonName, expectedText) {
+async function runPreviewScenario(page, baseUrl, action, buttonName, expectedText, diffGetRequests) {
   await assertStatusNot(page, "running", `${action} before preview`);
   await assertPreviewButtonsState(page, false, `${action} before preview`);
   const beforeControls = await stateChangingControls(page);
+  const diffRequestsBefore = diffGetRequests.length;
   await harnessPost(baseUrl, "__dev_harness__/arm", { action, gate: "running" });
   const loadId = await page.evaluate(() => window.__haOpsLoadId);
   await page.getByRole("button", { name: buttonName }).click();
@@ -371,6 +419,7 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   });
   assert((heldState.counters.started_jobs[action] || 0) === 1, `${action} did not start exactly one gated job`);
   await page.locator("[data-status-code='running']").waitFor({ timeout: 5000 });
+  await assertDiffSectionMountedBeforeGitAccess(page, `${action} running`, true);
   await assertPreviewButtonsState(page, true, `${action} during preview`);
   await assertAllStateChangingControlsDisabled(page, `${action} during preview`);
   const disabledStyle = await page.getByRole("button", { name: buttonName }).evaluate((button) => {
@@ -409,8 +458,11 @@ async function runPreviewScenario(page, baseUrl, action, buttonName, expectedTex
   await assertPreviouslyEnabledControlsRestored(page, beforeControls, `${action} after preview`);
   await assertLogContains(page, expectedText, `${action} success`);
   await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
+  await assertPreviewRowsAndControls(page, `${action} after preview`);
+  assert(diffGetRequests.length === diffRequestsBefore, `${action} fetched diff before explicit expansion`);
   await assertLogPanelLayout(page, "matched", `${action} after preview`);
   await assertPreviewExpansionControls(page, `${action} after reactive state update`);
+  assert(diffGetRequests.length > diffRequestsBefore, `${action} did not fetch diff after explicit expansion`);
 }
 
 async function postPreviewDecision(baseUrl, command, generation, payload) {
@@ -485,6 +537,68 @@ async function assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, directio
   assert(selectedAfterStale.length === 0, `${direction} stale select repopulated replaced preview`);
 }
 
+async function assertSaveNormalChoiceControls(page, baseUrl) {
+  const snapshot = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.json()));
+  const state = snapshot.state;
+  const path = state.last_save_preview_paths?.[0];
+  assert(path, "save preview has no path for choice controls");
+  const file = page.getByTestId("preview-file").filter({ hasText: path }).first();
+  const checkbox = file.locator("vaadin-checkbox").first();
+  await checkbox.click();
+  await waitFor("save preview selected path", async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    return current.state.save_preview_selected_paths?.includes(path) ? current : null;
+  });
+  const valueAfterSelect = await file.locator("vaadin-radio-group").first().evaluate((control) => control.value);
+  assert(valueAfterSelect === "ha", `normal Save row defaulted to ${valueAfterSelect}, expected ha`);
+  await file.getByText("Use Git Version").click();
+  await waitFor("save preview Git override", async () => {
+    const current = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    return current.state.save_preview_resolutions?.[path] === "git" ? current : null;
+  });
+}
+
+async function assertMobilePreviewUsability(page, phase) {
+  const metrics = await page.evaluate(() => {
+    const doc = document.documentElement;
+    function allElements(root = document) {
+      const elements = Array.from(root.querySelectorAll("*"));
+      return elements.flatMap((element) => [element, ...(element.shadowRoot ? allElements(element.shadowRoot) : [])]);
+    }
+    const offenders = Array.from(document.querySelectorAll("body *")).map((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        tag: element.tagName.toLowerCase(),
+        testid: element.getAttribute("data-testid") || "",
+        className: typeof element.className === "string" ? element.className : "",
+        text: (element.textContent || "").trim().slice(0, 80),
+        left: rect.left,
+        right: rect.right,
+        width: rect.width,
+      };
+    }).filter((item) => item.right > doc.clientWidth + 2 || item.left < -2)
+      .sort((left, right) => right.right - left.right)
+      .slice(0, 8);
+    const controls = allElements()
+      .filter((element) => ["VAADIN-CHECKBOX", "VAADIN-RADIO-GROUP", "VAADIN-BUTTON"].includes(element.tagName))
+      .filter((element) => element.closest("ha-ops-preview-file") || element.getRootNode()?.host?.closest?.("ha-ops-preview-file"))
+      .map((control) => {
+        const rect = control.getBoundingClientRect();
+        return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
+      });
+    return {
+      clientWidth: doc.clientWidth,
+      scrollWidth: doc.scrollWidth,
+      controls,
+      offenders,
+    };
+  });
+  assert(metrics.scrollWidth <= metrics.clientWidth + 2, `${phase} page overflowed horizontally: ${metrics.scrollWidth} > ${metrics.clientWidth}; offenders=${JSON.stringify(metrics.offenders)}`);
+  assert(metrics.controls.length > 0, `${phase} had no mobile preview controls`);
+  const hidden = metrics.controls.filter((rect) => rect.width <= 0 || rect.height <= 0 || rect.right < 0 || rect.left > metrics.clientWidth);
+  assert(hidden.length === 0, `${phase} had invisible/offscreen preview controls: ${JSON.stringify(hidden)}`);
+}
+
 async function runHttpFallbackFlow(page, baseUrl, posts, flow) {
   const before = await diagnostics(baseUrl);
   const beforePreviewComplete = before.counters.completed_jobs[flow.previewAction] || 0;
@@ -504,6 +618,14 @@ async function runHttpFallbackFlow(page, baseUrl, posts, flow) {
     return (state.counters.completed_jobs[flow.previewAction] || 0) > beforePreviewComplete ? state : null;
   });
   await page.getByText("homeassistant/configuration.yaml").waitFor({ timeout: 5000 });
+  await page.getByRole("button", { name: "Select All" }).last().click();
+  await waitFor(`fetch fallback ${flow.previewButton} selection`, async () => {
+    const snapshot = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    const selected = flow.finalAction === "save"
+      ? snapshot.state.save_preview_selected_paths
+      : snapshot.state.apply_preview_selected_paths;
+    return selected?.length ? snapshot : null;
+  });
 
   const finalResponse = page.waitForResponse(
     (response) => response.request().method() === "POST" && response.url().endsWith(`/${flow.finalPath}`),
@@ -544,6 +666,10 @@ async function main() {
     });
     const page = await context.newPage();
     page.on("websocket", (ws) => websockets.push(ws.url()));
+    const diffGetRequests = [];
+    page.on("request", (request) => {
+      if (new URL(request.url()).pathname.endsWith("/diff-get")) diffGetRequests.push(request.url());
+    });
     await page.goto(baseUrl);
     await assertLogPanelLayout(page, "matched", "initial desktop");
     await page.getByTestId("status-badge").waitFor();
@@ -552,7 +678,10 @@ async function main() {
     await new Promise((resolve) => setTimeout(resolve, 2500));
     assert(websockets.length === 1, `idle page created repeated WebSockets: ${websockets.length}`);
 
-    await runPreviewScenario(page, baseUrl, "preview", "Preview Git to HA", "Harness Git to HA preview finished.");
+    await harnessPost(baseUrl, "__dev_harness__/clear-previews");
+    await page.reload();
+    await waitForInteractiveTransport(page, "apply preview page reload");
+    await runPreviewScenario(page, baseUrl, "preview", "Preview Git to HA", "Harness Git to HA preview finished.", diffGetRequests);
     await waitFor("first WebSocket replay", async () => {
       const state = await diagnostics(baseUrl);
       return state.counters.ws_replays_seen > 0 ? state : null;
@@ -567,7 +696,11 @@ async function main() {
     assert(applyDiff.ok && applyDiff.diff.includes("harness_git_only"), "apply diff_get did not return harness diff");
     await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "apply");
 
-    await runPreviewScenario(page, baseUrl, "save_preview", "Preview HA to Git", "Harness HA to Git preview finished.");
+    await harnessPost(baseUrl, "__dev_harness__/clear-previews");
+    await page.reload();
+    await waitForInteractiveTransport(page, "save preview page reload");
+    await runPreviewScenario(page, baseUrl, "save_preview", "Preview HA to Git", "Harness HA to Git preview finished.", diffGetRequests);
+    await assertSaveNormalChoiceControls(page, baseUrl);
     const saveCursor = await page.evaluate(async () => {
       const snapshot = await fetch("debug-snapshot").then((response) => response.json());
       return snapshot.state.last_save_diff_cursor;
@@ -634,10 +767,23 @@ async function main() {
     assert(fallbackErrors.length === 0, `fetch fallback page errors: ${fallbackErrors.join(" | ")}`);
     await fallbackContext.close();
 
+    await harnessPost(baseUrl, "__dev_harness__/clear-previews");
+    const mobilePreviewResponse = await fetch(new URL("save-preview", baseUrl), {
+      method: "POST",
+      headers: { Accept: "application/json", "X-Requested-With": "fetch" },
+    }).then((response) => response.json());
+    assert(mobilePreviewResponse.ok, `mobile preview seed failed: ${JSON.stringify(mobilePreviewResponse)}`);
+    await waitFor("mobile preview seed completion", async () => {
+      const state = await diagnostics(baseUrl);
+      return state.state?.last_action === "save_preview" && state.state?.last_status === "success" ? state : null;
+    });
+
     const mobileContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
     const mobilePage = await mobileContext.newPage();
     await mobilePage.goto(baseUrl);
+    await mobilePage.getByTestId("preview-file").first().waitFor({ timeout: 5000 });
     await assertLogPanelLayout(mobilePage, "fallback", "initial mobile");
+    await assertMobilePreviewUsability(mobilePage, "mobile completed preview");
     await mobileContext.close();
 
     const debugText = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.text()));

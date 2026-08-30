@@ -1,9 +1,10 @@
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, render } from "lit";
 import "@vaadin/button";
 import "@vaadin/checkbox";
 import "@vaadin/confirm-dialog";
 import "@vaadin/progress-bar";
 import "@vaadin/radio-group";
+import "@vaadin/radio-group/vaadin-radio-button.js";
 import "@vaadin/select";
 
 const MUTATING_METHOD = "post";
@@ -65,15 +66,123 @@ function commandDirection(command) {
   return null;
 }
 
+function diffLineKind(line) {
+  if (line.startsWith("@@")) return "hunk";
+  if (line.startsWith("+++") || line.startsWith("---")) return "meta";
+  if (line.startsWith("+")) return "add";
+  if (line.startsWith("-")) return "del";
+  if (line.startsWith("diff --git")) return "meta";
+  return "ctx";
+}
+
+function changedRanges(oldText, newText) {
+  let prefixLength = 0;
+  const maxPrefix = Math.min(oldText.length, newText.length);
+  while (prefixLength < maxPrefix && oldText[prefixLength] === newText[prefixLength]) prefixLength += 1;
+
+  let suffixLength = 0;
+  const maxSuffix = Math.min(oldText.length, newText.length) - prefixLength;
+  while (
+    suffixLength < maxSuffix
+    && oldText[oldText.length - suffixLength - 1] === newText[newText.length - suffixLength - 1]
+  ) {
+    suffixLength += 1;
+  }
+
+  return [
+    [prefixLength, oldText.length - suffixLength],
+    [prefixLength, newText.length - suffixLength],
+  ];
+}
+
+const UNICODE_ESCAPE_RE = /\\(?:U[0-9A-Fa-f]{8}|u[0-9A-Fa-f]{4})/g;
+
+function unicodeEscapeCharacter(value) {
+  const codepoint = Number.parseInt(value.slice(2), 16);
+  if (codepoint >= 0xd800 && codepoint <= 0xdfff) return null;
+  try {
+    return String.fromCodePoint(codepoint);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function expandChangedRangeForUnicodeEscapes(text, range) {
+  let [start, end] = range;
+  for (const match of text.matchAll(UNICODE_ESCAPE_RE)) {
+    if (match.index < end && start < match.index + match[0].length) {
+      start = Math.min(start, match.index);
+      end = Math.max(end, match.index + match[0].length);
+    }
+  }
+  return [start, end];
+}
+
+function renderDiffText(text) {
+  const parts = [];
+  let last = 0;
+  for (const match of text.matchAll(UNICODE_ESCAPE_RE)) {
+    if (match.index > last) parts.push(text.slice(last, match.index));
+    const character = unicodeEscapeCharacter(match[0]);
+    parts.push(character
+      ? html`<span class="unicode-escape" title=${character} data-unicode-char=${character}>${match[0]}</span>`
+      : match[0]);
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
+}
+
+function renderChangedText(text, range) {
+  const [start, end] = expandChangedRangeForUnicodeEscapes(text, range);
+  if (start >= end) return renderDiffText(text);
+  return [
+    ...renderDiffText(text.slice(0, start)),
+    html`<span class="diff-changed">${renderDiffText(text.slice(start, end))}</span>`,
+    ...renderDiffText(text.slice(end)),
+  ];
+}
+
+function renderDiffLine(line, changedRange = null) {
+  const kind = diffLineKind(line);
+  const content = changedRange && (kind === "add" || kind === "del")
+    ? [line.slice(0, 1), ...renderChangedText(line.slice(1), changedRange)]
+    : renderDiffText(line || " ");
+  return html`<span class=${`line ${kind}`}>${content}</span>`;
+}
+
 function highlightedDiffLines(diff) {
-  return String(diff || "").split("\n").map((line) => {
-    let kind = "ctx";
-    if (line.startsWith("+") && !line.startsWith("+++")) kind = "add";
-    else if (line.startsWith("-") && !line.startsWith("---")) kind = "del";
-    else if (line.startsWith("@@")) kind = "hunk";
-    else if (line.startsWith("diff --git") || line.startsWith("---") || line.startsWith("+++")) kind = "meta";
-    return html`<span class=${`line ${kind}`}>${line || " "}</span>`;
-  });
+  const lines = String(diff || "").split("\n");
+  const rendered = [];
+  let index = 0;
+  while (index < lines.length) {
+    const removed = [];
+    const added = [];
+    let blockIndex = index;
+    while (blockIndex < lines.length && lines[blockIndex].startsWith("-") && !lines[blockIndex].startsWith("---")) {
+      removed.push(lines[blockIndex]);
+      blockIndex += 1;
+    }
+    while (blockIndex < lines.length && lines[blockIndex].startsWith("+") && !lines[blockIndex].startsWith("+++")) {
+      added.push(lines[blockIndex]);
+      blockIndex += 1;
+    }
+    if (removed.length || added.length) {
+      const pairs = Math.min(removed.length, added.length);
+      for (let pairIndex = 0; pairIndex < pairs; pairIndex += 1) {
+        const [oldRange, newRange] = changedRanges(removed[pairIndex].slice(1), added[pairIndex].slice(1));
+        rendered.push(renderDiffLine(removed[pairIndex], oldRange));
+        rendered.push(renderDiffLine(added[pairIndex], newRange));
+      }
+      for (const line of removed.slice(pairs)) rendered.push(renderDiffLine(line));
+      for (const line of added.slice(pairs)) rendered.push(renderDiffLine(line));
+      index = blockIndex;
+    } else {
+      rendered.push(renderDiffLine(lines[index]));
+      index += 1;
+    }
+  }
+  return rendered;
 }
 
 function uuid() {
@@ -166,33 +275,80 @@ class HaOpsPreviewFile extends LitElement {
   static properties = {
     path: { type: String }, cursor: { type: Object }, generation: { type: Number },
     expanded: { type: Boolean }, diff: { type: String }, diffState: { type: String },
+    selected: { type: Boolean }, choice: { type: String }, conflict: { type: Boolean },
+    direction: { type: String }, running: { type: Boolean },
   };
   static styles = css`
     :host { display: block; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; }
-    header { display: flex; align-items: center; gap: .75rem; padding: .65rem .75rem; }
+    header { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .65rem; padding: .65rem .75rem; }
     code { min-width: 0; overflow-wrap: anywhere; }
+    .path { min-width: 0; display: flex; align-items: center; gap: .5rem; }
+    .choice { display: flex; justify-content: flex-end; min-width: 0; }
+    vaadin-radio-group { width: 100%; max-width: 100%; }
+    vaadin-radio-group::part(group-field) { display: flex; flex-wrap: wrap; gap: .25rem .75rem; }
+    vaadin-radio-button { max-width: 100%; }
+    vaadin-radio-button::part(label) { white-space: normal; overflow-wrap: anywhere; }
     pre { margin: 0; padding: .75rem; overflow: auto; white-space: pre; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
     .line { display: block; min-height: 1.25em; color: var(--ha-ops-code-text, #24292f); }
     .add { color: var(--ha-ops-diff-add-text, #116329); background: var(--ha-ops-diff-add-bg, #dafbe1); }
     .del { color: var(--ha-ops-diff-del-text, #82071e); background: var(--ha-ops-diff-del-bg, #ffebe9); }
+    .diff-changed { border-radius: 3px; padding: 0 1px; font-weight: 700; }
+    .add .diff-changed { background: color-mix(in srgb, var(--ha-ops-diff-add-text, #116329) 24%, transparent); }
+    .del .diff-changed { background: color-mix(in srgb, var(--ha-ops-diff-del-text, #82071e) 20%, transparent); }
+    .unicode-escape { border-bottom: 1px dotted currentColor; cursor: help; }
     .hunk { color: var(--ha-ops-diff-hunk-text, #0550ae); background: var(--ha-ops-diff-hunk-bg, #ddf4ff); }
     .meta { color: var(--ha-ops-muted-text, #57606a); font-weight: 600; }
     [role="status"] { padding: .75rem; color: var(--ha-ops-muted-text, #57606a); }
+    @media (max-width: 700px) {
+      header { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
+      .path, .choice { justify-content: flex-start; }
+      .path { flex-wrap: wrap; }
+      vaadin-button { width: fit-content; }
+    }
   `;
   constructor() {
-    super(); this.path = ""; this.cursor = null; this.generation = 0; this.expanded = false; this.diff = ""; this.diffState = "idle";
+    super();
+    this.path = "";
+    this.cursor = null;
+    this.generation = 0;
+    this.expanded = false;
+    this.diff = "";
+    this.diffState = "idle";
+    this.selected = false;
+    this.choice = "";
+    this.conflict = false;
+    this.direction = "apply";
+    this.running = false;
   }
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
-    if (cursorChanged || changed.has("generation")) { this.expanded = false; this.diff = ""; this.diffState = "idle"; }
+    const pathChanged = changed.has("path") && changed.get("path") !== this.path;
+    if (cursorChanged || changed.has("generation") || pathChanged) { this.expanded = false; this.diff = ""; this.diffState = "idle"; }
   }
   render() {
     return html`
       <header>
-        <vaadin-button theme="secondary" aria-expanded=${String(this.expanded)} @click=${() => this.setExpanded(!this.expanded)}>
+        <div class="path">
+          <vaadin-checkbox
+            aria-label=${`${TEXT.includeFile || "Include file"} ${this.path}`}
+            .checked=${this.selected}
+            ?disabled=${this.running}
+            @change=${this.onSelectChange}></vaadin-checkbox>
+          <code>${this.path}</code>
+        </div>
+        <vaadin-button theme="secondary" ?disabled=${this.running} aria-expanded=${String(this.expanded)} @click=${() => this.setExpanded(!this.expanded)}>
           ${this.expanded ? TEXT.collapse : TEXT.expand}
         </vaadin-button>
-        <code>${this.path}</code>
+        <div class="choice">
+          <vaadin-radio-group
+            aria-label=${`${TEXT.versionChoice || "Version choice"} ${this.path}`}
+            .value=${this.choice || ""}
+            ?disabled=${this.running || !this.selected}
+            @change=${this.onChoiceChange}>
+            <vaadin-radio-button value="git">${TEXT.useGitVersion}</vaadin-radio-button>
+            <vaadin-radio-button value="ha">${TEXT.useHaVersion}</vaadin-radio-button>
+          </vaadin-radio-group>
+        </div>
       </header>
       ${this.expanded ? this.diffState === "loaded"
         ? html`<pre aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
@@ -215,6 +371,22 @@ class HaOpsPreviewFile extends LitElement {
       this.diffState = "stale";
     }
   }
+  onSelectChange = (event) => {
+    this.dispatchEvent(new CustomEvent("preview-select", {
+      bubbles: true,
+      composed: true,
+      detail: { path: this.path, selected: event.target.checked },
+    }));
+  };
+  onChoiceChange = (event) => {
+    const choice = event.detail?.value || event.target?.value || "";
+    if (!choice) return;
+    this.dispatchEvent(new CustomEvent("preview-resolve", {
+      bubbles: true,
+      composed: true,
+      detail: { path: this.path, choice },
+    }));
+  };
 }
 customElements.define("ha-ops-preview-file", HaOpsPreviewFile);
 
@@ -223,21 +395,45 @@ class HaOpsPreview extends LitElement {
   static styles = css`
     :host { display: grid; gap: .65rem; margin-top: 1rem; }
     header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
-    .actions { display: flex; gap: .5rem; }
+    .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
     .files { display: grid; gap: .5rem; }
     footer { display: flex; justify-content: flex-end; }
   `;
   constructor() { super(); this.state = {}; this.direction = "apply"; this.running = false; }
   get paths() { return this.direction === "save" ? this.state.last_save_preview_paths || [] : this.state.last_preview_paths || []; }
   get cursor() { return this.direction === "save" ? this.state.last_save_diff_cursor : this.state.last_diff_cursor; }
+  get selectedPaths() { return this.direction === "save" ? this.state.save_preview_selected_paths || [] : this.state.apply_preview_selected_paths || []; }
+  get resolutions() { return this.direction === "save" ? this.state.save_preview_resolutions || {} : this.state.apply_preview_resolutions || {}; }
+  get conflictPaths() { return this.direction === "save" ? this.state.last_save_preview_conflict_paths || [] : this.state.last_preview_conflict_paths || []; }
   get finalCommand() { return this.direction === "save" ? "save" : "apply"; }
   get finalLabel() { return this.direction === "save" ? TEXT.save : TEXT.apply; }
+  get selectCommand() { return this.direction === "save" ? "select_save_preview" : "select_apply_preview"; }
+  get resolveCommand() { return this.direction === "save" ? "resolve_save_preview" : "resolve_apply_preview"; }
+  isSelected(path) { return new Set(this.selectedPaths).has(path); }
+  isConflict(path) { return new Set(this.conflictPaths).has(path); }
+  choiceFor(path) { return this.resolutions[path] || ""; }
+  effectiveChoice(path) {
+    const explicit = this.choiceFor(path);
+    if (explicit) return explicit;
+    if (this.direction === "save" && this.isConflict(path) && this.isSelected(path)) return "";
+    return this.direction === "save" ? "ha" : "git";
+  }
+  selectedConflictChoicesMissing() {
+    if (this.direction !== "save") return false;
+    const selected = new Set(this.selectedPaths);
+    return this.conflictPaths.some((path) => selected.has(path) && !this.resolutions[path]);
+  }
+  isFinalActionDisabled() {
+    return this.running || !this.selectedPaths.length || this.selectedConflictChoicesMissing();
+  }
   render() {
     if (!this.paths.length) return nothing;
     return html`
       <header>
         <h3>${this.direction === "save" ? TEXT.savePreview : TEXT.applyPreview}</h3>
         <div class="actions">
+          <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(true)}>${TEXT.selectAll}</vaadin-button>
+          <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(false)}>${TEXT.selectNone}</vaadin-button>
           <vaadin-button theme="secondary" @click=${() => this.setAll(true)}>${TEXT.expandAll}</vaadin-button>
           <vaadin-button theme="secondary" @click=${() => this.setAll(false)}>${TEXT.collapseAll}</vaadin-button>
         </div>
@@ -245,18 +441,68 @@ class HaOpsPreview extends LitElement {
       <div class="files">
         ${this.paths.map((path) => html`<ha-ops-preview-file
           data-testid="preview-file" .path=${path} .cursor=${this.cursor}
-          .generation=${Number(this.state.operation_generation || 0)}></ha-ops-preview-file>`)}
+          .generation=${Number(this.state.operation_generation || 0)}
+          .direction=${this.direction}
+          .running=${this.running}
+          .selected=${this.isSelected(path)}
+          .conflict=${this.isConflict(path)}
+          .choice=${this.effectiveChoice(path)}
+          @preview-select=${this.onPreviewSelect}
+          @preview-resolve=${this.onPreviewResolve}></ha-ops-preview-file>`)}
       </div>
       <footer>
-        <vaadin-button theme="primary" ?disabled=${this.running} @click=${() => this.runFinalAction()}>
+        <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
           ${this.finalLabel}
         </vaadin-button>
       </footer>
     `;
   }
   setAll(expanded) { for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded); }
-  runFinalAction() {
+  selectAll(selected) {
     if (this.running) return;
+    this.dispatchEvent(new CustomEvent("ha-ops-command", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        command: this.selectCommand,
+        payload: { selection_action: selected ? "all" : "none", preview_identity: previewIdentity(this.state, this.direction) },
+      },
+    }));
+  }
+  onPreviewSelect = (event) => {
+    event.stopPropagation();
+    if (this.running) return;
+    this.dispatchEvent(new CustomEvent("ha-ops-command", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        command: this.selectCommand,
+        payload: {
+          path: event.detail.path,
+          selected: event.detail.selected ? "1" : "",
+          preview_identity: previewIdentity(this.state, this.direction),
+        },
+      },
+    }));
+  };
+  onPreviewResolve = (event) => {
+    event.stopPropagation();
+    if (this.running) return;
+    this.dispatchEvent(new CustomEvent("ha-ops-command", {
+      bubbles: true,
+      composed: true,
+      detail: {
+        command: this.resolveCommand,
+        payload: {
+          path: event.detail.path,
+          choice: event.detail.choice,
+          preview_identity: previewIdentity(this.state, this.direction),
+        },
+      },
+    }));
+  };
+  runFinalAction() {
+    if (this.isFinalActionDisabled()) return;
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
       bubbles: true,
       composed: true,
@@ -320,14 +566,6 @@ class HaOpsApp extends LitElement {
   render() {
     return html`
       <slot></slot>
-      <section data-testid="reactive-previews">
-        ${this.state.last_preview_paths?.length
-          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="apply"
-              @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
-        ${this.state.last_save_preview_paths?.length
-          ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="save"
-              @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
-      </section>
       <vaadin-confirm-dialog
         .opened=${this.confirmOpen}
         .message=${this.confirmMessage}
@@ -606,11 +844,58 @@ class HaOpsApp extends LitElement {
       log.status = this.state.last_status || "idle";
     }
     this.upgradeControls();
+    this.syncPreviewMount();
   }
 
   isRunning() {
     return this.state.last_status === "running" || Object.values(this.state.command_records || {})
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
+  }
+
+  isPreviewGenerationRunning() {
+    const runningStatuses = new Set(["accepted", "running", "failed_unknown"]);
+    if (["preview", "save_preview"].includes(this.state.last_action) && this.state.last_status === "running") return true;
+    return Object.values(this.state.command_records || {})
+      .some((record) => ["preview", "save_preview"].includes(record.command) && runningStatuses.has(record.status));
+  }
+
+  previewHost() {
+    let host = this.querySelector("#reactive-previews[data-testid='reactive-previews']");
+    if (host) return host;
+    host = document.createElement("div");
+    host.id = "reactive-previews";
+    host.dataset.testid = "reactive-previews";
+    const sections = Array.from(this.querySelectorAll("section.card.wide"));
+    const gitAccess = sections.find((section) => section.querySelector("h2")?.textContent?.trim() === (TEXT.gitAccess || "Git Access"));
+    gitAccess?.parentNode?.insertBefore(host, gitAccess);
+    return host;
+  }
+
+  syncPreviewMount() {
+    const host = this.previewHost();
+    if (!host) return;
+    const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
+    const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
+    const previewRunning = this.isPreviewGenerationRunning();
+    const visible = hasApplyPaths || hasSavePaths || previewRunning;
+    if (!visible) {
+      render(nothing, host);
+      return;
+    }
+    const loading = previewRunning && !hasApplyPaths && !hasSavePaths;
+    render(html`
+      <section class="card wide" data-testid="diff-section">
+        <h2>${TEXT.changeList}</h2>
+        ${loading
+          ? html`<div role="status">${TEXT.loadingPreviewDiff || "Loading Diff..."}</div>`
+          : html`
+              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="apply"
+                @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
+              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="save"
+                @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
+            `}
+      </section>
+    `, host);
   }
 
   markUnknown(error) {

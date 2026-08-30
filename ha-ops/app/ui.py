@@ -673,12 +673,14 @@ def render_targets(
     return (
         f"{addon_error}"
         "<form method='post' action='addons' data-auto-submit='change'>"
+        "<div class='table-scroll'>"
         "<table class='managed-targets-table'>"
         "<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>"
         f"<thead><tr><th class='checkbox-col'><span class='sr-only'>{_('label.managed')}</span></th><th>{_('label.target')}</th>"
         f"<th>{_('label.type')}</th><th>{_('label.source')}</th><th>{_('label.addon')}</th>"
         f"<th>{_('label.live_path')}</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
+        "</div>"
         "</form>"
     )
 
@@ -1519,6 +1521,8 @@ def render_page(data):
 
     <div>{data['conflicts_section_html']}</div>
 
+    <div id="reactive-previews" data-testid="reactive-previews"></div>
+
     <section class="card wide">
       <h2>{_('heading.git_access')}</h2>
       {data['git_auth_html']}
@@ -1542,11 +1546,20 @@ def render_page(data):
       collapse: {js_t('button.collapse_diff')},
       expandAll: {js_t('button.expand_all')},
       collapseAll: {js_t('button.collapse_all')},
+      selectAll: {js_t('button.select_all')},
+      selectNone: {js_t('button.select_none')},
+      changeList: {js_t('heading.change_list')},
+      gitAccess: {js_t('heading.git_access')},
       applyPreview: {js_t('heading.git_to_ha')},
       savePreview: {js_t('heading.ha_to_git')},
       apply: {js_t('action.apply')},
       save: {js_t('action.save')},
+      useGitVersion: {js_t('action.use_git_version')},
+      useHaVersion: {js_t('action.use_ha_version')},
+      includeFile: {js_t('label.include_preview_file')},
+      versionChoice: {js_t('label.preview_version_choice')},
       loadingDiff: {js_t('message.loading_diff')},
+      loadingPreviewDiff: {js_t('message.loading_preview_diff')},
       unavailableDiff: {js_t('text.diff_detail_unavailable')},
       confirm: {js_t('action.confirm')}
     }};

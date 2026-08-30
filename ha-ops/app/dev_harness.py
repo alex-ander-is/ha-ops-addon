@@ -513,6 +513,9 @@ class DevHarnessContext(app_context.AppContext):
             return self.harness_controller.arm(_first(body, "action"), _first(body, "gate") or "running")
         if route == "/__dev_harness__/release":
             return self.harness_controller.release(_first(body, "action"), _first(body, "gate") or "running")
+        if route == "/__dev_harness__/clear-previews":
+            self.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
+            return {"ok": True}
         return None
 
 

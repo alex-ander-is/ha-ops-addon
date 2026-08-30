@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.11
+
+- Restore the reactive Change List as a single card before Git Access, including the loading state while Preview or Save Preview is still running.
+- Add server-authoritative include checkboxes and Git/HA version choices to each reactive preview file row.
+- Highlight changed substrings inside added and deleted diff lines while keeping file diff bodies lazy-loaded until expansion.
+- Keep preview controls usable on mobile and cover the normal Save HA-default/Git-override path in browser smoke tests.
+
 ## 0.10.10
 
 - Move the HA Ops status badge into the page header next to the version badge and remove the floating connection badge from the production UI.
