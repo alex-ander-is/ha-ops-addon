@@ -523,16 +523,37 @@ async function assertSaveCommitSubjectFlow(page, baseUrl) {
   const saveSubject = await page.evaluate(() => {
     const save = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
     const root = save?.shadowRoot;
+    const label = root?.querySelector("label.commit-subject-label");
     const input = root?.querySelector("input[name='commit_subject']");
     const saveButton = Array.from(root?.querySelectorAll("footer vaadin-button") || []).find((button) => button.textContent.trim() === "Save HA to Git");
+    const labelRect = label?.getBoundingClientRect();
+    const inputRect = input?.getBoundingClientRect();
+    const buttonRect = saveButton?.getBoundingClientRect();
     return {
       value: input?.value ?? null,
-      inputLeft: input?.getBoundingClientRect().left ?? null,
-      buttonLeft: saveButton?.getBoundingClientRect().left ?? null,
+      labelRight: labelRect?.right ?? null,
+      inputLeft: inputRect?.left ?? null,
+      inputRight: inputRect?.right ?? null,
+      buttonLeft: buttonRect?.left ?? null,
+      labelCenterY: labelRect ? (labelRect.top + labelRect.bottom) / 2 : null,
+      inputCenterY: inputRect ? (inputRect.top + inputRect.bottom) / 2 : null,
+      buttonCenterY: buttonRect ? (buttonRect.top + buttonRect.bottom) / 2 : null,
+      inputWidth: inputRect?.width ?? 0,
     };
   });
   assert(saveSubject.value === "Harness save preview", `Save commit subject was not prefilled: ${JSON.stringify(saveSubject)}`);
-  assert(saveSubject.inputLeft !== null && saveSubject.inputLeft < saveSubject.buttonLeft, `Save commit subject was not left of Save button: ${JSON.stringify(saveSubject)}`);
+  assert(
+    saveSubject.labelRight !== null
+    && saveSubject.labelRight <= saveSubject.inputLeft
+    && saveSubject.inputRight <= saveSubject.buttonLeft,
+    `Save commit subject controls were not ordered label/input/button: ${JSON.stringify(saveSubject)}`,
+  );
+  assert(
+    Math.abs(saveSubject.labelCenterY - saveSubject.inputCenterY) < 8
+    && Math.abs(saveSubject.inputCenterY - saveSubject.buttonCenterY) < 8,
+    `Save commit subject controls were not in one row: ${JSON.stringify(saveSubject)}`,
+  );
+  assert(saveSubject.inputWidth > 300, `Save commit subject input did not fill the available row space: ${JSON.stringify(saveSubject)}`);
 
   await page.locator("ha-ops-preview").filter({ hasText: "Save HA to Git" }).locator("input[name='commit_subject']").fill("Browser Custom Save Subject");
   await page.getByRole("button", { name: "Select All" }).last().click();

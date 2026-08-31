@@ -1884,16 +1884,16 @@ var Ae=globalThis,ke=Ae.ShadowRoot&&(Ae.ShadyCSS===void 0||Ae.ShadyCSS.nativeSha
     header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
     .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
     .files { display: grid; gap: .5rem; min-width: 0; max-width: 100%; }
-    footer { display: flex; justify-content: flex-end; min-width: 0; }
-    .footer-actions { display: flex; align-items: end; justify-content: flex-end; gap: .75rem; flex-wrap: wrap; min-width: 0; max-width: 100%; }
-    label.commit-subject { display: grid; gap: .25rem; min-width: min(100%, 20rem); max-width: 100%; color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; }
-    input.commit-subject { box-sizing: border-box; width: min(28rem, 100%); max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
+    footer { display: block; min-width: 0; max-width: 100%; }
+    .footer-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
+    .footer-actions.apply-only { display: flex; justify-content: flex-end; }
+    .commit-subject-label { color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; white-space: nowrap; }
+    input.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
     input.commit-subject:disabled { color: var(--ha-ops-disabled-text, #8c959f); background: var(--ha-ops-disabled-bg, #f6f8fa); border-color: var(--ha-ops-disabled-border, #d8dee4); opacity: 1; }
     @media (max-width: 700px) {
       header { align-items: stretch; }
-      .actions, .footer-actions { justify-content: flex-start; }
-      footer { justify-content: flex-start; }
-      label.commit-subject, input.commit-subject { width: 100%; }
+      .actions { justify-content: flex-start; }
+      .footer-actions { gap: .4rem; }
     }
   `;constructor(){super(),this.state={},this.direction="apply",this.running=!1,this.wrapByPath={},this.previewIdentityKey="",this.commitSubject="",this.defaultCommitSubject="",this.commitSubjectPreviewIdentityKey=""}get paths(){return this.direction==="save"?this.state.last_save_preview_paths||[]:this.state.last_preview_paths||[]}get cursor(){return this.direction==="save"?this.state.last_save_diff_cursor:this.state.last_diff_cursor}get selectedPaths(){return this.direction==="save"?this.state.save_preview_selected_paths||[]:this.state.apply_preview_selected_paths||[]}get resolutions(){return this.direction==="save"?this.state.save_preview_resolutions||{}:this.state.apply_preview_resolutions||{}}get conflictPaths(){return this.direction==="save"?this.state.last_save_preview_conflict_paths||[]:this.state.last_preview_conflict_paths||[]}get finalCommand(){return this.direction==="save"?"save":"apply"}get finalLabel(){return this.direction==="save"?b.save:b.apply}get selectCommand(){return this.direction==="save"?"select_save_preview":"select_apply_preview"}get resolveCommand(){return this.direction==="save"?"resolve_save_preview":"resolve_apply_preview"}willUpdate(){let t=JSON.stringify(we(this.state,this.direction));t!==this.previewIdentityKey&&(this.previewIdentityKey=t,this.wrapByPath={}),this.direction==="save"&&t!==this.commitSubjectPreviewIdentityKey&&(this.commitSubjectPreviewIdentityKey=t,this.defaultCommitSubject=this.state.last_save_commit_subject||"",this.commitSubject=this.defaultCommitSubject)}isSelected(t){return new Set(this.selectedPaths).has(t)}isConflict(t){return new Set(this.conflictPaths).has(t)}isWrapped(t){return!!this.wrapByPath[t]}allCurrentPathsWrapped(){return this.paths.length>0&&this.paths.every(t=>this.isWrapped(t))}choiceFor(t){return this.resolutions[t]||""}effectiveChoice(t){let e=this.choiceFor(t);return e||(this.direction==="save"&&this.isConflict(t)&&this.isSelected(t)?"":this.direction==="save"?"ha":"git")}selectedConflictChoicesMissing(){if(this.direction!=="save")return!1;let t=new Set(this.selectedPaths);return this.conflictPaths.some(e=>t.has(e)&&!this.resolutions[e])}isFinalActionDisabled(){return this.running||!this.selectedPaths.length||this.selectedConflictChoicesMissing()}render(){return this.paths.length?u`
       <header>
@@ -1923,17 +1923,16 @@ var Ae=globalThis,ke=Ae.ShadowRoot&&(Ae.ShadyCSS===void 0||Ae.ShadyCSS.nativeSha
           @preview-wrap-toggle=${this.onPreviewWrapToggle}></ha-ops-preview-file>`)}
       </div>
       <footer>
-        <div class="footer-actions">
+        <div class=${`footer-actions ${this.direction==="save"?"":"apply-only"}`}>
           ${this.direction==="save"?u`
-            <label class="commit-subject">
-              <span>${b.commitSubject||"Commit Subject:"}</span>
-              <input
-                class="commit-subject"
-                name="commit_subject"
-                .value=${this.commitSubject}
-                ?disabled=${this.running}
-                @input=${this.onCommitSubjectInput}>
-            </label>
+            <label class="commit-subject-label" for="save-commit-subject">${b.commitSubject||"Commit Subject:"}</label>
+            <input
+              id="save-commit-subject"
+              class="commit-subject"
+              name="commit_subject"
+              .value=${this.commitSubject}
+              ?disabled=${this.running}
+              @input=${this.onCommitSubjectInput}>
           `:v}
           <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction()}>
             ${this.finalLabel}

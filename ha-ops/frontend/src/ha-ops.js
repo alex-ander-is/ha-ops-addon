@@ -450,16 +450,16 @@ class HaOpsPreview extends LitElement {
     header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
     .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
     .files { display: grid; gap: .5rem; min-width: 0; max-width: 100%; }
-    footer { display: flex; justify-content: flex-end; min-width: 0; }
-    .footer-actions { display: flex; align-items: end; justify-content: flex-end; gap: .75rem; flex-wrap: wrap; min-width: 0; max-width: 100%; }
-    label.commit-subject { display: grid; gap: .25rem; min-width: min(100%, 20rem); max-width: 100%; color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; }
-    input.commit-subject { box-sizing: border-box; width: min(28rem, 100%); max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
+    footer { display: block; min-width: 0; max-width: 100%; }
+    .footer-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
+    .footer-actions.apply-only { display: flex; justify-content: flex-end; }
+    .commit-subject-label { color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; white-space: nowrap; }
+    input.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
     input.commit-subject:disabled { color: var(--ha-ops-disabled-text, #8c959f); background: var(--ha-ops-disabled-bg, #f6f8fa); border-color: var(--ha-ops-disabled-border, #d8dee4); opacity: 1; }
     @media (max-width: 700px) {
       header { align-items: stretch; }
-      .actions, .footer-actions { justify-content: flex-start; }
-      footer { justify-content: flex-start; }
-      label.commit-subject, input.commit-subject { width: 100%; }
+      .actions { justify-content: flex-start; }
+      .footer-actions { gap: .4rem; }
     }
   `;
   constructor() {
@@ -543,17 +543,16 @@ class HaOpsPreview extends LitElement {
           @preview-wrap-toggle=${this.onPreviewWrapToggle}></ha-ops-preview-file>`)}
       </div>
       <footer>
-        <div class="footer-actions">
+        <div class=${`footer-actions ${this.direction === "save" ? "" : "apply-only"}`}>
           ${this.direction === "save" ? html`
-            <label class="commit-subject">
-              <span>${TEXT.commitSubject || "Commit Subject:"}</span>
-              <input
-                class="commit-subject"
-                name="commit_subject"
-                .value=${this.commitSubject}
-                ?disabled=${this.running}
-                @input=${this.onCommitSubjectInput}>
-            </label>
+            <label class="commit-subject-label" for="save-commit-subject">${TEXT.commitSubject || "Commit Subject:"}</label>
+            <input
+              id="save-commit-subject"
+              class="commit-subject"
+              name="commit_subject"
+              .value=${this.commitSubject}
+              ?disabled=${this.running}
+              @input=${this.onCommitSubjectInput}>
           ` : nothing}
           <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
             ${this.finalLabel}

@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.15
+
+- Keep the Save HA to Git commit subject label, input, and action button on one row with the input filling the available space.
+
 ## 0.10.14
 
 - Keep expanded reactive diffs within the Change List card and scroll long unwrapped lines inside each diff block.
