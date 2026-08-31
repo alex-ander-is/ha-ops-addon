@@ -6075,6 +6075,18 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(self.remote_main_subject(remote), "Custom HA Save Subject")
 
+    def test_save_preview_writes_default_commit_subject_for_reactive_save_input(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            server.context().release_now = lambda: "2026-06-24_17-00-00"
+            self.prepare_empty_save_preview(server, root)
+
+            self.assertEqual(
+                server.read_state()["last_save_commit_subject"],
+                "Save Home Assistant config 2026-06-24\u00a0•\u00a017-00-00",
+            )
+
     def test_save_ha_to_git_keeps_committed_custom_subject_in_disabled_preview_input(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

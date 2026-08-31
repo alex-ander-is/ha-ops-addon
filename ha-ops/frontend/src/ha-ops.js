@@ -275,21 +275,24 @@ class HaOpsPreviewFile extends LitElement {
     path: { type: String }, cursor: { type: Object }, generation: { type: Number },
     expanded: { type: Boolean }, diff: { type: String }, diffState: { type: String },
     selected: { type: Boolean }, choice: { type: String }, conflict: { type: Boolean },
-    direction: { type: String }, running: { type: Boolean },
+    direction: { type: String }, running: { type: Boolean }, wrapLines: { type: Boolean },
   };
   static styles = css`
-    :host { display: block; }
-    vaadin-details { border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; }
+    :host { display: block; min-width: 0; max-width: 100%; }
+    vaadin-details { border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; min-width: 0; max-width: 100%; }
+    vaadin-details::part(content) { min-width: 0; max-width: 100%; overflow: hidden; }
     vaadin-details-summary { width: 100%; }
-    vaadin-details-summary::part(content) { min-width: 0; width: 100%; }
-    .summary-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .65rem; width: 100%; }
+    vaadin-details-summary::part(content) { min-width: 0; width: 100%; max-width: 100%; }
+    .summary-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .65rem; width: 100%; max-width: 100%; min-width: 0; }
     code { min-width: 0; overflow-wrap: anywhere; }
     .path { min-width: 0; display: flex; align-items: center; gap: .5rem; }
     vaadin-checkbox::part(label) { white-space: normal; overflow-wrap: anywhere; }
     .choice { display: flex; justify-content: flex-end; gap: .35rem; min-width: 0; flex-wrap: wrap; }
     .choice vaadin-button[aria-pressed="true"] { font-weight: 700; }
-    pre { margin: 0; padding: .75rem; overflow: auto; white-space: pre; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
-    .line { display: block; min-height: 1.25em; color: var(--ha-ops-code-text, #24292f); }
+    pre { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; margin: 0; padding: .75rem; overflow-x: auto; overflow-y: auto; white-space: pre; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
+    pre.wrap-lines { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .line { display: block; width: max-content; min-width: 100%; min-height: 1.25em; color: var(--ha-ops-code-text, #24292f); }
+    pre.wrap-lines .line { width: auto; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     .add { color: var(--ha-ops-diff-add-text, #116329); background: var(--ha-ops-diff-add-bg, #dafbe1); }
     .del { color: var(--ha-ops-diff-del-text, #82071e); background: var(--ha-ops-diff-del-bg, #ffebe9); }
     .diff-changed { border-radius: 3px; padding: 0 1px; font-weight: 700; }
@@ -319,6 +322,7 @@ class HaOpsPreviewFile extends LitElement {
     this.conflict = false;
     this.direction = "apply";
     this.running = false;
+    this.wrapLines = false;
   }
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
@@ -350,13 +354,19 @@ class HaOpsPreviewFile extends LitElement {
               aria-label=${`${TEXT.versionChoice || "Version choice"} ${this.path}`}
               @click=${this.stopTogglePropagation}
               @keydown=${this.stopKeyboardTogglePropagation}>
+              <vaadin-button
+                theme="secondary small"
+                aria-pressed=${String(this.wrapLines)}
+                @click=${this.onWrapToggle}>
+                ${this.wrapLines ? TEXT.unwrapLines || "Unwrap Lines" : TEXT.wrapLines || "Wrap Lines"}
+              </vaadin-button>
               ${this.choiceButton("ha", TEXT.useHaVersion)}
               ${this.choiceButton("git", TEXT.useGitVersion)}
             </div>
           </div>
         </vaadin-details-summary>
         ${this.expanded ? this.diffState === "loaded"
-          ? html`<pre aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
+          ? html`<pre class=${this.wrapLines ? "wrap-lines" : ""} aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
           : html`<div role="status">${this.diffState === "stale" ? TEXT.unavailableDiff : TEXT.loadingDiff}</div>`
           : nothing}
       </vaadin-details>
@@ -405,6 +415,14 @@ class HaOpsPreviewFile extends LitElement {
       detail: { path: this.path, selected: event.target.checked },
     }));
   };
+  onWrapToggle = (event) => {
+    event.stopPropagation();
+    this.dispatchEvent(new CustomEvent("preview-wrap-toggle", {
+      bubbles: true,
+      composed: true,
+      detail: { path: this.path, wrapLines: !this.wrapLines },
+    }));
+  };
   dispatchChoice(choice) {
     if (!choice || this.running || !this.selected) return;
     this.dispatchEvent(new CustomEvent("preview-resolve", {
@@ -417,15 +435,44 @@ class HaOpsPreviewFile extends LitElement {
 customElements.define("ha-ops-preview-file", HaOpsPreviewFile);
 
 class HaOpsPreview extends LitElement {
-  static properties = { state: { type: Object }, direction: { type: String }, running: { type: Boolean } };
+  static properties = {
+    state: { type: Object },
+    direction: { type: String },
+    running: { type: Boolean },
+    wrapByPath: { state: true },
+    previewIdentityKey: { state: true },
+    commitSubject: { state: true },
+    defaultCommitSubject: { state: true },
+    commitSubjectPreviewIdentityKey: { state: true },
+  };
   static styles = css`
-    :host { display: grid; gap: .65rem; margin-top: 1rem; }
+    :host { display: grid; gap: .65rem; margin-top: 1rem; min-width: 0; max-width: 100%; }
     header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; flex-wrap: wrap; }
     .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
-    .files { display: grid; gap: .5rem; }
-    footer { display: flex; justify-content: flex-end; }
+    .files { display: grid; gap: .5rem; min-width: 0; max-width: 100%; }
+    footer { display: flex; justify-content: flex-end; min-width: 0; }
+    .footer-actions { display: flex; align-items: end; justify-content: flex-end; gap: .75rem; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+    label.commit-subject { display: grid; gap: .25rem; min-width: min(100%, 20rem); max-width: 100%; color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; }
+    input.commit-subject { box-sizing: border-box; width: min(28rem, 100%); max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
+    input.commit-subject:disabled { color: var(--ha-ops-disabled-text, #8c959f); background: var(--ha-ops-disabled-bg, #f6f8fa); border-color: var(--ha-ops-disabled-border, #d8dee4); opacity: 1; }
+    @media (max-width: 700px) {
+      header { align-items: stretch; }
+      .actions, .footer-actions { justify-content: flex-start; }
+      footer { justify-content: flex-start; }
+      label.commit-subject, input.commit-subject { width: 100%; }
+    }
   `;
-  constructor() { super(); this.state = {}; this.direction = "apply"; this.running = false; }
+  constructor() {
+    super();
+    this.state = {};
+    this.direction = "apply";
+    this.running = false;
+    this.wrapByPath = {};
+    this.previewIdentityKey = "";
+    this.commitSubject = "";
+    this.defaultCommitSubject = "";
+    this.commitSubjectPreviewIdentityKey = "";
+  }
   get paths() { return this.direction === "save" ? this.state.last_save_preview_paths || [] : this.state.last_preview_paths || []; }
   get cursor() { return this.direction === "save" ? this.state.last_save_diff_cursor : this.state.last_diff_cursor; }
   get selectedPaths() { return this.direction === "save" ? this.state.save_preview_selected_paths || [] : this.state.apply_preview_selected_paths || []; }
@@ -435,8 +482,22 @@ class HaOpsPreview extends LitElement {
   get finalLabel() { return this.direction === "save" ? TEXT.save : TEXT.apply; }
   get selectCommand() { return this.direction === "save" ? "select_save_preview" : "select_apply_preview"; }
   get resolveCommand() { return this.direction === "save" ? "resolve_save_preview" : "resolve_apply_preview"; }
+  willUpdate() {
+    const identityKey = JSON.stringify(previewIdentity(this.state, this.direction));
+    if (identityKey !== this.previewIdentityKey) {
+      this.previewIdentityKey = identityKey;
+      this.wrapByPath = {};
+    }
+    if (this.direction === "save" && identityKey !== this.commitSubjectPreviewIdentityKey) {
+      this.commitSubjectPreviewIdentityKey = identityKey;
+      this.defaultCommitSubject = this.state.last_save_commit_subject || "";
+      this.commitSubject = this.defaultCommitSubject;
+    }
+  }
   isSelected(path) { return new Set(this.selectedPaths).has(path); }
   isConflict(path) { return new Set(this.conflictPaths).has(path); }
+  isWrapped(path) { return Boolean(this.wrapByPath[path]); }
+  allCurrentPathsWrapped() { return this.paths.length > 0 && this.paths.every((path) => this.isWrapped(path)); }
   choiceFor(path) { return this.resolutions[path] || ""; }
   effectiveChoice(path) {
     const explicit = this.choiceFor(path);
@@ -458,6 +519,9 @@ class HaOpsPreview extends LitElement {
       <header>
         <h3>${this.direction === "save" ? TEXT.savePreview : TEXT.applyPreview}</h3>
         <div class="actions">
+          <vaadin-button theme="secondary" @click=${() => this.wrapAll(!this.allCurrentPathsWrapped())}>
+            ${this.allCurrentPathsWrapped() ? TEXT.unwrapAllLines || "Unwrap All Lines" : TEXT.wrapAllLines || "Wrap All Lines"}
+          </vaadin-button>
           <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(true)}>${TEXT.selectAll}</vaadin-button>
           <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.selectAll(false)}>${TEXT.selectNone}</vaadin-button>
           <vaadin-button theme="secondary" ?disabled=${this.running} @click=${() => this.setAll(true)}>${TEXT.expandAll}</vaadin-button>
@@ -470,18 +534,38 @@ class HaOpsPreview extends LitElement {
           .generation=${Number(this.state.operation_generation || 0)}
           .direction=${this.direction}
           .running=${this.running}
+          .wrapLines=${this.isWrapped(path)}
           .selected=${this.isSelected(path)}
           .conflict=${this.isConflict(path)}
           .choice=${this.effectiveChoice(path)}
           @preview-select=${this.onPreviewSelect}
-          @preview-resolve=${this.onPreviewResolve}></ha-ops-preview-file>`)}
+          @preview-resolve=${this.onPreviewResolve}
+          @preview-wrap-toggle=${this.onPreviewWrapToggle}></ha-ops-preview-file>`)}
       </div>
       <footer>
-        <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
-          ${this.finalLabel}
-        </vaadin-button>
+        <div class="footer-actions">
+          ${this.direction === "save" ? html`
+            <label class="commit-subject">
+              <span>${TEXT.commitSubject || "Commit Subject:"}</span>
+              <input
+                class="commit-subject"
+                name="commit_subject"
+                .value=${this.commitSubject}
+                ?disabled=${this.running}
+                @input=${this.onCommitSubjectInput}>
+            </label>
+          ` : nothing}
+          <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
+            ${this.finalLabel}
+          </vaadin-button>
+        </div>
       </footer>
     `;
+  }
+  wrapAll(wrapLines) {
+    const next = {};
+    for (const path of this.paths) next[path] = wrapLines;
+    this.wrapByPath = next;
   }
   setAll(expanded) {
     if (this.running) return;
@@ -530,12 +614,22 @@ class HaOpsPreview extends LitElement {
       },
     }));
   };
+  onPreviewWrapToggle = (event) => {
+    event.stopPropagation();
+    this.wrapByPath = { ...this.wrapByPath, [event.detail.path]: Boolean(event.detail.wrapLines) };
+  };
+  onCommitSubjectInput = (event) => {
+    this.commitSubject = event.target.value;
+  };
   runFinalAction() {
     if (this.isFinalActionDisabled()) return;
+    const payload = this.direction === "save"
+      ? { commit_subject: this.commitSubject, default_commit_subject: this.defaultCommitSubject }
+      : {};
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
       bubbles: true,
       composed: true,
-      detail: { command: this.finalCommand, payload: {} },
+      detail: { command: this.finalCommand, payload },
     }));
   }
 }

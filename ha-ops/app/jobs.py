@@ -857,6 +857,11 @@ def run_save_preview_job(ctx, lock_acquired=False):
             ctx.add_detail(details, _("detail.including_redundant_save_preview"))
         preview = ctx.build_save_preview(resolved_targets, repo_dir, details, include_redundant_data)
         commit = ctx.git_head_or_unborn(repo_dir)
+        save_commit_subject = (
+            default_save_commit_subject(ctx.release_now())
+            if preview.get("paths") or preview.get("conflicts")
+            else None
+        )
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
         ctx.add_detail(details, _("detail.pushed_ha_live"))
         git_state_out_of_date = False
@@ -887,6 +892,7 @@ def run_save_preview_job(ctx, lock_acquired=False):
                 "last_save_preview_paths": preview.get("paths", []),
                 "last_save_preview_conflicts": bool(preview.get("conflicts")),
                 "last_save_preview_conflict_paths": preview.get("conflicts", []),
+                "last_save_commit_subject": save_commit_subject,
                 "save_preview_resolutions": {},
                 "save_preview_selected_paths": [],
                 "post_apply_save_recommended": False,

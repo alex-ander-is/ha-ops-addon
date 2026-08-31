@@ -182,6 +182,7 @@ class HarnessScenarioController:
             "log_markers_emitted": 0,
         }
         self.events = []
+        self.last_save_commit_subject = None
 
     def arm(self, action, gate):
         action = self._normalize_action(action)
@@ -219,7 +220,7 @@ class HarnessScenarioController:
             self.counters["ws_replays_seen"] += 1
             self.events.append({"phase": "ws-replay"})
 
-    def run_job(self, ctx, action, lock_acquired=False):
+    def run_job(self, ctx, action, lock_acquired=False, commit_subject=None):
         action = self._normalize_action(action)
         if not job_logic.enter_run_lock(ctx, action, lock_acquired):
             return False
@@ -228,6 +229,8 @@ class HarnessScenarioController:
         try:
             with self._lock:
                 self.counters["started_jobs"][action] = self.counters["started_jobs"].get(action, 0) + 1
+                if action == "save":
+                    self.last_save_commit_subject = commit_subject
                 item = self._gates.get((action, gate))
                 if item is not None:
                     item["phase"] = "running-held"
@@ -287,6 +290,7 @@ class HarnessScenarioController:
                 "gates": gates,
                 "counters": json.loads(json.dumps(self.counters)),
                 "events": list(self.events[-50:]),
+                "last_save_commit_subject": self.last_save_commit_subject,
             }
         if ctx is not None:
             state = ctx.read_state()
@@ -346,6 +350,7 @@ class HarnessScenarioController:
     def _write_save_preview(self, ctx, details):
         path = "homeassistant/configuration.yaml"
         second_path = "homeassistant/packages/live_harness.yaml"
+        long_value = "x" * 2200
         diff = (
             "diff --git a/homeassistant/configuration.yaml b/homeassistant/configuration.yaml\n"
             "--- a/homeassistant/configuration.yaml\n"
@@ -354,6 +359,7 @@ class HarnessScenarioController:
             " default_config:\n"
             "+input_boolean:\n"
             "+  harness_live_only:\n"
+            f"+  harness_long_line: \"{long_value}\"\n"
             "diff --git a/homeassistant/packages/live_harness.yaml b/homeassistant/packages/live_harness.yaml\n"
             "new file mode 100644\n"
             "--- /dev/null\n"
@@ -490,7 +496,7 @@ class DevHarnessContext(app_context.AppContext):
         return self.harness_controller.run_job(self, "apply", lock_acquired=lock_acquired)
 
     def run_save_job(self, commit_subject=None, lock_acquired=False):
-        return self.harness_controller.run_job(self, "save", lock_acquired=lock_acquired)
+        return self.harness_controller.run_job(self, "save", lock_acquired=lock_acquired, commit_subject=commit_subject)
 
     def dev_harness_record_duplicate_rejection(self, action):
         self.harness_controller.record_duplicate_rejection(action)

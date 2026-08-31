@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.14
+
+- Keep expanded reactive diffs within the Change List card and scroll long unwrapped lines inside each diff block.
+- Add per-file and global line-wrapping controls for reactive diff rows without triggering extra diff loads.
+- Restore the Save HA to Git commit subject field beside the save action while keeping Apply to HA payloads unchanged.
+
 ## 0.10.13
 
 - Replace reactive Change List radio buttons with adjacent `Use HA Version` and `Use Git Version` action buttons.

@@ -393,13 +393,174 @@ async function assertPreviewRowsAndControls(page, phase) {
       checkbox: Boolean(root?.querySelector("vaadin-checkbox")),
       details: Boolean(root?.querySelector("vaadin-details")),
       radio: Boolean(root?.querySelector("vaadin-radio-group")),
+      wrapButton: Boolean(Array.from(root?.querySelectorAll("vaadin-button") || []).find((button) => button.textContent.trim() === "Wrap Lines")),
       haButton: Boolean(Array.from(root?.querySelectorAll("vaadin-button") || []).find((button) => button.textContent.trim() === "Use HA Version")),
       gitButton: Boolean(Array.from(root?.querySelectorAll("vaadin-button") || []).find((button) => button.textContent.trim() === "Use Git Version")),
       path: root?.querySelector("code")?.textContent || "",
     };
   }));
-  const missing = controls.filter((item) => !item.checkbox || !item.details || !item.haButton || !item.gitButton || !item.path || item.radio);
+  const missing = controls.filter((item) => !item.checkbox || !item.details || !item.wrapButton || !item.haButton || !item.gitButton || !item.path || item.radio);
   assert(missing.length === 0, `${phase} preview rows missing checkbox/details/buttons/path or still had radio group: ${JSON.stringify(controls)}`);
+}
+
+async function assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, phase) {
+  await waitFor(`${phase} save preview mounted`, async () => page.evaluate(() => {
+    return Array.from(document.querySelectorAll("ha-ops-preview")).some((item) => item.direction === "save") ? true : null;
+  }));
+  const order = await page.evaluate(() => {
+    const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const previewRoot = preview?.shadowRoot;
+    const toolbarLabels = Array.from(previewRoot?.querySelectorAll("header vaadin-button") || []).map((button) => button.textContent.trim());
+    const firstFile = previewRoot?.querySelector("ha-ops-preview-file");
+    const rowLabels = Array.from(firstFile?.shadowRoot?.querySelectorAll(".choice vaadin-button") || []).map((button) => button.textContent.trim());
+    return {
+      toolbarLabels,
+      rowLabels,
+      globalWrapIndex: toolbarLabels.indexOf("Wrap All Lines"),
+      selectAllIndex: toolbarLabels.indexOf("Select All"),
+      rowWrapIndex: rowLabels.indexOf("Wrap Lines"),
+      haIndex: rowLabels.indexOf("Use HA Version"),
+      gitIndex: rowLabels.indexOf("Use Git Version"),
+    };
+  });
+  assert(order.globalWrapIndex >= 0 && order.globalWrapIndex < order.selectAllIndex, `${phase} global wrap was not before Select All: ${JSON.stringify(order.toolbarLabels)}`);
+  assert(order.rowWrapIndex >= 0 && order.rowWrapIndex < order.haIndex && order.rowWrapIndex < order.gitIndex, `${phase} row wrap was not before version buttons: ${JSON.stringify(order.rowLabels)}`);
+
+  await page.getByRole("button", { name: "Expand All" }).last().click();
+  await page.getByText("harness_long_line").waitFor({ timeout: 5000 });
+  const beforeRequests = diffGetRequests.length;
+  const unwrappedMetrics = await page.evaluate(() => {
+    const doc = document.documentElement;
+    const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const firstFile = preview?.shadowRoot?.querySelector("ha-ops-preview-file");
+    const pre = firstFile?.shadowRoot?.querySelector("pre");
+    const fileRect = firstFile?.getBoundingClientRect();
+    const style = pre ? getComputedStyle(pre) : null;
+    return {
+      docClientWidth: doc.clientWidth,
+      docScrollWidth: doc.scrollWidth,
+      fileRight: fileRect?.right ?? null,
+      preClientWidth: pre?.clientWidth ?? 0,
+      preScrollWidth: pre?.scrollWidth ?? 0,
+      overflowX: style?.overflowX ?? "",
+      whiteSpace: style?.whiteSpace ?? "",
+    };
+  });
+  assert(unwrappedMetrics.docScrollWidth <= unwrappedMetrics.docClientWidth + 2, `${phase} page overflowed before wrap: ${JSON.stringify(unwrappedMetrics)}`);
+  assert(unwrappedMetrics.fileRight <= unwrappedMetrics.docClientWidth + 2, `${phase} preview row overflowed viewport: ${JSON.stringify(unwrappedMetrics)}`);
+  assert(unwrappedMetrics.preScrollWidth > unwrappedMetrics.preClientWidth, `${phase} unwrapped diff did not scroll internally: ${JSON.stringify(unwrappedMetrics)}`);
+  assert(["auto", "scroll"].includes(unwrappedMetrics.overflowX), `${phase} unwrapped diff overflow-x was ${unwrappedMetrics.overflowX}`);
+  assert(unwrappedMetrics.whiteSpace === "pre", `${phase} unwrapped diff white-space was ${unwrappedMetrics.whiteSpace}`);
+
+  const afterRowWrap = await page.evaluate(async () => {
+    const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const files = Array.from(preview?.shadowRoot?.querySelectorAll("ha-ops-preview-file") || []);
+    const first = files[0];
+    const second = files[1];
+    const button = Array.from(first.shadowRoot.querySelectorAll("vaadin-button")).find((item) => item.textContent.trim() === "Wrap Lines");
+    button.click();
+    await preview.updateComplete;
+    await first.updateComplete;
+    await second.updateComplete;
+    const firstPre = first.shadowRoot.querySelector("pre");
+    const secondPre = second.shadowRoot.querySelector("pre");
+    return {
+      firstWrapped: first.wrapLines,
+      secondWrapped: second.wrapLines,
+      firstWhiteSpace: getComputedStyle(firstPre).whiteSpace,
+      secondWhiteSpace: getComputedStyle(secondPre).whiteSpace,
+      firstClientWidth: firstPre.clientWidth,
+      firstScrollWidth: firstPre.scrollWidth,
+    };
+  });
+  assert(afterRowWrap.firstWrapped && !afterRowWrap.secondWrapped, `${phase} per-file wrap affected wrong rows: ${JSON.stringify(afterRowWrap)}`);
+  assert(afterRowWrap.firstWhiteSpace === "pre-wrap" && afterRowWrap.secondWhiteSpace === "pre", `${phase} per-file wrap styles were wrong: ${JSON.stringify(afterRowWrap)}`);
+  assert(afterRowWrap.firstScrollWidth <= afterRowWrap.firstClientWidth + 4, `${phase} wrapped diff still overflowed internally: ${JSON.stringify(afterRowWrap)}`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} wrap toggle triggered diff-get`);
+
+  const refreshSnapshot = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+  const afterSamePreviewRefresh = await postPreviewDecision(baseUrl, "select_save_preview", refreshSnapshot.state.operation_generation, {
+    path: refreshSnapshot.state.last_save_preview_paths[0],
+    selected: "1",
+    preview_identity: previewIdentity(refreshSnapshot.state, "save"),
+  });
+  assert(afterSamePreviewRefresh.ok, `${phase} same-preview select failed before wrap preservation check: ${JSON.stringify(afterSamePreviewRefresh)}`);
+  await waitFor(`${phase} same-preview wrap preservation`, async () => {
+    const wrapped = await page.evaluate(() => {
+      const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+      return preview?.shadowRoot?.querySelector("ha-ops-preview-file")?.wrapLines;
+    });
+    return wrapped ? { wrapped } : null;
+  });
+
+  const global = await page.evaluate(async () => {
+    const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const globalButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Wrap All Lines");
+    globalButton.click();
+    await preview.updateComplete;
+    const wrapped = Array.from(preview.shadowRoot.querySelectorAll("ha-ops-preview-file")).map((file) => file.wrapLines);
+    const unwrapButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Unwrap All Lines");
+    unwrapButton.click();
+    await preview.updateComplete;
+    const unwrapped = Array.from(preview.shadowRoot.querySelectorAll("ha-ops-preview-file")).map((file) => file.wrapLines);
+    return { wrapped, unwrapped };
+  });
+  assert(global.wrapped.every(Boolean), `${phase} Wrap All did not wrap all rows: ${JSON.stringify(global)}`);
+  assert(global.unwrapped.every((value) => !value), `${phase} Unwrap All did not unwrap all rows: ${JSON.stringify(global)}`);
+  assert(diffGetRequests.length === beforeRequests, `${phase} global wrap toggle triggered diff-get`);
+}
+
+async function assertSaveCommitSubjectFlow(page, baseUrl) {
+  await waitFor("save commit subject preview mounted", async () => page.evaluate(() => {
+    return Array.from(document.querySelectorAll("ha-ops-preview")).some((item) => item.direction === "save") ? true : null;
+  }));
+  const applyInputCount = await page.evaluate(() => {
+    const apply = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "apply");
+    return apply?.shadowRoot?.querySelectorAll("input[name='commit_subject']").length || 0;
+  });
+  assert(applyInputCount === 0, `Apply preview exposed commit subject input: ${applyInputCount}`);
+
+  const saveSubject = await page.evaluate(() => {
+    const save = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const root = save?.shadowRoot;
+    const input = root?.querySelector("input[name='commit_subject']");
+    const saveButton = Array.from(root?.querySelectorAll("footer vaadin-button") || []).find((button) => button.textContent.trim() === "Save HA to Git");
+    return {
+      value: input?.value ?? null,
+      inputLeft: input?.getBoundingClientRect().left ?? null,
+      buttonLeft: saveButton?.getBoundingClientRect().left ?? null,
+    };
+  });
+  assert(saveSubject.value === "Harness save preview", `Save commit subject was not prefilled: ${JSON.stringify(saveSubject)}`);
+  assert(saveSubject.inputLeft !== null && saveSubject.inputLeft < saveSubject.buttonLeft, `Save commit subject was not left of Save button: ${JSON.stringify(saveSubject)}`);
+
+  await page.locator("ha-ops-preview").filter({ hasText: "Save HA to Git" }).locator("input[name='commit_subject']").fill("Browser Custom Save Subject");
+  await page.getByRole("button", { name: "Select All" }).last().click();
+  await waitFor("save subject flow selection", async () => {
+    const snapshot = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
+    return snapshot.state.save_preview_selected_paths?.length ? snapshot : null;
+  });
+
+  await harnessPost(baseUrl, "__dev_harness__/arm", { action: "save", gate: "running" });
+  await page.getByRole("button", { name: "Save HA to Git" }).click();
+  await waitFor("save subject flow held", async () => {
+    const state = await diagnostics(baseUrl);
+    return state.gates["save:running"]?.held ? state : null;
+  });
+  const disabled = await page.evaluate(() => {
+    const save = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
+    const root = save?.shadowRoot;
+    const input = root?.querySelector("input[name='commit_subject']");
+    const button = Array.from(root?.querySelectorAll("footer vaadin-button") || []).find((item) => item.textContent.trim() === "Save HA to Git");
+    return { input: Boolean(input?.disabled), button: Boolean(button?.disabled) };
+  });
+  assert(disabled.input && disabled.button, `Save running state did not disable subject input and final button: ${JSON.stringify(disabled)}`);
+  await harnessPost(baseUrl, "__dev_harness__/release", { action: "save", gate: "running" });
+  await page.getByText("Harness live HA changes committed to Git.").waitFor({ timeout: 5000 });
+  await waitFor("save subject submitted to harness", async () => {
+    const state = await diagnostics(baseUrl);
+    return state.last_save_commit_subject === "Browser Custom Save Subject" ? state : null;
+  });
 }
 
 function assert(condition, message) {
@@ -660,8 +821,12 @@ async function assertMobilePreviewUsability(page, phase) {
       .sort((left, right) => right.right - left.right)
       .slice(0, 8);
     const controls = allElements()
-      .filter((element) => ["VAADIN-CHECKBOX", "VAADIN-DETAILS", "VAADIN-BUTTON"].includes(element.tagName))
-      .filter((element) => element.closest("ha-ops-preview-file") || element.getRootNode()?.host?.closest?.("ha-ops-preview-file"))
+      .filter((element) => ["VAADIN-CHECKBOX", "VAADIN-DETAILS", "VAADIN-BUTTON", "INPUT"].includes(element.tagName))
+      .filter((element) =>
+        element.closest("ha-ops-preview-file")
+        || element.getRootNode()?.host?.closest?.("ha-ops-preview-file")
+        || element.getAttribute("name") === "commit_subject",
+      )
       .map((control) => {
         const rect = control.getBoundingClientRect();
         return { width: rect.width, height: rect.height, left: rect.left, right: rect.right };
@@ -790,6 +955,8 @@ async function main() {
     }, saveCursor);
     assert(saveDiff.ok && saveDiff.diff.includes("harness_live_only"), "save diff_get did not return harness diff");
     await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "save");
+    await assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, "save preview wrapping");
+    await assertSaveCommitSubjectFlow(page, baseUrl);
 
     await harnessPost(baseUrl, "__dev_harness__/arm", { action: "preview", gate: "running" });
     await page.getByRole("button", { name: "Preview Git to HA" }).click();
