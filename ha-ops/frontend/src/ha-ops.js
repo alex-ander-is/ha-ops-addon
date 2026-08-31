@@ -322,7 +322,7 @@ class HaOpsPreviewFile extends LitElement {
     this.conflict = false;
     this.direction = "apply";
     this.running = false;
-    this.wrapLines = false;
+    this.wrapLines = true;
   }
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
@@ -496,7 +496,7 @@ class HaOpsPreview extends LitElement {
   }
   isSelected(path) { return new Set(this.selectedPaths).has(path); }
   isConflict(path) { return new Set(this.conflictPaths).has(path); }
-  isWrapped(path) { return Boolean(this.wrapByPath[path]); }
+  isWrapped(path) { return this.wrapByPath[path] !== false; }
   allCurrentPathsWrapped() { return this.paths.length > 0 && this.paths.every((path) => this.isWrapped(path)); }
   choiceFor(path) { return this.resolutions[path] || ""; }
   effectiveChoice(path) {
@@ -563,7 +563,7 @@ class HaOpsPreview extends LitElement {
   }
   wrapAll(wrapLines) {
     const next = {};
-    for (const path of this.paths) next[path] = wrapLines;
+    for (const path of this.paths) next[path] = Boolean(wrapLines);
     this.wrapByPath = next;
   }
   setAll(expanded) {

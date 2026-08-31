@@ -429,7 +429,7 @@ async function assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, pha
   await page.getByRole("button", { name: "Expand All" }).last().click();
   await page.getByText("harness_long_line").waitFor({ timeout: 5000 });
   const beforeRequests = diffGetRequests.length;
-  const unwrappedMetrics = await page.evaluate(() => {
+  const wrappedMetrics = await page.evaluate(() => {
     const doc = document.documentElement;
     const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
     const firstFile = preview?.shadowRoot?.querySelector("ha-ops-preview-file");
@@ -446,18 +446,18 @@ async function assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, pha
       whiteSpace: style?.whiteSpace ?? "",
     };
   });
-  assert(unwrappedMetrics.docScrollWidth <= unwrappedMetrics.docClientWidth + 2, `${phase} page overflowed before wrap: ${JSON.stringify(unwrappedMetrics)}`);
-  assert(unwrappedMetrics.fileRight <= unwrappedMetrics.docClientWidth + 2, `${phase} preview row overflowed viewport: ${JSON.stringify(unwrappedMetrics)}`);
-  assert(unwrappedMetrics.preScrollWidth > unwrappedMetrics.preClientWidth, `${phase} unwrapped diff did not scroll internally: ${JSON.stringify(unwrappedMetrics)}`);
-  assert(["auto", "scroll"].includes(unwrappedMetrics.overflowX), `${phase} unwrapped diff overflow-x was ${unwrappedMetrics.overflowX}`);
-  assert(unwrappedMetrics.whiteSpace === "pre", `${phase} unwrapped diff white-space was ${unwrappedMetrics.whiteSpace}`);
+  assert(wrappedMetrics.docScrollWidth <= wrappedMetrics.docClientWidth + 2, `${phase} page overflowed with default wrap: ${JSON.stringify(wrappedMetrics)}`);
+  assert(wrappedMetrics.fileRight <= wrappedMetrics.docClientWidth + 2, `${phase} preview row overflowed viewport: ${JSON.stringify(wrappedMetrics)}`);
+  assert(wrappedMetrics.preScrollWidth <= wrappedMetrics.preClientWidth + 4, `${phase} default wrapped diff overflowed internally: ${JSON.stringify(wrappedMetrics)}`);
+  assert(["auto", "scroll"].includes(wrappedMetrics.overflowX), `${phase} wrapped diff overflow-x was ${wrappedMetrics.overflowX}`);
+  assert(wrappedMetrics.whiteSpace === "pre-wrap", `${phase} default wrapped diff white-space was ${wrappedMetrics.whiteSpace}`);
 
-  const afterRowWrap = await page.evaluate(async () => {
+  const afterRowUnwrap = await page.evaluate(async () => {
     const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
     const files = Array.from(preview?.shadowRoot?.querySelectorAll("ha-ops-preview-file") || []);
     const first = files[0];
     const second = files[1];
-    const button = Array.from(first.shadowRoot.querySelectorAll("vaadin-button")).find((item) => item.textContent.trim() === "Wrap Lines");
+    const button = Array.from(first.shadowRoot.querySelectorAll("vaadin-button")).find((item) => item.textContent.trim() === "Unwrap Lines");
     button.click();
     await preview.updateComplete;
     await first.updateComplete;
@@ -473,9 +473,9 @@ async function assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, pha
       firstScrollWidth: firstPre.scrollWidth,
     };
   });
-  assert(afterRowWrap.firstWrapped && !afterRowWrap.secondWrapped, `${phase} per-file wrap affected wrong rows: ${JSON.stringify(afterRowWrap)}`);
-  assert(afterRowWrap.firstWhiteSpace === "pre-wrap" && afterRowWrap.secondWhiteSpace === "pre", `${phase} per-file wrap styles were wrong: ${JSON.stringify(afterRowWrap)}`);
-  assert(afterRowWrap.firstScrollWidth <= afterRowWrap.firstClientWidth + 4, `${phase} wrapped diff still overflowed internally: ${JSON.stringify(afterRowWrap)}`);
+  assert(!afterRowUnwrap.firstWrapped && afterRowUnwrap.secondWrapped, `${phase} per-file unwrap affected wrong rows: ${JSON.stringify(afterRowUnwrap)}`);
+  assert(afterRowUnwrap.firstWhiteSpace === "pre" && afterRowUnwrap.secondWhiteSpace === "pre-wrap", `${phase} per-file unwrap styles were wrong: ${JSON.stringify(afterRowUnwrap)}`);
+  assert(afterRowUnwrap.firstScrollWidth > afterRowUnwrap.firstClientWidth, `${phase} unwrapped diff did not scroll internally: ${JSON.stringify(afterRowUnwrap)}`);
   assert(diffGetRequests.length === beforeRequests, `${phase} wrap toggle triggered diff-get`);
 
   const refreshSnapshot = await fetch(`${baseUrl}debug-snapshot`).then((response) => response.json());
@@ -490,23 +490,23 @@ async function assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, pha
       const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
       return preview?.shadowRoot?.querySelector("ha-ops-preview-file")?.wrapLines;
     });
-    return wrapped ? { wrapped } : null;
+    return wrapped === false ? { wrapped } : null;
   });
 
   const global = await page.evaluate(async () => {
     const preview = Array.from(document.querySelectorAll("ha-ops-preview")).find((item) => item.direction === "save");
-    const globalButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Wrap All Lines");
+    const globalButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Unwrap All Lines");
     globalButton.click();
     await preview.updateComplete;
-    const wrapped = Array.from(preview.shadowRoot.querySelectorAll("ha-ops-preview-file")).map((file) => file.wrapLines);
-    const unwrapButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Unwrap All Lines");
-    unwrapButton.click();
-    await preview.updateComplete;
     const unwrapped = Array.from(preview.shadowRoot.querySelectorAll("ha-ops-preview-file")).map((file) => file.wrapLines);
-    return { wrapped, unwrapped };
+    const wrapButton = Array.from(preview.shadowRoot.querySelectorAll("header vaadin-button")).find((button) => button.textContent.trim() === "Wrap All Lines");
+    wrapButton.click();
+    await preview.updateComplete;
+    const wrapped = Array.from(preview.shadowRoot.querySelectorAll("ha-ops-preview-file")).map((file) => file.wrapLines);
+    return { unwrapped, wrapped };
   });
-  assert(global.wrapped.every(Boolean), `${phase} Wrap All did not wrap all rows: ${JSON.stringify(global)}`);
   assert(global.unwrapped.every((value) => !value), `${phase} Unwrap All did not unwrap all rows: ${JSON.stringify(global)}`);
+  assert(global.wrapped.every(Boolean), `${phase} Wrap All did not wrap all rows: ${JSON.stringify(global)}`);
   assert(diffGetRequests.length === beforeRequests, `${phase} global wrap toggle triggered diff-get`);
 }
 
