@@ -178,6 +178,7 @@ class HarnessScenarioController:
             "held_jobs": {},
             "completed_jobs": {},
             "duplicate_rejections": {},
+            "retained_topics_cleared": 0,
             "ws_replays_seen": 0,
             "log_markers_emitted": 0,
         }
@@ -255,6 +256,16 @@ class HarnessScenarioController:
                 self._write_save_preview(ctx, details)
             elif action == "apply":
                 self._write_apply_complete(ctx, details)
+            elif action == "deleted_devices_preview":
+                self._write_deleted_devices_preview(ctx, details)
+            elif action == "deleted_devices_delete":
+                self._write_deleted_devices_pending(ctx, details)
+            elif action == "deleted_devices_revert":
+                self._write_deleted_devices_reverted(ctx, details)
+            elif action == "retained_devices_preview":
+                self._write_retained_devices_preview(ctx, details)
+            elif action == "retained_devices_delete":
+                self._write_retained_devices_delete(ctx, details)
             else:
                 self._write_save_complete(ctx, details)
             with self._lock:
@@ -421,9 +432,144 @@ class HarnessScenarioController:
             }
         )
 
+    def _write_deleted_devices_preview(self, ctx, details):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "deleted_devices_preview",
+                "last_message": "Harness deleted devices preview finished.",
+                "last_details": [*details, "Harness deleted devices preview finished."],
+                "last_deleted_devices_preview": "Harness deleted devices preview.",
+                "last_deleted_devices_rows": [
+                    {
+                        "id": "deleted-device",
+                        "recovered_name": "Detached Button",
+                        "recovered_manufacturer": "Example",
+                        "recovered_model": "Button",
+                        "recovered_identifiers": [["mqtt", "zigbee2mqtt_0xaaaabbbbccccdddd"]],
+                    }
+                ],
+                "last_deleted_devices_count": 1,
+                "last_deleted_devices_device_count": 1,
+                "last_deleted_devices_entity_count": 0,
+                "last_deleted_devices_fingerprint": "harness-deleted-fingerprint",
+                "last_deleted_devices_generated_at": ctx.utc_now(),
+            }
+        )
+
+    def _write_deleted_devices_pending(self, ctx, details):
+        ctx.write_state(
+            {
+                **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+                **state_store.INTERNAL_IDS_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "deleted_devices_delete",
+                "last_message": "Harness deleted devices cleanup is waiting for confirmation.",
+                "last_details": [*details, "Harness deleted devices cleanup is waiting for confirmation."],
+                "last_deleted_devices_preview": "No deleted devices or entities found.",
+                "last_deleted_devices_rows": [],
+                "last_deleted_devices_count": 0,
+                "last_deleted_devices_device_count": 0,
+                "last_deleted_devices_entity_count": 0,
+                "deleted_devices_pending_confirmation": True,
+                "deleted_devices_rollback_path": str(ctx.dev_harness_root / "data" / "work" / "harness-deleted-rollback.json"),
+                "deleted_devices_pending_device_count": 1,
+                "deleted_devices_pending_entity_count": 0,
+            }
+        )
+
+    def _write_deleted_devices_reverted(self, ctx, details):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "deleted_devices_revert",
+                "last_message": "Harness deleted devices cleanup reverted.",
+                "last_details": [*details, "Harness deleted devices cleanup reverted."],
+                "deleted_devices_pending_confirmation": False,
+                "deleted_devices_rollback_path": None,
+                "deleted_devices_pending_device_count": 0,
+                "deleted_devices_pending_entity_count": 0,
+            }
+        )
+
+    def _retained_rows(self, suffix="a"):
+        return [
+            {
+                "identity": f"harness-retained-{suffix}",
+                "selected": True,
+                "identifiers": ["mqtt", f"zigbee2mqtt_0xaaaabbbbccccddd{suffix}"],
+                "name": f"retained_{suffix}",
+                "manufacturer": "Example",
+                "model": "Battery button",
+                "retained_topics": [f"homeassistant/device_automation/0xaaaabbbbccccddd{suffix}/action_hold/config"],
+            }
+        ]
+
+    def _write_retained_devices_preview(self, ctx, details):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "retained_devices_preview",
+                "last_message": "Harness retained devices preview finished.",
+                "last_details": [*details, "Harness retained devices preview finished."],
+                "last_retained_devices_preview": "Harness retained devices preview.",
+                "last_retained_devices_rows": self._retained_rows("a"),
+                "last_retained_devices_count": 1,
+                "last_retained_devices_fingerprint": "harness-retained-fingerprint-a",
+                "last_retained_devices_generated_at": ctx.utc_now(),
+                "last_retained_devices_device_registry_fingerprint": "harness-device-registry-fingerprint",
+                "last_retained_devices_scanned_paths": ["zigbee2mqtt/state.json"],
+            }
+        )
+
+    def replace_retained_preview(self, ctx):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "retained_devices_preview",
+                "last_message": "Harness retained devices preview replaced.",
+                "last_details": ["Harness retained devices preview replaced."],
+                "last_retained_devices_preview": "Harness retained devices preview B.",
+                "last_retained_devices_rows": self._retained_rows("b"),
+                "last_retained_devices_count": 1,
+                "last_retained_devices_fingerprint": "harness-retained-fingerprint-b",
+                "last_retained_devices_generated_at": ctx.utc_now(),
+            }
+        )
+        return {"ok": True}
+
+    def _write_retained_devices_delete(self, ctx, details):
+        with self._lock:
+            self.counters["retained_topics_cleared"] += 1
+        ctx.write_state(
+            {
+                **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "retained_devices_delete",
+                "last_message": "Deleted retained discovery for 1 retained device candidate(s).",
+                "last_details": [*details, "Deleted retained discovery for 1 retained device candidate(s)."],
+            }
+        )
+
     def _normalize_action(self, action):
         action = str(action or "").replace("-", "_")
-        if action not in {"preview", "save_preview", "apply", "save"}:
+        if action not in {
+            "preview",
+            "save_preview",
+            "apply",
+            "save",
+            "deleted_devices_preview",
+            "deleted_devices_delete",
+            "deleted_devices_revert",
+            "retained_devices_preview",
+            "retained_devices_delete",
+        }:
             raise RuntimeError(f"unsupported dev harness action: {action}")
         return action
 
@@ -498,6 +644,32 @@ class DevHarnessContext(app_context.AppContext):
     def run_save_job(self, commit_subject=None, lock_acquired=False):
         return self.harness_controller.run_job(self, "save", lock_acquired=lock_acquired, commit_subject=commit_subject)
 
+    def run_deleted_devices_preview_job(self, lock_acquired=False):
+        return self.harness_controller.run_job(self, "deleted_devices_preview", lock_acquired=lock_acquired)
+
+    def run_deleted_devices_delete_job(self, lock_acquired=False):
+        return self.harness_controller.run_job(self, "deleted_devices_delete", lock_acquired=lock_acquired)
+
+    def run_deleted_devices_revert_job(self, lock_acquired=False):
+        return self.harness_controller.run_job(self, "deleted_devices_revert", lock_acquired=lock_acquired)
+
+    def run_retained_devices_preview_job(self, lock_acquired=False):
+        return self.harness_controller.run_job(self, "retained_devices_preview", lock_acquired=lock_acquired)
+
+    def run_retained_devices_delete_job(self, selected, lock_acquired=False):
+        return job_logic.run_retained_devices_delete_job(selected, self.job_deps(), lock_acquired=lock_acquired)
+
+    def clear_retained_discovery_topic(self, topic):
+        with self.harness_controller._lock:
+            self.harness_controller.counters["retained_topics_cleared"] += 1
+        return None
+
+    def deleted_devices_cleanup_status(self, rollback_path):
+        return {"removed": 1, "current": 0, "added": 0, "returned": 0, "removed_devices": 1, "removed_entities": 0, "current_devices": 0, "current_entities": 0, "added_devices": 0, "added_entities": 0}
+
+    def deleted_devices_pending_diff(self, rollback_path):
+        return "--- deleted devices before cleanup\n+++ deleted devices now\n@@ -1 +0,0 @@\n- deleted-device\n"
+
     def dev_harness_record_duplicate_rejection(self, action):
         self.harness_controller.record_duplicate_rejection(action)
 
@@ -522,6 +694,8 @@ class DevHarnessContext(app_context.AppContext):
         if route == "/__dev_harness__/clear-previews":
             self.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
             return {"ok": True}
+        if route == "/__dev_harness__/replace-retained-preview":
+            return self.harness_controller.replace_retained_preview(self)
         return None
 
 

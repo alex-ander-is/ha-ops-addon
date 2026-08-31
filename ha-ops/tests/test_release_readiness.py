@@ -44,6 +44,16 @@ def changelog_section(text, version):
 
 
 class ReleaseReadinessTests(unittest.TestCase):
+    def test_config_version_has_matching_changelog_entry(self):
+        config = CONFIG_PATH.read_text()
+        match = re.search(r'^version:\s*"([^"]+)"', config, re.MULTILINE)
+        self.assertIsNotNone(match)
+
+        changelog = CHANGELOG_PATH.read_text()
+        section = changelog_section(changelog, match.group(1))
+        self.assertIsNotNone(section)
+        self.assertRegex(section, r"\n- .+")
+
     def test_displayed_terminology_uses_apps(self):
         legacy_term = re.compile(r"\badd-" + r"ons?\b", re.IGNORECASE)
         paths = [REPO_ROOT / "AGENTS.md", REPO_ROOT / "README.md", REPO_ROOT / "repository.yaml", *repo_text_files()]

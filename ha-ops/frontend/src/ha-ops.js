@@ -634,6 +634,82 @@ class HaOpsPreview extends LitElement {
 }
 customElements.define("ha-ops-preview", HaOpsPreview);
 
+function hasCommandInFlight(state, commands) {
+  const runningStatuses = new Set(["accepted", "running", "failed_unknown"]);
+  return Object.values(state.command_records || {})
+    .some((record) => commands.includes(record.command) && runningStatuses.has(record.status));
+}
+
+function deletedEntriesLabel(state) {
+  const devices = Number(state.last_deleted_devices_device_count || 0);
+  const entities = Number(state.last_deleted_devices_entity_count || 0);
+  if (devices && entities) return TEXT.deletedDevicesAndEntitiesLabel;
+  if (entities) return TEXT.deletedEntitiesLabel;
+  return TEXT.deletedDevicesLabel;
+}
+
+function renderDeletedDevicesTable(rows) {
+  if (!rows?.length) return html`<p>${TEXT.noDeletedDevices}</p>`;
+  const columns = [
+    ["area", TEXT.area, (row) => row.area || ""],
+    ["id", TEXT.id, (row) => row.id || ""],
+    ["entity-id", TEXT.entityId, (row) => row.entity_id || ""],
+    ["name", TEXT.name, (row) => row.recovered_name || ""],
+    ["device", TEXT.manufacturerModel, (row) => [row.recovered_manufacturer, row.recovered_model, row.recovered_model_id].filter(Boolean).join("\n")],
+    ["identifiers", TEXT.identifiers, (row) => (row.recovered_identifiers || []).slice(0, 3).map((identifier) => Array.isArray(identifier) ? identifier.join(":") : String(identifier)).join(", ")],
+    ["original-name", TEXT.originalName, (row) => row.original_name || ""],
+    ["original-device-class", TEXT.originalDeviceClass, (row) => row.original_device_class || ""],
+    ["source", TEXT.source, (row) => [String(row.source_commit || "").slice(0, 12), row.source_path].filter(Boolean).join(" ")],
+  ];
+  const visible = columns.filter(([key, _label, value]) => key === "id" || rows.some((row) => String(value(row)).trim()));
+  return html`
+    <div class="table-scroll">
+      <div class="deleted-devices-table">
+        <div class="deleted-device-header">
+          ${visible.map(([key, label]) => html`<div class=${`deleted-device-header-cell deleted-device-col-${key}`}>${label}</div>`)}
+        </div>
+        ${rows.map((row) => html`<div class="deleted-device-row">
+          ${visible.map(([key, _label, value]) => {
+            const text = String(value(row));
+            return html`<div class=${`deleted-device-cell deleted-device-cell-${key} deleted-device-col-${key}`}>
+              ${["id", "entity-id", "identifiers", "source"].includes(key) ? html`<code>${text}</code>` : text}
+            </div>`;
+          })}
+        </div>`)}
+      </div>
+    </div>
+  `;
+}
+
+function renderRetainedDevicesTable(rows, disabled) {
+  if (!rows?.length) return html`<p>${TEXT.noRetainedDevices}</p>`;
+  return html`
+    <div class="table-scroll">
+      <table class="retained-devices-table">
+        <colgroup><col class="checkbox-col"><col><col><col><col></colgroup>
+        <thead><tr>
+          <th class="checkbox-col" aria-label=${TEXT.deleteLabel}></th>
+          <th>${TEXT.identifiers}</th>
+          <th>${TEXT.name}</th>
+          <th>${TEXT.manufacturerModel}</th>
+          <th>${TEXT.retainedDiscoveryTopics}</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map((row) => html`<tr>
+            <td class="checkbox-col">
+              <input type="checkbox" name="candidate" value=${row.identity || ""} ?checked=${row.selected !== false} ?disabled=${disabled}>
+            </td>
+            <td><code>${String(row.identifiers || "")}</code></td>
+            <td>${row.name || ""}</td>
+            <td>${[row.manufacturer, row.model].filter(Boolean).join(" | ")}</td>
+            <td><pre>${(row.retained_topics || []).join("\n")}</pre></td>
+          </tr>`)}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 class HaOpsApp extends LitElement {
   static properties = {
     connection: { type: String },
@@ -999,13 +1075,19 @@ class HaOpsApp extends LitElement {
     const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();
-    const visible = hasApplyPaths || hasSavePaths || previewRunning;
+    const cleanupRunning = hasCommandInFlight(this.state, ["deleted_devices_preview", "retained_devices_preview", "deleted_devices_delete", "retained_devices_delete", "internal_ids_preview", "internal_ids_migrate"]);
+    const hasDeletedPreview = Boolean(this.state.last_deleted_devices_generated_at);
+    const hasRetainedPreview = Boolean(this.state.last_retained_devices_generated_at);
+    const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning;
+    for (const element of this.querySelectorAll("[data-server-cleanup-preview]")) element.hidden = Boolean(hasDeletedPreview || hasRetainedPreview || cleanupRunning);
     if (!visible) {
       render(nothing, host);
       return;
     }
     const loading = previewRunning && !hasApplyPaths && !hasSavePaths;
     render(html`
+      ${this.renderDeletedPreview(cleanupRunning)}
+      ${this.renderRetainedPreview(cleanupRunning)}
       <section class="card wide" data-testid="diff-section">
         <h2>${TEXT.changeList}</h2>
         ${loading
@@ -1018,6 +1100,53 @@ class HaOpsApp extends LitElement {
             `}
       </section>
     `, host);
+  }
+
+  renderDeletedPreview(cleanupRunning) {
+    const rows = this.state.last_deleted_devices_rows || [];
+    const count = Number(this.state.last_deleted_devices_count || 0);
+    const visible = Boolean(this.state.last_deleted_devices_generated_at) || cleanupRunning && this.state.last_action === "deleted_devices_preview";
+    if (!visible) return nothing;
+    const disabled = this.isRunning() || Boolean(this.state.deleted_devices_pending_confirmation) || !count || !this.state.last_deleted_devices_fingerprint;
+    const entries = deletedEntriesLabel(this.state);
+    const confirmMessage = TEXT.confirmDeletedDevicesDelete.replace("{entries}", entries);
+    return html`
+      <section class="card wide" data-testid="deleted-devices-preview-section">
+        <h2>${TEXT.deletedDevicesPreview}</h2>
+        <p>${TEXT.generatedAt} <span data-transient="deleted-devices-generated">${this.state.last_deleted_devices_generated_at || ""}</span></p>
+        <div data-transient="deleted-devices-preview">${renderDeletedDevicesTable(rows)}</div>
+        ${count > 0 ? html`
+          <div class="actions deletion-actions"><div class="action-row">
+            <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${confirmMessage}>
+              <button type="submit" ?disabled=${disabled}>${TEXT.approveDeletedDevices}</button>
+            </form>
+          </div></div>
+        ` : nothing}
+      </section>
+    `;
+  }
+
+  renderRetainedPreview(cleanupRunning) {
+    const rows = this.state.last_retained_devices_rows || [];
+    const visible = Boolean(this.state.last_retained_devices_generated_at) || cleanupRunning && this.state.last_action === "retained_devices_preview";
+    if (!visible) return nothing;
+    const disabled = this.isRunning() || Boolean(this.state.deleted_devices_pending_confirmation) || !rows.length || !this.state.last_retained_devices_fingerprint;
+    return html`
+      <section class="card wide" data-testid="retained-devices-preview-section">
+        <h2>${TEXT.retainedDevicesPreview}</h2>
+        <p class="muted">${TEXT.retainedPreviewNotice}</p>
+        <p class="muted">${TEXT.retainedDeleteNotice}</p>
+        <p>${TEXT.generatedAt} <span data-transient="retained-devices-generated">${this.state.last_retained_devices_generated_at || ""}</span></p>
+        <form method="post" action="retained-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${TEXT.confirmRetainedDevicesDelete}>
+          <input type="hidden" name="retained_preview_fingerprint" value=${this.state.last_retained_devices_fingerprint || ""}>
+          <input type="hidden" name="retained_preview_generated_at" value=${this.state.last_retained_devices_generated_at || ""}>
+          <div data-transient="retained-devices-preview">${renderRetainedDevicesTable(rows, disabled)}</div>
+          ${rows.length ? html`<div class="actions deletion-actions"><div class="action-row">
+            <button type="submit" ?disabled=${disabled}>${TEXT.deleteRetainedDevices}</button>
+          </div></div>` : nothing}
+        </form>
+      </section>
+    `;
   }
 
   markUnknown(error) {

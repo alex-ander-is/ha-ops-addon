@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.16
+
+- Show deleted-device and retained-MQTT cleanup previews reactively after checks finish, keep retained-topic deletion tied to the exact reviewed preview, and block cleanup actions while deleted-device cleanup is awaiting confirmation.
+
 ## 0.10.15
 
 - Keep the Save HA to Git commit subject label, input, and action button on one row with the input filling the available space.

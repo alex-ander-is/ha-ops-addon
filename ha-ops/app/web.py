@@ -127,7 +127,8 @@ def repair_stale_running_state(ctx, state):
 
 
 def recovery_action_allowed(ctx, action):
-    return job_logic.recovery_action_allowed(ctx.read_state(), action)
+    state = ctx.read_state()
+    return job_logic.recovery_action_allowed(state, action) and state_store.cleanup_action_allowed(state, action)
 
 
 def reconcile_docker_prune_orphan(ctx, lock_acquired=False):
@@ -629,7 +630,20 @@ def render_page(ctx):
         )
     retained_devices_section_html = ""
     if state.get("last_retained_devices_generated_at"):
-        retained_delete_disabled = "disabled" if run_disabled or save_push_retry_pending or not retained_devices_rows else ""
+        retained_delete_disabled = (
+            "disabled"
+            if run_disabled
+            or save_push_retry_pending
+            or deleted_devices_pending_confirmation
+            or deleted_devices_recovery_active
+            or not retained_devices_rows
+            else ""
+        )
+        retained_controls_disabled = bool(retained_delete_disabled)
+        retained_identity_fields = (
+            f"<input type='hidden' name='retained_preview_fingerprint' value='{html.escape(str(state.get('last_retained_devices_fingerprint') or ''), quote=True)}'>"
+            f"<input type='hidden' name='retained_preview_generated_at' value='{html.escape(str(state.get('last_retained_devices_generated_at') or ''), quote=True)}'>"
+        )
         retained_devices_section_html = (
             "<section class='card wide'>"
             f"<h2>{_('heading.retained_devices_preview')}</h2>"
@@ -641,7 +655,8 @@ def render_page(ctx):
             "<form method='post' action='retained-devices-delete' data-async-form='true' "
             "data-preserve-display-state='true' "
             f"data-confirm='{html.escape(_('confirm.retained_devices_delete'), quote=True)}'>"
-            f"<div data-transient='retained-devices-preview'>{ui.render_retained_devices_table(retained_devices_rows)}</div>"
+            f"{retained_identity_fields}"
+            f"<div data-transient='retained-devices-preview'>{ui.render_retained_devices_table(retained_devices_rows, disabled=retained_controls_disabled)}</div>"
             "<div class='actions deletion-actions'><div class='action-row'>"
             f"<button type='submit' {retained_delete_disabled}>{_('action.delete_retained_devices')}</button>"
             "</div></div>"
@@ -651,7 +666,15 @@ def render_page(ctx):
 
     internal_ids_section_html = ""
     if state.get("last_internal_ids_generated_at"):
-        internal_ids_migrate_disabled = "disabled" if run_disabled or save_push_retry_pending or not any(row.get("changes") for row in internal_ids_rows) else ""
+        internal_ids_migrate_disabled = (
+            "disabled"
+            if run_disabled
+            or save_push_retry_pending
+            or deleted_devices_pending_confirmation
+            or deleted_devices_recovery_active
+            or not any(row.get("changes") for row in internal_ids_rows)
+            else ""
+        )
         internal_ids_changed_files = sum(1 for row in internal_ids_rows if row.get("changes"))
         internal_ids_totals = {
             "changes": sum(int(row.get("changes") or 0) for row in internal_ids_rows),
@@ -883,6 +906,15 @@ def assert_preview_decision_identity(state, direction, body):
         return
     if _parse_preview_identity((body or {}).get("preview_identity")) != current:
         raise StalePreviewDecision(_("error.preview_stale_decision"))
+
+
+def retained_preview_identity_matches_state(state, body):
+    if not state.get("last_retained_devices_fingerprint") or not state.get("last_retained_devices_generated_at"):
+        return False
+    return (
+        body_first(body, "retained_preview_fingerprint") == state.get("last_retained_devices_fingerprint")
+        and body_first(body, "retained_preview_generated_at") == state.get("last_retained_devices_generated_at")
+    )
 
 
 def mutate_preview_decision(ctx, direction, action, body):
@@ -1166,7 +1198,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         "disk_usage": (ctx.run_disk_usage_job, [], None, "message.disk_usage_started"),
         "deleted_devices_preview": (ctx.run_deleted_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.deleted_devices_check_started"),
         "retained_devices_preview": (ctx.run_retained_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.retained_devices_check_started"),
-        "retained_devices_delete": (ctx.run_retained_devices_delete_job, [envelope_payload.get("candidate", [])], None, "message.retained_devices_delete_started"),
+        "retained_devices_delete": (ctx.run_retained_devices_delete_job, [envelope_payload], None, "message.retained_devices_delete_started"),
         "internal_ids_preview": (ctx.run_internal_ids_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.internal_ids_check_started"),
         "internal_ids_migrate": (ctx.run_internal_ids_migrate_job, [envelope_payload.get("candidate", [])], None, "message.internal_ids_migration_started"),
         "deleted_devices_delete": (ctx.run_deleted_devices_delete_job, [], None, "message.deleted_devices_delete_started"),
@@ -1175,6 +1207,14 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         "rollback": (ctx.run_rollback_job, [envelope_payload.get("release", "")], None, "message.rollback_started"),
     }
     if command in job_commands:
+        if not state_store.cleanup_action_allowed(ctx.read_state(), command):
+            return command_result(False, job_logic.cleanup_blocked_message(ctx.read_state(), command), status=409)
+        if (
+            command == "retained_devices_delete"
+            and not job_is_running(ctx)
+            and not retained_preview_identity_matches_state(ctx.read_state(), envelope_payload)
+        ):
+            return command_result(False, _("error.retained_devices_preview_changed"), status=409)
         target, args, state_updates, message_key = job_commands[command]
         if start_job is None:
             ok = start_reserved_background(ctx, target, *args, state_updates=state_updates, command_id=command_id)
@@ -1229,6 +1269,7 @@ POST_ENDPOINTS = (
     "/__dev_harness__/arm",
     "/__dev_harness__/release",
     "/__dev_harness__/clear-previews",
+    "/__dev_harness__/replace-retained-preview",
 )
 
 
@@ -1318,9 +1359,10 @@ def create_handler(ctx):
             else:
                 self.send_html(render_page(ctx), status=409)
 
-        def send_recovery_blocked(self):
+        def send_recovery_blocked(self, action=None):
             state = ctx.read_state()
-            message = state.get("last_message") or _("message.deleted_devices_cleanup_manual_recovery")
+            action = action or (job_action(getattr(self, "blocked_target", None)) if getattr(self, "blocked_target", None) else "mutation")
+            message = job_logic.cleanup_blocked_message(state, action)
             if self.wants_json():
                 self.send_json({"ok": False, "message": message}, status=409)
             else:
@@ -1361,7 +1403,9 @@ def create_handler(ctx):
                 self.send_startup_repair_blocked()
                 return False
             if not recovery_action_allowed(ctx, action):
+                self.blocked_target = target
                 self.send_recovery_blocked()
+                self.blocked_target = None
             else:
                 recorder = getattr(ctx, "dev_harness_record_duplicate_rejection", None)
                 if recorder is not None and job_is_running(ctx):
@@ -1474,6 +1518,14 @@ def create_handler(ctx):
                         "resolve_apply_preview",
                         "select_save_preview",
                         "select_apply_preview",
+                        "deleted_devices_preview",
+                        "retained_devices_preview",
+                        "retained_devices_delete",
+                        "internal_ids_preview",
+                        "internal_ids_migrate",
+                        "deleted_devices_delete",
+                        "deleted_devices_confirm",
+                        "deleted_devices_revert",
                     }:
                         for frame in ws_state_frames(ctx, base_revision=last_revision):
                             write_ws_frame(self.wfile, frame)
@@ -1528,11 +1580,15 @@ def create_handler(ctx):
             # The recovery fence is authoritative at the HTTP boundary too:
             # reject before a direct endpoint can mutate state or queue work.
             # Disk usage is deliberately read-only and remains available.
+            route_action = route.removeprefix("/").replace("-", "_")
+            if not state_store.cleanup_action_allowed(ctx.read_state(), route_action):
+                self.send_recovery_blocked(route_action)
+                return
             if (
                 state_store.deleted_devices_recovery_active(ctx.read_state())
                 and route not in {"/deleted-devices-revert", "/disk-usage"}
             ):
-                self.send_recovery_blocked()
+                self.send_recovery_blocked(route_action)
                 return
 
             if route == "/generate-key":
@@ -1616,6 +1672,9 @@ def create_handler(ctx):
                     elif direction == "apply":
                         ctx.write_state(state_store.APPLY_PREVIEW_CLEAR_UPDATES)
                         message = _("message.apply_preview_cancelled")
+                    elif direction == "retained":
+                        ctx.write_state(state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES)
+                        message = _("message.retained_devices_preview_cancelled")
                     else:
                         if self.wants_json():
                             self.send_json({"ok": False, "message": _("error.invalid_preview_direction")}, status=400)
@@ -1857,8 +1916,10 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                selected = body.get("candidate", [])
-                if not self.start_job(ctx.run_retained_devices_delete_job, selected):
+                if not job_is_running(ctx) and not retained_preview_identity_matches_state(ctx.read_state(), body):
+                    self.send_json({"ok": False, "message": _("error.retained_devices_preview_changed")}, status=409)
+                    return
+                if not self.start_job(ctx.run_retained_devices_delete_job, body):
                     return
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.retained_devices_delete_started")})

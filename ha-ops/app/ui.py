@@ -485,12 +485,14 @@ def render_deleted_devices_table(rows):
     )
 
 
-def render_retained_devices_table(rows):
+def render_retained_devices_table(rows, disabled=False):
     if not rows:
         return f"<p>{_('text.no_retained_devices')}</p>"
     rendered_rows = []
-    for index, row in enumerate(rows):
+    disabled_attr = "disabled" if disabled else ""
+    for row in rows:
         checked = "checked" if row.get("selected", True) else ""
+        identity = html.escape(str(row.get("identity") or ""), quote=True)
         identifiers = html.escape(str(row.get("identifiers") or ""))
         name = html.escape(str(row.get("name") or ""))
         manufacturer = html.escape(str(row.get("manufacturer") or ""))
@@ -498,7 +500,7 @@ def render_retained_devices_table(rows):
         topics = html.escape("\n".join(row.get("retained_topics") or []))
         rendered_rows.append(
             "<tr>"
-            f"<td class='checkbox-col'><input type='checkbox' name='candidate' value='{index}' {checked}></td>"
+            f"<td class='checkbox-col'><input type='checkbox' name='candidate' value='{identity}' {checked} {disabled_attr}></td>"
             f"<td><code>{identifiers}</code></td>"
             f"<td>{name}</td>"
             f"<td>{manufacturer} | {model}</td>"
@@ -1513,11 +1515,11 @@ def render_page(data):
       </section>
     </div>
 
-    <div>{data['deleted_devices_section_html']}</div>
+    <div data-server-cleanup-preview="deleted">{data['deleted_devices_section_html']}</div>
 
-    <div>{data['retained_devices_section_html']}</div>
+    <div data-server-cleanup-preview="retained">{data['retained_devices_section_html']}</div>
 
-    <div>{data['internal_ids_section_html']}</div>
+    <div data-server-cleanup-preview="internal">{data['internal_ids_section_html']}</div>
 
     <div>{data['conflicts_section_html']}</div>
 
@@ -1553,19 +1555,44 @@ def render_page(data):
       wrapAllLines: {js_t('button.wrap_all_lines')},
       unwrapAllLines: {js_t('button.unwrap_all_lines')},
       changeList: {js_t('heading.change_list')},
+      deletedDevicesPreview: {js_t('heading.deleted_devices_preview')},
+      retainedDevicesPreview: {js_t('heading.retained_devices_preview')},
       gitAccess: {js_t('heading.git_access')},
       applyPreview: {js_t('heading.git_to_ha')},
       savePreview: {js_t('heading.ha_to_git')},
       apply: {js_t('action.apply')},
+      approveDeletedDevices: {js_t('action.approve_deleted_devices')},
+      deleteRetainedDevices: {js_t('action.delete_retained_devices')},
       save: {js_t('action.save')},
       useGitVersion: {js_t('action.use_git_version')},
       useHaVersion: {js_t('action.use_ha_version')},
+      confirmDeletedDevicesDelete: {js_t('confirm.deleted_devices_delete')},
+      confirmRetainedDevicesDelete: {js_t('confirm.retained_devices_delete')},
       includeFile: {js_t('label.include_preview_file')},
+      area: {js_t('label.area')},
+      id: {js_t('label.id')},
+      entityId: {js_t('label.entity_id')},
+      generatedAt: {js_t('label.generated_at')},
+      identifiers: {js_t('label.identifiers')},
+      name: {js_t('label.name')},
+      manufacturerModel: {js_t('label.manufacturer_model')},
+      originalName: {js_t('label.original_name')},
+      originalDeviceClass: {js_t('label.original_device_class')},
+      retainedDiscoveryTopics: {js_t('label.retained_discovery_topics')},
+      source: {js_t('label.source')},
+      deleteLabel: {js_t('label.delete')},
       commitSubject: {js_t('label.commit_subject')},
       versionChoice: {js_t('label.preview_version_choice')},
       loadingDiff: {js_t('message.loading_diff')},
       loadingPreviewDiff: {js_t('message.loading_preview_diff')},
       unavailableDiff: {js_t('text.diff_detail_unavailable')},
+      noDeletedDevices: {js_t('text.no_deleted_devices')},
+      noRetainedDevices: {js_t('text.no_retained_devices')},
+      retainedPreviewNotice: {js_t('notice.retained_devices_preview')},
+      retainedDeleteNotice: {js_t('notice.retained_devices_delete')},
+      deletedDevicesLabel: {js_t('label.deleted_devices')},
+      deletedEntitiesLabel: {js_t('label.deleted_entities')},
+      deletedDevicesAndEntitiesLabel: {js_t('label.deleted_devices_and_entities')},
       confirm: {js_t('action.confirm')}
     }};
   </script>

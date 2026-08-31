@@ -38,6 +38,11 @@ def fingerprint_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def fingerprint_json(value):
+    text = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return fingerprint_text(text)
+
+
 def read_device_registry(config_dir):
     path = device_registry_path(config_dir)
     if not path.exists():
@@ -103,16 +108,24 @@ def stale_mqtt_discovery_candidates(config_dir, retained_topics=None):
     _path, text, data = read_device_registry(config_dir)
     known_ieees, scanned_paths = zigbee2mqtt_ieees(config_dir)
     retained_by_ieee = retained_discovery_topic_ieees(retained_topics)
+    device_registry_fingerprint = fingerprint_text(text)
     candidates = []
     for device in data.get("data", {}).get("devices", []):
         ieee = mqtt_zigbee2mqtt_identifier(device)
         if not ieee or ieee in known_ieees:
             continue
         topics = sorted(retained_by_ieee.get(ieee, []))
+        identity_payload = {
+            "device_id": device.get("id") or "",
+            "ieee": ieee,
+            "identifiers": ["mqtt", f"zigbee2mqtt_{ieee}"],
+            "retained_topics": topics,
+        }
         candidates.append(
             {
                 "id": device.get("id") or "",
                 "ieee": ieee,
+                "identity": fingerprint_json(identity_payload),
                 "identifiers": ["mqtt", f"zigbee2mqtt_{ieee}"],
                 "name": device.get("name_by_user") or device.get("name") or "",
                 "manufacturer": device.get("manufacturer") or "",
@@ -122,9 +135,27 @@ def stale_mqtt_discovery_candidates(config_dir, retained_topics=None):
             }
         )
     candidates.sort(key=lambda item: (item["name"], item["ieee"], item["id"]))
+    fingerprint_payload = {
+        "schema": 1,
+        "device_registry_fingerprint": device_registry_fingerprint,
+        "known_zigbee2mqtt_ieees": sorted(known_ieees),
+        "scanned_paths": sorted(scanned_paths),
+        "retained_topics": sorted(str(topic) for topic in retained_topics or [] if isinstance(topic, str)),
+        "candidates": [
+            {
+                "id": item["id"],
+                "ieee": item["ieee"],
+                "identity": item["identity"],
+                "identifiers": item["identifiers"],
+                "retained_topics": item["retained_topics"],
+            }
+            for item in candidates
+        ],
+    }
     return {
         "count": len(candidates),
-        "fingerprint": fingerprint_text(text),
+        "device_registry_fingerprint": device_registry_fingerprint,
+        "fingerprint": fingerprint_json(fingerprint_payload),
         "scanned_paths": scanned_paths,
         "candidates": candidates,
     }

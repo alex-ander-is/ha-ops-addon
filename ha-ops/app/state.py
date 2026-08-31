@@ -212,6 +212,32 @@ def deleted_devices_recovery_allows(state, action):
     """Only Revert can resolve a persisted manual/restart recovery fence."""
     return not deleted_devices_recovery_active(state) or action == "deleted_devices_revert"
 
+
+CLEANUP_ACTIONS = {
+    "deleted_devices_preview",
+    "deleted_devices_delete",
+    "deleted_devices_confirm",
+    "deleted_devices_revert",
+    "retained_devices_preview",
+    "retained_devices_delete",
+    "internal_ids_preview",
+    "internal_ids_migrate",
+    "docker_build_cache_prune",
+}
+CLEANUP_PENDING_ALLOWED_ACTIONS = {"deleted_devices_confirm", "deleted_devices_revert", "disk_usage"}
+
+
+def deleted_devices_pending_cleanup_active(state):
+    return bool(state.get("deleted_devices_pending_confirmation"))
+
+
+def cleanup_action_allowed(state, action):
+    if deleted_devices_recovery_active(state):
+        return action in {"deleted_devices_revert", "disk_usage"}
+    if deleted_devices_pending_cleanup_active(state) and action in CLEANUP_ACTIONS:
+        return action in CLEANUP_PENDING_ALLOWED_ACTIONS
+    return True
+
 APPLY_PREVIEW_CLEAR_UPDATES = {
     "last_diff": "",
     "last_diff_cursor": None,
@@ -263,6 +289,8 @@ RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES = {
     "last_retained_devices_count": 0,
     "last_retained_devices_fingerprint": None,
     "last_retained_devices_generated_at": None,
+    "last_retained_devices_device_registry_fingerprint": None,
+    "last_retained_devices_scanned_paths": [],
 }
 INTERNAL_IDS_PREVIEW_CLEAR_UPDATES = {
     "last_internal_ids_preview": "",
@@ -404,6 +432,8 @@ def default_state():
         "last_retained_devices_count": 0,
         "last_retained_devices_fingerprint": None,
         "last_retained_devices_generated_at": None,
+        "last_retained_devices_device_registry_fingerprint": None,
+        "last_retained_devices_scanned_paths": [],
         "last_internal_ids_preview": "",
         "last_internal_ids_rows": [],
         "last_internal_ids_count": 0,

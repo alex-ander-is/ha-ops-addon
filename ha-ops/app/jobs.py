@@ -32,6 +32,19 @@ def enter_run_lock(ctx, action, lock_acquired=False):
     if not recovery_action_allowed(ctx.read_state(), action):
         ctx.run_lock.release()
         return False
+    state = ctx.read_state()
+    if not state_store.cleanup_action_allowed(state, action):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "error",
+                "last_action": action,
+                "last_message": cleanup_blocked_message(state, action),
+                "last_details": [cleanup_blocked_message(state, action)],
+            }
+        )
+        ctx.run_lock.release()
+        return False
     return True
 
 
@@ -54,6 +67,20 @@ RECOVERY_READ_ONLY_ACTIONS = {"disk_usage"}
 
 def recovery_action_allowed(state, action):
     return action in RECOVERY_READ_ONLY_ACTIONS or state_store.deleted_devices_recovery_allows(state, action)
+
+
+def cleanup_blocked_message(state, action):
+    if state_store.deleted_devices_recovery_active(state):
+        return state.get("last_message") or _("message.deleted_devices_cleanup_manual_recovery")
+    if action == "deleted_devices_preview":
+        return _("error.deleted_devices_pending_before_check")
+    if action == "deleted_devices_delete":
+        return _("error.deleted_devices_pending_before_delete")
+    if action in {"retained_devices_preview", "retained_devices_delete"}:
+        return _("error.deleted_devices_pending_before_retained")
+    if action in {"internal_ids_preview", "internal_ids_migrate"}:
+        return _("error.deleted_devices_pending_before_internal_ids")
+    return _("message.pending_deleted_devices")
 
 
 def service_branch_push_out_of_date(branch, error):
@@ -1170,6 +1197,7 @@ def retained_device_rows(candidates):
         rows.append(
             {
                 "selected": bool(item.get("retained_topics")),
+                "identity": item.get("identity") or "",
                 "identifiers": item.get("identifiers") or ["mqtt", f"zigbee2mqtt_{item.get('ieee', '')}"],
                 "name": item.get("name") or "",
                 "manufacturer": item.get("manufacturer") or "",
@@ -1379,6 +1407,8 @@ def run_retained_devices_preview_job(ctx, lock_acquired=False):
                 "last_retained_devices_count": count,
                 "last_retained_devices_fingerprint": preview["fingerprint"],
                 "last_retained_devices_generated_at": utc_now(),
+                "last_retained_devices_device_registry_fingerprint": preview.get("device_registry_fingerprint"),
+                "last_retained_devices_scanned_paths": preview.get("scanned_paths") or [],
             }
         )
         return True
@@ -1398,6 +1428,28 @@ def run_retained_devices_preview_job(ctx, lock_acquired=False):
         return False
     finally:
         release_run_lock(ctx)
+
+
+def _submitted_values(value):
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value]
+    return [str(value)]
+
+
+def _retained_selection_payload(selected):
+    if isinstance(selected, dict):
+        return {
+            "candidate": _submitted_values(selected.get("candidate")),
+            "retained_preview_fingerprint": (_submitted_values(selected.get("retained_preview_fingerprint")) or [""])[0],
+            "retained_preview_generated_at": (_submitted_values(selected.get("retained_preview_generated_at")) or [""])[0],
+        }
+    return {
+        "candidate": _submitted_values(selected),
+        "retained_preview_fingerprint": "",
+        "retained_preview_generated_at": "",
+    }
 
 
 def run_retained_devices_delete_job(selected, ctx, lock_acquired=False):
@@ -1421,17 +1473,29 @@ def run_retained_devices_delete_job(selected, ctx, lock_acquired=False):
 
     try:
         state = ctx.read_state()
+        payload = _retained_selection_payload(selected)
         rows = state.get("last_retained_devices_rows") or []
-        if not rows:
+        fingerprint = state.get("last_retained_devices_fingerprint")
+        generated_at = state.get("last_retained_devices_generated_at")
+        if not rows or not fingerprint or not generated_at:
             raise i18n.error("error.retained_devices_preview_required")
-        selected_indexes = {int(value) for value in selected}
-        if not selected_indexes:
+        if (
+            payload["retained_preview_fingerprint"] != fingerprint
+            or payload["retained_preview_generated_at"] != generated_at
+        ):
+            raise i18n.error("error.retained_devices_preview_changed")
+        selected_identities = set(payload["candidate"])
+        if not selected_identities:
             raise i18n.error("error.retained_devices_selection_required")
         topics = []
-        for index, row in enumerate(rows):
-            if index not in selected_indexes:
+        selected_count = 0
+        for row in rows:
+            if str(row.get("identity") or "") not in selected_identities:
                 continue
+            selected_count += 1
             topics.extend(row.get("retained_topics") or [])
+        if selected_count != len(selected_identities):
+            raise i18n.error("error.retained_devices_preview_changed")
         if not topics:
             raise i18n.error("error.retained_devices_no_topics")
 
@@ -1445,7 +1509,7 @@ def run_retained_devices_delete_job(selected, ctx, lock_acquired=False):
                 "last_run_at": utc_now(),
                 "last_status": "success",
                 "last_action": "retained_devices_delete",
-                "last_message": _("message.deleted_retained_devices", count=len(selected_indexes)),
+                "last_message": _("message.deleted_retained_devices", count=selected_count),
                 "last_details": details,
                 **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
             }

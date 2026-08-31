@@ -380,6 +380,7 @@ class ServerTests(unittest.TestCase):
             "error.internal_ids_preview_required": "CATALOG: internal IDs preview required.",
             "error.internal_ids_selection_required": "CATALOG: internal IDs selection required.",
             "error.retained_devices_no_topics": "CATALOG: retained devices have no topics.",
+            "error.retained_devices_preview_changed": "CATALOG: retained devices preview changed.",
             "error.retained_devices_preview_required": "CATALOG: retained devices preview required.",
             "error.retained_devices_selection_required": "CATALOG: retained devices selection required.",
         }
@@ -437,15 +438,37 @@ class ServerTests(unittest.TestCase):
             ),
             (
                 "retained devices selection required",
-                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job([], ctx),
-                {"last_retained_devices_rows": [{"retained_topics": ["homeassistant/sensor/stale/config"]}]},
+                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job(
+                    {
+                        "candidate": [],
+                        "retained_preview_fingerprint": ["fp"],
+                        "retained_preview_generated_at": ["2026-06-15T12:00:00+00:00"],
+                    },
+                    ctx,
+                ),
+                {
+                    "last_retained_devices_rows": [{"identity": "row", "retained_topics": ["homeassistant/sensor/stale/config"]}],
+                    "last_retained_devices_fingerprint": "fp",
+                    "last_retained_devices_generated_at": "2026-06-15T12:00:00+00:00",
+                },
                 "CATALOG: retained devices selection required.",
                 "Select at least one retained device candidate to delete.",
             ),
             (
                 "retained devices no topics",
-                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job(["0"], ctx),
-                {"last_retained_devices_rows": [{"retained_topics": []}]},
+                lambda ctx: server.app_context.job_logic.run_retained_devices_delete_job(
+                    {
+                        "candidate": ["row"],
+                        "retained_preview_fingerprint": ["fp"],
+                        "retained_preview_generated_at": ["2026-06-15T12:00:00+00:00"],
+                    },
+                    ctx,
+                ),
+                {
+                    "last_retained_devices_rows": [{"identity": "row", "retained_topics": []}],
+                    "last_retained_devices_fingerprint": "fp",
+                    "last_retained_devices_generated_at": "2026-06-15T12:00:00+00:00",
+                },
                 "CATALOG: retained devices have no topics.",
                 "Selected retained device candidates have no retained discovery topics.",
             ),
@@ -1563,7 +1586,9 @@ class ServerTests(unittest.TestCase):
         self.assertIn("const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);", script)
         self.assertIn("const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);", script)
         self.assertIn("const previewRunning = this.isPreviewGenerationRunning();", script)
-        self.assertIn("const visible = hasApplyPaths || hasSavePaths || previewRunning;", script)
+        self.assertIn("const hasDeletedPreview = Boolean(this.state.last_deleted_devices_generated_at);", script)
+        self.assertIn("const hasRetainedPreview = Boolean(this.state.last_retained_devices_generated_at);", script)
+        self.assertIn("const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning;", script)
         self.assertIn("const loading = previewRunning && !hasApplyPaths && !hasSavePaths;", script)
         self.assertIn('data-testid="diff-section"', script)
         self.assertIn("TEXT.loadingPreviewDiff", script)
@@ -1597,6 +1622,44 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Use Git Version", page)
         self.assertIn("useHaVersion", page)
         self.assertIn("Use HA Version", page)
+        self.assertIn("approveDeletedDevices", page)
+        self.assertIn("Approve Deletion", page)
+        self.assertIn("deleteRetainedDevices", page)
+        self.assertIn("Delete retained devices", page)
+        self.assertIn("confirmDeletedDevicesDelete", page)
+        self.assertIn("Stop Home Assistant Core and remove", page)
+        self.assertIn("confirmRetainedDevicesDelete", page)
+        self.assertIn("Clear selected MQTT retained discovery topics only", page)
+        self.assertIn("retainedPreviewNotice", page)
+        self.assertIn("These candidates come from stale retained Home Assistant MQTT discovery topics", page)
+        self.assertIn("retainedDeleteNotice", page)
+        self.assertIn("noDeletedDevices", page)
+        self.assertIn("No deleted devices or entities found.", page)
+        self.assertIn("noRetainedDevices", page)
+        self.assertIn("No retained devices candidates found.", page)
+        self.assertIn("deletedDevicesAndEntitiesLabel", page)
+        self.assertIn("deleted devices and entities", page)
+
+    def test_reactive_cleanup_preview_source_uses_text_catalog(self):
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        for key in (
+            "TEXT.confirmDeletedDevicesDelete",
+            "TEXT.confirmRetainedDevicesDelete",
+            "TEXT.approveDeletedDevices",
+            "TEXT.deleteRetainedDevices",
+            "TEXT.retainedPreviewNotice",
+            "TEXT.retainedDeleteNotice",
+            "TEXT.noDeletedDevices",
+            "TEXT.noRetainedDevices",
+            "TEXT.deletedDevicesAndEntitiesLabel",
+            "TEXT.deletedEntitiesLabel",
+            "TEXT.deletedDevicesLabel",
+        ):
+            self.assertIn(key, script)
+        self.assertNotIn("Stop Home Assistant Core and remove {entries}?", script)
+        self.assertNotIn("Clear selected MQTT retained discovery topics only? This does not delete files or registry/database records.", script)
+        self.assertNotIn("No deleted devices or entities found.", script)
+        self.assertNotIn("No retained devices candidates found.", script)
 
     def test_reactive_diff_highlighter_pairs_changed_line_substrings(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
@@ -4342,6 +4405,11 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(get_request.responses[-1], 200)
         self.assertEqual(json.loads(get_request.wfile.getvalue().decode()), {"ok": True})
 
+        retained_delete_payload = {
+            "candidate": ["0", "2"],
+            "retained_preview_fingerprint": ["fp"],
+            "retained_preview_generated_at": ["2026-08-31T10:00:00+00:00"],
+        }
         post_request = invoke(
             "do_POST",
             "/save",
@@ -4517,10 +4585,16 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ctx.state_updates[-1]["last_internal_ids_count"], 0)
         self.assertIsNone(ctx.state_updates[-1]["last_internal_ids_generated_at"])
 
+        ctx.state.update(
+            {
+                "last_retained_devices_fingerprint": "fp",
+                "last_retained_devices_generated_at": "2026-08-31T10:00:00+00:00",
+            }
+        )
         post_request = invoke(
             "do_POST",
             "/retained-devices-delete",
-            body=b"candidate=0&candidate=2",
+            body=b"candidate=0&candidate=2&retained_preview_fingerprint=fp&retained_preview_generated_at=2026-08-31T10%3A00%3A00%2B00%3A00",
             headers={"Accept": "application/json", "X-Requested-With": "fetch"},
         )
         self.assertEqual(post_request.responses[-1], 200)
@@ -4537,7 +4611,7 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
-                ("retained-devices-delete", ["0", "2"]),
+                ("retained-devices-delete", retained_delete_payload),
             ],
         )
 
@@ -4569,7 +4643,7 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
-                ("retained-devices-delete", ["0", "2"]),
+                ("retained-devices-delete", retained_delete_payload),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
             ],
@@ -4594,7 +4668,7 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
-                ("retained-devices-delete", ["0", "2"]),
+                ("retained-devices-delete", retained_delete_payload),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -4620,7 +4694,7 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
-                ("retained-devices-delete", ["0", "2"]),
+                ("retained-devices-delete", retained_delete_payload),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -4943,7 +5017,7 @@ class ServerTests(unittest.TestCase):
                 "deleted-devices-preview",
                 "retained-devices-preview",
                 "internal-ids-preview",
-                ("retained-devices-delete", ["0", "2"]),
+                ("retained-devices-delete", retained_delete_payload),
                 "deleted-devices-delete",
                 "deleted-devices-confirm",
                 "deleted-devices-revert",
@@ -13317,8 +13391,9 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("Save Preview", page)
             self.assertNotIn("No apply preview yet.", page)
             self.assertNotIn("No save preview yet.", page)
-            self.assertNotIn("Deletion of deleted_devices Preview", page)
-            self.assertNotIn("Approve Deletion", page)
+            body_markup = page.split("<script>", 1)[0]
+            self.assertNotIn("Deletion of deleted_devices Preview", body_markup)
+            self.assertNotIn("Approve Deletion", body_markup)
             self.assertNotIn("Confirm Changes", page)
             self.assertNotIn("Revert Changes", page)
 
@@ -13948,8 +14023,10 @@ class ServerTests(unittest.TestCase):
                             "retained_topics": [
                                 "homeassistant/device_automation/0xabc123fffed45678/action_hold/config"
                             ],
+                            "identity": "row-identity",
                         }
                     ],
+                    "last_retained_devices_fingerprint": "retained-fingerprint",
                 }
             )
 
@@ -13961,9 +14038,167 @@ class ServerTests(unittest.TestCase):
             self.assertIn("does not delete files or registry/database records", page)
             self.assertIn("<colgroup><col class='checkbox-col'>", page)
             self.assertIn("<th class='checkbox-col' aria-label='Delete'></th>", page)
-            self.assertIn("<td class='checkbox-col'><input type='checkbox'", page)
+            self.assertIn("name='retained_preview_fingerprint' value='retained-fingerprint'", page)
+            self.assertIn("name='candidate' value='row-identity'", page)
             self.assertIn(".retained-devices-table .checkbox-col", page)
             self.assertIn("width: 42px;", page)
+
+    def test_retained_devices_fingerprint_covers_topics_and_scanned_z2m_context(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            z2m = server.CONFIG_DIR / "zigbee2mqtt"
+            storage.mkdir()
+            z2m.mkdir()
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [
+                                {
+                                    "id": "stale-device",
+                                    "identifiers": [["mqtt", "zigbee2mqtt_0xabc123fffed45678"]],
+                                    "name": "Detached Button",
+                                },
+                            ]
+                        }
+                    }
+                )
+            )
+
+            preview_a = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(
+                server.CONFIG_DIR,
+                ["homeassistant/device_automation/0xabc123fffed45678/action_hold/config"],
+            )
+            preview_b = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(
+                server.CONFIG_DIR,
+                ["homeassistant/device_automation/0xabc123fffed45678/action_double/config"],
+            )
+            (z2m / "state.json").write_text('[{"ieee_address":"0x0017880104abcd12"}]')
+            preview_c = server.app_context.registry_cleanup.build_stale_mqtt_discovery_preview(
+                server.CONFIG_DIR,
+                ["homeassistant/device_automation/0xabc123fffed45678/action_hold/config"],
+            )
+
+            self.assertNotEqual(preview_a["fingerprint"], preview_b["fingerprint"])
+            self.assertNotEqual(preview_a["fingerprint"], preview_c["fingerprint"])
+            self.assertEqual(preview_a["device_registry_fingerprint"], preview_b["device_registry_fingerprint"])
+            self.assertEqual(preview_a["device_registry_fingerprint"], preview_c["device_registry_fingerprint"])
+            self.assertTrue(preview_a["candidates"][0]["identity"])
+
+    def test_retained_devices_delete_rejects_stale_preview_identity_before_clearing_topics(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            cleared = []
+            server._CTX.clear_retained_discovery_topic = cleared.append
+            row_a = {
+                "identity": "identity-a",
+                "selected": True,
+                "retained_topics": ["homeassistant/device_automation/0xaaaabbbbccccdddd/action_hold/config"],
+            }
+            row_b = {
+                "identity": "identity-b",
+                "selected": True,
+                "retained_topics": ["homeassistant/device_automation/0xffffbbbbccccdddd/action_hold/config"],
+            }
+            server.write_state(
+                {
+                    "last_retained_devices_rows": [row_a],
+                    "last_retained_devices_count": 1,
+                    "last_retained_devices_fingerprint": "fingerprint-a",
+                    "last_retained_devices_generated_at": "2026-08-31T10:00:00+00:00",
+                }
+            )
+            submitted = {
+                "candidate": ["identity-a"],
+                "retained_preview_fingerprint": ["fingerprint-a"],
+                "retained_preview_generated_at": ["2026-08-31T10:00:00+00:00"],
+            }
+            server.write_state(
+                {
+                    "last_retained_devices_rows": [row_b],
+                    "last_retained_devices_count": 1,
+                    "last_retained_devices_fingerprint": "fingerprint-b",
+                    "last_retained_devices_generated_at": "2026-08-31T10:01:00+00:00",
+                }
+            )
+
+            self.assertFalse(server._CTX.run_retained_devices_delete_job(submitted))
+            state = server.read_state()
+            self.assertEqual(cleared, [])
+            self.assertEqual(state["last_message"], "Retained devices preview changed. Run Check retained devices again.")
+            self.assertEqual(state["last_retained_devices_rows"], [row_b])
+
+    def test_retained_devices_delete_uses_stable_identity_not_row_index(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            cleared = []
+            server._CTX.clear_retained_discovery_topic = cleared.append
+            server.write_state(
+                {
+                    "last_retained_devices_rows": [
+                        {
+                            "identity": "identity-a",
+                            "selected": True,
+                            "retained_topics": ["homeassistant/device_automation/0xaaaabbbbccccdddd/action_hold/config"],
+                        }
+                    ],
+                    "last_retained_devices_count": 1,
+                    "last_retained_devices_fingerprint": "fingerprint-a",
+                    "last_retained_devices_generated_at": "2026-08-31T10:00:00+00:00",
+                }
+            )
+
+            self.assertTrue(
+                server._CTX.run_retained_devices_delete_job(
+                    {
+                        "candidate": ["identity-a"],
+                        "retained_preview_fingerprint": ["fingerprint-a"],
+                        "retained_preview_generated_at": ["2026-08-31T10:00:00+00:00"],
+                    }
+                )
+            )
+            self.assertEqual(cleared, ["homeassistant/device_automation/0xaaaabbbbccccdddd/action_hold/config"])
+
+    def test_pending_deleted_cleanup_blocks_cleanup_jobs_http_and_websocket_dispatch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state({"deleted_devices_pending_confirmation": True})
+
+            job_cases = [
+                ("retained preview", lambda: server._CTX.run_retained_devices_preview_job()),
+                ("retained delete", lambda: server._CTX.run_retained_devices_delete_job({})),
+                ("internal preview", lambda: server._CTX.run_internal_ids_preview_job()),
+                ("internal migrate", lambda: server._CTX.run_internal_ids_migrate_job(["0"])),
+            ]
+            for label, action in job_cases:
+                with self.subTest(boundary="job", label=label):
+                    self.assertFalse(action())
+
+            for route in ("/retained-devices-preview", "/retained-devices-delete", "/internal-ids-preview", "/internal-ids-migrate"):
+                with self.subTest(boundary="http", route=route):
+                    response = self.post_json(server, route)
+                    self.assertEqual(response.responses[-1], 409)
+
+            scheduled = []
+
+            def start_job(target, *args, **kwargs):
+                scheduled.append(target.__name__)
+                return True
+
+            for command in ("retained_devices_preview", "retained_devices_delete", "internal_ids_preview", "internal_ids_migrate"):
+                with self.subTest(boundary="websocket", command=command):
+                    result = server.web.dispatch_command(server.context(), command, start_job=start_job)
+                    self.assertFalse(result["ok"])
+            self.assertEqual(scheduled, [])
 
     def test_clear_stale_mqtt_discovery_topics_publishes_empty_retained_payloads(self):
         server = load_server()
@@ -15728,8 +15963,9 @@ devices:
             self.assertEqual(state["last_deleted_devices_count"], 0)
             self.assertIsNone(state["last_deleted_devices_fingerprint"])
             self.assertIsNone(state["last_deleted_devices_generated_at"])
-            self.assertNotIn("Deletion of deleted_devices Preview", page)
-            self.assertNotIn("Approve Deletion", page)
+            body_markup = page.split("<script>", 1)[0]
+            self.assertNotIn("Deletion of deleted_devices Preview", body_markup)
+            self.assertNotIn("Approve Deletion", body_markup)
 
     def test_refresh_preserves_deleted_devices_preview_during_pending_cleanup(self):
         server = load_server()
