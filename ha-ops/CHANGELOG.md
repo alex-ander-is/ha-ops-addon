@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.24
+
+- Give deleted-device cleanup preview entity IDs enough grid width, keep the first column inset, and cover column alignment in browser smoke tests.
+- Save browser smoke screenshots for key HA Ops UI states.
+
 ## 0.10.23
 
 - Style the stale-client acknowledgement action as a visible secondary button.

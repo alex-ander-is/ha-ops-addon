@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -10,6 +11,24 @@ const sharedRoot = process.env.PLAYWRIGHT_SHARED_ROOT || "/Users/purportex/Appli
 const runtime = await import(pathToFileURL(path.join(sharedRoot, "src/runtime.mjs")).href);
 const { chromium } = runtime;
 const PREVIEW_BUTTONS = ["Preview Git to HA", "Preview HA to Git"];
+
+function createArtifactsDir() {
+  const root = process.env.HA_OPS_BROWSER_ARTIFACTS_DIR || path.join(appRoot, "tests/browser/artifacts");
+  const stamp = new Date().toISOString().replaceAll(":", "").replaceAll(".", "");
+  const dir = path.join(root, stamp);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+async function saveScreenshot(page, artifactsDir, name, locator = null) {
+  const filePath = path.join(artifactsDir, `${name}.png`);
+  if (locator) {
+    await locator.screenshot({ path: filePath });
+  } else {
+    await page.screenshot({ path: filePath, fullPage: true });
+  }
+  return filePath;
+}
 
 function sortedStrings(items) {
   return [...(items || [])].map((item) => String(item)).filter(Boolean).sort();
@@ -221,7 +240,7 @@ async function assertVersionMismatchOpen(page, version) {
   assert(state.clientVersion !== version, `version mismatch opened for matching client/backend version ${version}`);
 }
 
-async function runVersionMismatchScenario(page, baseUrl) {
+async function runVersionMismatchScenario(page, baseUrl, artifactsDir) {
   await assertVersionMismatchHidden(page, "fresh load");
 
   await harnessPost(baseUrl, "__dev_harness__/backend-version", { version: "9.8.7" });
@@ -229,6 +248,7 @@ async function runVersionMismatchScenario(page, baseUrl) {
   const dialog = await versionMismatchDialog(page);
   await assertVersionMismatchOpen(page, "9.8.7");
   await page.getByText("A new HA Ops version 9.8.7 is available. Correct client operation is not guaranteed until you reload HA Ops.").waitFor();
+  await saveScreenshot(page, artifactsDir, "version-mismatch-dialog");
   assert(await page.getByRole("button", { name: "Reload HA Ops" }).isVisible(), "reload button missing from version mismatch dialog");
   assert(
     await page.getByRole("button", { name: "Acknowledge Risks & Continue" }).isVisible(),
@@ -999,13 +1019,16 @@ async function assertMobilePreviewUsability(page, phase) {
   assert(hidden.length === 0, `${phase} had invisible/offscreen preview controls: ${JSON.stringify(hidden)}`);
 }
 
-async function runCleanupPreviewScenarios(page, baseUrl) {
+async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   await harnessPost(baseUrl, "__dev_harness__/clear-previews");
   await page.reload();
   await waitForInteractiveTransport(page, "cleanup preview page reload");
 
   await page.getByRole("button", { name: "Check deleted devices and entities" }).click();
   await page.getByTestId("deleted-devices-preview-section").getByText("Detached Button").waitFor({ timeout: 5000 });
+  await assertDeletedDevicesGridLayout(page);
+  await saveScreenshot(page, artifactsDir, "deleted-devices-preview");
+  await saveScreenshot(page, artifactsDir, "deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
   await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: "Approve Deletion" }).waitFor({ timeout: 5000 });
 
   await harnessPost(baseUrl, "__dev_harness__/clear-previews");
@@ -1058,6 +1081,102 @@ async function runCleanupPreviewScenarios(page, baseUrl) {
   });
   await page.reload();
   await waitForInteractiveTransport(page, "cleanup revert reload");
+}
+
+async function assertDeletedDevicesGridLayout(page) {
+  const metrics = await page.getByTestId("deleted-devices-preview-section").evaluate((section) => {
+    const table = section.querySelector(".deleted-devices-table");
+    const rectFor = (selector) => {
+      const element = table?.querySelector(selector);
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        text: element.textContent.trim(),
+      };
+    };
+    const firstTextRectFor = (selector) => {
+      const element = table?.querySelector(selector);
+      const textElement = element?.querySelector("code") || element;
+      if (!element || !textElement) return null;
+      const cellRect = element.getBoundingClientRect();
+      let textRect = textElement.getBoundingClientRect();
+      const textNode = Array.from(textElement.childNodes).find((node) => node.nodeType === Node.TEXT_NODE);
+      if (textNode) {
+        const range = document.createRange();
+        range.selectNodeContents(textNode);
+        textRect = range.getBoundingClientRect();
+        range.detach();
+      }
+      return {
+        cellLeft: cellRect.left,
+        textLeft: textRect.left,
+        inset: textRect.left - cellRect.left,
+        text: textElement.textContent.trim(),
+      };
+    };
+    const lineHeightFor = (text) => {
+      const walker = document.createTreeWalker(table, NodeFilter.SHOW_ELEMENT);
+      while (walker.nextNode()) {
+        const element = walker.currentNode;
+        if (element.textContent.trim() === text) {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          const fontSize = Number.parseFloat(style.fontSize);
+          const lineHeight = Number.parseFloat(style.lineHeight);
+          return {
+            height: rect.height,
+            lineHeight: Number.isFinite(lineHeight) ? lineHeight : fontSize * 1.25,
+            width: rect.width,
+            text: element.textContent.trim(),
+          };
+        }
+      }
+      return null;
+    };
+    return {
+      table: rectFor(".deleted-device-line"),
+      idHeader: rectFor(".deleted-device-header .deleted-device-col-id"),
+      identifiersHeader: rectFor(".deleted-device-header .deleted-device-col-identifiers"),
+      originalHeader: rectFor(".deleted-device-header .deleted-device-col-original-name"),
+      nameHeader: rectFor(".deleted-device-header .deleted-device-col-name"),
+      areaHeader: rectFor(".deleted-device-header .deleted-device-col-area"),
+      entityHeader: rectFor(".deleted-device-header .deleted-device-col-entity-id"),
+      deviceHeader: rectFor(".deleted-device-header .deleted-device-col-device"),
+      sourceHeader: rectFor(".deleted-device-header .deleted-device-col-source"),
+      idText: firstTextRectFor(".deleted-device-header .deleted-device-col-id"),
+      identifiersText: firstTextRectFor(".deleted-device-header .deleted-device-col-identifiers"),
+      longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
+    };
+  });
+  const pairs = [
+    ["ID/Identifiers", metrics.idHeader, metrics.identifiersHeader],
+    ["Original Name/Name", metrics.originalHeader, metrics.nameHeader],
+    ["Area/Entity ID", metrics.areaHeader, metrics.entityHeader],
+    ["Manufacturer and Model/Source", metrics.deviceHeader, metrics.sourceHeader],
+  ];
+  for (const [label, primary, secondary] of pairs) {
+    assert(primary && secondary, `deleted-device grid missing ${label} header metrics: ${JSON.stringify(metrics)}`);
+    assert(Math.abs(primary.left - secondary.left) <= 1, `deleted-device ${label} columns are not aligned: ${JSON.stringify({ primary, secondary })}`);
+    assert(Math.abs(primary.width - secondary.width) <= 1, `deleted-device ${label} columns have different widths: ${JSON.stringify({ primary, secondary })}`);
+  }
+  assert(metrics.table && metrics.idHeader && metrics.idText && metrics.identifiersText, `deleted-device grid missing table/header metrics: ${JSON.stringify(metrics)}`);
+  assert(
+    Math.abs(metrics.idHeader.left - metrics.table.left) <= 1,
+    `deleted-device first grid column is shifted instead of only padded internally: ${JSON.stringify({ table: metrics.table, idHeader: metrics.idHeader })}`,
+  );
+  assert(
+    metrics.idText.inset >= 11 && metrics.identifiersText.inset >= 11,
+    `deleted-device first column has no internal left padding: ${JSON.stringify({ idText: metrics.idText, identifiersText: metrics.identifiersText })}`,
+  );
+  assert(metrics.longEntity, `long deleted-device entity row was not rendered: ${JSON.stringify(metrics)}`);
+  assert(
+    metrics.longEntity.height <= metrics.longEntity.lineHeight * 1.4,
+    `long deleted-device entity ID wrapped: ${JSON.stringify(metrics.longEntity)}`,
+  );
 }
 
 async function runHttpFallbackFlow(page, baseUrl, posts, flow) {
@@ -1117,6 +1236,7 @@ async function main() {
   try {
     const info = await ready;
     const baseUrl = info.baseUrl;
+    const artifactsDir = createArtifactsDir();
     browser = await chromium.launch({ headless: true });
 
     const context = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
@@ -1135,10 +1255,11 @@ async function main() {
     await assertLogPanelLayout(page, "matched", "initial desktop");
     await page.getByTestId("status-badge").waitFor();
     await page.getByTestId("version-badge").getByText(/\d+\.\d+\.\d+/).waitFor();
+    await saveScreenshot(page, artifactsDir, "initial-desktop");
     assert((await page.getByTestId("connection-status").count()) === 0, "production connection badge should not float over the UI");
     await new Promise((resolve) => setTimeout(resolve, 2500));
     assert(websockets.length === 1, `idle page created repeated WebSockets: ${websockets.length}`);
-    await runVersionMismatchScenario(page, baseUrl);
+    await runVersionMismatchScenario(page, baseUrl, artifactsDir);
 
     await harnessPost(baseUrl, "__dev_harness__/clear-previews");
     await page.reload();
@@ -1174,7 +1295,7 @@ async function main() {
     await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "save");
     await assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, "save preview wrapping");
     await assertSaveCommitSubjectFlow(page, baseUrl);
-    await runCleanupPreviewScenarios(page, baseUrl);
+    await runCleanupPreviewScenarios(page, baseUrl, artifactsDir);
 
     await harnessPost(baseUrl, "__dev_harness__/arm", { action: "preview", gate: "running" });
     await page.getByRole("button", { name: "Preview Git to HA" }).click();
@@ -1249,10 +1370,12 @@ async function main() {
     await mobilePage.getByTestId("preview-file").first().waitFor({ timeout: 5000 });
     await assertLogPanelLayout(mobilePage, "fallback", "initial mobile");
     await assertMobilePreviewUsability(mobilePage, "mobile completed preview");
+    await saveScreenshot(mobilePage, artifactsDir, "mobile-completed-preview");
     await mobileContext.close();
 
     const debugText = await page.evaluate(() => fetch("debug-snapshot").then((response) => response.text()));
     assert(!debugText.includes("diff --git"), "debug snapshot leaked raw diff");
+    console.log(`browser smoke artifacts: ${artifactsDir}`);
     console.log(`browser smoke passed: ${baseUrl}`);
   } catch (error) {
     primaryError = error;

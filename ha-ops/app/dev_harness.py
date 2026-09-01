@@ -448,11 +448,20 @@ class HarnessScenarioController:
                         "recovered_manufacturer": "Example",
                         "recovered_model": "Button",
                         "recovered_identifiers": [["mqtt", "zigbee2mqtt_0xaaaabbbbccccdddd"]],
-                    }
+                    },
+                    {
+                        "id": "2f0973a7c988fe6d6d82405840dfbaa",
+                        "entity_id": "binary_sensor.zigbee2mqtt_running",
+                    },
+                    {
+                        "id": "29192c5e43314167861757da9f9dc53b",
+                        "entity_id": "binary_sensor.kitchen_presence_occupancy",
+                        "recovered_name": "Kitchen Presence Occupancy",
+                    },
                 ],
-                "last_deleted_devices_count": 1,
+                "last_deleted_devices_count": 3,
                 "last_deleted_devices_device_count": 1,
-                "last_deleted_devices_entity_count": 0,
+                "last_deleted_devices_entity_count": 2,
                 "last_deleted_devices_fingerprint": "harness-deleted-fingerprint",
                 "last_deleted_devices_generated_at": ctx.utc_now(),
             }

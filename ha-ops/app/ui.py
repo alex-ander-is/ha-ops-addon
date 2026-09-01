@@ -1133,7 +1133,7 @@ def render_page(data):
       text-align: center;
     }}
     .deleted-devices-table {{
-      min-width: 720px;
+      min-width: 1200px;
     }}
     .deleted-device-header,
     .deleted-device-row {{
@@ -1145,7 +1145,7 @@ def render_page(data):
     }}
     .deleted-device-line {{
       display: grid;
-      grid-template-columns: minmax(34ch, 1.2fr) minmax(14ch, 0.9fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr);
+      grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr);
       column-gap: 12px;
       align-items: start;
       padding: 8px 0;
@@ -1169,6 +1169,10 @@ def render_page(data):
     }}
     .deleted-device-col-identifiers {{
       grid-column: 1;
+    }}
+    .deleted-device-col-id,
+    .deleted-device-col-identifiers {{
+      padding-left: 12px;
     }}
     .deleted-device-col-area {{
       grid-column: 3;
