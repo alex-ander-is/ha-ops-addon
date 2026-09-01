@@ -451,13 +451,13 @@ def render_deleted_devices_table(rows):
         "id": ("id", "ID", plain_value("id"), True),
         "entity-id": ("entity-id", "Entity ID", plain_value("entity_id"), True),
         "name": ("name", _("label.name"), plain_value("recovered_name"), False),
-        "device": ("device", "Manufacturer / Model", device_value, False),
+        "device": ("device", "Manufacturer and Model", device_value, False),
         "identifiers": ("identifiers", _("label.identifiers"), identifiers_value, True),
         "original-name": ("original-name", _("label.original_name"), plain_value("original_name"), False),
         "source": ("source", _("label.source"), source_value, True),
     }
-    primary_keys = ("area", "id", "entity-id", "name", "original-name")
-    secondary_keys = ("device", "identifiers", "source")
+    primary_keys = ("id", "original-name", "area", "device")
+    secondary_keys = ("identifiers", "name", "entity-id", "source")
 
     primary_columns = [columns_by_key[key] for key in primary_keys]
     secondary_columns = [columns_by_key[key] for key in secondary_keys]
@@ -1145,7 +1145,7 @@ def render_page(data):
     }}
     .deleted-device-line {{
       display: grid;
-      grid-template-columns: minmax(12ch, 0.8fr) minmax(13ch, 0.8fr) minmax(24ch, 1.6fr) minmax(20ch, 1.4fr) minmax(20ch, 1.4fr);
+      grid-template-columns: minmax(16ch, 0.9fr) minmax(18ch, 1.1fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr);
       align-items: start;
     }}
     .deleted-device-line + .deleted-device-line {{
@@ -1163,28 +1163,28 @@ def render_page(data):
       word-break: normal;
     }}
     .deleted-device-col-id {{
-      grid-column: 2;
+      grid-column: 1;
     }}
     .deleted-device-col-entity-id {{
       grid-column: 3;
     }}
     .deleted-device-col-source {{
-      grid-column: 5;
-    }}
-    .deleted-device-col-identifiers {{
-      grid-column: 3 / 5;
-    }}
-    .deleted-device-col-area {{
-      grid-column: 1;
-    }}
-    .deleted-device-col-name {{
       grid-column: 4;
     }}
+    .deleted-device-col-identifiers {{
+      grid-column: 1;
+    }}
+    .deleted-device-col-area {{
+      grid-column: 3;
+    }}
+    .deleted-device-col-name {{
+      grid-column: 2;
+    }}
     .deleted-device-col-original-name {{
-      grid-column: 5;
+      grid-column: 2;
     }}
     .deleted-device-col-device {{
-      grid-column: 1 / 3;
+      grid-column: 4;
     }}
     .deleted-device-cell code {{
       display: block;

@@ -13935,7 +13935,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("deleted-device-header-cell deleted-device-col-name'>Name</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-original-name'>Original Name</div>", table)
             self.assertIn(
-                "deleted-device-header-cell deleted-device-col-device'>Manufacturer / Model</div>",
+                "deleted-device-header-cell deleted-device-col-device'>Manufacturer and Model</div>",
                 table,
             )
             self.assertNotIn("deleted-device-header-cell deleted-device-col-manufacturer", table)
@@ -13943,6 +13943,23 @@ class ServerTests(unittest.TestCase):
             self.assertIn("deleted-device-header-cell deleted-device-col-identifiers'>Identifiers</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-source'>Source</div>", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
+            primary_header_start = table.index("deleted-device-line deleted-device-line-primary")
+            secondary_header_start = table.index("deleted-device-line deleted-device-line-secondary")
+            self.assertLess(primary_header_start, secondary_header_start)
+            primary_headers = [
+                table.index("deleted-device-header-cell deleted-device-col-id", primary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-original-name", primary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-area", primary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-device", primary_header_start),
+            ]
+            secondary_headers = [
+                table.index("deleted-device-header-cell deleted-device-col-identifiers", secondary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-name", secondary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-entity-id", secondary_header_start),
+                table.index("deleted-device-header-cell deleted-device-col-source", secondary_header_start),
+            ]
+            self.assertEqual(primary_headers, sorted(primary_headers))
+            self.assertEqual(secondary_headers, sorted(secondary_headers))
             self.assertNotIn("<table", table)
             self.assertNotIn("<colgroup", table)
             self.assertIn("Living Room Motion", table)

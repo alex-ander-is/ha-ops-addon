@@ -655,7 +655,7 @@ function renderDeletedDevicesTable(rows) {
     "id": ["id", TEXT.id, (row) => row.id || ""],
     "entity-id": ["entity-id", TEXT.entityId, (row) => row.entity_id || ""],
     "name": ["name", TEXT.name, (row) => row.recovered_name || ""],
-    "device": ["device", TEXT.manufacturerModel, (row) => {
+    "device": ["device", "Manufacturer and Model", (row) => {
       const model = [row.recovered_model, row.recovered_model_id].filter(Boolean).join(" / ");
       return [row.recovered_manufacturer, model].filter(Boolean).join("\n");
     }],
@@ -663,8 +663,8 @@ function renderDeletedDevicesTable(rows) {
     "original-name": ["original-name", TEXT.originalName, (row) => row.original_name || ""],
     "source": ["source", TEXT.source, (row) => [String(row.source_commit || "").slice(0, 12), row.source_path].filter(Boolean).join(" ")],
   };
-  const primaryKeys = ["area", "id", "entity-id", "name", "original-name"];
-  const secondaryKeys = ["device", "identifiers", "source"];
+  const primaryKeys = ["id", "original-name", "area", "device"];
+  const secondaryKeys = ["identifiers", "name", "entity-id", "source"];
   const primaryColumns = primaryKeys.map((key) => columnsByKey[key]);
   const secondaryColumns = secondaryKeys.map((key) => columnsByKey[key]);
   const renderHeaderLine = (columns, line) => html`
