@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.18
+
+- Align both deleted-device cleanup preview lines on a shared grid so columns keep the same positions.
+
 ## 0.10.17
 
 - Split deleted-device cleanup preview rows into two readable lines while keeping Manufacturer / Model as one combined field.
