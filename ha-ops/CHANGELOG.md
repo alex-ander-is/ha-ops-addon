@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.17
+
+- Split deleted-device cleanup preview rows into two readable lines while keeping Manufacturer / Model as one combined field.
+
 ## 0.10.16
 
 - Show deleted-device and retained-MQTT cleanup previews reactively after checks finish, keep retained-topic deletion tied to the exact reviewed preview, and block cleanup actions while deleted-device cleanup is awaiting confirmation.
