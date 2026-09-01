@@ -145,6 +145,113 @@ async function diagnostics(baseUrl) {
   return response.json();
 }
 
+async function refreshBackendSnapshot(page) {
+  await page.evaluate(async () => {
+    const app = document.querySelector("ha-ops-app");
+    if (!app?.loadHttpBaseline) throw new Error("ha-ops-app baseline loader unavailable");
+    await app.loadHttpBaseline();
+  });
+}
+
+async function versionMismatchDialog(page) {
+  return page.locator("ha-ops-app").locator("vaadin-confirm-dialog.version-mismatch");
+}
+
+async function versionMismatchBackdropColor(page) {
+  return page.evaluate(() => {
+    function findBackdrop(root) {
+      for (const element of root.querySelectorAll("*")) {
+        const part = element.getAttribute("part") || "";
+        if (part.split(/\s+/).includes("backdrop")) return element;
+        if (element.shadowRoot) {
+          const found = findBackdrop(element.shadowRoot);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+    const dialog = document.querySelector("ha-ops-app")?.shadowRoot
+      ?.querySelector("vaadin-confirm-dialog.version-mismatch");
+    const backdrop = dialog?.shadowRoot ? findBackdrop(dialog.shadowRoot) : null;
+    return backdrop ? getComputedStyle(backdrop).backgroundColor : "";
+  });
+}
+
+async function assertVersionMismatchHidden(page, phase) {
+  await waitFor(`version mismatch hidden after ${phase}`, async () => {
+    const state = await page.evaluate(() => {
+      const app = document.querySelector("ha-ops-app");
+      return {
+        clientVersion: app?.clientVersion,
+        backendVersion: app?.backendVersion,
+        open: Boolean(app?.versionMismatchOpen),
+      };
+    });
+    return state.open ? null : state;
+  });
+}
+
+async function assertVersionMismatchOpen(page, version) {
+  const state = await waitFor(`version mismatch open for ${version}`, async () => {
+    const value = await page.evaluate(() => {
+      const app = document.querySelector("ha-ops-app");
+      return {
+        clientVersion: app?.clientVersion,
+        backendVersion: app?.backendVersion,
+        open: Boolean(app?.versionMismatchOpen),
+      };
+    });
+    return value.open && value.backendVersion === version ? value : null;
+  });
+  assert(state.clientVersion !== version, `version mismatch opened for matching client/backend version ${version}`);
+}
+
+async function runVersionMismatchScenario(page, baseUrl) {
+  await assertVersionMismatchHidden(page, "fresh load");
+
+  await harnessPost(baseUrl, "__dev_harness__/backend-version", { version: "9.8.7" });
+  await refreshBackendSnapshot(page);
+  const dialog = await versionMismatchDialog(page);
+  await assertVersionMismatchOpen(page, "9.8.7");
+  await page.getByText("A new HA Ops version 9.8.7 is available. Correct client operation is not guaranteed until you reload HA Ops.").waitFor();
+  assert(await page.getByRole("button", { name: "Reload HA Ops" }).isVisible(), "reload button missing from version mismatch dialog");
+  assert(
+    await page.getByRole("button", { name: "Acknowledge Risks & Continue" }).isVisible(),
+    "acknowledge button missing from version mismatch dialog",
+  );
+  assert(
+    (await versionMismatchBackdropColor(page)) === "rgba(0, 0, 0, 0.33)",
+    `version mismatch backdrop was not 33% dim: ${await versionMismatchBackdropColor(page)}`,
+  );
+  const beforeAcknowledge = {
+    loadId: await page.evaluate(() => window.__haOpsLoadId),
+    status: await page.locator("[data-status-code]").getAttribute("data-status-code"),
+  };
+
+  await page.getByRole("button", { name: "Acknowledge Risks & Continue" }).click();
+  await assertVersionMismatchHidden(page, "acknowledge");
+  assert((await page.evaluate(() => window.__haOpsLoadId)) === beforeAcknowledge.loadId, "acknowledge reloaded the page");
+  assert((await page.locator("[data-status-code]").getAttribute("data-status-code")) === beforeAcknowledge.status, "acknowledge changed page state");
+
+  await refreshBackendSnapshot(page);
+  await assertVersionMismatchHidden(page, "same acknowledged backend version");
+
+  await harnessPost(baseUrl, "__dev_harness__/backend-version", { version: "9.8.8" });
+  await refreshBackendSnapshot(page);
+  await assertVersionMismatchOpen(page, "9.8.8");
+
+  await page.keyboard.press("Escape");
+  await assertVersionMismatchHidden(page, "escape acknowledgement");
+  await refreshBackendSnapshot(page);
+  await assertVersionMismatchHidden(page, "same escape-acknowledged backend version");
+
+  await harnessPost(baseUrl, "__dev_harness__/backend-version", { version: "9.8.9" });
+  await refreshBackendSnapshot(page);
+  await assertVersionMismatchOpen(page, "9.8.9");
+  await page.getByRole("button", { name: "Acknowledge Risks & Continue" }).click();
+  await assertVersionMismatchHidden(page, "final cleanup acknowledgement");
+}
+
 async function waitFor(label, callback, timeout = 5000) {
   const deadline = Date.now() + timeout;
   let last;
@@ -1011,6 +1118,7 @@ async function main() {
     assert((await page.getByTestId("connection-status").count()) === 0, "production connection badge should not float over the UI");
     await new Promise((resolve) => setTimeout(resolve, 2500));
     assert(websockets.length === 1, `idle page created repeated WebSockets: ${websockets.length}`);
+    await runVersionMismatchScenario(page, baseUrl);
 
     await harnessPost(baseUrl, "__dev_harness__/clear-previews");
     await page.reload();

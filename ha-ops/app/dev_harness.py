@@ -581,6 +581,7 @@ class DevHarnessContext(app_context.AppContext):
         self.dev_harness_enabled = True
         self.fake_supervisor = FakeSupervisor()
         self.harness_controller = HarnessScenarioController()
+        self.dev_harness_backend_version = None
         super().__init__(
             data_dir=fixture["data_dir"],
             config_dir=fixture["config_dir"],
@@ -592,6 +593,11 @@ class DevHarnessContext(app_context.AppContext):
 
     def call_supervisor(self, method, path, payload=None, timeout=None):
         return self.fake_supervisor.call(method, path, payload=payload, timeout=timeout)
+
+    def addon_version(self):
+        if self.dev_harness_backend_version:
+            return self.dev_harness_backend_version
+        return super().addon_version()
 
     def get_installed_addons(self):
         return self.fake_supervisor.call("GET", "/addons").get("addons", [])
@@ -696,6 +702,12 @@ class DevHarnessContext(app_context.AppContext):
             return {"ok": True}
         if route == "/__dev_harness__/replace-retained-preview":
             return self.harness_controller.replace_retained_preview(self)
+        if route == "/__dev_harness__/backend-version":
+            version = str(_first(body, "version")).strip()
+            if not version:
+                raise RuntimeError("version is required")
+            self.dev_harness_backend_version = version
+            return {"ok": True, "backend_version": version}
         return None
 
 

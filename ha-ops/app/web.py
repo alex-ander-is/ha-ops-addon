@@ -1082,8 +1082,10 @@ def command_result(ok, message="", **extra):
 
 def _snapshot_payload(ctx):
     if hasattr(ctx, "debug_snapshot"):
-        return ctx.debug_snapshot()
-    return {"state": state_store.redacted_state_snapshot(ctx.read_state())}
+        payload = ctx.debug_snapshot()
+    else:
+        payload = {"state": state_store.redacted_state_snapshot(ctx.read_state())}
+    return {**payload, "backend_version": ctx.addon_version()}
 
 
 def dispatch_command(ctx, command, body=None, start_job=None):
@@ -1270,6 +1272,7 @@ POST_ENDPOINTS = (
     "/__dev_harness__/release",
     "/__dev_harness__/clear-previews",
     "/__dev_harness__/replace-retained-preview",
+    "/__dev_harness__/backend-version",
 )
 
 
@@ -1284,6 +1287,7 @@ def ws_state_frames(ctx, base_revision=None):
             "revision": revision,
             "patch": state,
             "readiness": snapshot.get("readiness", {}),
+            "backend_version": snapshot.get("backend_version"),
         }]
     return [{"type": "state", "revision": revision, **snapshot}]
 

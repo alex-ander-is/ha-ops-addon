@@ -16,6 +16,11 @@ const WS_COMMANDS = new Set([
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
 
+function knownVersion(value) {
+  const version = String(value || "").trim();
+  return Boolean(version) && version !== "unknown";
+}
+
 function sortedStrings(items) {
   return [...(items || [])].map((item) => String(item)).filter(Boolean).sort();
 }
@@ -734,10 +739,20 @@ class HaOpsApp extends LitElement {
     state: { type: Object },
     confirmOpen: { type: Boolean },
     confirmMessage: { type: String },
+    clientVersion: { type: String },
+    backendVersion: { type: String },
+    versionMismatchOpen: { type: Boolean },
   };
 
   static styles = css`
     :host { display: contents; }
+    vaadin-confirm-dialog.version-mismatch {
+      --vaadin-confirm-dialog-width: min(420px, calc(100vw - 32px));
+      --vaadin-confirm-dialog-max-width: calc(100vw - 32px);
+    }
+    vaadin-confirm-dialog.version-mismatch::part(backdrop) {
+      background: rgba(0, 0, 0, 0.33);
+    }
   `;
 
   constructor() {
@@ -748,6 +763,10 @@ class HaOpsApp extends LitElement {
     this.confirmOpen = false;
     this.confirmMessage = "";
     this.confirmForm = null;
+    this.clientVersion = knownVersion(window.__HA_OPS_BOOT_VERSION__) ? String(window.__HA_OPS_BOOT_VERSION__) : null;
+    this.backendVersion = this.clientVersion;
+    this.acknowledgedBackendVersion = null;
+    this.versionMismatchOpen = false;
     this.socket = null;
     this.pending = new Map();
     this.nextRequestId = 1;
@@ -788,6 +807,18 @@ class HaOpsApp extends LitElement {
         cancel-button-visible
         @confirm=${this.confirmMutation}
         @cancel=${() => { this.confirmOpen = false; this.confirmForm = null; }}
+      ></vaadin-confirm-dialog>
+      <vaadin-confirm-dialog
+        class="version-mismatch"
+        .opened=${this.versionMismatchOpen}
+        .header=${TEXT.versionMismatchTitle || "New HA Ops Version Available"}
+        .message=${this.versionMismatchMessage()}
+        .confirmText=${TEXT.reloadHaOps || "Reload HA Ops"}
+        .rejectText=${TEXT.acknowledgeRisksContinue || "Acknowledge Risks & Continue"}
+        reject-button-visible
+        @confirm=${this.reloadHaOps}
+        @reject=${this.acknowledgeVersionMismatch}
+        @cancel=${this.acknowledgeVersionMismatch}
       ></vaadin-confirm-dialog>
     `;
   }
@@ -1024,12 +1055,14 @@ class HaOpsApp extends LitElement {
 
   applyBaseline(frame) {
     if (!frame.state) return;
+    this.observeBackendVersion(frame.backend_version);
     this.state = structuredClone(frame.state);
     this.revision = Number(frame.revision ?? frame.state_revision ?? frame.state.state_revision ?? 0);
     this.syncDom();
   }
 
   applyPatch(frame) {
+    this.observeBackendVersion(frame.backend_version);
     const base = Number(frame.base_revision);
     const revision = Number(frame.revision);
     if (revision <= this.revision) return;
@@ -1043,6 +1076,34 @@ class HaOpsApp extends LitElement {
     this.revision = revision;
     this.syncDom();
   }
+
+  observeBackendVersion(version) {
+    if (!knownVersion(version) || !knownVersion(this.clientVersion)) {
+      this.backendVersion = knownVersion(version) ? String(version) : this.backendVersion;
+      this.versionMismatchOpen = false;
+      return;
+    }
+    const backendVersion = String(version);
+    this.backendVersion = backendVersion;
+    this.versionMismatchOpen = backendVersion !== this.clientVersion
+      && this.acknowledgedBackendVersion !== backendVersion;
+  }
+
+  versionMismatchMessage() {
+    const version = this.backendVersion || "";
+    const template = TEXT.versionMismatchWarning
+      || "A new HA Ops version {version} is available. Correct client operation is not guaranteed until you reload HA Ops.";
+    return template.replaceAll("{version}", version);
+  }
+
+  reloadHaOps = () => {
+    window.location.reload();
+  };
+
+  acknowledgeVersionMismatch = () => {
+    if (knownVersion(this.backendVersion)) this.acknowledgedBackendVersion = String(this.backendVersion);
+    this.versionMismatchOpen = false;
+  };
 
   syncDom() {
     const running = this.state.last_status === "running" || Object.values(this.state.command_records || {})

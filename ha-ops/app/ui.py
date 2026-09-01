@@ -1567,6 +1567,7 @@ def render_page(data):
   </ha-ops-app>
   <script>
     window.__HA_OPS_REACTIVE_UI__ = true;
+    window.__HA_OPS_BOOT_VERSION__ = {js_string(data.get('version', ''))};
     window.__HA_OPS_TEXT__ = {{
       expand: {js_t('button.expand_diff')},
       collapse: {js_t('button.collapse_diff')},
@@ -1592,6 +1593,10 @@ def render_page(data):
       useHaVersion: {js_t('action.use_ha_version')},
       confirmDeletedDevicesDelete: {js_t('confirm.deleted_devices_delete')},
       confirmRetainedDevicesDelete: {js_t('confirm.retained_devices_delete')},
+      reloadHaOps: {js_t('action.reload_ha_ops')},
+      acknowledgeRisksContinue: {js_t('action.acknowledge_risks_continue')},
+      versionMismatchTitle: {js_t('heading.version_mismatch')},
+      versionMismatchWarning: {js_t('warning.version_mismatch')},
       includeFile: {js_t('label.include_preview_file')},
       area: {js_t('label.area')},
       id: {js_t('label.id')},

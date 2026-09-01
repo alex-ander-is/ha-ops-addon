@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.21
+
+- Warn already-open HA Ops clients when the backend App version changes, with reload and acknowledgement options.
+
 ## 0.10.20
 
 - Keep each deleted-device cleanup preview entry visually grouped while giving ID and identifier values more room.

@@ -908,6 +908,22 @@ class ServerTests(unittest.TestCase):
             self.assertLess(version_at, description_at)
             self.assertNotIn(f"<footer>HA Ops {server.addon_version()}</footer>", page)
 
+    def test_page_bootstraps_client_version_and_modal_text(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "1.2.3"\n')
+
+            page = server.render_page()
+
+            self.assertIn('window.__HA_OPS_BOOT_VERSION__ = "1.2.3";', page)
+            self.assertIn('"Reload HA Ops"', page)
+            self.assertIn('"Acknowledge Risks \\u0026 Continue"', page)
+            self.assertIn('"New HA Ops Version Available"', page)
+            self.assertIn("Correct client operation is not guaranteed", page)
+
     def test_run_save_job_status_message_comes_from_translation_catalog(self):
         server = load_server()
 
@@ -2372,7 +2388,8 @@ class ServerTests(unittest.TestCase):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("<ha-ops-app", page)
         self.assertIn('command: "replay"', script)
-        self.assertNotIn("window.location.reload", script)
+        command_flow = script[script.index("async dispatchMutation(form)"):script.index("observeBackendVersion(version)")]
+        self.assertNotIn("window.location.reload", command_flow)
 
     def test_startup_clears_empty_error_state(self):
         server = load_server()
@@ -18039,6 +18056,37 @@ devices:
             self.assertIn("last_diff_cursor", replay["state"])
             self.assertNotIn("raw apply diff body", payload)
 
+    def test_debug_snapshot_exposes_backend_version(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.ADDON_CONFIG_PATH = root / "config.yaml"
+            server.ADDON_CONFIG_PATH.write_text('version: "1.2.3"\n')
+
+            debug = server.web.dispatch_command(server.context(), "debug_snapshot")
+
+            self.assertTrue(debug["ok"])
+            self.assertEqual(debug["backend_version"], "1.2.3")
+
+    def test_ws_state_frames_expose_backend_version_on_full_and_patch_frames(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+            ctx.dev_harness_backend_version = "1.2.3"
+            ctx.repair_startup_state()
+            full = server.web.ws_state_frames(ctx)[0]
+            ctx.write_state({"last_status": "running", "last_message": "Apply still running."})
+            state = ctx.read_state()
+
+            patch = server.web.ws_state_frames(ctx, base_revision=state["state_revision"] - 1)[0]
+
+            self.assertEqual(full["type"], "state")
+            self.assertEqual(full["backend_version"], "1.2.3")
+            self.assertEqual(patch["type"], "state_patch")
+            self.assertEqual(patch["backend_version"], "1.2.3")
+            self.assertNotIn("backend_version", patch["patch"])
+
     def test_ws_replay_frames_carry_state_and_log_without_raw_diff(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -18243,8 +18291,22 @@ devices:
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("this.connect();", script)
         self.assertNotIn("reloadSoon", script)
-        self.assertNotIn("window.location.reload", script)
+        command_flow = script[script.index("async dispatchMutation(form)"):script.index("observeBackendVersion(version)")]
+        self.assertNotIn("window.location.reload", command_flow)
         self.assertIn("this.applyPatch(frame)", script)
+
+    def test_frontend_version_mismatch_guard_is_present_in_source_and_build(self):
+        source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        built = (ROOT / "app" / "static" / "ha-ops.js").read_text()
+
+        for script in (source, built):
+            self.assertIn("observeBackendVersion", script)
+            self.assertIn("acknowledgeVersionMismatch", script)
+            self.assertIn("window.location.reload", script)
+            self.assertIn("Reload HA Ops", script)
+            self.assertIn("Acknowledge Risks & Continue", script)
+            self.assertIn("rgba(0, 0, 0, 0.33)", script)
+            self.assertIn("@cancel=", script)
 
     def test_reactive_components_keep_scrollable_log_and_preview_controls(self):
         server = load_server()
@@ -18319,6 +18381,19 @@ devices:
 
             self.assertEqual(server.web.job_action(ctx.run_preview_job), "preview")
             self.assertEqual(server.web.job_action(ctx.run_save_preview_job), "save_preview")
+
+    def test_dev_harness_can_override_backend_version_without_state_patch_pollution(self):
+        server, harness = load_dev_harness()
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = harness.create_context(root=Path(tmp), keep_root=True)
+
+            result = ctx.dev_harness_handle_post("/__dev_harness__/backend-version", {"version": ["9.8.7"]})
+            frame = server.web.ws_state_frames(ctx)[0]
+
+            self.assertEqual(result, {"ok": True, "backend_version": "9.8.7"})
+            self.assertEqual(ctx.addon_version(), "9.8.7")
+            self.assertEqual(frame["backend_version"], "9.8.7")
+            self.assertNotIn("backend_version", frame["state"])
 
     def test_dev_harness_diagnostics_are_absent_from_default_context(self):
         server = load_server()
