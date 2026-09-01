@@ -13870,15 +13870,17 @@ class ServerTests(unittest.TestCase):
             table_start = page.index("<div class='deleted-devices-table'>")
             table = page[table_start : page.index("</section>", table_start)]
             self.assertIn("<div class='deleted-device-header'>", table)
+            self.assertIn("deleted-device-line deleted-device-line-primary", table)
+            self.assertIn("deleted-device-line deleted-device-line-secondary", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
             self.assertNotIn("<table class='deleted-devices-table'>", table)
             self.assertNotIn("<colgroup>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-entity-id", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-device", table)
+            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
             self.assertIn("sensor.bathroom_presence_illuminance", table)
             self.assertIn("Illuminance", table)
-            self.assertIn("illuminance", table)
             self.assertIn("deleted-1", table)
             self.assertIn("Approve Deletion", table)
             self.assertNotIn("identifiers=mqtt:old", table)
@@ -13925,6 +13927,8 @@ class ServerTests(unittest.TestCase):
             table_start = page.index("<div class='deleted-devices-table'>")
             table = page[table_start : page.index("</section>", table_start)]
 
+            self.assertIn("deleted-device-line deleted-device-line-primary", table)
+            self.assertIn("deleted-device-line deleted-device-line-secondary", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-name'>Name</div>", table)
             self.assertIn(

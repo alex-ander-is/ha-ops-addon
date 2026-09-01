@@ -650,31 +650,51 @@ function deletedEntriesLabel(state) {
 
 function renderDeletedDevicesTable(rows) {
   if (!rows?.length) return html`<p>${TEXT.noDeletedDevices}</p>`;
-  const columns = [
-    ["area", TEXT.area, (row) => row.area || ""],
-    ["id", TEXT.id, (row) => row.id || ""],
-    ["entity-id", TEXT.entityId, (row) => row.entity_id || ""],
-    ["name", TEXT.name, (row) => row.recovered_name || ""],
-    ["device", TEXT.manufacturerModel, (row) => [row.recovered_manufacturer, row.recovered_model, row.recovered_model_id].filter(Boolean).join("\n")],
-    ["identifiers", TEXT.identifiers, (row) => (row.recovered_identifiers || []).slice(0, 3).map((identifier) => Array.isArray(identifier) ? identifier.join(":") : String(identifier)).join(", ")],
-    ["original-name", TEXT.originalName, (row) => row.original_name || ""],
-    ["original-device-class", TEXT.originalDeviceClass, (row) => row.original_device_class || ""],
-    ["source", TEXT.source, (row) => [String(row.source_commit || "").slice(0, 12), row.source_path].filter(Boolean).join(" ")],
-  ];
-  const visible = columns.filter(([key, _label, value]) => key === "id" || rows.some((row) => String(value(row)).trim()));
+  const columnsByKey = {
+    "area": ["area", TEXT.area, (row) => row.area || ""],
+    "id": ["id", TEXT.id, (row) => row.id || ""],
+    "entity-id": ["entity-id", TEXT.entityId, (row) => row.entity_id || ""],
+    "name": ["name", TEXT.name, (row) => row.recovered_name || ""],
+    "device": ["device", TEXT.manufacturerModel, (row) => {
+      const model = [row.recovered_model, row.recovered_model_id].filter(Boolean).join(" / ");
+      return [row.recovered_manufacturer, model].filter(Boolean).join("\n");
+    }],
+    "identifiers": ["identifiers", TEXT.identifiers, (row) => (row.recovered_identifiers || []).slice(0, 3).map((identifier) => Array.isArray(identifier) ? identifier.join(":") : String(identifier)).join(", ")],
+    "original-name": ["original-name", TEXT.originalName, (row) => row.original_name || ""],
+    "source": ["source", TEXT.source, (row) => [String(row.source_commit || "").slice(0, 12), row.source_path].filter(Boolean).join(" ")],
+  };
+  const primaryKeys = ["area", "id", "entity-id", "name", "original-name"];
+  const secondaryKeys = ["device", "identifiers", "source"];
+  const visibleColumns = (keys) => keys
+    .map((key) => columnsByKey[key])
+    .filter(([key, _label, value]) => key === "id" || rows.some((row) => String(value(row)).trim()));
+  const visiblePrimary = visibleColumns(primaryKeys);
+  const visibleSecondary = visibleColumns(secondaryKeys);
+  const renderHeaderLine = (columns, line) => html`
+    <div class=${`deleted-device-line deleted-device-line-${line}`}>
+      ${columns.map(([key, label]) => html`<div class=${`deleted-device-header-cell deleted-device-col-${key}`}>${label}</div>`)}
+    </div>
+  `;
+  const renderRowLine = (columns, row, line) => html`
+    <div class=${`deleted-device-line deleted-device-line-${line}`}>
+      ${columns.map(([key, _label, value]) => {
+        const text = String(value(row));
+        return html`<div class=${`deleted-device-cell deleted-device-cell-${key} deleted-device-col-${key}`}>
+          ${["id", "entity-id", "identifiers", "source"].includes(key) ? html`<code>${text}</code>` : text}
+        </div>`;
+      })}
+    </div>
+  `;
   return html`
     <div class="table-scroll">
       <div class="deleted-devices-table">
         <div class="deleted-device-header">
-          ${visible.map(([key, label]) => html`<div class=${`deleted-device-header-cell deleted-device-col-${key}`}>${label}</div>`)}
+          ${renderHeaderLine(visiblePrimary, "primary")}
+          ${renderHeaderLine(visibleSecondary, "secondary")}
         </div>
         ${rows.map((row) => html`<div class="deleted-device-row">
-          ${visible.map(([key, _label, value]) => {
-            const text = String(value(row));
-            return html`<div class=${`deleted-device-cell deleted-device-cell-${key} deleted-device-col-${key}`}>
-              ${["id", "entity-id", "identifiers", "source"].includes(key) ? html`<code>${text}</code>` : text}
-            </div>`;
-          })}
+          ${renderRowLine(visiblePrimary, row, "primary")}
+          ${renderRowLine(visibleSecondary, row, "secondary")}
         </div>`)}
       </div>
     </div>

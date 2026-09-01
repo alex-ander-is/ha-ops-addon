@@ -446,35 +446,54 @@ def render_deleted_devices_table(rows):
     def plain_value(key):
         return lambda row: str(row.get(key) or "")
 
-    columns = [
-        ("area", _("label.area"), plain_value("area"), False),
-        ("id", "ID", plain_value("id"), True),
-        ("entity-id", "Entity ID", plain_value("entity_id"), True),
-        ("name", _("label.name"), plain_value("recovered_name"), False),
-        ("device", "Manufacturer / Model", device_value, False),
-        ("identifiers", _("label.identifiers"), identifiers_value, True),
-        ("original-name", _("label.original_name"), plain_value("original_name"), False),
-        ("original-device-class", _("label.original_device_class"), plain_value("original_device_class"), False),
-        ("source", _("label.source"), source_value, True),
-    ]
-    visible_columns = [
-        column
-        for column in columns
-        if column[0] == "id" or any(column[2](row).strip() for row in rows)
-    ]
-    header = "".join(
-        f"<div class='deleted-device-header-cell deleted-device-col-{key}'>{label}</div>"
-        for key, label, _, _ in visible_columns
-    )
+    columns_by_key = {
+        "area": ("area", _("label.area"), plain_value("area"), False),
+        "id": ("id", "ID", plain_value("id"), True),
+        "entity-id": ("entity-id", "Entity ID", plain_value("entity_id"), True),
+        "name": ("name", _("label.name"), plain_value("recovered_name"), False),
+        "device": ("device", "Manufacturer / Model", device_value, False),
+        "identifiers": ("identifiers", _("label.identifiers"), identifiers_value, True),
+        "original-name": ("original-name", _("label.original_name"), plain_value("original_name"), False),
+        "source": ("source", _("label.source"), source_value, True),
+    }
+    primary_keys = ("area", "id", "entity-id", "name", "original-name")
+    secondary_keys = ("device", "identifiers", "source")
+
+    def visible_columns(keys):
+        return [
+            columns_by_key[key]
+            for key in keys
+            if key == "id" or any(columns_by_key[key][2](row).strip() for row in rows)
+        ]
+
+    visible_primary = visible_columns(primary_keys)
+    visible_secondary = visible_columns(secondary_keys)
+
+    def render_header_line(columns, line):
+        cells = "".join(
+            f"<div class='deleted-device-header-cell deleted-device-col-{key}'>{label}</div>"
+            for key, label, _, _ in columns
+        )
+        return f"<div class='deleted-device-line deleted-device-line-{line}'>{cells}</div>"
+
+    header = render_header_line(visible_primary, "primary") + render_header_line(visible_secondary, "secondary")
     rendered_rows = []
     for row in rows:
-        cells = []
-        for key, _label, value_for_row, is_code in visible_columns:
-            value = html.escape(value_for_row(row)).replace("\n", "<br>")
-            class_attr = f" class='deleted-device-cell deleted-device-cell-{key} deleted-device-col-{key}'"
-            content = f"<code>{value}</code>" if is_code else value
-            cells.append(f"<div{class_attr}>{content}</div>")
-        rendered_rows.append(f"<div class='deleted-device-row'>{''.join(cells)}</div>")
+        def render_row_line(columns, line):
+            cells = []
+            for key, _label, value_for_row, is_code in columns:
+                value = html.escape(value_for_row(row)).replace("\n", "<br>")
+                class_attr = f" class='deleted-device-cell deleted-device-cell-{key} deleted-device-col-{key}'"
+                content = f"<code>{value}</code>" if is_code else value
+                cells.append(f"<div{class_attr}>{content}</div>")
+            return f"<div class='deleted-device-line deleted-device-line-{line}'>{''.join(cells)}</div>"
+
+        rendered_rows.append(
+            "<div class='deleted-device-row'>"
+            f"{render_row_line(visible_primary, 'primary')}"
+            f"{render_row_line(visible_secondary, 'secondary')}"
+            "</div>"
+        )
     return (
         "<div class='table-scroll'>"
         "<div class='deleted-devices-table'>"
@@ -1121,17 +1140,25 @@ def render_page(data):
       text-align: center;
     }}
     .deleted-devices-table {{
-      min-width: 760px;
+      min-width: 720px;
     }}
     .deleted-device-header,
     .deleted-device-row {{
-      display: flex;
-      align-items: stretch;
       border-bottom: 1px solid #d0d7de;
     }}
     .deleted-device-header {{
       background: #f6f8fa;
       font-weight: 700;
+    }}
+    .deleted-device-line {{
+      display: flex;
+      align-items: stretch;
+    }}
+    .deleted-device-line + .deleted-device-line {{
+      border-top: 1px solid #eef2f6;
+    }}
+    .deleted-device-header .deleted-device-line + .deleted-device-line {{
+      border-top-color: #d0d7de;
     }}
     .deleted-device-header-cell,
     .deleted-device-cell {{
@@ -1142,24 +1169,26 @@ def render_page(data):
       word-break: normal;
     }}
     .deleted-device-col-id {{
-      flex: 0 1 11ch;
+      flex: 0 1 13ch;
+    }}
+    .deleted-device-col-entity-id {{
+      flex: 2 1 28ch;
     }}
     .deleted-device-col-source {{
-      flex: 1 2 20ch;
+      flex: 1 2 26ch;
     }}
     .deleted-device-col-identifiers {{
-      flex: 1 2 22ch;
+      flex: 1 2 24ch;
     }}
-    .deleted-device-col-area,
-    .deleted-device-col-original-device-class {{
-      flex: 0 1 12ch;
+    .deleted-device-col-area {{
+      flex: 0 1 14ch;
     }}
     .deleted-device-col-name,
     .deleted-device-col-original-name {{
-      flex: 2 1 20ch;
+      flex: 2 1 22ch;
     }}
     .deleted-device-col-device {{
-      flex: 2 1 24ch;
+      flex: 2 1 28ch;
     }}
     .deleted-device-cell code {{
       display: block;
