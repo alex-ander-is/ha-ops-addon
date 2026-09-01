@@ -1145,14 +1145,8 @@ def render_page(data):
     }}
     .deleted-device-line {{
       display: grid;
-      grid-template-columns: minmax(16ch, 0.9fr) minmax(18ch, 1.1fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr);
+      grid-template-columns: minmax(34ch, 1.2fr) minmax(14ch, 0.9fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr);
       align-items: start;
-    }}
-    .deleted-device-line + .deleted-device-line {{
-      border-top: 1px solid #eef2f6;
-    }}
-    .deleted-device-header .deleted-device-line + .deleted-device-line {{
-      border-top-color: #d0d7de;
     }}
     .deleted-device-header-cell,
     .deleted-device-cell {{
@@ -1173,6 +1167,11 @@ def render_page(data):
     }}
     .deleted-device-col-identifiers {{
       grid-column: 1;
+    }}
+    .deleted-device-col-id code,
+    .deleted-device-col-identifiers code {{
+      overflow-wrap: normal;
+      white-space: nowrap;
     }}
     .deleted-device-col-area {{
       grid-column: 3;

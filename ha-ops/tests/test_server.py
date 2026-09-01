@@ -13927,6 +13927,13 @@ class ServerTests(unittest.TestCase):
             table_start = page.index("<div class='deleted-devices-table'>")
             table = page[table_start : page.index("</section>", table_start)]
 
+            self.assertIn(
+                "grid-template-columns: minmax(34ch, 1.2fr) minmax(14ch, 0.9fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr)",
+                page,
+            )
+            self.assertNotIn(".deleted-device-line + .deleted-device-line", page)
+            self.assertIn(".deleted-device-col-id code", page)
+            self.assertIn("white-space: nowrap", page)
             self.assertIn("deleted-device-line deleted-device-line-primary", table)
             self.assertIn("deleted-device-line deleted-device-line-secondary", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
