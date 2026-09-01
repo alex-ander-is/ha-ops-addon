@@ -459,32 +459,30 @@ def render_deleted_devices_table(rows):
     primary_keys = ("id", "original-name", "area", "device")
     secondary_keys = ("identifiers", "name", "entity-id", "source")
 
-    primary_columns = [columns_by_key[key] for key in primary_keys]
-    secondary_columns = [columns_by_key[key] for key in secondary_keys]
-
-    def render_header_line(columns, line):
+    def render_header_cells(keys, line):
         cells = "".join(
-            f"<div class='deleted-device-header-cell deleted-device-col-{key}'>{label}</div>"
-            for key, label, _, _ in columns
+            f"<div class='deleted-device-header-cell deleted-device-cell-{line} deleted-device-col-{key}'>{columns_by_key[key][1]}</div>"
+            for key in keys
         )
-        return f"<div class='deleted-device-line deleted-device-line-{line}'>{cells}</div>"
+        return cells
 
-    header = render_header_line(primary_columns, "primary") + render_header_line(secondary_columns, "secondary")
+    header = render_header_cells(primary_keys, "primary") + render_header_cells(secondary_keys, "secondary")
     rendered_rows = []
     for row in rows:
-        def render_row_line(columns, line):
+        def render_row_cells(keys, line):
             cells = []
-            for key, _label, value_for_row, is_code in columns:
+            for key in keys:
+                _class_name, _label, value_for_row, is_code = columns_by_key[key]
                 value = html.escape(value_for_row(row)).replace("\n", "<br>")
-                class_attr = f" class='deleted-device-cell deleted-device-cell-{key} deleted-device-col-{key}'"
+                class_attr = f" class='deleted-device-cell deleted-device-cell-{line} deleted-device-cell-{key} deleted-device-col-{key}'"
                 content = f"<code>{value}</code>" if is_code else value
                 cells.append(f"<div{class_attr}>{content}</div>")
-            return f"<div class='deleted-device-line deleted-device-line-{line}'>{''.join(cells)}</div>"
+            return "".join(cells)
 
         rendered_rows.append(
             "<div class='deleted-device-row'>"
-            f"{render_row_line(primary_columns, 'primary')}"
-            f"{render_row_line(secondary_columns, 'secondary')}"
+            f"{render_row_cells(primary_keys, 'primary')}"
+            f"{render_row_cells(secondary_keys, 'secondary')}"
             "</div>"
         )
     return (
@@ -1143,20 +1141,26 @@ def render_page(data):
       background: #f6f8fa;
       font-weight: 700;
     }}
-    .deleted-device-line {{
+    .deleted-device-header,
+    .deleted-device-row {{
       display: grid;
       grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr);
       column-gap: 0;
       align-items: start;
-      padding: 8px 0;
     }}
     .deleted-device-header-cell,
     .deleted-device-cell {{
       box-sizing: border-box;
       min-width: 0;
-      padding: 0 12px;
+      padding: 8px 12px;
       overflow-wrap: anywhere;
       word-break: normal;
+    }}
+    .deleted-device-cell-primary {{
+      grid-row: 1;
+    }}
+    .deleted-device-cell-secondary {{
+      grid-row: 2;
     }}
     .deleted-device-col-id {{
       grid-column: 1;

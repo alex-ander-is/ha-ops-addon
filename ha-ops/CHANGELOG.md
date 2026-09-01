@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.26
+
+- Render each deleted-device preview entry in one grid context so its two visual lines always share column widths.
+
 ## 0.10.25
 
 - Normalize deleted-device preview column padding so every grid column has the same internal text inset.

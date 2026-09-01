@@ -13887,14 +13887,13 @@ class ServerTests(unittest.TestCase):
             table_start = page.index("<div class='deleted-devices-table'>")
             table = page[table_start : page.index("</section>", table_start)]
             self.assertIn("<div class='deleted-device-header'>", table)
-            self.assertIn("deleted-device-line deleted-device-line-primary", table)
-            self.assertIn("deleted-device-line deleted-device-line-secondary", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
+            self.assertNotIn("deleted-device-line", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area'>Area</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id'>ID</div>", table)
             self.assertNotIn("<table class='deleted-devices-table'>", table)
             self.assertNotIn("<colgroup>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-entity-id", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-device", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
             self.assertIn("sensor.bathroom_presence_illuminance", table)
             self.assertIn("Illuminance", table)
@@ -13950,45 +13949,43 @@ class ServerTests(unittest.TestCase):
                 page,
             )
             self.assertIn("column-gap: 0", page)
-            self.assertIn("padding: 8px 0", page)
-            self.assertIn("padding: 0 12px", page)
-            self.assertNotIn(".deleted-device-line + .deleted-device-line", page)
+            self.assertIn("padding: 8px 12px", page)
+            self.assertIn(".deleted-device-cell-primary", page)
+            self.assertIn("grid-row: 1", page)
+            self.assertIn(".deleted-device-cell-secondary", page)
+            self.assertIn("grid-row: 2", page)
+            self.assertNotIn(".deleted-device-line", page)
             self.assertIn(".deleted-device-cell.deleted-device-col-id code", page)
             self.assertIn(".deleted-device-cell.deleted-device-col-identifiers code", page)
             self.assertIn("white-space: nowrap", page)
             generic_code_rule = page.index(".deleted-device-cell code")
             nowrap_rule = page.index(".deleted-device-cell.deleted-device-col-id code")
             self.assertLess(generic_code_rule, nowrap_rule)
-            self.assertIn("deleted-device-line deleted-device-line-primary", table)
-            self.assertIn("deleted-device-line deleted-device-line-secondary", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-entity-id'>Entity ID</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-name'>Name</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-original-name'>Original Name</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area'>Area</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id'>ID</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id'>Entity ID</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-name'>Name</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-original-name'>Original Name</div>", table)
             self.assertIn(
-                "deleted-device-header-cell deleted-device-col-device'>Manufacturer and Model</div>",
+                "deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device'>Manufacturer and Model</div>",
                 table,
             )
             self.assertNotIn("deleted-device-header-cell deleted-device-col-manufacturer", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-model", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-identifiers'>Identifiers</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-col-source'>Source</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-identifiers'>Identifiers</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-source'>Source</div>", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
-            primary_header_start = table.index("deleted-device-line deleted-device-line-primary")
-            secondary_header_start = table.index("deleted-device-line deleted-device-line-secondary")
-            self.assertLess(primary_header_start, secondary_header_start)
             primary_headers = [
-                table.index("deleted-device-header-cell deleted-device-col-id", primary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-original-name", primary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-area", primary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-device", primary_header_start),
+                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id"),
+                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-original-name"),
+                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area"),
+                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device"),
             ]
             secondary_headers = [
-                table.index("deleted-device-header-cell deleted-device-col-identifiers", secondary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-name", secondary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-entity-id", secondary_header_start),
-                table.index("deleted-device-header-cell deleted-device-col-source", secondary_header_start),
+                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-identifiers"),
+                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-name"),
+                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id"),
+                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-source"),
             ]
             self.assertEqual(primary_headers, sorted(primary_headers))
             self.assertEqual(secondary_headers, sorted(secondary_headers))
@@ -14003,6 +14000,14 @@ class ServerTests(unittest.TestCase):
             self.assertIn("deleted-device-col-source", table)
             self.assertIn("deleted-device-cell-identifiers", table)
             self.assertIn("deleted-device-cell-device", table)
+
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            built = (ROOT / "app" / "static" / "ha-ops.js").read_text()
+            for script in (source, built):
+                self.assertNotIn("deleted-device-line", script)
+                self.assertIn("deleted-device-cell-", script)
+            self.assertIn("renderHeaderCells", source)
+            self.assertIn("renderRowCells", source)
 
     def test_stale_mqtt_discovery_preview_finds_registry_device_missing_from_z2m(self):
         server = load_server()

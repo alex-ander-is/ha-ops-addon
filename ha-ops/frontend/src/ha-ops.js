@@ -670,33 +670,27 @@ function renderDeletedDevicesTable(rows) {
   };
   const primaryKeys = ["id", "original-name", "area", "device"];
   const secondaryKeys = ["identifiers", "name", "entity-id", "source"];
-  const primaryColumns = primaryKeys.map((key) => columnsByKey[key]);
-  const secondaryColumns = secondaryKeys.map((key) => columnsByKey[key]);
-  const renderHeaderLine = (columns, line) => html`
-    <div class=${`deleted-device-line deleted-device-line-${line}`}>
-      ${columns.map(([key, label]) => html`<div class=${`deleted-device-header-cell deleted-device-col-${key}`}>${label}</div>`)}
-    </div>
-  `;
-  const renderRowLine = (columns, row, line) => html`
-    <div class=${`deleted-device-line deleted-device-line-${line}`}>
-      ${columns.map(([key, _label, value]) => {
+  const renderHeaderCells = (keys, line) => keys.map((key) => {
+    const [_className, label] = columnsByKey[key];
+    return html`<div class=${`deleted-device-header-cell deleted-device-cell-${line} deleted-device-col-${key}`}>${label}</div>`;
+  });
+  const renderRowCells = (keys, row, line) => keys.map((key) => {
+        const [_className, _label, value] = columnsByKey[key];
         const text = String(value(row));
-        return html`<div class=${`deleted-device-cell deleted-device-cell-${key} deleted-device-col-${key}`}>
+        return html`<div class=${`deleted-device-cell deleted-device-cell-${line} deleted-device-cell-${key} deleted-device-col-${key}`}>
           ${["id", "entity-id", "identifiers", "source"].includes(key) ? html`<code>${text}</code>` : text}
         </div>`;
-      })}
-    </div>
-  `;
+      });
   return html`
     <div class="table-scroll">
       <div class="deleted-devices-table">
         <div class="deleted-device-header">
-          ${renderHeaderLine(primaryColumns, "primary")}
-          ${renderHeaderLine(secondaryColumns, "secondary")}
+          ${renderHeaderCells(primaryKeys, "primary")}
+          ${renderHeaderCells(secondaryKeys, "secondary")}
         </div>
         ${rows.map((row) => html`<div class="deleted-device-row">
-          ${renderRowLine(primaryColumns, row, "primary")}
-          ${renderRowLine(secondaryColumns, row, "secondary")}
+          ${renderRowCells(primaryKeys, row, "primary")}
+          ${renderRowCells(secondaryKeys, row, "secondary")}
         </div>`)}
       </div>
     </div>
