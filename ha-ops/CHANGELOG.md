@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.25
+
+- Normalize deleted-device preview column padding so every grid column has the same internal text inset.
+
 ## 0.10.24
 
 - Give deleted-device cleanup preview entity IDs enough grid width, keep the first column inset, and cover column alignment in browser smoke tests.

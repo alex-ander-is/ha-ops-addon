@@ -13949,13 +13949,9 @@ class ServerTests(unittest.TestCase):
                 "grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr)",
                 page,
             )
-            self.assertIn("column-gap: 12px", page)
+            self.assertIn("column-gap: 0", page)
             self.assertIn("padding: 8px 0", page)
-            self.assertIn(
-                ".deleted-device-col-id,\n    .deleted-device-col-identifiers {\n      padding-left: 12px;",
-                page,
-            )
-            self.assertIn("padding: 0", page)
+            self.assertIn("padding: 0 12px", page)
             self.assertNotIn(".deleted-device-line + .deleted-device-line", page)
             self.assertIn(".deleted-device-cell.deleted-device-col-id code", page)
             self.assertIn(".deleted-device-cell.deleted-device-col-identifiers code", page)

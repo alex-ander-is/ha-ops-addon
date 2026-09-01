@@ -1098,7 +1098,7 @@ async function assertDeletedDevicesGridLayout(page) {
         text: element.textContent.trim(),
       };
     };
-    const firstTextRectFor = (selector) => {
+    const textRectFor = (selector) => {
       const element = table?.querySelector(selector);
       const textElement = element?.querySelector("code") || element;
       if (!element || !textElement) return null;
@@ -1147,8 +1147,16 @@ async function assertDeletedDevicesGridLayout(page) {
       entityHeader: rectFor(".deleted-device-header .deleted-device-col-entity-id"),
       deviceHeader: rectFor(".deleted-device-header .deleted-device-col-device"),
       sourceHeader: rectFor(".deleted-device-header .deleted-device-col-source"),
-      idText: firstTextRectFor(".deleted-device-header .deleted-device-col-id"),
-      identifiersText: firstTextRectFor(".deleted-device-header .deleted-device-col-identifiers"),
+      headerTextInsets: [
+        textRectFor(".deleted-device-header .deleted-device-col-id"),
+        textRectFor(".deleted-device-header .deleted-device-col-original-name"),
+        textRectFor(".deleted-device-header .deleted-device-col-area"),
+        textRectFor(".deleted-device-header .deleted-device-col-device"),
+        textRectFor(".deleted-device-header .deleted-device-col-identifiers"),
+        textRectFor(".deleted-device-header .deleted-device-col-name"),
+        textRectFor(".deleted-device-header .deleted-device-col-entity-id"),
+        textRectFor(".deleted-device-header .deleted-device-col-source"),
+      ],
       longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
     };
   });
@@ -1163,15 +1171,17 @@ async function assertDeletedDevicesGridLayout(page) {
     assert(Math.abs(primary.left - secondary.left) <= 1, `deleted-device ${label} columns are not aligned: ${JSON.stringify({ primary, secondary })}`);
     assert(Math.abs(primary.width - secondary.width) <= 1, `deleted-device ${label} columns have different widths: ${JSON.stringify({ primary, secondary })}`);
   }
-  assert(metrics.table && metrics.idHeader && metrics.idText && metrics.identifiersText, `deleted-device grid missing table/header metrics: ${JSON.stringify(metrics)}`);
+  assert(metrics.table && metrics.idHeader, `deleted-device grid missing table/header metrics: ${JSON.stringify(metrics)}`);
   assert(
     Math.abs(metrics.idHeader.left - metrics.table.left) <= 1,
     `deleted-device first grid column is shifted instead of only padded internally: ${JSON.stringify({ table: metrics.table, idHeader: metrics.idHeader })}`,
   );
-  assert(
-    metrics.idText.inset >= 11 && metrics.identifiersText.inset >= 11,
-    `deleted-device first column has no internal left padding: ${JSON.stringify({ idText: metrics.idText, identifiersText: metrics.identifiersText })}`,
-  );
+  const textInsets = metrics.headerTextInsets || [];
+  assert(textInsets.length === 8 && textInsets.every(Boolean), `deleted-device header text inset metrics missing: ${JSON.stringify(metrics)}`);
+  for (const item of textInsets) {
+    assert(item.inset >= 11, `deleted-device header cell has no internal left padding: ${JSON.stringify(item)}`);
+    assert(Math.abs(item.inset - textInsets[0].inset) <= 1, `deleted-device header paddings differ: ${JSON.stringify(textInsets)}`);
+  }
   assert(metrics.longEntity, `long deleted-device entity row was not rendered: ${JSON.stringify(metrics)}`);
   assert(
     metrics.longEntity.height <= metrics.longEntity.lineHeight * 1.4,
