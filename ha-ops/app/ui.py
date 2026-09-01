@@ -1146,13 +1146,15 @@ def render_page(data):
     .deleted-device-line {{
       display: grid;
       grid-template-columns: minmax(34ch, 1.2fr) minmax(14ch, 0.9fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr);
+      column-gap: 12px;
       align-items: start;
+      padding: 8px 0;
     }}
     .deleted-device-header-cell,
     .deleted-device-cell {{
       box-sizing: border-box;
       min-width: 0;
-      padding: 8px;
+      padding: 0;
       overflow-wrap: anywhere;
       word-break: normal;
     }}
@@ -1167,11 +1169,6 @@ def render_page(data):
     }}
     .deleted-device-col-identifiers {{
       grid-column: 1;
-    }}
-    .deleted-device-col-id code,
-    .deleted-device-col-identifiers code {{
-      overflow-wrap: normal;
-      white-space: nowrap;
     }}
     .deleted-device-col-area {{
       grid-column: 3;
@@ -1190,6 +1187,11 @@ def render_page(data):
       overflow-wrap: anywhere;
       white-space: normal;
       word-break: normal;
+    }}
+    .deleted-device-cell.deleted-device-col-id code,
+    .deleted-device-cell.deleted-device-col-identifiers code {{
+      overflow-wrap: normal;
+      white-space: nowrap;
     }}
     .managed-targets-table {{
       table-layout: auto;

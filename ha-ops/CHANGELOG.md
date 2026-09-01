@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.22
+
+- Align deleted-device cleanup preview cells to their shared grid columns without left-padding drift.
+
 ## 0.10.21
 
 - Warn already-open HA Ops clients when the backend App version changes, with reload and acknowledgement options.

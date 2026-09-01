@@ -13948,9 +13948,16 @@ class ServerTests(unittest.TestCase):
                 "grid-template-columns: minmax(34ch, 1.2fr) minmax(14ch, 0.9fr) minmax(18ch, 1.2fr) minmax(28ch, 1.8fr)",
                 page,
             )
+            self.assertIn("column-gap: 12px", page)
+            self.assertIn("padding: 8px 0", page)
+            self.assertIn("padding: 0", page)
             self.assertNotIn(".deleted-device-line + .deleted-device-line", page)
-            self.assertIn(".deleted-device-col-id code", page)
+            self.assertIn(".deleted-device-cell.deleted-device-col-id code", page)
+            self.assertIn(".deleted-device-cell.deleted-device-col-identifiers code", page)
             self.assertIn("white-space: nowrap", page)
+            generic_code_rule = page.index(".deleted-device-cell code")
+            nowrap_rule = page.index(".deleted-device-cell.deleted-device-col-id code")
+            self.assertLess(generic_code_rule, nowrap_rule)
             self.assertIn("deleted-device-line deleted-device-line-primary", table)
             self.assertIn("deleted-device-line deleted-device-line-secondary", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
