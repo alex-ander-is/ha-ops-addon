@@ -753,6 +753,23 @@ class HaOpsApp extends LitElement {
     vaadin-confirm-dialog.version-mismatch::part(backdrop) {
       background: rgba(0, 0, 0, 0.33);
     }
+    vaadin-confirm-dialog.version-mismatch vaadin-button.version-mismatch-ack {
+      --vaadin-button-background: #f6f8fa;
+      --vaadin-button-border-color: #8c959f;
+      --vaadin-button-border-radius: 6px;
+      --vaadin-button-border-width: 1px;
+      --vaadin-button-text-color: #24292f;
+      font-weight: 700;
+      margin-inline-end: 8px;
+    }
+    vaadin-confirm-dialog.version-mismatch vaadin-button.version-mismatch-ack:hover {
+      --vaadin-button-background: #eaeef2;
+      --vaadin-button-border-color: #6e7781;
+    }
+    vaadin-confirm-dialog.version-mismatch vaadin-button.version-mismatch-ack:focus-visible {
+      outline: 2px solid #0969da;
+      outline-offset: 2px;
+    }
   `;
 
   constructor() {
@@ -814,12 +831,19 @@ class HaOpsApp extends LitElement {
         .header=${TEXT.versionMismatchTitle || "New HA Ops Version Available"}
         .message=${this.versionMismatchMessage()}
         .confirmText=${TEXT.reloadHaOps || "Reload HA Ops"}
-        .rejectText=${TEXT.acknowledgeRisksContinue || "Acknowledge Risks & Continue"}
         reject-button-visible
         @confirm=${this.reloadHaOps}
-        @reject=${this.acknowledgeVersionMismatch}
         @cancel=${this.acknowledgeVersionMismatch}
-      ></vaadin-confirm-dialog>
+      >
+        <vaadin-button
+          slot="reject-button"
+          class="version-mismatch-ack"
+          theme="secondary"
+          @click=${this.acknowledgeVersionMismatch}
+        >
+          ${TEXT.acknowledgeRisksContinue || "Acknowledge Risks & Continue"}
+        </vaadin-button>
+      </vaadin-confirm-dialog>
     `;
   }
 

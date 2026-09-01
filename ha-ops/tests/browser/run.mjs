@@ -177,6 +177,21 @@ async function versionMismatchBackdropColor(page) {
   });
 }
 
+async function versionMismatchRejectButtonStyle(page) {
+  const button = page.getByRole("button", { name: "Acknowledge Risks & Continue" });
+  return button.evaluate((element) => {
+    const button = element instanceof HTMLElement ? element : null;
+    if (!button) return null;
+    const style = getComputedStyle(button);
+    return {
+      backgroundColor: style.backgroundColor,
+      borderStyle: style.borderStyle,
+      borderWidth: style.borderWidth,
+      color: style.color,
+    };
+  });
+}
+
 async function assertVersionMismatchHidden(page, phase) {
   await waitFor(`version mismatch hidden after ${phase}`, async () => {
     const state = await page.evaluate(() => {
@@ -219,6 +234,11 @@ async function runVersionMismatchScenario(page, baseUrl) {
     await page.getByRole("button", { name: "Acknowledge Risks & Continue" }).isVisible(),
     "acknowledge button missing from version mismatch dialog",
   );
+  const rejectStyle = await versionMismatchRejectButtonStyle(page);
+  assert(rejectStyle, "acknowledge button style target missing from version mismatch dialog");
+  assert(rejectStyle.borderStyle === "solid", `acknowledge button border style is not solid: ${JSON.stringify(rejectStyle)}`);
+  assert(rejectStyle.borderWidth !== "0px", `acknowledge button border is missing: ${JSON.stringify(rejectStyle)}`);
+  assert(rejectStyle.backgroundColor !== "rgba(0, 0, 0, 0)", `acknowledge button background is transparent: ${JSON.stringify(rejectStyle)}`);
   assert(
     (await versionMismatchBackdropColor(page)) === "rgba(0, 0, 0, 0.33)",
     `version mismatch backdrop was not 33% dim: ${await versionMismatchBackdropColor(page)}`,

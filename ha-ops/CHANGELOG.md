@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.23
+
+- Style the stale-client acknowledgement action as a visible secondary button.
+
 ## 0.10.22
 
 - Align deleted-device cleanup preview cells to their shared grid columns without left-padding drift.
