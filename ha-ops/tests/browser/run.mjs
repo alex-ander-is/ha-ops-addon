@@ -1146,8 +1146,14 @@ async function assertDeletedDevicesGridLayout(page) {
       }
       return null;
     };
+    const tableRect = table?.getBoundingClientRect();
     return {
-      table: rectFor(".deleted-device-header"),
+      table: tableRect ? {
+        left: tableRect.left,
+        top: tableRect.top,
+        width: tableRect.width,
+        height: tableRect.height,
+      } : null,
       idHeader: rectFor(".deleted-device-header .deleted-device-col-id"),
       identifiersHeader: rectFor(".deleted-device-header .deleted-device-col-identifiers"),
       originalHeader: rectFor(".deleted-device-header .deleted-device-col-original-name"),
@@ -1198,6 +1204,21 @@ async function assertDeletedDevicesGridLayout(page) {
     assert(primary && secondary, `deleted-device grid missing ${label} row metrics: ${JSON.stringify(metrics)}`);
     assert(Math.abs(primary.left - secondary.left) <= 1, `deleted-device row ${label} columns are not aligned: ${JSON.stringify({ primary, secondary })}`);
     assert(Math.abs(primary.width - secondary.width) <= 1, `deleted-device row ${label} columns have different widths: ${JSON.stringify({ primary, secondary })}`);
+  }
+  const tablePairs = [
+    ["ID", metrics.idHeader, metrics.firstRowId],
+    ["Identifiers", metrics.identifiersHeader, metrics.firstRowIdentifiers],
+    ["Original Name", metrics.originalHeader, metrics.firstRowOriginal],
+    ["Name", metrics.nameHeader, metrics.firstRowName],
+    ["Area", metrics.areaHeader, metrics.firstRowArea],
+    ["Entity ID", metrics.entityHeader, metrics.firstRowEntity],
+    ["Manufacturer and Model", metrics.deviceHeader, metrics.firstRowDevice],
+    ["Source", metrics.sourceHeader, metrics.firstRowSource],
+  ];
+  for (const [label, header, row] of tablePairs) {
+    assert(header && row, `deleted-device grid missing ${label} table metrics: ${JSON.stringify(metrics)}`);
+    assert(Math.abs(header.left - row.left) <= 1, `deleted-device ${label} header and row columns are not aligned: ${JSON.stringify({ header, row })}`);
+    assert(Math.abs(header.width - row.width) <= 1, `deleted-device ${label} header and row columns have different widths: ${JSON.stringify({ header, row })}`);
   }
   assert(metrics.table && metrics.idHeader, `deleted-device grid missing table/header metrics: ${JSON.stringify(metrics)}`);
   assert(

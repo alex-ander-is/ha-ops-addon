@@ -1132,21 +1132,18 @@ def render_page(data):
     }}
     .deleted-devices-table {{
       min-width: 1200px;
-    }}
-    .deleted-device-header,
-    .deleted-device-row {{
-      border-bottom: 1px solid #d0d7de;
-    }}
-    .deleted-device-header {{
-      background: #f6f8fa;
-      font-weight: 700;
-    }}
-    .deleted-device-header,
-    .deleted-device-row {{
       display: grid;
       grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr);
       column-gap: 0;
-      align-items: start;
+      align-items: stretch;
+    }}
+    .deleted-device-header,
+    .deleted-device-row {{
+      display: contents;
+    }}
+    .deleted-device-header-cell {{
+      background: #f6f8fa;
+      font-weight: 700;
     }}
     .deleted-device-header-cell,
     .deleted-device-cell {{
@@ -1156,11 +1153,9 @@ def render_page(data):
       overflow-wrap: anywhere;
       word-break: normal;
     }}
-    .deleted-device-cell-primary {{
-      grid-row: 1;
-    }}
-    .deleted-device-cell-secondary {{
-      grid-row: 2;
+    .deleted-device-header-cell.deleted-device-cell-secondary,
+    .deleted-device-cell.deleted-device-cell-secondary {{
+      border-bottom: 1px solid #d0d7de;
     }}
     .deleted-device-col-id {{
       grid-column: 1;

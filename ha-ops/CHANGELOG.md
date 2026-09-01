@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.27
+
+- Make the deleted-device preview use one shared table grid so headers and data rows keep identical column widths.
+
 ## 0.10.26
 
 - Render each deleted-device preview entry in one grid context so its two visual lines always share column widths.
