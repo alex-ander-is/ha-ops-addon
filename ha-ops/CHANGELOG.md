@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.19
+
+- Reorder deleted-device cleanup preview columns so long manufacturer/model values no longer spill across narrow leading columns.
+
 ## 0.10.18
 
 - Align both deleted-device cleanup preview lines on a shared grid so columns keep the same positions.
