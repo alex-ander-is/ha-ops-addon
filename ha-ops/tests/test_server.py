@@ -13792,7 +13792,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("disabled", disk_form)
             self.assertIn("disabled", deleted_form)
 
-    def test_deleted_devices_preview_lists_entities_as_flex_rows(self):
+    def test_deleted_devices_preview_lists_entities_as_grid_rows(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13877,7 +13877,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("<table class='deleted-devices-table'>", table)
             self.assertNotIn("<colgroup>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-entity-id", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-device", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-device", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
             self.assertIn("sensor.bathroom_presence_illuminance", table)
             self.assertIn("Illuminance", table)
@@ -13885,7 +13885,7 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Approve Deletion", table)
             self.assertNotIn("identifiers=mqtt:old", table)
 
-    def test_deleted_devices_table_hides_empty_columns_and_keeps_non_empty_columns(self):
+    def test_deleted_devices_table_keeps_grid_columns_aligned(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13929,8 +13929,11 @@ class ServerTests(unittest.TestCase):
 
             self.assertIn("deleted-device-line deleted-device-line-primary", table)
             self.assertIn("deleted-device-line deleted-device-line-secondary", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-area'>Area</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-id'>ID</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-entity-id'>Entity ID</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-name'>Name</div>", table)
+            self.assertIn("deleted-device-header-cell deleted-device-col-original-name'>Original Name</div>", table)
             self.assertIn(
                 "deleted-device-header-cell deleted-device-col-device'>Manufacturer / Model</div>",
                 table,
@@ -13939,8 +13942,6 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("deleted-device-header-cell deleted-device-col-model", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-identifiers'>Identifiers</div>", table)
             self.assertIn("deleted-device-header-cell deleted-device-col-source'>Source</div>", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-area", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-name", table)
             self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
             self.assertNotIn("<table", table)
             self.assertNotIn("<colgroup", table)

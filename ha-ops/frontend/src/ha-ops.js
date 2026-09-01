@@ -665,11 +665,8 @@ function renderDeletedDevicesTable(rows) {
   };
   const primaryKeys = ["area", "id", "entity-id", "name", "original-name"];
   const secondaryKeys = ["device", "identifiers", "source"];
-  const visibleColumns = (keys) => keys
-    .map((key) => columnsByKey[key])
-    .filter(([key, _label, value]) => key === "id" || rows.some((row) => String(value(row)).trim()));
-  const visiblePrimary = visibleColumns(primaryKeys);
-  const visibleSecondary = visibleColumns(secondaryKeys);
+  const primaryColumns = primaryKeys.map((key) => columnsByKey[key]);
+  const secondaryColumns = secondaryKeys.map((key) => columnsByKey[key]);
   const renderHeaderLine = (columns, line) => html`
     <div class=${`deleted-device-line deleted-device-line-${line}`}>
       ${columns.map(([key, label]) => html`<div class=${`deleted-device-header-cell deleted-device-col-${key}`}>${label}</div>`)}
@@ -689,12 +686,12 @@ function renderDeletedDevicesTable(rows) {
     <div class="table-scroll">
       <div class="deleted-devices-table">
         <div class="deleted-device-header">
-          ${renderHeaderLine(visiblePrimary, "primary")}
-          ${renderHeaderLine(visibleSecondary, "secondary")}
+          ${renderHeaderLine(primaryColumns, "primary")}
+          ${renderHeaderLine(secondaryColumns, "secondary")}
         </div>
         ${rows.map((row) => html`<div class="deleted-device-row">
-          ${renderRowLine(visiblePrimary, row, "primary")}
-          ${renderRowLine(visibleSecondary, row, "secondary")}
+          ${renderRowLine(primaryColumns, row, "primary")}
+          ${renderRowLine(secondaryColumns, row, "secondary")}
         </div>`)}
       </div>
     </div>

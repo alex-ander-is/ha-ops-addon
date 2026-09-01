@@ -459,15 +459,8 @@ def render_deleted_devices_table(rows):
     primary_keys = ("area", "id", "entity-id", "name", "original-name")
     secondary_keys = ("device", "identifiers", "source")
 
-    def visible_columns(keys):
-        return [
-            columns_by_key[key]
-            for key in keys
-            if key == "id" or any(columns_by_key[key][2](row).strip() for row in rows)
-        ]
-
-    visible_primary = visible_columns(primary_keys)
-    visible_secondary = visible_columns(secondary_keys)
+    primary_columns = [columns_by_key[key] for key in primary_keys]
+    secondary_columns = [columns_by_key[key] for key in secondary_keys]
 
     def render_header_line(columns, line):
         cells = "".join(
@@ -476,7 +469,7 @@ def render_deleted_devices_table(rows):
         )
         return f"<div class='deleted-device-line deleted-device-line-{line}'>{cells}</div>"
 
-    header = render_header_line(visible_primary, "primary") + render_header_line(visible_secondary, "secondary")
+    header = render_header_line(primary_columns, "primary") + render_header_line(secondary_columns, "secondary")
     rendered_rows = []
     for row in rows:
         def render_row_line(columns, line):
@@ -490,8 +483,8 @@ def render_deleted_devices_table(rows):
 
         rendered_rows.append(
             "<div class='deleted-device-row'>"
-            f"{render_row_line(visible_primary, 'primary')}"
-            f"{render_row_line(visible_secondary, 'secondary')}"
+            f"{render_row_line(primary_columns, 'primary')}"
+            f"{render_row_line(secondary_columns, 'secondary')}"
             "</div>"
         )
     return (
@@ -1151,8 +1144,9 @@ def render_page(data):
       font-weight: 700;
     }}
     .deleted-device-line {{
-      display: flex;
-      align-items: stretch;
+      display: grid;
+      grid-template-columns: minmax(12ch, 0.8fr) minmax(13ch, 0.8fr) minmax(24ch, 1.6fr) minmax(20ch, 1.4fr) minmax(20ch, 1.4fr);
+      align-items: start;
     }}
     .deleted-device-line + .deleted-device-line {{
       border-top: 1px solid #eef2f6;
@@ -1169,26 +1163,28 @@ def render_page(data):
       word-break: normal;
     }}
     .deleted-device-col-id {{
-      flex: 0 1 13ch;
+      grid-column: 2;
     }}
     .deleted-device-col-entity-id {{
-      flex: 2 1 28ch;
+      grid-column: 3;
     }}
     .deleted-device-col-source {{
-      flex: 1 2 26ch;
+      grid-column: 5;
     }}
     .deleted-device-col-identifiers {{
-      flex: 1 2 24ch;
+      grid-column: 3 / 5;
     }}
     .deleted-device-col-area {{
-      flex: 0 1 14ch;
+      grid-column: 1;
     }}
-    .deleted-device-col-name,
+    .deleted-device-col-name {{
+      grid-column: 4;
+    }}
     .deleted-device-col-original-name {{
-      flex: 2 1 22ch;
+      grid-column: 5;
     }}
     .deleted-device-col-device {{
-      flex: 2 1 28ch;
+      grid-column: 1 / 3;
     }}
     .deleted-device-cell code {{
       display: block;
