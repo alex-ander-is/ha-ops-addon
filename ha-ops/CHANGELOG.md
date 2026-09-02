@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.28
+
+- Show pending deleted-device cleanup as a decision state in the reactive UI, keeping Confirm and Revert available instead of showing a stale done state.
+
 ## 0.10.27
 
 - Make the deleted-device preview use one shared table grid so headers and data rows keep identical column widths.

@@ -1068,9 +1068,18 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   });
   await page.reload();
   await waitForInteractiveTransport(page, "pending deleted cleanup reload");
+  await assertStatus(page, "pending decision", "pending deleted cleanup reload");
+  assert((await page.getByTestId("status-badge").textContent()).trim() !== "done", "pending deleted cleanup badge looked done");
   assert(await page.getByRole("button", { name: "Check retained devices" }).isDisabled(), "retained check enabled during pending deleted cleanup");
   assert(await page.getByRole("button", { name: "Check actions IDs" }).isDisabled(), "internal IDs check enabled during pending deleted cleanup");
-  await page.getByRole("button", { name: "Revert Changes" }).waitFor({ timeout: 5000 });
+  const pendingSection = page.getByTestId("deleted-devices-preview-section");
+  await pendingSection.getByText("Pending deleted devices Diff").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("Harness deleted devices cleanup is waiting for confirmation.").waitFor({ timeout: 5000 });
+  assert((await pendingSection.getByText("No deleted devices or entities found.").count()) === 0, "pending deleted cleanup showed stale empty preview");
+  await pendingSection.getByRole("button", { name: "Confirm Changes" }).waitFor({ timeout: 5000 });
+  await pendingSection.getByRole("button", { name: "Revert Changes" }).waitFor({ timeout: 5000 });
+  assert(!(await pendingSection.getByRole("button", { name: "Confirm Changes" }).isDisabled()), "confirm disabled during pending deleted cleanup");
+  assert(!(await pendingSection.getByRole("button", { name: "Revert Changes" }).isDisabled()), "revert disabled during pending deleted cleanup");
   await fetch(new URL("deleted-devices-revert", baseUrl), {
     method: "POST",
     headers: { Accept: "application/json", "X-Requested-With": "fetch" },

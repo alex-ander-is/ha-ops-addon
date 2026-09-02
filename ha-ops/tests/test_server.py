@@ -1604,7 +1604,8 @@ class ServerTests(unittest.TestCase):
         self.assertIn("const previewRunning = this.isPreviewGenerationRunning();", script)
         self.assertIn("const hasDeletedPreview = Boolean(this.state.last_deleted_devices_generated_at);", script)
         self.assertIn("const hasRetainedPreview = Boolean(this.state.last_retained_devices_generated_at);", script)
-        self.assertIn("const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning;", script)
+        self.assertIn("const pendingDeletedCleanup = Boolean(this.state.deleted_devices_pending_confirmation);", script)
+        self.assertIn("const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning || pendingDeletedCleanup;", script)
         self.assertIn("const loading = previewRunning && !hasApplyPaths && !hasSavePaths;", script)
         self.assertIn('data-testid="diff-section"', script)
         self.assertIn("TEXT.loadingPreviewDiff", script)
@@ -1640,6 +1641,16 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Use HA Version", page)
         self.assertIn("approveDeletedDevices", page)
         self.assertIn("Approve Deletion", page)
+        self.assertIn("revertDeletedDevices", page)
+        self.assertIn("Revert Changes", page)
+        self.assertIn("confirmChanges", page)
+        self.assertIn("Confirm Changes", page)
+        self.assertIn("pendingDeletedDevicesTitle", page)
+        self.assertIn("Pending {entries} Diff", page)
+        self.assertIn("pendingDeletedDevicesMessage", page)
+        self.assertIn("Confirm or revert the pending deleted devices cleanup", page)
+        self.assertIn("statusPendingDecision", page)
+        self.assertIn("pending decision", page)
         self.assertIn("deleteRetainedDevices", page)
         self.assertIn("Delete retained devices", page)
         self.assertIn("confirmDeletedDevicesDelete", page)
@@ -1662,9 +1673,17 @@ class ServerTests(unittest.TestCase):
             "TEXT.confirmDeletedDevicesDelete",
             "TEXT.confirmRetainedDevicesDelete",
             "TEXT.approveDeletedDevices",
+            "TEXT.revertDeletedDevices",
+            "TEXT.confirmChanges",
             "TEXT.deleteRetainedDevices",
             "TEXT.retainedPreviewNotice",
             "TEXT.retainedDeleteNotice",
+            "TEXT.pendingDeletedDevicesTitle",
+            "TEXT.pendingDeletedDevicesMessage",
+            "TEXT.pendingDeletedDevicesRemoved",
+            "TEXT.deletedDevicesPendingNotice",
+            "TEXT.statusDone",
+            "TEXT.statusPendingDecision",
             "TEXT.noDeletedDevices",
             "TEXT.noRetainedDevices",
             "TEXT.deletedDevicesAndEntitiesLabel",
@@ -1674,7 +1693,6 @@ class ServerTests(unittest.TestCase):
             self.assertIn(key, script)
         self.assertNotIn("Stop Home Assistant Core and remove {entries}?", script)
         self.assertNotIn("Clear selected MQTT retained discovery topics only? This does not delete files or registry/database records.", script)
-        self.assertNotIn("No deleted devices or entities found.", script)
         self.assertNotIn("No retained devices candidates found.", script)
 
     def test_reactive_diff_highlighter_pairs_changed_line_substrings(self):
@@ -13411,8 +13429,8 @@ class ServerTests(unittest.TestCase):
             body_markup = page.split("<script>", 1)[0]
             self.assertNotIn("Deletion of deleted_devices Preview", body_markup)
             self.assertNotIn("Approve Deletion", body_markup)
-            self.assertNotIn("Confirm Changes", page)
-            self.assertNotIn("Revert Changes", page)
+            self.assertNotIn("Confirm Changes", body_markup)
+            self.assertNotIn("Revert Changes", body_markup)
 
     def test_disk_usage_job_writes_read_only_summary_to_log(self):
         server = load_server()

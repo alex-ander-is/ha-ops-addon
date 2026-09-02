@@ -1589,6 +1589,7 @@ def render_page(data):
       apply: {js_t('action.apply')},
       approveDeletedDevices: {js_t('action.approve_deleted_devices')},
       deleteRetainedDevices: {js_t('action.delete_retained_devices')},
+      revertDeletedDevices: {js_t('action.revert_changes')},
       save: {js_t('action.save')},
       useGitVersion: {js_t('action.use_git_version')},
       useHaVersion: {js_t('action.use_ha_version')},
@@ -1623,7 +1624,14 @@ def render_page(data):
       deletedDevicesLabel: {js_t('label.deleted_devices')},
       deletedEntitiesLabel: {js_t('label.deleted_entities')},
       deletedDevicesAndEntitiesLabel: {js_t('label.deleted_devices_and_entities')},
-      confirm: {js_t('action.confirm')}
+      deletedDevicesPendingNotice: {js_t('notice.deleted_devices_pending')},
+      pendingDeletedDevicesMessage: {js_t('message.pending_deleted_devices')},
+      pendingDeletedDevicesRemoved: {js_t('text.cleanup_removed')},
+      pendingDeletedDevicesTitle: {js_t('heading.pending_deleted_devices_diff')},
+      statusDone: {js_t('status.done')},
+      statusPendingDecision: {js_t('status.pending_decision')},
+      confirm: {js_t('action.confirm')},
+      confirmChanges: {js_t('action.confirm_changes')}
     }};
   </script>
   <script type="module" src="assets/ha-ops.js"></script>

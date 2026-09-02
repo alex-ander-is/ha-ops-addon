@@ -1172,10 +1172,11 @@ class HaOpsApp extends LitElement {
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();
     const cleanupRunning = hasCommandInFlight(this.state, ["deleted_devices_preview", "retained_devices_preview", "deleted_devices_delete", "retained_devices_delete", "internal_ids_preview", "internal_ids_migrate"]);
+    const pendingDeletedCleanup = Boolean(this.state.deleted_devices_pending_confirmation);
     const hasDeletedPreview = Boolean(this.state.last_deleted_devices_generated_at);
     const hasRetainedPreview = Boolean(this.state.last_retained_devices_generated_at);
-    const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning;
-    for (const element of this.querySelectorAll("[data-server-cleanup-preview]")) element.hidden = Boolean(hasDeletedPreview || hasRetainedPreview || cleanupRunning);
+    const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning || pendingDeletedCleanup;
+    for (const element of this.querySelectorAll("[data-server-cleanup-preview]")) element.hidden = Boolean(hasDeletedPreview || hasRetainedPreview || cleanupRunning || pendingDeletedCleanup);
     if (!visible) {
       render(nothing, host);
       return;
@@ -1199,6 +1200,30 @@ class HaOpsApp extends LitElement {
   }
 
   renderDeletedPreview(cleanupRunning) {
+    if (this.state.deleted_devices_pending_confirmation) {
+      const entries = deletedEntriesLabel(this.state);
+      const pendingCount = Number(this.state.deleted_devices_pending_device_count || 0) + Number(this.state.deleted_devices_pending_entity_count || 0);
+      const title = (TEXT.pendingDeletedDevicesTitle || "Pending {entries} Diff").replace("{entries}", entries);
+      const removedText = (TEXT.pendingDeletedDevicesRemoved || "- {entries} removed by this cleanup: {count}")
+        .replace("{entries}", entries)
+        .replace("{count}", String(pendingCount));
+      return html`
+        <section class="card wide" data-testid="deleted-devices-preview-section">
+          <h2>${title}</h2>
+          <p>${this.state.last_message || TEXT.pendingDeletedDevicesMessage || "Deleted devices cleanup is waiting for your decision."}</p>
+          <ul><li>${removedText}</li></ul>
+          <p>${TEXT.deletedDevicesPendingNotice || "Confirm Changes keeps this cleanup. Revert Changes restores only entries removed by this cleanup."}</p>
+          <div class="actions deletion-actions"><div class="action-row">
+            <form method="post" action="deleted-devices-confirm" data-async-form="true" data-preserve-display-state="true">
+              <button type="submit" ?disabled=${this.isRunning()}>${TEXT.confirmChanges || "Confirm Changes"}</button>
+            </form>
+            <form method="post" action="deleted-devices-revert" data-async-form="true" data-preserve-display-state="true">
+              <button type="submit" class="secondary" ?disabled=${this.isRunning()}>${TEXT.revertDeletedDevices || "Revert Changes"}</button>
+            </form>
+          </div></div>
+        </section>
+      `;
+    }
     const rows = this.state.last_deleted_devices_rows || [];
     const count = Number(this.state.last_deleted_devices_count || 0);
     const visible = Boolean(this.state.last_deleted_devices_generated_at) || cleanupRunning && this.state.last_action === "deleted_devices_preview";
@@ -1279,7 +1304,7 @@ class HaOpsApp extends LitElement {
   updateStatusBadge() {
     const badge = this.querySelector("[data-status-code]");
     if (!badge) return;
-    const status = this.state.last_status || "idle";
+    const status = this.state.deleted_devices_pending_confirmation ? "pending decision" : this.state.last_status || "idle";
     badge.dataset.connectionState = this.connection;
     if (this.connection === "unknown" || (status === "idle" && this.isDegradedConnection())) {
       badge.dataset.statusCode = "transport";
@@ -1288,8 +1313,8 @@ class HaOpsApp extends LitElement {
       return;
     }
     badge.dataset.statusCode = status;
-    badge.textContent = status === "success" ? "done" : status;
-    badge.className = `badge ${status === "success" ? "" : status}`.trim();
+    badge.textContent = status === "success" ? TEXT.statusDone || "done" : status === "pending decision" ? TEXT.statusPendingDecision || "pending decision" : status;
+    badge.className = `badge ${status === "success" ? "" : status === "pending decision" ? "pending" : status}`.trim();
   }
 }
 customElements.define("ha-ops-app", HaOpsApp);
