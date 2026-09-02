@@ -260,6 +260,8 @@ class HarnessScenarioController:
                 self._write_deleted_devices_preview(ctx, details)
             elif action == "deleted_devices_delete":
                 self._write_deleted_devices_pending(ctx, details)
+            elif action == "deleted_devices_confirm":
+                self._write_deleted_devices_confirmed(ctx, details)
             elif action == "deleted_devices_revert":
                 self._write_deleted_devices_reverted(ctx, details)
             elif action == "retained_devices_preview":
@@ -468,6 +470,23 @@ class HarnessScenarioController:
         )
 
     def _write_deleted_devices_pending(self, ctx, details):
+        storage = ctx.config_dir / ".storage"
+        storage.mkdir(parents=True, exist_ok=True)
+        current_registry = storage / "core.device_registry"
+        rollback_path = ctx.dev_harness_root / "data" / "work" / "harness-deleted-rollback.json"
+        rollback_path.parent.mkdir(parents=True, exist_ok=True)
+        current_registry.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}, indent=2))
+        rollback_path.write_text(
+            json.dumps(
+                {
+                    "data": {
+                        "devices": [],
+                        "deleted_devices": [{"id": "deleted-device", "name": "Detached Button"}],
+                    }
+                },
+                indent=2,
+            )
+        )
         ctx.write_state(
             {
                 **state_store.RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES,
@@ -483,7 +502,7 @@ class HarnessScenarioController:
                 "last_deleted_devices_device_count": 0,
                 "last_deleted_devices_entity_count": 0,
                 "deleted_devices_pending_confirmation": True,
-                "deleted_devices_rollback_path": str(ctx.dev_harness_root / "data" / "work" / "harness-deleted-rollback.json"),
+                "deleted_devices_rollback_path": str(rollback_path),
                 "deleted_devices_pending_device_count": 1,
                 "deleted_devices_pending_entity_count": 0,
             }
@@ -497,6 +516,21 @@ class HarnessScenarioController:
                 "last_action": "deleted_devices_revert",
                 "last_message": "Harness deleted devices cleanup reverted.",
                 "last_details": [*details, "Harness deleted devices cleanup reverted."],
+                "deleted_devices_pending_confirmation": False,
+                "deleted_devices_rollback_path": None,
+                "deleted_devices_pending_device_count": 0,
+                "deleted_devices_pending_entity_count": 0,
+            }
+        )
+
+    def _write_deleted_devices_confirmed(self, ctx, details):
+        ctx.write_state(
+            {
+                "last_run_at": ctx.utc_now(),
+                "last_status": "success",
+                "last_action": "deleted_devices_confirm",
+                "last_message": "Harness deleted devices cleanup confirmed.",
+                "last_details": [*details, "Harness deleted devices cleanup confirmed."],
                 "deleted_devices_pending_confirmation": False,
                 "deleted_devices_rollback_path": None,
                 "deleted_devices_pending_device_count": 0,
@@ -575,6 +609,7 @@ class HarnessScenarioController:
             "save",
             "deleted_devices_preview",
             "deleted_devices_delete",
+            "deleted_devices_confirm",
             "deleted_devices_revert",
             "retained_devices_preview",
             "retained_devices_delete",

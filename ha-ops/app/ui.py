@@ -1628,6 +1628,8 @@ def render_page(data):
       pendingDeletedDevicesMessage: {js_t('message.pending_deleted_devices')},
       pendingDeletedDevicesRemoved: {js_t('text.cleanup_removed')},
       pendingDeletedDevicesTitle: {js_t('heading.pending_deleted_devices_diff')},
+      pendingDiffUnavailable: {js_t('error.pending_diff_unavailable')},
+      conflictDiffTitle: {js_t('title.conflict_diff')},
       statusDone: {js_t('status.done')},
       statusPendingDecision: {js_t('status.pending_decision')},
       confirm: {js_t('action.confirm')},

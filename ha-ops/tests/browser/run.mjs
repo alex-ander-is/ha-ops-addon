@@ -1070,12 +1070,26 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   await waitForInteractiveTransport(page, "pending deleted cleanup reload");
   await assertStatus(page, "pending decision", "pending deleted cleanup reload");
   assert((await page.getByTestId("status-badge").textContent()).trim() !== "done", "pending deleted cleanup badge looked done");
+  assert(await page.getByRole("button", { name: "Preview Git to HA" }).isDisabled(), "Git to HA preview enabled during pending deleted cleanup");
+  assert(await page.getByRole("button", { name: "Preview HA to Git" }).isDisabled(), "HA to Git preview enabled during pending deleted cleanup");
+  assert(await page.getByRole("button", { name: "Reset Git State" }).isDisabled(), "reset git state enabled during pending deleted cleanup");
+  assert(await page.getByRole("button", { name: "Check disk usage" }).isDisabled(), "disk usage enabled during pending deleted cleanup");
+  assert(await page.getByRole("button", { name: "Clear build cache" }).isDisabled(), "Docker build-cache prune enabled during pending deleted cleanup");
   assert(await page.getByRole("button", { name: "Check retained devices" }).isDisabled(), "retained check enabled during pending deleted cleanup");
   assert(await page.getByRole("button", { name: "Check actions IDs" }).isDisabled(), "internal IDs check enabled during pending deleted cleanup");
   const pendingSection = page.getByTestId("deleted-devices-preview-section");
   await pendingSection.getByText("Pending deleted devices Diff").waitFor({ timeout: 5000 });
   await pendingSection.getByText("Harness deleted devices cleanup is waiting for confirmation.").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("No deleted devices or entities found.").count()) === 0, "pending deleted cleanup showed stale empty preview");
+  await waitFor("pending deleted cleanup rendered deleted diff line", async () => {
+    const deletedText = await pendingSection.locator(".diff-del").evaluateAll((nodes) =>
+      nodes.map((node) => node.textContent || "").join("\n")
+    );
+    return deletedText.includes("deleted-device") ? deletedText : null;
+  });
+  await pendingSection.getByText("deleted devices before cleanup").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("deleted devices now").waitFor({ timeout: 5000 });
+  assert((await pendingSection.locator("ul li").filter({ hasText: /removed by this cleanup/ }).count()) === 0, "pending deleted cleanup rendered dash summary as a list item");
   await pendingSection.getByRole("button", { name: "Confirm Changes" }).waitFor({ timeout: 5000 });
   await pendingSection.getByRole("button", { name: "Revert Changes" }).waitFor({ timeout: 5000 });
   assert(!(await pendingSection.getByRole("button", { name: "Confirm Changes" }).isDisabled()), "confirm disabled during pending deleted cleanup");
@@ -1090,6 +1104,33 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   });
   await page.reload();
   await waitForInteractiveTransport(page, "cleanup revert reload");
+  assert((await page.getByTestId("deleted-devices-preview-section").count()) === 0, "revert left stale pending deleted cleanup section");
+  assert(!(await page.getByRole("button", { name: "Preview Git to HA" }).isDisabled()), "Git to HA preview stayed disabled after deleted cleanup revert");
+  assert(!(await page.getByRole("button", { name: "Preview HA to Git" }).isDisabled()), "HA to Git preview stayed disabled after deleted cleanup revert");
+  assert(!(await page.getByRole("button", { name: "Reset Git State" }).isDisabled()), "reset git state stayed disabled after deleted cleanup revert");
+  assert(!(await page.getByRole("button", { name: "Check disk usage" }).isDisabled()), "disk usage stayed disabled after deleted cleanup revert");
+
+  await fetch(new URL("deleted-devices-delete", baseUrl), {
+    method: "POST",
+    headers: { Accept: "application/json", "X-Requested-With": "fetch" },
+  }).then((response) => response.json());
+  await waitFor("deleted devices second pending cleanup", async () => {
+    const state = await diagnostics(baseUrl);
+    return state.state?.last_action === "deleted_devices_delete" && state.state?.last_status === "success" ? state : null;
+  });
+  await refreshBackendSnapshot(page);
+  await page.getByRole("button", { name: "Confirm Changes" }).click();
+  await waitFor("deleted devices pending cleanup confirmed", async () => {
+    const state = await diagnostics(baseUrl);
+    return state.state?.last_action === "deleted_devices_confirm" && state.state?.last_status === "success" ? state : null;
+  });
+  await page.reload();
+  await waitForInteractiveTransport(page, "cleanup confirm reload");
+  assert((await page.getByTestId("deleted-devices-preview-section").count()) === 0, "confirm left stale pending deleted cleanup section");
+  assert(!(await page.getByRole("button", { name: "Preview Git to HA" }).isDisabled()), "Git to HA preview stayed disabled after deleted cleanup confirm");
+  assert(!(await page.getByRole("button", { name: "Preview HA to Git" }).isDisabled()), "HA to Git preview stayed disabled after deleted cleanup confirm");
+  assert(!(await page.getByRole("button", { name: "Reset Git State" }).isDisabled()), "reset git state stayed disabled after deleted cleanup confirm");
+  assert(!(await page.getByRole("button", { name: "Check disk usage" }).isDisabled()), "disk usage stayed disabled after deleted cleanup confirm");
 }
 
 async function assertDeletedDevicesGridLayout(page) {

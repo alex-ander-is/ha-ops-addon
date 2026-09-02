@@ -956,8 +956,8 @@ class ServerTests(unittest.TestCase):
             i18n.EN_TEXT["message.preparing_save"] = original_preparing
             i18n.EN_TEXT["message.pending_deleted_devices"] = original_pending
 
-        self.assertEqual(ctx.updates[0]["last_message"], "CATALOG: preparing save.")
-        self.assertEqual(ctx.updates[1]["last_message"], "CATALOG: pending deleted_devices cleanup.")
+        self.assertEqual(len(ctx.updates), 1)
+        self.assertEqual(ctx.updates[0]["last_message"], "CATALOG: pending deleted_devices cleanup.")
 
     def test_preparing_action_messages_include_button_context(self):
         server = load_server()
@@ -1622,6 +1622,23 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("vaadin-radio-group", script)
         self.assertNotIn("@vaadin/radio-group", script)
 
+    def test_reactive_pending_deleted_devices_contract_clears_diff_and_recomputes_disabled_controls(self):
+        script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+
+        self.assertIn("function normalizePendingDeletedDevicesState(state)", script)
+        self.assertIn('state.deleted_devices_pending_diff = "";', script)
+        self.assertIn("this.state = normalizePendingDeletedDevicesState(structuredClone(frame.state));", script)
+        self.assertIn("this.state = normalizePendingDeletedDevicesState({ ...this.state, ...(frame.patch || {}) });", script)
+        self.assertIn('deletedEntriesLabel(this.state, "deleted_devices_pending")', script)
+        self.assertIn("highlightedDiffLines(pendingDiff)", script)
+        self.assertNotIn("<ul><li>${removedText}</li></ul>", script)
+        self.assertIn("const PENDING_FENCED_ACTIONS = new Set([", script)
+        self.assertIn('"disk_usage"', script)
+        self.assertIn('"reset_git_state"', script)
+        self.assertIn('"docker_build_cache_prune"', script)
+        self.assertIn('form.dataset.actionReady = ready ? "true" : "false";', script)
+        self.assertIn("control.disabled = !ready;", script)
+
     def test_reactive_diff_text_bootstrap_includes_preview_controls(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1649,6 +1666,9 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Pending {entries} Diff", page)
         self.assertIn("pendingDeletedDevicesMessage", page)
         self.assertIn("Confirm or revert the pending deleted devices cleanup", page)
+        self.assertIn("pendingDiffUnavailable", page)
+        self.assertIn("Pending diff unavailable: {error}", page)
+        self.assertIn("conflictDiffTitle", page)
         self.assertIn("statusPendingDecision", page)
         self.assertIn("pending decision", page)
         self.assertIn("deleteRetainedDevices", page)
@@ -1682,6 +1702,8 @@ class ServerTests(unittest.TestCase):
             "TEXT.pendingDeletedDevicesMessage",
             "TEXT.pendingDeletedDevicesRemoved",
             "TEXT.deletedDevicesPendingNotice",
+            "TEXT.pendingDiffUnavailable",
+            "TEXT.conflictDiffTitle",
             "TEXT.statusDone",
             "TEXT.statusPendingDecision",
             "TEXT.noDeletedDevices",
@@ -13805,12 +13827,16 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(response["ok"])
         self.assertIn("already running", response["message"])
 
-    def test_disk_usage_action_stays_enabled_during_pending_deleted_devices(self):
+    def test_maintenance_actions_are_disabled_during_pending_deleted_devices(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
+            server.context().docker_api.socket_is_available = lambda: True
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": False, "docker_api": True}
+            }
             server.write_state(
                 {
                     "deleted_devices_pending_confirmation": True,
@@ -13822,10 +13848,46 @@ class ServerTests(unittest.TestCase):
 
             disk_form_start = page.index('action="disk-usage"')
             disk_form = page[disk_form_start : page.index("</form>", disk_form_start)]
+            reset_form_start = page.index('action="reset-git-state"')
+            reset_form = page[reset_form_start : page.index("</form>", reset_form_start)]
+            prune_form_start = page.index('action="docker-build-cache-prune"')
+            prune_form = page[prune_form_start : page.index("</form>", prune_form_start)]
             deleted_form_start = page.index('action="deleted-devices-preview"')
             deleted_form = page[deleted_form_start : page.index("</form>", deleted_form_start)]
-            self.assertNotIn("disabled", disk_form)
+            self.assertIn("disabled", disk_form)
+            self.assertIn("disabled", reset_form)
+            self.assertIn('data-action-ready="false"', prune_form)
+            self.assertIn("disabled", prune_form)
             self.assertIn("disabled", deleted_form)
+
+    def test_pending_deleted_devices_rejects_disk_usage_and_reset_http_and_ws(self):
+        server = load_server()
+        for action, endpoint in (("disk_usage", "/disk-usage"), ("reset_git_state", "/reset-git-state")):
+            with self.subTest(action=action):
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    calls = []
+                    setattr(
+                        server.context(),
+                        f"run_{action}_job",
+                        lambda lock_acquired=False, action=action: calls.append((action, lock_acquired)),
+                    )
+                    server.write_state(
+                        {
+                            "deleted_devices_pending_confirmation": True,
+                            "deleted_devices_rollback_path": str(root / "missing-rollback"),
+                        }
+                    )
+
+                    http = self.post_json(server, endpoint)
+                    ws = server.web.dispatch_command(server.context(), action)
+
+                    self.assertEqual(http.responses[-1], 409)
+                    self.assertFalse(ws["ok"])
+                    self.assertEqual(ws["status"], 409)
+                    self.assertEqual(calls, [])
+                    self.assertNotEqual(server.read_state().get("last_status"), "running")
 
     def test_deleted_devices_preview_lists_entities_as_grid_rows(self):
         server = load_server()
@@ -17554,6 +17616,86 @@ devices:
             self.assertFalse(payload["ok"])
             self.assertIn("Protection mode is enabled", payload["message"])
 
+    def test_docker_build_cache_prune_is_rejected_during_pending_deleted_devices(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.context().docker_api.socket_is_available = lambda: True
+            server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
+                "data": {"protected": False, "docker_api": True}
+            }
+            calls = []
+            server.context().run_docker_build_cache_prune_job = lambda operation_id, lock_acquired=False: calls.append(
+                (operation_id, lock_acquired)
+            )
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(root / "missing-rollback"),
+                }
+            )
+
+            before = server.read_state()
+            response = self.post_json(server, "/docker-build-cache-prune")
+
+            self.assertEqual(response.responses[-1], 409)
+            self.assertEqual(calls, [])
+            self.assertIsNone(server.read_state()["docker_build_cache_prune_fence"])
+            self.assertEqual(server.read_state()["operation_generation"], before["operation_generation"])
+            payload = json.loads(response.wfile.getvalue().decode())
+            self.assertFalse(payload["ok"])
+            self.assertIn("pending deleted devices cleanup", payload["message"])
+
+    def test_post_lock_pending_deleted_devices_blocks_reserved_starts(self):
+        server = load_server()
+
+        class RaceContext:
+            def __init__(self):
+                self.run_lock = threading.Lock()
+                self.reads = 0
+                self.state_updates = []
+                self.calls = []
+
+            def read_state(self):
+                self.reads += 1
+                return {
+                    "last_status": "idle",
+                    "deleted_devices_pending_confirmation": self.reads >= 2,
+                    "deleted_devices_rollback_path": "/tmp/rollback" if self.reads >= 2 else None,
+                    "docker_build_cache_prune_fence": None,
+                }
+
+            def write_state(self, updates):
+                self.state_updates.append(updates)
+
+            def run_disk_usage_job(self, lock_acquired=False):
+                self.calls.append(("disk_usage", lock_acquired))
+
+        for action in ("disk_usage", "reset_git_state", "docker_build_cache_prune"):
+            with self.subTest(action=action):
+                ctx = RaceContext()
+                ok, state, lock_acquired = server.web.reserve_action_slot(ctx, action)
+                self.assertFalse(ok)
+                self.assertFalse(lock_acquired)
+                self.assertTrue(state["deleted_devices_pending_confirmation"])
+                self.assertTrue(ctx.run_lock.acquire(blocking=False))
+                ctx.run_lock.release()
+
+        ctx = RaceContext()
+        ctx.run_lock.acquire()
+        ok = server.web.start_reserved_background(
+            ctx,
+            ctx.run_disk_usage_job,
+            lock_acquired=True,
+            state_updates={"last_status": "running"},
+        )
+        self.assertFalse(ok)
+        self.assertEqual(ctx.state_updates, [])
+        self.assertEqual(ctx.calls, [])
+        self.assertTrue(ctx.run_lock.acquire(blocking=False))
+        ctx.run_lock.release()
+
     def test_disk_usage_skips_docker_after_unavailable_capability(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -18089,6 +18231,88 @@ devices:
             self.assertIn("last_diff_cursor", replay["state"])
             self.assertNotIn("raw apply diff body", payload)
 
+    def test_pending_deleted_devices_diff_is_transient_in_snapshot_and_ws_frames(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            current = storage / "core.device_registry"
+            rollback = root / "work" / "deleted-devices-rollback" / "core.device_registry"
+            rollback.parent.mkdir(parents=True)
+            current.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            rollback.write_text(
+                json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "deleted-1", "name": "Old Button"}]}})
+            )
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(rollback),
+                    "deleted_devices_pending_device_count": 1,
+                    "deleted_devices_pending_entity_count": 0,
+                }
+            )
+
+            replay = server.web.dispatch_command(server.context(), "replay")
+            full = server.web.ws_state_frames(server.context())[0]
+            patch = server.web.ws_state_frames(
+                server.context(),
+                base_revision=server.read_state()["state_revision"] - 1,
+            )[0]
+            persisted = json.loads(server.STATE_PATH.read_text())
+
+            for state in (replay["state"], full["state"], patch["patch"]):
+                self.assertIn("deleted devices before cleanup", state["deleted_devices_pending_diff"])
+                self.assertIn("deleted devices now", state["deleted_devices_pending_diff"])
+                self.assertEqual(state["deleted_devices_pending_diff_error"], "")
+            self.assertNotIn("deleted_devices_pending_diff", persisted)
+            self.assertNotIn("deleted_devices_pending_diff_error", persisted)
+
+    def test_pending_deleted_devices_diff_snapshot_clears_when_not_applicable_or_errors(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            stale_state = server.app_context.state_store.default_state()
+            stale_state.update(
+                {
+                    "deleted_devices_pending_confirmation": False,
+                    "deleted_devices_pending_diff": "stale diff",
+                    "deleted_devices_pending_diff_error": "stale error",
+                    "state_revision": 1,
+                }
+            )
+            server.STATE_PATH.write_text(json.dumps(stale_state))
+
+            cleared = server.web.dispatch_command(server.context(), "replay")["state"]
+            self.assertEqual(cleared["deleted_devices_pending_diff"], "")
+            self.assertEqual(cleared["deleted_devices_pending_diff_error"], "")
+
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(root / "missing-rollback"),
+                }
+            )
+            errored = server.web.dispatch_command(server.context(), "replay")["state"]
+            self.assertEqual(errored["deleted_devices_pending_diff"], "")
+            self.assertTrue(errored["deleted_devices_pending_diff_error"])
+            self.assertNotEqual(errored["deleted_devices_pending_diff_error"], "stale error")
+
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": False,
+                    "deleted_devices_rollback_path": None,
+                }
+            )
+            patch = server.web.ws_state_frames(
+                server.context(),
+                base_revision=server.read_state()["state_revision"] - 1,
+            )[0]["patch"]
+            self.assertEqual(patch["deleted_devices_pending_diff"], "")
+            self.assertEqual(patch["deleted_devices_pending_diff_error"], "")
+
     def test_debug_snapshot_exposes_backend_version(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -18253,6 +18477,38 @@ devices:
             self.assertTrue(duplicate["duplicate"])
             self.assertEqual(len(scheduled), 1)
             self.assertEqual(server.read_state()["command_records"][command_id]["status"], "accepted")
+
+    def test_ws_cleanup_block_terminalizes_claimed_command_id(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": str(root / "missing-rollback"),
+                }
+            )
+            command_id = "99999999-9999-4999-8999-999999999999"
+            generation = server.read_state()["operation_generation"]
+
+            result = server.web.dispatch_command(
+                server.context(),
+                "disk_usage",
+                {
+                    "command_id": command_id,
+                    "generation": generation,
+                    "payload": {},
+                },
+            )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], 409)
+            self.assertIn("pending deleted devices cleanup", result["message"])
+            record = server.read_state()["command_records"][command_id]
+            self.assertEqual(record["status"], "terminal")
+            self.assertFalse(record["result"]["ok"])
+            self.assertEqual(record["result"]["message"], result["message"])
 
     def test_restart_marks_unresolved_durable_command_failed_unknown(self):
         server = load_server()

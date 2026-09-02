@@ -92,6 +92,10 @@ DELETED_DEVICES_RECOVERY_ACTIVE = {
 
 DOCKER_PRUNE_FENCE_KEY = "docker_build_cache_prune_fence"
 DOCKER_PRUNE_ACTIVE_PHASES = {"accepted", "dispatching"}
+TRANSIENT_SNAPSHOT_FIELDS = {
+    "deleted_devices_pending_diff",
+    "deleted_devices_pending_diff_error",
+}
 
 
 def _valid_timestamp(value):
@@ -214,6 +218,12 @@ def deleted_devices_recovery_allows(state, action):
 
 
 CLEANUP_ACTIONS = {
+    "preview",
+    "save_preview",
+    "apply",
+    "save",
+    "reset_git_state",
+    "disk_usage",
     "deleted_devices_preview",
     "deleted_devices_delete",
     "deleted_devices_confirm",
@@ -224,7 +234,7 @@ CLEANUP_ACTIONS = {
     "internal_ids_migrate",
     "docker_build_cache_prune",
 }
-CLEANUP_PENDING_ALLOWED_ACTIONS = {"deleted_devices_confirm", "deleted_devices_revert", "disk_usage"}
+CLEANUP_PENDING_ALLOWED_ACTIONS = {"deleted_devices_confirm", "deleted_devices_revert"}
 
 
 def deleted_devices_pending_cleanup_active(state):
@@ -233,7 +243,7 @@ def deleted_devices_pending_cleanup_active(state):
 
 def cleanup_action_allowed(state, action):
     if deleted_devices_recovery_active(state):
-        return action in {"deleted_devices_revert", "disk_usage"}
+        return action == "deleted_devices_revert"
     if deleted_devices_pending_cleanup_active(state) and action in CLEANUP_ACTIONS:
         return action in CLEANUP_PENDING_ALLOWED_ACTIONS
     return True
@@ -526,6 +536,8 @@ def sanitize_state_for_persistence(current):
     for field in DIFF_FIELDS:
         if current.get(field):
             current[field] = ""
+    for field in TRANSIENT_SNAPSHOT_FIELDS:
+        current.pop(field, None)
     return current
 
 

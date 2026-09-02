@@ -128,6 +128,10 @@ def repair_stale_running_state(ctx, state):
 
 def recovery_action_allowed(ctx, action):
     state = ctx.read_state()
+    return action_allowed_in_state(state, action)
+
+
+def action_allowed_in_state(state, action):
     return job_logic.recovery_action_allowed(state, action) and state_store.cleanup_action_allowed(state, action)
 
 
@@ -168,13 +172,13 @@ def reserve_action_slot(ctx, action="mutation"):
     run_lock = getattr(ctx, "run_lock", None)
     if run_lock is None:
         state = ctx.read_state()
-        return not state.get("last_status") == "running", state, False
+        return not state.get("last_status") == "running" and action_allowed_in_state(state, action), state, False
 
     if not run_lock.acquire(blocking=False):
         return False, None, False
     try:
         state, reconciled = reconcile_docker_prune_orphan(ctx, lock_acquired=True)
-        if not job_logic.recovery_action_allowed(state, action):
+        if not action_allowed_in_state(state, action):
             run_lock.release()
             return False, state, False
         return True, state, True
@@ -486,12 +490,18 @@ def render_page(ctx):
     if save_push_retry_pending:
         action_disabled = "disabled"
         check_deleted_devices_disabled = "disabled"
-    check_disk_usage_disabled = "disabled" if run_disabled or save_push_retry_pending else ""
+    check_disk_usage_disabled = (
+        "disabled"
+        if run_disabled or save_push_retry_pending or deleted_devices_pending_confirmation or deleted_devices_recovery_active
+        else ""
+    )
     docker_capability_status = ctx.docker_build_cache_capability()
     docker_prune_ready = bool(
         docker_capability_status["available"]
         and not job_running
         and not save_push_retry_pending
+        and not deleted_devices_pending_confirmation
+        and not deleted_devices_recovery_active
         and docker_prune.get("kind") == "idle"
     )
     docker_prune_disabled = "" if docker_prune_ready else "disabled"
@@ -1026,7 +1036,8 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
     if lock_acquired:
         # A caller may have reserved the lock before a concurrent recovery
         # fence was persisted; check again while it owns that reservation.
-        if not recovery_action_allowed(ctx, action):
+        state, _reconciled = reconcile_docker_prune_orphan(ctx, lock_acquired=True)
+        if not action_allowed_in_state(state, action):
             ctx.run_lock.release()
             return False
         try:
@@ -1080,11 +1091,32 @@ def command_result(ok, message="", **extra):
     return payload
 
 
+def _deleted_devices_transient_snapshot_fields(ctx, state):
+    if state.get("deleted_devices_pending_confirmation") and state.get("deleted_devices_rollback_path"):
+        try:
+            return {
+                "deleted_devices_pending_diff": ctx.deleted_devices_pending_diff(state["deleted_devices_rollback_path"]),
+                "deleted_devices_pending_diff_error": "",
+            }
+        except Exception as exc:
+            return {
+                "deleted_devices_pending_diff": "",
+                "deleted_devices_pending_diff_error": state_store.redact_sensitive_text(str(exc)),
+            }
+    return {
+        "deleted_devices_pending_diff": "",
+        "deleted_devices_pending_diff_error": "",
+    }
+
+
 def _snapshot_payload(ctx):
     if hasattr(ctx, "debug_snapshot"):
         payload = ctx.debug_snapshot()
     else:
         payload = {"state": state_store.redacted_state_snapshot(ctx.read_state())}
+    state = dict(payload.get("state") or {})
+    state.update(_deleted_devices_transient_snapshot_fields(ctx, state))
+    payload = {**payload, "state": state}
     return {**payload, "backend_version": ctx.addon_version()}
 
 
@@ -1095,12 +1127,12 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         if recorder is not None and job_is_running(ctx):
             recorder(action)
 
-    def finalize_rejected(command_id, ok):
+    def finalize_rejected(command_id, ok, message=None):
         if command_id and not ok:
             ctx.update_command(
                 command_id,
                 "terminal",
-                {"ok": False, "message": state_store.READINESS_BLOCKED_MESSAGE},
+                {"ok": False, "message": message or state_store.READINESS_BLOCKED_MESSAGE},
             )
 
     if command == "state_get" or command == "replay":
@@ -1209,8 +1241,11 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         "rollback": (ctx.run_rollback_job, [envelope_payload.get("release", "")], None, "message.rollback_started"),
     }
     if command in job_commands:
-        if not state_store.cleanup_action_allowed(ctx.read_state(), command):
-            return command_result(False, job_logic.cleanup_blocked_message(ctx.read_state(), command), status=409)
+        state = ctx.read_state()
+        if not state_store.cleanup_action_allowed(state, command):
+            message = job_logic.cleanup_blocked_message(state, command)
+            finalize_rejected(command_id, False, message)
+            return command_result(False, message, status=409)
         if (
             command == "retained_devices_delete"
             and not job_is_running(ctx)
@@ -1581,16 +1616,15 @@ def create_handler(ctx):
                 self.send_error(404)
                 return
 
-            # The recovery fence is authoritative at the HTTP boundary too:
+            # The cleanup/recovery fence is authoritative at the HTTP boundary:
             # reject before a direct endpoint can mutate state or queue work.
-            # Disk usage is deliberately read-only and remains available.
             route_action = route.removeprefix("/").replace("-", "_")
             if not state_store.cleanup_action_allowed(ctx.read_state(), route_action):
                 self.send_recovery_blocked(route_action)
                 return
             if (
                 state_store.deleted_devices_recovery_active(ctx.read_state())
-                and route not in {"/deleted-devices-revert", "/disk-usage"}
+                and route != "/deleted-devices-revert"
             ):
                 self.send_recovery_blocked(route_action)
                 return
@@ -1795,7 +1829,10 @@ def create_handler(ctx):
                     return
                 ok, state, lock_acquired = reserve_action_slot(ctx, "docker_build_cache_prune")
                 if not ok:
-                    self.send_running_action()
+                    if state is not None and not action_allowed_in_state(state, "docker_build_cache_prune"):
+                        self.send_recovery_blocked("docker_build_cache_prune")
+                    else:
+                        self.send_running_action()
                     return
                 operation_id = str(uuid.uuid4())
                 transferred = False

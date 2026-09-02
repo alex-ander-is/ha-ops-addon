@@ -62,11 +62,8 @@ def assert_repaired_generation(ctx, action, expected_generation=None):
     return generation
 
 
-RECOVERY_READ_ONLY_ACTIONS = {"disk_usage"}
-
-
 def recovery_action_allowed(state, action):
-    return action in RECOVERY_READ_ONLY_ACTIONS or state_store.deleted_devices_recovery_allows(state, action)
+    return state_store.deleted_devices_recovery_allows(state, action)
 
 
 def cleanup_blocked_message(state, action):

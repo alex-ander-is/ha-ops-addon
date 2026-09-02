@@ -149,10 +149,17 @@ function renderChangedText(text, range) {
 
 function renderDiffLine(line, changedRange = null) {
   const kind = diffLineKind(line);
+  const staticKind = {
+    add: "diff-add",
+    del: "diff-del",
+    hunk: "diff-hunk",
+    meta: "diff-file",
+    ctx: "diff-context",
+  }[kind];
   const content = changedRange && (kind === "add" || kind === "del")
     ? [line.slice(0, 1), ...renderChangedText(line.slice(1), changedRange)]
     : renderDiffText(line || " ");
-  return html`<span class=${`line ${kind}`}>${content}</span>`;
+  return html`<span class=${`line ${kind} diff-line ${staticKind}`}>${content}</span>`;
 }
 
 function highlightedDiffLines(diff) {
@@ -645,12 +652,34 @@ function hasCommandInFlight(state, commands) {
     .some((record) => commands.includes(record.command) && runningStatuses.has(record.status));
 }
 
-function deletedEntriesLabel(state) {
-  const devices = Number(state.last_deleted_devices_device_count || 0);
-  const entities = Number(state.last_deleted_devices_entity_count || 0);
+const CLEANUP_RECOVERY_ACTIVE = new Set(["restore_required", "recovering", "manual_recovery"]);
+const PENDING_FENCED_ACTIONS = new Set([
+  "preview", "save_preview", "apply", "save", "reset_git_state", "disk_usage",
+  "deleted_devices_preview", "deleted_devices_delete", "retained_devices_preview",
+  "retained_devices_delete", "internal_ids_preview", "internal_ids_migrate",
+  "docker_build_cache_prune",
+]);
+const PENDING_ALLOWED_ACTIONS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
+
+function deletedEntriesLabel(state, prefix = "last_deleted_devices") {
+  const devices = Number(state[`${prefix}_device_count`] || 0);
+  const entities = Number(state[`${prefix}_entity_count`] || 0);
   if (devices && entities) return TEXT.deletedDevicesAndEntitiesLabel;
   if (entities) return TEXT.deletedEntitiesLabel;
   return TEXT.deletedDevicesLabel;
+}
+
+function normalizePendingDeletedDevicesState(state) {
+  const pending = Boolean(state.deleted_devices_pending_confirmation && state.deleted_devices_rollback_path);
+  if (!pending) {
+    state.deleted_devices_pending_diff = "";
+    state.deleted_devices_pending_diff_error = "";
+  }
+  return state;
+}
+
+function deletedDevicesRecoveryActive(state) {
+  return CLEANUP_RECOVERY_ACTIVE.has(state.deleted_devices_recovery_phase);
 }
 
 function renderDeletedDevicesTable(rows) {
@@ -1074,7 +1103,7 @@ class HaOpsApp extends LitElement {
   applyBaseline(frame) {
     if (!frame.state) return;
     this.observeBackendVersion(frame.backend_version);
-    this.state = structuredClone(frame.state);
+    this.state = normalizePendingDeletedDevicesState(structuredClone(frame.state));
     this.revision = Number(frame.revision ?? frame.state_revision ?? frame.state.state_revision ?? 0);
     this.syncDom();
   }
@@ -1090,7 +1119,7 @@ class HaOpsApp extends LitElement {
       this.socket?.send(JSON.stringify({ id: String(this.nextRequestId++), command: "replay" }));
       return;
     }
-    this.state = { ...this.state, ...(frame.patch || {}) };
+    this.state = normalizePendingDeletedDevicesState({ ...this.state, ...(frame.patch || {}) });
     this.revision = revision;
     this.syncDom();
   }
@@ -1126,8 +1155,28 @@ class HaOpsApp extends LitElement {
   syncDom() {
     const running = this.state.last_status === "running" || Object.values(this.state.command_records || {})
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
+    const pending = Boolean(this.state.deleted_devices_pending_confirmation);
+    const recovery = deletedDevicesRecoveryActive(this.state);
+    const saveRetry = Boolean(this.state.save_push_retry_pending);
+    const dockerFenceActive = Boolean(this.state.docker_build_cache_prune_fence);
     for (const control of this.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-details, vaadin-select")) {
-      if (!control.matches("[data-read-only-control]")) control.disabled = running || control.hasAttribute("data-server-disabled");
+      if (control.matches("[data-read-only-control]")) continue;
+      const form = control.closest("form");
+      const action = form ? commandForAction(form.action) : "";
+      if (action === "docker_build_cache_prune") {
+        const capabilityAvailable = form?.dataset.capabilityAvailable === "true";
+        const ready = capabilityAvailable && !running && !saveRetry && !pending && !recovery && !dockerFenceActive;
+        if (form) form.dataset.actionReady = ready ? "true" : "false";
+        control.disabled = !ready;
+      } else if (PENDING_FENCED_ACTIONS.has(action) || PENDING_ALLOWED_ACTIONS.has(action)) {
+        control.disabled = recovery
+          ? action !== "deleted_devices_revert"
+          : running || saveRetry || (pending && !PENDING_ALLOWED_ACTIONS.has(action));
+      } else if (recovery) {
+        control.disabled = action ? action !== "deleted_devices_revert" : running || control.hasAttribute("data-server-disabled");
+      } else {
+        control.disabled = running || control.hasAttribute("data-server-disabled");
+      }
     }
     this.updateStatusBadge();
     const log = this.querySelector("ha-ops-log");
@@ -1201,18 +1250,27 @@ class HaOpsApp extends LitElement {
 
   renderDeletedPreview(cleanupRunning) {
     if (this.state.deleted_devices_pending_confirmation) {
-      const entries = deletedEntriesLabel(this.state);
+      const entries = deletedEntriesLabel(this.state, "deleted_devices_pending");
       const pendingCount = Number(this.state.deleted_devices_pending_device_count || 0) + Number(this.state.deleted_devices_pending_entity_count || 0);
       const title = (TEXT.pendingDeletedDevicesTitle || "Pending {entries} Diff").replace("{entries}", entries);
       const removedText = (TEXT.pendingDeletedDevicesRemoved || "- {entries} removed by this cleanup: {count}")
         .replace("{entries}", entries)
-        .replace("{count}", String(pendingCount));
+        .replace("{count}", String(pendingCount))
+        .replace(/^\s*-\s*/, "");
+      const pendingDiff = this.state.deleted_devices_pending_diff || "";
+      const pendingDiffError = this.state.deleted_devices_pending_diff_error || "";
+      const unavailableTemplate = TEXT.pendingDiffUnavailable || "Pending diff unavailable: {error}";
       return html`
         <section class="card wide" data-testid="deleted-devices-preview-section">
           <h2>${title}</h2>
           <p>${this.state.last_message || TEXT.pendingDeletedDevicesMessage || "Deleted devices cleanup is waiting for your decision."}</p>
-          <ul><li>${removedText}</li></ul>
+          <p>${removedText}</p>
           <p>${TEXT.deletedDevicesPendingNotice || "Confirm Changes keeps this cleanup. Revert Changes restores only entries removed by this cleanup."}</p>
+          ${pendingDiff
+            ? html`<div class="conflict-diff" role="region" aria-label=${TEXT.conflictDiffTitle || "Conflict diff"}>
+                <div class="diff-lines">${highlightedDiffLines(pendingDiff)}</div>
+              </div>`
+            : html`<p>${unavailableTemplate.replace("{error}", pendingDiffError)}</p>`}
           <div class="actions deletion-actions"><div class="action-row">
             <form method="post" action="deleted-devices-confirm" data-async-form="true" data-preserve-display-state="true">
               <button type="submit" ?disabled=${this.isRunning()}>${TEXT.confirmChanges || "Confirm Changes"}</button>
