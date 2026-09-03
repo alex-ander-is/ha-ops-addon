@@ -1398,7 +1398,7 @@ class HaOpsApp extends LitElement {
         ${count > 0 ? html`
           <div class="actions deletion-actions"><div class="action-row">
             <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${confirmMessage}>
-              <button type="submit" ?disabled=${disabled}>${TEXT.approveDeletedDevices}</button>
+              <button type="submit" ?disabled=${disabled}>${TEXT.removeDeletedEntries}</button>
             </form>
           </div></div>
         ` : nothing}

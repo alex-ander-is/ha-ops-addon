@@ -2112,7 +2112,7 @@ var Ae=globalThis,Se=Ae.ShadowRoot&&(Ae.ShadyCSS===void 0||Ae.ShadyCSS.nativeSha
         ${n>0?h`
           <div class="actions deletion-actions"><div class="action-row">
             <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${l}>
-              <button type="submit" ?disabled=${o}>${c.approveDeletedDevices}</button>
+              <button type="submit" ?disabled=${o}>${c.removeDeletedEntries}</button>
             </form>
           </div></div>
         `:g}

@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.32
+
+- Show deleted-registry cleanup as readable device/probable groups, label Hass.io App tombstones such as Zigbee2MQTT by name, and replace the legacy approval button copy with `Remove Deleted Entries`.
+
 ## 0.10.31
 
 - Group deleted entities without `device_id` under the matching deleted device when there is one safe entity-id prefix match, and require Playwright screenshot/DOM verification for visual UI work.

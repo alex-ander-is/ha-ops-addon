@@ -1222,6 +1222,42 @@ def _semantic_slug(value):
     return text
 
 
+def _humanize_semantic_slug(value):
+    slug = _semantic_slug(value)
+    if not slug:
+        return ""
+    special = {
+        "zigbee2mqtt": "Zigbee2MQTT",
+        "z2m": "Zigbee2MQTT",
+        "mqtt": "MQTT",
+        "ha": "HA",
+        "hassio": "Supervisor",
+        "rssi": "RSSI",
+        "lqi": "LQI",
+    }
+    return " ".join(special.get(part, part.upper() if len(part) <= 3 and part.isalpha() else part.capitalize()) for part in slug.split("_"))
+
+
+def _hassio_addon_display_from_identifiers(identifiers):
+    for identifier in identifiers or []:
+        if not isinstance(identifier, list) or len(identifier) < 2:
+            continue
+        domain = _semantic_slug(identifier[0])
+        value = _semantic_slug(identifier[1])
+        if domain != "hassio" or not value:
+            continue
+        match = re.fullmatch(r"[0-9a-f]{6,}_(.+)", value)
+        addon_slug = match.group(1) if match else value
+        label = _humanize_semantic_slug(addon_slug)
+        if label:
+            return {
+                "label": label,
+                "manufacturer": "App",
+                "model": "Supervisor",
+            }
+    return {}
+
+
 def _entity_object_id(entity):
     entity_id = _text_value((entity or {}).get("entity_id"))
     return _semantic_slug(entity_id.split(".", 1)[1] if "." in entity_id else entity_id)
@@ -1270,17 +1306,23 @@ def _device_display(device, areas, row_by_id=None, enrichment_by_id=None):
     device_id = _text_value(device.get("id"))
     row = (row_by_id or {}).get(device_id, {})
     enrichment = (enrichment_by_id or {}).get(device_id, {})
+    hassio_display = _hassio_addon_display_from_identifiers(
+        enrichment.get("identifiers") or row.get("recovered_identifiers") or device.get("identifiers")
+    )
     name = _text_value(
         enrichment.get("recovered_name")
         or row.get("recovered_name")
         or normalize_recovered_name(device.get("name_by_user") or device.get("name"))
         or device.get("name_by_user")
         or device.get("name")
+        or hassio_display.get("label")
         or device_id
     )
     area_id = _text_value(device.get("area_id"))
-    manufacturer = _text_value(enrichment.get("manufacturer") or row.get("recovered_manufacturer") or device.get("manufacturer"))
-    model = _text_value(enrichment.get("model") or row.get("recovered_model") or device.get("model"))
+    manufacturer = _text_value(
+        enrichment.get("manufacturer") or row.get("recovered_manufacturer") or device.get("manufacturer") or hassio_display.get("manufacturer")
+    )
+    model = _text_value(enrichment.get("model") or row.get("recovered_model") or device.get("model") or hassio_display.get("model"))
     model_id = _text_value(enrichment.get("model_id") or row.get("recovered_model_id") or device.get("model_id"))
     return {
         "id": device_id,
@@ -1325,6 +1367,51 @@ def _infer_deleted_entity_device_id(entity, candidates_by_device_id):
     winners = [device_id for device_id, candidate in matches if len(candidate) == longest]
     unique = sorted(set(winners))
     return unique[0] if len(unique) == 1 else ""
+
+
+def _deleted_entity_probable_group_key(entity):
+    object_id = _entity_object_id(entity)
+    parts = [part for part in object_id.split("_") if part]
+    if len(parts) < 3:
+        return ""
+    if parts[0].startswith("tze") and len(parts) >= 3:
+        return "_".join(parts[:3])
+    return "_".join(parts[:2])
+
+
+def _synthetic_deleted_entity_groups(entities):
+    buckets = {}
+    for entity in entities:
+        key = _deleted_entity_probable_group_key(entity)
+        if key:
+            buckets.setdefault(key, []).append(entity)
+    grouped = []
+    consumed_ids = set()
+    for key, bucket in sorted(buckets.items()):
+        if len(bucket) < 2:
+            continue
+        consumed_ids.update(id(entity) for entity in bucket)
+        grouped.append(
+            {
+                "device": {
+                    "id": key,
+                    "label": _humanize_semantic_slug(key),
+                    "name": _humanize_semantic_slug(key),
+                    "manufacturer": "",
+                    "model": "Probable group",
+                    "model_id": "",
+                    "area": "",
+                    "identifiers": [],
+                    "source_commit": "",
+                    "source_path": "",
+                },
+                "deleted_entities": [_entity_summary(entity) for entity in bucket],
+                "active_entities": [],
+                "counts": {"deleted_entities": len(bucket), "active_entities": 0},
+            }
+        )
+    remaining = [entity for entity in entities if id(entity) not in consumed_ids]
+    return grouped, remaining
 
 
 def build_deleted_devices_tree_from_data(
@@ -1387,6 +1474,18 @@ def build_deleted_devices_tree_from_data(
                 },
             }
         )
+    synthetic_groups = []
+    regrouped_deleted_entity_groups = {}
+    for device_id, entities in deleted_entity_groups.items():
+        if device_id:
+            regrouped_deleted_entity_groups[device_id] = entities
+            continue
+        groups, remaining = _synthetic_deleted_entity_groups(entities)
+        synthetic_groups.extend(groups)
+        if remaining:
+            regrouped_deleted_entity_groups[device_id] = remaining
+    deleted_entity_groups = regrouped_deleted_entity_groups
+    device_groups.extend(synthetic_groups)
     orphan_entities = []
     for device_id, entities in sorted(deleted_entity_groups.items()):
         if device_id and device_id in deleted_device_ids:

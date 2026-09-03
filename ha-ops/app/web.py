@@ -325,7 +325,7 @@ def action_label(action):
         "save": _("action.save"),
         "save_preview": _("action.preview_save"),
         "deleted_devices_preview": _("action.check_deleted_devices"),
-        "deleted_devices_delete": _("action.approve_deleted_devices"),
+        "deleted_devices_delete": _("action.remove_deleted_entries"),
         "deleted_devices_confirm": _("action.confirm_changes"),
         "deleted_devices_revert": _("action.revert_changes"),
         "disk_usage": _("action.check_disk_usage"),
@@ -579,7 +579,7 @@ def render_page(ctx):
             "<form method='post' action='deleted-devices-delete' data-async-form='true' "
             "data-preserve-display-state='true' "
             f"data-confirm='{html.escape(_('confirm.deleted_devices_delete', entries=preview_entries), quote=True)}'>"
-            f"<button type='submit' {deletion_disabled}>{_('action.approve_deleted_devices')}</button>"
+            f"<button type='submit' {deletion_disabled}>{_('action.remove_deleted_entries')}</button>"
             "</form>"
             "</div>"
             "</div>"

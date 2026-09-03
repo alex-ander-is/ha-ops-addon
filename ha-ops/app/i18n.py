@@ -3,7 +3,6 @@ DEFAULT_LANGUAGE = "en"
 
 EN_TEXT = {
     "action.apply": "Apply Git to HA",
-    "action.approve_deleted_devices": "Approve Deletion",
     "action.approve_ha_to_git": "Approve HA to Git",
     "action.check_actions_ids": "Check actions IDs",
     "action.check_deleted_devices": "Check deleted devices and entities",
@@ -24,6 +23,7 @@ EN_TEXT = {
     "action.regenerate_deploy_key": "Regenerate Deploy Key",
     "action.reset_git_state": "Reset Git State",
     "action.delete_retained_devices": "Delete retained devices",
+    "action.remove_deleted_entries": "Remove Deleted Entries",
     "action.revert_changes": "Revert Changes",
     "action.review_post_apply_save": "Review Post-Apply HA Changes",
     "action.rollback": "Rollback",

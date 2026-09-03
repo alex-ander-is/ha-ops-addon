@@ -1679,8 +1679,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("Use Git Version", page)
         self.assertIn("useHaVersion", page)
         self.assertIn("Use HA Version", page)
-        self.assertIn("approveDeletedDevices", page)
-        self.assertIn("Approve Deletion", page)
+        self.assertIn("removeDeletedEntries", page)
+        self.assertIn("Remove Deleted Entries", page)
+        self.assertNotIn("approveDeletedDevices", page)
+        self.assertNotIn("Approve Deletion", page)
         self.assertIn("revertDeletedDevices", page)
         self.assertIn("Revert Changes", page)
         self.assertIn("confirmChanges", page)
@@ -1715,7 +1717,7 @@ class ServerTests(unittest.TestCase):
         for key in (
             "TEXT.confirmDeletedDevicesDelete",
             "TEXT.confirmRetainedDevicesDelete",
-            "TEXT.approveDeletedDevices",
+            "TEXT.removeDeletedEntries",
             "TEXT.revertDeletedDevices",
             "TEXT.confirmChanges",
             "TEXT.deleteRetainedDevices",
@@ -13991,7 +13993,8 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Bathroom Presence", page)
             self.assertIn("sensor.bathroom_presence_illuminance", page)
             self.assertNotIn("<table class='deleted-devices-table'>", page)
-            self.assertIn("Approve Deletion", page)
+            self.assertIn("Remove Deleted Entries", page)
+            self.assertNotIn("Approve Deletion", page)
             self.assertNotIn("identifiers=mqtt:old", page)
 
     def test_deleted_devices_table_keeps_grid_columns_aligned(self):
@@ -15591,6 +15594,10 @@ devices:
                             "deleted_entities": [
                                 {"id": "entity-z2m", "entity_id": "binary_sensor.zigbee2mqtt_running"},
                                 {"id": "entity-kitchen", "entity_id": "binary_sensor.kitchen_presence_occupancy"},
+                                {"id": "entity-kitchen-rc-battery", "entity_id": "sensor.kitchen_rc_battery"},
+                                {"id": "entity-kitchen-rc-lq", "entity_id": "sensor.kitchen_rc_linkquality"},
+                                {"id": "entity-tze-rssi", "entity_id": "sensor.tze204_qasjif9e_ts0601_rssi"},
+                                {"id": "entity-tze-lqi", "entity_id": "sensor.tze204_qasjif9e_ts0601_lqi"},
                                 {"id": "entity-orphan", "entity_id": "sensor.unrelated_orphan"},
                             ],
                         }
@@ -15602,9 +15609,20 @@ devices:
             tree = server.read_state()["last_deleted_devices_tree"]
             groups_by_id = {group["device"]["id"]: group for group in tree["device_groups"]}
 
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["label"], "Zigbee2MQTT")
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["manufacturer"], "App")
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["model"], "Supervisor")
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["deleted_entities"][0]["entity_id"], "binary_sensor.zigbee2mqtt_running")
             self.assertEqual(groups_by_id["kitchen_presence"]["deleted_entities"][0]["entity_id"], "binary_sensor.kitchen_presence_occupancy")
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["area"], "Kitchen")
+            self.assertEqual(
+                [entity["entity_id"] for entity in groups_by_id["kitchen_rc"]["deleted_entities"]],
+                ["sensor.kitchen_rc_battery", "sensor.kitchen_rc_linkquality"],
+            )
+            self.assertEqual(
+                [entity["entity_id"] for entity in groups_by_id["tze204_qasjif9e_ts0601"]["deleted_entities"]],
+                ["sensor.tze204_qasjif9e_ts0601_rssi", "sensor.tze204_qasjif9e_ts0601_lqi"],
+            )
             self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.unrelated_orphan")
 
     def test_deleted_devices_preview_rejects_non_array_consumed_registry_paths(self):

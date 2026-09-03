@@ -1025,11 +1025,12 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
   await waitForInteractiveTransport(page, "cleanup preview page reload");
 
   await page.getByRole("button", { name: "Check deleted devices and entities" }).click();
-  await page.getByTestId("deleted-devices-preview-section").getByText("Detached Button").waitFor({ timeout: 5000 });
+  await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: /Zigbee2MQTT · App \/ Supervisor/ }).waitFor({ timeout: 5000 });
   await assertDeletedDevicesSemanticTreeLayout(page);
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview");
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
-  await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: "Approve Deletion" }).waitFor({ timeout: 5000 });
+  await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: "Remove Deleted Entries" }).waitFor({ timeout: 5000 });
+  assert((await page.getByTestId("deleted-devices-preview-section").getByText("Approve Deletion").count()) === 0, "legacy deleted devices approval label was rendered");
 
   await harnessPost(baseUrl, "__dev_harness__/clear-previews");
   await page.reload();
@@ -1081,11 +1082,13 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
   await pendingSection.getByText("Pending deleted devices cleanup").waitFor({ timeout: 5000 });
   await pendingSection.getByText("Harness deleted devices cleanup is waiting for confirmation.").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("No deleted devices or entities found.").count()) === 0, "pending deleted cleanup showed stale empty preview");
-  await pendingSection.getByText("Detached Button").waitFor({ timeout: 5000 });
-  await pendingSection.getByText("Example / Button").waitFor({ timeout: 5000 });
+  await pendingSection.getByRole("button", { name: /Zigbee2MQTT · App \/ Supervisor/ }).waitFor({ timeout: 5000 });
   await pendingSection.getByText("binary_sensor.zigbee2mqtt_running").waitFor({ timeout: 5000 });
   await pendingSection.getByText("binary_sensor.kitchen_presence_occupancy").waitFor({ timeout: 5000 });
-  await pendingSection.getByText("sensor.detached_button_battery").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("Kitchen RC").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("sensor.kitchen_rc_battery").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("Tze204 Qasjif9e Ts0601").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("sensor.tze204_qasjif9e_ts0601_rssi").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("deleted devices before cleanup").count()) === 0, "pending raw diff loaded before expansion");
   const beforeRawExpansion = pendingRawDiffRequests.length;
   const rawDetails = pendingSection.locator("ha-ops-pending-raw-diff").locator("vaadin-details");
@@ -1194,19 +1197,33 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
       clientWidth: document.documentElement.clientWidth,
       longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
       orphanGroupCount: section.querySelectorAll(".deleted-devices-tree vaadin-details.orphan-entities").length,
+      zigbee2mqttDisplay: groups.some((group) =>
+        group.text.includes("Zigbee2MQTT") && group.text.includes("App / Supervisor") && group.text.includes("binary_sensor.zigbee2mqtt_running")
+      ),
       kitchenPresenceGrouped: groups.some((group) =>
         group.text.includes("Kitchen Presence") && group.text.includes("binary_sensor.kitchen_presence_occupancy")
+      ),
+      kitchenRcGrouped: groups.some((group) =>
+        group.text.includes("Kitchen RC") && group.text.includes("sensor.kitchen_rc_battery") && group.text.includes("sensor.kitchen_rc_linkquality")
+      ),
+      tzeGrouped: groups.some((group) =>
+        group.text.includes("Tze204 Qasjif9e Ts0601") &&
+        group.text.includes("sensor.tze204_qasjif9e_ts0601_rssi") &&
+        group.text.includes("sensor.tze204_qasjif9e_ts0601_lqi")
       ),
     };
   });
   assert(metrics.tree, `deleted-device semantic tree missing: ${JSON.stringify(metrics)}`);
-  assert(metrics.groupCount >= 2, `deleted-device semantic tree missing device groups: ${JSON.stringify(metrics)}`);
-  assert(metrics.semanticDetailsCount >= 2, `deleted-device semantic tree did not use Vaadin Details groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.groupCount >= 4, `deleted-device semantic tree missing device groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.semanticDetailsCount >= 4, `deleted-device semantic tree did not use Vaadin Details groups: ${JSON.stringify(metrics)}`);
   assert(metrics.semanticSummaryCount === metrics.semanticDetailsCount, `deleted-device Vaadin Details summaries missing: ${JSON.stringify(metrics)}`);
   assert(metrics.articleGroupCount === 0, `deleted-device semantic tree used custom article groups: ${JSON.stringify(metrics)}`);
   assert(metrics.legacyTableCount === 0, `deleted-device legacy table was rendered: ${JSON.stringify(metrics)}`);
   assert(metrics.orphanGroupCount === 0, `deleted-device semantic tree rendered inferred entities as orphan groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.zigbee2mqttDisplay, `Zigbee2MQTT hassio device was not rendered as a readable app group: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenPresenceGrouped, `kitchen presence entity was not grouped under its device: ${JSON.stringify(metrics)}`);
+  assert(metrics.kitchenRcGrouped, `kitchen RC entities were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
+  assert(metrics.tzeGrouped, `TZE link metrics were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
   const overflowing = (metrics.groups || []).filter((group) => group.left < -2 || group.right > metrics.clientWidth + 2);
   assert(overflowing.length === 0, `deleted-device semantic tree overflowed horizontally: ${JSON.stringify({ metrics, overflowing })}`);
   assert(metrics.longEntity, `long deleted-device entity was not rendered: ${JSON.stringify(metrics)}`);
