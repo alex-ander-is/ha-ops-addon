@@ -97,6 +97,13 @@ class ReleaseReadinessTests(unittest.TestCase):
         self.assertIsNotNone(old_section)
         self.assertNotIn(duplicate_running_log_note, old_section)
 
+    def test_agents_require_visual_ui_bugs_to_use_playwright_evidence(self):
+        agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+
+        self.assertIn("run the affected flow with Playwright", agents)
+        self.assertIn("screenshot or DOM evidence", agents)
+        self.assertIn("do not treat green non-visual unit tests as sufficient", agents)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -15559,6 +15559,54 @@ devices:
             self.assertEqual(tree["device_groups"][0]["active_entities"][0]["entity_id"], "sensor.old_battery")
             self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.orphan")
 
+    def test_deleted_devices_preview_infers_missing_entity_device_links_from_unique_prefix(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": [{"id": "kitchen", "name": "Kitchen"}]}}))
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [],
+                            "deleted_devices": [
+                                {
+                                    "id": "b31f14db9f048950d3525ebb1f34ed93",
+                                    "identifiers": [["hassio", "61804cda_zigbee2mqtt"]],
+                                },
+                                {"id": "kitchen_presence", "name": "kitchen_presence", "area_id": "kitchen"},
+                            ],
+                        }
+                    }
+                )
+            )
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [],
+                            "deleted_entities": [
+                                {"id": "entity-z2m", "entity_id": "binary_sensor.zigbee2mqtt_running"},
+                                {"id": "entity-kitchen", "entity_id": "binary_sensor.kitchen_presence_occupancy"},
+                                {"id": "entity-orphan", "entity_id": "sensor.unrelated_orphan"},
+                            ],
+                        }
+                    }
+                )
+            )
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            tree = server.read_state()["last_deleted_devices_tree"]
+            groups_by_id = {group["device"]["id"]: group for group in tree["device_groups"]}
+
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["deleted_entities"][0]["entity_id"], "binary_sensor.zigbee2mqtt_running")
+            self.assertEqual(groups_by_id["kitchen_presence"]["deleted_entities"][0]["entity_id"], "binary_sensor.kitchen_presence_occupancy")
+            self.assertEqual(groups_by_id["kitchen_presence"]["device"]["area"], "Kitchen")
+            self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.unrelated_orphan")
+
     def test_deleted_devices_preview_rejects_non_array_consumed_registry_paths(self):
         cases = [
             ("core.device_registry", {"data": {"devices": {}, "deleted_devices": []}}, "data.devices must be an array"),

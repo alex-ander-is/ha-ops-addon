@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.31
+
+- Group deleted entities without `device_id` under the matching deleted device when there is one safe entity-id prefix match, and require Playwright screenshot/DOM verification for visual UI work.
+
 ## 0.10.30
 
 - Replace pending deleted-device cleanup raw diffs with a semantic Vaadin Details tree, lazy-load the advanced raw diff only when expanded, and fail closed on malformed registry arrays.

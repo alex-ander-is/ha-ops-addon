@@ -535,7 +535,7 @@ class HarnessScenarioController:
         return {
             "schema": 1,
             "generated_from": generated_from,
-            "counts": {"devices": 1, "deleted_entities": 2, "active_entities": 1, "orphan_deleted_entities": 1},
+            "counts": {"devices": 2, "deleted_entities": 2, "active_entities": 1, "orphan_deleted_entities": 0},
             "warnings": [],
             "device_groups": [
                 {
@@ -554,16 +554,26 @@ class HarnessScenarioController:
                     "deleted_entities": [{"id": "entity-a", "entity_id": "binary_sensor.zigbee2mqtt_running", "name": ""}],
                     "active_entities": [{"id": "entity-live", "entity_id": "sensor.detached_button_battery", "name": "Battery"}],
                     "counts": {"deleted_entities": 1, "active_entities": 1},
-                }
-            ],
-            "orphan_entity_groups": [
+                },
                 {
-                    "device_id": "",
-                    "label": "Deleted entities",
+                    "device": {
+                        "id": "kitchen_presence",
+                        "label": "Kitchen Presence",
+                        "name": "Kitchen Presence",
+                        "manufacturer": "Example",
+                        "model": "Presence Sensor",
+                        "model_id": "",
+                        "area": "Kitchen",
+                        "identifiers": [["zha", "a4:c1:38:a3:71:09:9d:d7"]],
+                        "source_commit": "",
+                        "source_path": "",
+                    },
                     "deleted_entities": [{"id": "entity-b", "entity_id": "binary_sensor.kitchen_presence_occupancy", "name": "Kitchen Presence Occupancy"}],
-                    "counts": {"deleted_entities": 1},
-                }
+                    "active_entities": [],
+                    "counts": {"deleted_entities": 1, "active_entities": 0},
+                },
             ],
+            "orphan_entity_groups": [],
         }
 
     def _write_deleted_devices_reverted(self, ctx, details):

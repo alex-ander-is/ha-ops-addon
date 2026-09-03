@@ -1213,6 +1213,36 @@ def _text_value(value):
     return str(value).strip() if value not in (None, "") else ""
 
 
+def _semantic_slug(value):
+    text = _text_value(value).lower()
+    if not text:
+        return ""
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    text = re.sub(r"_+", "_", text).strip("_")
+    return text
+
+
+def _entity_object_id(entity):
+    entity_id = _text_value((entity or {}).get("entity_id"))
+    return _semantic_slug(entity_id.split(".", 1)[1] if "." in entity_id else entity_id)
+
+
+def _identifier_slug_candidates(identifiers):
+    candidates = set()
+    for identifier in identifiers or []:
+        if not isinstance(identifier, list):
+            continue
+        for part in identifier[1:3]:
+            slug = _semantic_slug(part)
+            if not slug:
+                continue
+            candidates.add(slug)
+            match = re.fullmatch(r"[0-9a-f]{6,}_(.+)", slug)
+            if match:
+                candidates.add(match.group(1))
+    return candidates
+
+
 def _identifiers_display(identifiers, limit=3):
     result = []
     for identifier in identifiers or []:
@@ -1266,6 +1296,37 @@ def _device_display(device, areas, row_by_id=None, enrichment_by_id=None):
     }
 
 
+def _device_entity_prefix_candidates(device, display):
+    candidates = {_semantic_slug(display.get("id")), _semantic_slug(display.get("label")), _semantic_slug(display.get("name"))}
+    candidates.update(_identifier_slug_candidates(display.get("identifiers")))
+    candidates.update(_identifier_slug_candidates(device.get("identifiers")))
+    label = _text_value(display.get("label") or display.get("name"))
+    for part in re.split(r"\s+[•·-]\s+|[()]", label):
+        candidates.add(_semantic_slug(part))
+    return {candidate for candidate in candidates if len(candidate) >= 3}
+
+
+def _infer_deleted_entity_device_id(entity, candidates_by_device_id):
+    object_id = _entity_object_id(entity)
+    if not object_id:
+        return ""
+    matches = []
+    for device_id, candidates in candidates_by_device_id.items():
+        best = ""
+        for candidate in candidates:
+            if object_id == candidate or object_id.startswith(f"{candidate}_"):
+                if len(candidate) > len(best):
+                    best = candidate
+        if best:
+            matches.append((device_id, best))
+    if not matches:
+        return ""
+    longest = max(len(match[1]) for match in matches)
+    winners = [device_id for device_id, candidate in matches if len(candidate) == longest]
+    unique = sorted(set(winners))
+    return unique[0] if len(unique) == 1 else ""
+
+
 def build_deleted_devices_tree_from_data(
     device_data,
     entity_data=None,
@@ -1291,9 +1352,19 @@ def build_deleted_devices_tree_from_data(
     enrichment_result = sanitize_deleted_devices_enrichment(enrichment)
     enrichment_by_id = enrichment_result["by_id"]
     warnings = list(enrichment_result["warnings"])
+    device_displays = {}
+    candidates_by_device_id = {}
+    for device in deleted:
+        device_id = _text_value(device.get("id"))
+        display = _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
+        device_displays[device_id] = display
+        candidates_by_device_id[device_id] = _device_entity_prefix_candidates(device, display)
     deleted_entity_groups = {}
     for entity in deleted_entities_list:
-        deleted_entity_groups.setdefault(_text_value(entity.get("device_id")), []).append(entity)
+        device_id = _text_value(entity.get("device_id"))
+        if not device_id:
+            device_id = _infer_deleted_entity_device_id(entity, candidates_by_device_id)
+        deleted_entity_groups.setdefault(device_id, []).append(entity)
     active_entity_groups = {}
     for entity in active_entities:
         active_entity_groups.setdefault(_text_value(entity.get("device_id")), []).append(entity)
@@ -1304,7 +1375,7 @@ def build_deleted_devices_tree_from_data(
         deleted_device_ids.add(device_id)
         related_deleted = deleted_entity_groups.pop(device_id, [])
         related_active = active_entity_groups.get(device_id, [])
-        display = _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
+        display = device_displays.get(device_id) or _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
         device_groups.append(
             {
                 "device": display,

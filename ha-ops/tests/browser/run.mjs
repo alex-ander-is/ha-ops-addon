@@ -1193,6 +1193,10 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
       legacyTableCount: section.querySelectorAll(".deleted-devices-table").length,
       clientWidth: document.documentElement.clientWidth,
       longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
+      orphanGroupCount: section.querySelectorAll(".deleted-devices-tree vaadin-details.orphan-entities").length,
+      kitchenPresenceGrouped: groups.some((group) =>
+        group.text.includes("Kitchen Presence") && group.text.includes("binary_sensor.kitchen_presence_occupancy")
+      ),
     };
   });
   assert(metrics.tree, `deleted-device semantic tree missing: ${JSON.stringify(metrics)}`);
@@ -1201,6 +1205,8 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
   assert(metrics.semanticSummaryCount === metrics.semanticDetailsCount, `deleted-device Vaadin Details summaries missing: ${JSON.stringify(metrics)}`);
   assert(metrics.articleGroupCount === 0, `deleted-device semantic tree used custom article groups: ${JSON.stringify(metrics)}`);
   assert(metrics.legacyTableCount === 0, `deleted-device legacy table was rendered: ${JSON.stringify(metrics)}`);
+  assert(metrics.orphanGroupCount === 0, `deleted-device semantic tree rendered inferred entities as orphan groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.kitchenPresenceGrouped, `kitchen presence entity was not grouped under its device: ${JSON.stringify(metrics)}`);
   const overflowing = (metrics.groups || []).filter((group) => group.left < -2 || group.right > metrics.clientWidth + 2);
   assert(overflowing.length === 0, `deleted-device semantic tree overflowed horizontally: ${JSON.stringify({ metrics, overflowing })}`);
   assert(metrics.longEntity, `long deleted-device entity was not rendered: ${JSON.stringify(metrics)}`);
