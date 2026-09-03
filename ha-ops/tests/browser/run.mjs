@@ -1029,6 +1029,10 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
   await assertDeletedDevicesSemanticTreeLayout(page);
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview");
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await assertDeletedDevicesSemanticTreeMobileLayout(page);
+  await saveScreenshot(page, artifactsDir, "mobile-deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
+  await page.setViewportSize({ width: 1600, height: 1000 });
   await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: "Remove Deleted Entries" }).waitFor({ timeout: 5000 });
   assert((await page.getByTestId("deleted-devices-preview-section").getByText("Approve Deletion").count()) === 0, "legacy deleted devices approval label was rendered");
 
@@ -1197,6 +1201,21 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
       clientWidth: document.documentElement.clientWidth,
       longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
       orphanGroupCount: section.querySelectorAll(".deleted-devices-tree vaadin-details.orphan-entities").length,
+      entitiesToRemoveCount: [...section.querySelectorAll(".deleted-entity-label")].filter((element) =>
+        element.textContent.trim() === "Entities to remove"
+      ).length,
+      activeZeroVisible: section.textContent.includes("0 active entities"),
+      probableGroupVisible: section.textContent.includes("Probable group"),
+      rightIdentifiers: [...section.querySelectorAll(".deleted-device-summary-identifier")].map((element) => {
+        const rect = element.getBoundingClientRect();
+        const summaryRect = element.closest("vaadin-details-summary").getBoundingClientRect();
+        return {
+          text: element.textContent.trim(),
+          rightGap: Math.round(summaryRect.right - rect.right),
+          left: Math.round(rect.left),
+          summaryLeft: Math.round(summaryRect.left),
+        };
+      }),
       zigbee2mqttDisplay: groups.some((group) =>
         group.text.includes("Zigbee2MQTT") && group.text.includes("App / Supervisor") && group.text.includes("binary_sensor.zigbee2mqtt_running")
       ),
@@ -1220,6 +1239,10 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
   assert(metrics.articleGroupCount === 0, `deleted-device semantic tree used custom article groups: ${JSON.stringify(metrics)}`);
   assert(metrics.legacyTableCount === 0, `deleted-device legacy table was rendered: ${JSON.stringify(metrics)}`);
   assert(metrics.orphanGroupCount === 0, `deleted-device semantic tree rendered inferred entities as orphan groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.entitiesToRemoveCount >= 4, `deleted-device tree did not use Entities to remove labels: ${JSON.stringify(metrics)}`);
+  assert(!metrics.activeZeroVisible, `deleted-device tree rendered noisy zero active count: ${JSON.stringify(metrics)}`);
+  assert(!metrics.probableGroupVisible, `deleted-device tree rendered unnecessary probable group suffix: ${JSON.stringify(metrics)}`);
+  assert(metrics.rightIdentifiers.some((identifier) => identifier.text.includes("hassio:61804cda_zigbee2mqtt") && identifier.rightGap <= 24), `hassio identifier was not aligned to the right edge: ${JSON.stringify(metrics)}`);
   assert(metrics.zigbee2mqttDisplay, `Zigbee2MQTT hassio device was not rendered as a readable app group: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenPresenceGrouped, `kitchen presence entity was not grouped under its device: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenRcGrouped, `kitchen RC entities were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
@@ -1231,6 +1254,49 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
     metrics.longEntity.textHeight <= metrics.longEntity.lineHeight * 1.4,
     `long deleted-device entity label wrapped: ${JSON.stringify(metrics.longEntity)}`,
   );
+}
+
+async function assertDeletedDevicesSemanticTreeMobileLayout(page) {
+  const metrics = await page.getByTestId("deleted-devices-preview-section").evaluate((section) => {
+    const doc = document.documentElement;
+    const identifiers = [...section.querySelectorAll(".deleted-device-summary-identifier")].map((element) => {
+      const rect = element.getBoundingClientRect();
+      const summaryRect = element.closest("vaadin-details-summary").getBoundingClientRect();
+      return {
+        text: element.textContent.trim(),
+        left: Math.round(rect.left),
+        right: Math.round(rect.right),
+        summaryLeft: Math.round(summaryRect.left),
+        summaryRight: Math.round(summaryRect.right),
+      };
+    });
+    const overflowingItems = [...section.querySelectorAll(".deleted-device-group li")].map((element) => {
+      const rect = element.getBoundingClientRect();
+      const groupRect = element.closest(".deleted-device-group").getBoundingClientRect();
+      return {
+        text: element.textContent.trim(),
+        right: Math.round(rect.right),
+        groupRight: Math.round(groupRect.right),
+      };
+    }).filter((item) => item.right > item.groupRight + 2);
+    return {
+      clientWidth: doc.clientWidth,
+      scrollWidth: doc.scrollWidth,
+      identifiers,
+      overflowingItems,
+      activeZeroVisible: section.textContent.includes("0 active entities"),
+      entitiesToRemoveVisible: section.textContent.includes("Entities to remove"),
+    };
+  });
+  assert(metrics.scrollWidth <= metrics.clientWidth + 2, `mobile deleted-device tree overflowed viewport: ${JSON.stringify(metrics)}`);
+  assert(metrics.entitiesToRemoveVisible, `mobile deleted-device tree lost Entities to remove labels: ${JSON.stringify(metrics)}`);
+  assert(!metrics.activeZeroVisible, `mobile deleted-device tree rendered noisy zero active count: ${JSON.stringify(metrics)}`);
+  assert(metrics.overflowingItems.length === 0, `mobile deleted-device tree clipped entity labels: ${JSON.stringify(metrics)}`);
+  assert(metrics.identifiers.some((identifier) =>
+    identifier.text.includes("hassio:61804cda_zigbee2mqtt") &&
+    identifier.left >= identifier.summaryLeft - 2 &&
+    identifier.right <= identifier.summaryRight + 2
+  ), `mobile hassio identifier did not wrap within summary: ${JSON.stringify(metrics)}`);
 }
 
 async function runHttpFallbackFlow(page, baseUrl, posts, flow) {

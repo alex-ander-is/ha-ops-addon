@@ -1711,6 +1711,11 @@ class ServerTests(unittest.TestCase):
         self.assertIn("No retained devices candidates found.", page)
         self.assertIn("deletedDevicesAndEntitiesLabel", page)
         self.assertIn("deleted devices and entities", page)
+        self.assertIn("entitiesToRemoveLabel", page)
+        self.assertIn("Entities to remove", page)
+        self.assertIn("deletedDeviceGroupRemoveCount", page)
+        self.assertIn("entities to remove", page)
+        self.assertIn("deletedDeviceGroupActiveCount", page)
 
     def test_reactive_cleanup_preview_source_uses_text_catalog(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
@@ -1736,6 +1741,9 @@ class ServerTests(unittest.TestCase):
             "TEXT.deletedDevicesAndEntitiesLabel",
             "TEXT.deletedEntitiesLabel",
             "TEXT.deletedDevicesLabel",
+            "TEXT.entitiesToRemoveLabel",
+            "TEXT.deletedDeviceGroupRemoveCount",
+            "TEXT.deletedDeviceGroupActiveCount",
         ):
             self.assertIn(key, script)
         self.assertNotIn("Stop Home Assistant Core and remove {entries}?", script)
@@ -15613,12 +15621,15 @@ devices:
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["manufacturer"], "App")
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["model"], "Supervisor")
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["deleted_entities"][0]["entity_id"], "binary_sensor.zigbee2mqtt_running")
+            self.assertEqual(groups_by_id["kitchen_presence"]["device"]["label"], "Kitchen Presence")
             self.assertEqual(groups_by_id["kitchen_presence"]["deleted_entities"][0]["entity_id"], "binary_sensor.kitchen_presence_occupancy")
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["area"], "Kitchen")
+            self.assertEqual(groups_by_id["kitchen_rc"]["device"]["model"], "")
             self.assertEqual(
                 [entity["entity_id"] for entity in groups_by_id["kitchen_rc"]["deleted_entities"]],
                 ["sensor.kitchen_rc_battery", "sensor.kitchen_rc_linkquality"],
             )
+            self.assertEqual(groups_by_id["tze204_qasjif9e_ts0601"]["device"]["model"], "")
             self.assertEqual(
                 [entity["entity_id"] for entity in groups_by_id["tze204_qasjif9e_ts0601"]["deleted_entities"]],
                 ["sensor.tze204_qasjif9e_ts0601_rssi", "sensor.tze204_qasjif9e_ts0601_lqi"],
@@ -15676,6 +15687,8 @@ devices:
             self.assertIn("Advanced raw diff", page)
             self.assertIn("<vaadin-details class='deleted-device-group' opened>", page)
             self.assertIn("<vaadin-details-summary slot='summary'>", page)
+            self.assertIn("Entities to remove", page)
+            self.assertNotIn("0 active entities", page)
             self.assertNotIn("<article class='deleted-device-group'", page)
             self.assertNotIn("deleted devices before cleanup", page)
             self.assertNotIn("deleted devices now", page)

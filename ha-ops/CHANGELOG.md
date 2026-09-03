@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.33
+
+- Tighten deleted-registry cleanup cards by moving identifiers into the card header, hiding empty active-entity counts, using `Entities to remove` copy, and wrapping long entity IDs on mobile.
+
 ## 0.10.32
 
 - Show deleted-registry cleanup as readable device/probable groups, label Hass.io App tombstones such as Zigbee2MQTT by name, and replace the legacy approval button copy with `Remove Deleted Entries`.

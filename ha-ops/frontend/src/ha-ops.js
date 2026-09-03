@@ -748,9 +748,15 @@ function renderDeletedDevicesTree(tree) {
         const counts = group.counts || {};
         const model = [device.manufacturer, device.model, device.model_id].filter(Boolean).join(" / ");
         const summary = [device.label || device.id || TEXT.deletedDevicesLabel, model, device.area].filter(Boolean).join(" · ");
-        const meta = (TEXT.deletedDeviceGroupCounts || "{deleted} deleted, {active} active")
-          .replace("{deleted}", String(Number(counts.deleted_entities || 0)))
-          .replace("{active}", String(Number(counts.active_entities || 0)));
+        const deletedCount = Number(counts.deleted_entities || 0);
+        const activeCount = Number(counts.active_entities || 0);
+        const metaParts = [
+          (TEXT.deletedDeviceGroupRemoveCount || "{deleted} entities to remove").replace("{deleted}", String(deletedCount)),
+        ];
+        if (activeCount > 0) {
+          metaParts.push((TEXT.deletedDeviceGroupActiveCount || "{active} active entities").replace("{active}", String(activeCount)));
+        }
+        const meta = metaParts.join(", ");
         const source = [String(device.source_commit || "").slice(0, 12), device.source_path].filter(Boolean).join(" ");
         const identifiers = (device.identifiers || []).slice(0, 3).map((identifier) =>
           Array.isArray(identifier) ? identifier.join(":") : String(identifier)
@@ -758,11 +764,16 @@ function renderDeletedDevicesTree(tree) {
         return html`
           <vaadin-details class="deleted-device-group" opened>
             <vaadin-details-summary slot="summary">
-              <span class="deleted-device-summary-main">${summary}</span>
-              <span class="deleted-device-summary-meta">${meta}</span>
+              <div class="deleted-device-summary-row">
+                <span class="deleted-device-summary-left">
+                  <span class="deleted-device-summary-main">${summary}</span>
+                  <span class="deleted-device-summary-meta">${meta}</span>
+                </span>
+                ${identifiers ? html`<code class="deleted-device-summary-identifier">${identifiers}</code>` : nothing}
+              </div>
             </vaadin-details-summary>
-            ${source || identifiers ? html`<p><small>${[source, identifiers].filter(Boolean).join(" · ")}</small></p>` : nothing}
-            ${renderEntityList(TEXT.deletedEntitiesLabel, group.deleted_entities || [])}
+            ${source ? html`<p><small>${source}</small></p>` : nothing}
+            ${renderEntityList(TEXT.entitiesToRemoveLabel || "Entities to remove", group.deleted_entities || [])}
             ${renderEntityList(TEXT.activeEntitiesLabel || "Active entities", group.active_entities || [])}
           </vaadin-details>
         `;
@@ -772,7 +783,7 @@ function renderDeletedDevicesTree(tree) {
           <vaadin-details-summary slot="summary">
             <span class="deleted-device-summary-main">${group.label || TEXT.deletedEntitiesLabel}</span>
           </vaadin-details-summary>
-          ${renderEntityList(TEXT.deletedEntitiesLabel, group.deleted_entities || [])}
+          ${renderEntityList(TEXT.entitiesToRemoveLabel || "Entities to remove", group.deleted_entities || [])}
         </vaadin-details>
       `)}
     </div>
@@ -895,6 +906,61 @@ class HaOpsApp extends LitElement {
     vaadin-confirm-dialog.version-mismatch vaadin-button.version-mismatch-ack:focus-visible {
       outline: 2px solid #0969da;
       outline-offset: 2px;
+    }
+    .deleted-device-summary-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+      width: 100%;
+    }
+    vaadin-details-summary::part(content) {
+      width: 100%;
+      min-width: 0;
+    }
+    .deleted-device-summary-left {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+    .deleted-device-summary-main {
+      display: block;
+      font-size: 1rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }
+    .deleted-device-summary-meta {
+      display: block;
+      color: var(--ha-ops-muted-text, #57606a);
+      font-size: .9rem;
+      font-weight: 400;
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }
+    .deleted-device-summary-identifier {
+      flex: 0 1 auto;
+      max-width: 48%;
+      color: var(--ha-ops-muted-text, #57606a);
+      font-size: .85rem;
+      font-weight: 400;
+      overflow-wrap: anywhere;
+      text-align: right;
+      white-space: normal;
+    }
+    .deleted-device-group li {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    @media (max-width: 640px) {
+      .deleted-device-summary-row {
+        flex-wrap: wrap;
+      }
+      .deleted-device-summary-identifier {
+        flex-basis: 100%;
+        max-width: 100%;
+        text-align: left;
+      }
     }
   `;
 

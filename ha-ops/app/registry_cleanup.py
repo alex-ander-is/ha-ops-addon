@@ -1238,6 +1238,16 @@ def _humanize_semantic_slug(value):
     return " ".join(special.get(part, part.upper() if len(part) <= 3 and part.isalpha() else part.capitalize()) for part in slug.split("_"))
 
 
+def _display_label_from_text(value):
+    text = _text_value(value)
+    if not text:
+        return ""
+    slug = _semantic_slug(text)
+    if slug and text == slug and "_" in text:
+        return _humanize_semantic_slug(text)
+    return text
+
+
 def _hassio_addon_display_from_identifiers(identifiers):
     for identifier in identifiers or []:
         if not isinstance(identifier, list) or len(identifier) < 2:
@@ -1312,9 +1322,9 @@ def _device_display(device, areas, row_by_id=None, enrichment_by_id=None):
     name = _text_value(
         enrichment.get("recovered_name")
         or row.get("recovered_name")
-        or normalize_recovered_name(device.get("name_by_user") or device.get("name"))
-        or device.get("name_by_user")
-        or device.get("name")
+        or _display_label_from_text(normalize_recovered_name(device.get("name_by_user") or device.get("name")))
+        or _display_label_from_text(device.get("name_by_user"))
+        or _display_label_from_text(device.get("name"))
         or hassio_display.get("label")
         or device_id
     )
@@ -1398,7 +1408,7 @@ def _synthetic_deleted_entity_groups(entities):
                     "label": _humanize_semantic_slug(key),
                     "name": _humanize_semantic_slug(key),
                     "manufacturer": "",
-                    "model": "Probable group",
+                    "model": "",
                     "model_id": "",
                     "area": "",
                     "identifiers": [],

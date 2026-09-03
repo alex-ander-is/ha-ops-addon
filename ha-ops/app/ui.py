@@ -188,6 +188,7 @@ def render_deleted_devices_tree(tree):
     parts.append("<div class='deleted-devices-tree'>")
     for group in groups:
         device = group.get("device") or {}
+        identifier = ", ".join(":".join(map(str, item)) if isinstance(item, list) else str(item) for item in (device.get("identifiers") or [])[:3])
         summary_bits = [
             device.get("label") or device.get("id") or _("label.deleted_devices"),
             " / ".join(item for item in [device.get("manufacturer"), device.get("model"), device.get("model_id")] if item),
@@ -195,22 +196,31 @@ def render_deleted_devices_tree(tree):
         ]
         summary = " · ".join(html.escape(str(item)) for item in summary_bits if item)
         counts = group.get("counts") or {}
-        meta = _("text.deleted_device_group_counts", deleted=count_nonnegative(counts.get("deleted_entities")), active=count_nonnegative(counts.get("active_entities")))
+        deleted_count = count_nonnegative(counts.get("deleted_entities"))
+        active_count = count_nonnegative(counts.get("active_entities"))
+        meta_parts = [_("text.deleted_device_group_remove_count", deleted=deleted_count)]
+        if active_count:
+            meta_parts.append(_("text.deleted_device_group_active_count", active=active_count))
+        meta = ", ".join(meta_parts)
+        identifier_html = f"<code class='deleted-device-summary-identifier'>{html.escape(identifier)}</code>" if identifier else ""
         parts.append("<vaadin-details class='deleted-device-group' opened>")
         parts.append(
             "<vaadin-details-summary slot='summary'>"
+            "<div class='deleted-device-summary-row'>"
+            "<span class='deleted-device-summary-left'>"
             f"<span class='deleted-device-summary-main'>{summary}</span>"
             f"<span class='deleted-device-summary-meta'>{html.escape(meta)}</span>"
+            "</span>"
+            f"{identifier_html}"
+            "</div>"
             "</vaadin-details-summary>"
         )
         details = []
         if device.get("source_commit") or device.get("source_path"):
             details.append(" ".join(item for item in [str(device.get("source_commit") or "")[:12], device.get("source_path") or ""] if item))
-        if device.get("identifiers"):
-            details.append(", ".join(":".join(map(str, item)) if isinstance(item, list) else str(item) for item in device.get("identifiers")[:3]))
         if details:
             parts.append("<p><small>" + html.escape(" · ".join(details)) + "</small></p>")
-        parts.extend(render_entity_list(_("label.deleted_entities"), group.get("deleted_entities") or []))
+        parts.extend(render_entity_list(_("label.entities_to_remove"), group.get("deleted_entities") or []))
         parts.extend(render_entity_list(_("label.active_entities"), group.get("active_entities") or []))
         parts.append("</vaadin-details>")
     for group in orphans:
@@ -221,7 +231,7 @@ def render_deleted_devices_tree(tree):
             f"<span class='deleted-device-summary-main'>{html.escape(str(label))}</span>"
             "</vaadin-details-summary>"
         )
-        parts.extend(render_entity_list(_("label.deleted_entities"), group.get("deleted_entities") or []))
+        parts.extend(render_entity_list(_("label.entities_to_remove"), group.get("deleted_entities") or []))
         parts.append("</vaadin-details>")
     parts.append("</div>")
     return "".join(parts)
@@ -1374,6 +1384,22 @@ def render_page(data):
     .deleted-device-group vaadin-details-summary {{
       width: 100%;
     }}
+    .deleted-device-group vaadin-details-summary::part(content) {{
+      width: 100%;
+      min-width: 0;
+    }}
+    .deleted-device-summary-row {{
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      min-width: 0;
+      width: 100%;
+    }}
+    .deleted-device-summary-left {{
+      min-width: 0;
+      flex: 1 1 auto;
+    }}
     .deleted-device-summary-main {{
       display: block;
       font-size: 1rem;
@@ -1388,13 +1414,38 @@ def render_page(data):
       margin-top: 2px;
       overflow-wrap: anywhere;
     }}
+    .deleted-device-summary-identifier {{
+      flex: 0 1 auto;
+      max-width: 48%;
+      color: var(--ha-muted);
+      font-size: .85rem;
+      font-weight: 400;
+      overflow-wrap: anywhere;
+      text-align: right;
+      white-space: normal;
+    }}
     .deleted-device-group ul {{
       margin: 4px 0 0;
       padding-left: 1.25rem;
     }}
+    .deleted-device-group li {{
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }}
     .deleted-entity-label {{
       margin: 10px 0 0;
       font-weight: 600;
+    }}
+    @media (max-width: 640px) {{
+      .deleted-device-summary-row {{
+        flex-wrap: wrap;
+      }}
+      .deleted-device-summary-identifier {{
+        flex-basis: 100%;
+        max-width: 100%;
+        text-align: left;
+      }}
     }}
     .pending-raw-diff {{
       display: block;
@@ -1753,6 +1804,7 @@ def render_page(data):
       deletedEntitiesLabel: {js_t('label.deleted_entities')},
       deletedDevicesAndEntitiesLabel: {js_t('label.deleted_devices_and_entities')},
       activeEntitiesLabel: {js_t('label.active_entities')},
+      entitiesToRemoveLabel: {js_t('label.entities_to_remove')},
       deletedDevicesPendingNotice: {js_t('notice.deleted_devices_pending')},
       pendingDeletedDevicesMessage: {js_t('message.pending_deleted_devices')},
       pendingDeletedDevicesRemoved: {js_t('text.cleanup_removed')},
@@ -1760,7 +1812,8 @@ def render_page(data):
       pendingDiffUnavailable: {js_t('error.pending_diff_unavailable')},
       advancedRawDiff: {js_t('heading.advanced_raw_diff')},
       rawDiffLoadsOnExpand: {js_t('text.raw_diff_loads_on_expand')},
-      deletedDeviceGroupCounts: {js_t('text.deleted_device_group_counts')},
+      deletedDeviceGroupActiveCount: {js_t('text.deleted_device_group_active_count')},
+      deletedDeviceGroupRemoveCount: {js_t('text.deleted_device_group_remove_count')},
       conflictDiffTitle: {js_t('title.conflict_diff')},
       statusDone: {js_t('status.done')},
       statusPendingDecision: {js_t('status.pending_decision')},
