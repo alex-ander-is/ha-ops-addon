@@ -255,10 +255,18 @@ class AppContext:
                         "deleted_devices_applied_fingerprint": None,
                         "deleted_devices_pending_device_count": 0,
                         "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_pending_tree": None,
+                        "deleted_devices_pending_tree_error": "",
                         "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
                 )
             if phase == registry_cleanup.ROLLBACK_PHASE_PENDING:
+                pending_tree = None
+                pending_tree_error = ""
+                try:
+                    pending_tree = self.deleted_devices_pending_tree(path)
+                except Exception as exc:
+                    pending_tree_error = str(exc)
                 return self.write_state(
                     {
                         "deleted_devices_pending_confirmation": True,
@@ -267,6 +275,11 @@ class AppContext:
                         "deleted_devices_rollback_fingerprint": manifest.get("fingerprint"),
                         "deleted_devices_pending_device_count": manifest.get("device_count", 0),
                         "deleted_devices_pending_entity_count": manifest.get("entity_count", 0),
+                        "deleted_devices_pending_tree": pending_tree,
+                        "deleted_devices_pending_tree_error": pending_tree_error,
+                        "last_deleted_devices_tree": None,
+                        "last_deleted_devices_tree_error": "",
+                        "last_deleted_devices_enrichment": None,
                         "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
                 )
@@ -328,6 +341,9 @@ class AppContext:
                     "last_details": details,
                     "last_deleted_devices_preview": preview["summary"],
                     "last_deleted_devices_rows": preview["rows"],
+                    "last_deleted_devices_tree": preview.get("tree"),
+                    "last_deleted_devices_tree_error": "",
+                    "last_deleted_devices_enrichment": preview.get("enrichment"),
                     "last_deleted_devices_count": preview["count"],
                     "last_deleted_devices_device_count": preview.get("device_count", 0),
                     "last_deleted_devices_entity_count": preview.get("entity_count", 0),
@@ -340,6 +356,8 @@ class AppContext:
                     "deleted_devices_applied_fingerprint": None,
                     "deleted_devices_pending_device_count": 0,
                     "deleted_devices_pending_entity_count": 0,
+                    "deleted_devices_pending_tree": None,
+                    "deleted_devices_pending_tree_error": "",
                     "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                 }
             )
@@ -369,6 +387,9 @@ class AppContext:
                         {
                             "last_deleted_devices_preview": preview["summary"],
                             "last_deleted_devices_rows": preview["rows"],
+                            "last_deleted_devices_tree": preview.get("tree"),
+                            "last_deleted_devices_tree_error": "",
+                            "last_deleted_devices_enrichment": preview.get("enrichment"),
                             "last_deleted_devices_count": preview["count"],
                             "last_deleted_devices_device_count": preview.get("device_count", 0),
                             "last_deleted_devices_entity_count": preview.get("entity_count", 0),
@@ -889,8 +910,8 @@ class AppContext:
     def clear_deleted_devices(self, expected_fingerprint):
         return registry_cleanup.clear_deleted_devices(self.config_dir, expected_fingerprint)
 
-    def create_deleted_devices_rollback(self, expected_fingerprint):
-        return registry_cleanup.create_deleted_devices_rollback(self.config_dir, self.work_dir, expected_fingerprint)
+    def create_deleted_devices_rollback(self, expected_fingerprint, enrichment=None):
+        return registry_cleanup.create_deleted_devices_rollback(self.config_dir, self.work_dir, expected_fingerprint, enrichment)
 
     def set_deleted_devices_rollback_phase(self, rollback_path, phase):
         return registry_cleanup.rollback_manifest_phase(rollback_path, phase)
@@ -900,6 +921,9 @@ class AppContext:
 
     def deleted_devices_pending_diff(self, rollback_path):
         return registry_cleanup.deleted_devices_pending_diff(self.config_dir, rollback_path)
+
+    def deleted_devices_pending_tree(self, rollback_path):
+        return registry_cleanup.build_deleted_devices_pending_tree(self.config_dir, rollback_path)
 
     def restore_deleted_devices_rollback(self, rollback_path):
         return registry_cleanup.restore_deleted_devices_rollback(self.config_dir, rollback_path)
@@ -1055,6 +1079,7 @@ class AppContext:
             create_release_snapshot=self.create_release_snapshot,
             create_deleted_devices_rollback=self.create_deleted_devices_rollback,
             deleted_devices_cleanup_status=self.deleted_devices_cleanup_status,
+            deleted_devices_pending_tree=self.deleted_devices_pending_tree,
             device_registry_fingerprint=self.device_registry_fingerprint,
             discard_deleted_devices_rollback=self.discard_deleted_devices_rollback,
             enforce_apply_limits=self.enforce_apply_limits,

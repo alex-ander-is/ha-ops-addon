@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
 SERVER_PATH = ROOT / "app" / "server.py"
 I18N_PATH = ROOT / "app" / "i18n.py"
 I18N_GUARD_PATHS = [
@@ -188,6 +189,25 @@ class ServerTests(unittest.TestCase):
                             add_offender(path, source, message_arg, "add_detail", offenders)
         if offenders:
             self.fail("User-facing messages bypass the translation catalog:\n" + "\n".join(offenders))
+
+    def test_generated_frontend_bundle_has_narrow_whitespace_check_exception(self):
+        bundle_attr = subprocess.run(
+            ["git", "check-attr", "whitespace", "--", "ha-ops/app/static/ha-ops.js"],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        source_attr = subprocess.run(
+            ["git", "check-attr", "whitespace", "--", "ha-ops/frontend/src/ha-ops.js"],
+            cwd=REPO_ROOT,
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+        self.assertEqual(bundle_attr, "ha-ops/app/static/ha-ops.js: whitespace: unset")
+        self.assertEqual(source_attr, "ha-ops/frontend/src/ha-ops.js: whitespace: unspecified")
 
     def test_f013_runtime_and_preview_messages_use_translation_catalog(self):
         guarded = {
@@ -1071,11 +1091,11 @@ class ServerTests(unittest.TestCase):
         server.RELEASES_DIR = server.DATA_DIR / "releases"
         server.CONFIG_DIR = root / "homeassistant"
         server.ADDON_CONFIGS_DIR = root / "addon_configs"
-        server.DATA_DIR.mkdir(parents=True)
-        server.WORK_DIR.mkdir(parents=True)
-        server.RELEASES_DIR.mkdir(parents=True)
-        server.CONFIG_DIR.mkdir(parents=True)
-        server.ADDON_CONFIGS_DIR.mkdir(parents=True)
+        server.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        server.WORK_DIR.mkdir(parents=True, exist_ok=True)
+        server.RELEASES_DIR.mkdir(parents=True, exist_ok=True)
+        server.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        server.ADDON_CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
         server.log = lambda message: None
 
     def post_json(self, server, path, body=b""):
@@ -1630,7 +1650,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("this.state = normalizePendingDeletedDevicesState(structuredClone(frame.state));", script)
         self.assertIn("this.state = normalizePendingDeletedDevicesState({ ...this.state, ...(frame.patch || {}) });", script)
         self.assertIn('deletedEntriesLabel(this.state, "deleted_devices_pending")', script)
-        self.assertIn("highlightedDiffLines(pendingDiff)", script)
+        self.assertIn("class HaOpsPendingRawDiff", script)
+        self.assertIn('fetch("pending-deleted-devices-diff-get")', script)
+        self.assertIn("renderDeletedDevicesTree(pendingTree)", script)
+        self.assertNotIn("highlightedDiffLines(pendingDiff)", script)
         self.assertNotIn("<ul><li>${removedText}</li></ul>", script)
         self.assertIn("const PENDING_FENCED_ACTIONS = new Set([", script)
         self.assertIn('"disk_usage"', script)
@@ -1663,7 +1686,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("confirmChanges", page)
         self.assertIn("Confirm Changes", page)
         self.assertIn("pendingDeletedDevicesTitle", page)
-        self.assertIn("Pending {entries} Diff", page)
+        self.assertIn("Pending {entries} cleanup", page)
         self.assertIn("pendingDeletedDevicesMessage", page)
         self.assertIn("Confirm or revert the pending deleted devices cleanup", page)
         self.assertIn("pendingDiffUnavailable", page)
@@ -13964,22 +13987,12 @@ class ServerTests(unittest.TestCase):
                 ],
             )
             page = server.render_page()
-            table_start = page.index("<div class='deleted-devices-table'>")
-            table = page[table_start : page.index("</section>", table_start)]
-            self.assertIn("<div class='deleted-device-header'>", table)
-            self.assertNotIn("deleted-device-line", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area'>Area</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id'>ID</div>", table)
-            self.assertNotIn("<table class='deleted-devices-table'>", table)
-            self.assertNotIn("<colgroup>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
-            self.assertIn("sensor.bathroom_presence_illuminance", table)
-            self.assertIn("Illuminance", table)
-            self.assertIn("deleted-1", table)
-            self.assertIn("Approve Deletion", table)
-            self.assertNotIn("identifiers=mqtt:old", table)
+            self.assertIn("deleted-devices-tree", page)
+            self.assertIn("Bathroom Presence", page)
+            self.assertIn("sensor.bathroom_presence_illuminance", page)
+            self.assertNotIn("<table class='deleted-devices-table'>", page)
+            self.assertIn("Approve Deletion", page)
+            self.assertNotIn("identifiers=mqtt:old", page)
 
     def test_deleted_devices_table_keeps_grid_columns_aligned(self):
         server = load_server()
@@ -15464,7 +15477,7 @@ devices:
             reloaded_server.log = lambda message: None
             reloaded_state = reloaded_server.read_state()
             self.assertEqual(reloaded_state["deleted_devices_pending_entity_count"], 1)
-            self.assertIn("Pending deleted entities Diff", reloaded_server.render_page())
+            self.assertIn("Pending deleted entities cleanup", reloaded_server.render_page())
 
             self.assertTrue(server.run_deleted_devices_confirm_job())
             confirmed = server.read_state()
@@ -15501,6 +15514,183 @@ devices:
             self.assertEqual(state["last_deleted_devices_count"], 2)
             self.assertIn("Old Button", state["last_deleted_devices_preview"])
             self.assertIn("sensor.philips_1_lqi", state["last_deleted_devices_preview"])
+
+    def test_deleted_devices_preview_builds_semantic_tree_with_context_groups(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": [{"id": "kitchen", "name": "Kitchen"}]}}))
+            (storage / "core.device_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "devices": [{"id": "live-device"}],
+                            "deleted_devices": [
+                                {"id": "device-1", "name": "Old Button", "manufacturer": "Example", "model": "Button", "area_id": "kitchen"}
+                            ],
+                        }
+                    }
+                )
+            )
+            (storage / "core.entity_registry").write_text(
+                json.dumps(
+                    {
+                        "data": {
+                            "entities": [{"id": "active-1", "entity_id": "sensor.old_battery", "device_id": "device-1"}],
+                            "deleted_entities": [
+                                {"id": "entity-1", "entity_id": "sensor.old_action", "device_id": "device-1"},
+                                {"id": "entity-2", "entity_id": "sensor.orphan"},
+                            ],
+                        }
+                    }
+                )
+            )
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            tree = server.read_state()["last_deleted_devices_tree"]
+
+            self.assertEqual(tree["device_groups"][0]["device"]["label"], "Old Button")
+            self.assertEqual(tree["device_groups"][0]["device"]["manufacturer"], "Example")
+            self.assertEqual(tree["device_groups"][0]["device"]["area"], "Kitchen")
+            self.assertEqual(tree["device_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.old_action")
+            self.assertEqual(tree["device_groups"][0]["active_entities"][0]["entity_id"], "sensor.old_battery")
+            self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.orphan")
+
+    def test_deleted_devices_preview_rejects_non_array_consumed_registry_paths(self):
+        cases = [
+            ("core.device_registry", {"data": {"devices": {}, "deleted_devices": []}}, "data.devices must be an array"),
+            ("core.device_registry", {"data": {"devices": [], "deleted_devices": {}}}, "data.deleted_devices must be an array"),
+            ("core.entity_registry", {"data": {"entities": {}, "deleted_entities": []}}, "data.entities must be an array"),
+            ("core.entity_registry", {"data": {"entities": [], "deleted_entities": {}}}, "data.deleted_entities must be an array"),
+            ("core.area_registry", {"data": {"areas": {}}}, "data.areas must be an array"),
+        ]
+        for registry_name, bad_payload, expected in cases:
+            with self.subTest(registry_name=registry_name, expected=expected):
+                server = load_server()
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    storage = server.CONFIG_DIR / ".storage"
+                    storage.mkdir()
+                    (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+                    (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": [], "deleted_entities": []}}))
+                    (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
+                    (storage / registry_name).write_text(json.dumps(bad_payload))
+
+                    self.assertFalse(server.run_deleted_devices_preview_job())
+                    state = server.read_state()
+
+                    self.assertIn(expected, state["last_message"])
+                    self.assertIsNone(state["last_deleted_devices_tree"])
+                    self.assertIsNone(state["last_deleted_devices_fingerprint"])
+
+    def test_server_pending_deleted_devices_render_uses_semantic_tree_not_raw_diff(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Old Button"}]}}))
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            page = server.render_page()
+
+            self.assertIn("Pending deleted devices cleanup", page)
+            self.assertNotIn("Pending deleted devices Diff", page)
+            self.assertIn("Old Button", page)
+            self.assertIn("Advanced raw diff", page)
+            self.assertIn("<vaadin-details class='deleted-device-group' opened>", page)
+            self.assertIn("<vaadin-details-summary slot='summary'>", page)
+            self.assertNotIn("<article class='deleted-device-group'", page)
+            self.assertNotIn("deleted devices before cleanup", page)
+            self.assertNotIn("deleted devices now", page)
+            self.assertNotIn("Confirm Changes accepts this diff", page)
+
+    def test_pending_replay_uses_manifest_enrichment_not_stale_preview_rows(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Registry Label"}]}}))
+            fingerprint = server._CTX.device_registry_fingerprint()
+            enrichment = {
+                "schema": 1,
+                "devices": [
+                    {
+                        "id": "device-1",
+                        "recovered_name": "Recovered Button",
+                        "manufacturer": "Acme",
+                        "model": "Wall Button",
+                        "model_id": "WB-1",
+                        "identifiers": [["mqtt", "zigbee2mqtt_0xaaaabbbbccccdddd"]],
+                        "source_commit": "1234567890abcdef",
+                        "source_path": "homeassistant/.storage/core.device_registry",
+                    }
+                ],
+            }
+            rollback = server._CTX.create_deleted_devices_rollback(fingerprint, enrichment)
+            server._CTX.set_deleted_devices_rollback_phase(rollback["path"], "pending_confirmation")
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": rollback["path"],
+                    "deleted_devices_rollback_format": "manifest_v1",
+                    "deleted_devices_pending_device_count": 1,
+                    "last_deleted_devices_rows": [{"id": "device-1", "recovered_name": "Stale Wrong Label"}],
+                }
+            )
+
+            reloaded_server = load_server()
+            self.configure_paths(reloaded_server, root)
+            reloaded_server._CTX.repair_startup_state()
+            tree = reloaded_server.read_state()["deleted_devices_pending_tree"]
+
+            self.assertEqual(tree["device_groups"][0]["device"]["label"], "Recovered Button")
+            self.assertEqual(tree["device_groups"][0]["device"]["manufacturer"], "Acme")
+            self.assertEqual(tree["device_groups"][0]["device"]["model"], "Wall Button")
+            self.assertEqual(tree["device_groups"][0]["device"]["source_commit"], "1234567890abcdef")
+            self.assertNotIn("Stale Wrong Label", json.dumps(tree))
+
+    def test_pending_replay_ignores_invalid_manifest_enrichment_with_warning(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Registry Label"}]}}))
+            fingerprint = server._CTX.device_registry_fingerprint()
+            rollback = server._CTX.create_deleted_devices_rollback(fingerprint, {"schema": 99, "devices": []})
+            server._CTX.set_deleted_devices_rollback_phase(rollback["path"], "pending_confirmation")
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            server.write_state(
+                {
+                    "deleted_devices_pending_confirmation": True,
+                    "deleted_devices_rollback_path": rollback["path"],
+                    "deleted_devices_rollback_format": "manifest_v1",
+                    "deleted_devices_pending_device_count": 1,
+                }
+            )
+
+            replay = server.web.dispatch_command(server.context(), "replay")["state"]
+            tree = replay["deleted_devices_pending_tree"]
+
+            self.assertEqual(tree["device_groups"][0]["device"]["label"], "Registry Label")
+            self.assertTrue(tree["warnings"])
 
     def test_deleted_entities_fingerprint_blocks_stale_delete_before_core_stop(self):
         server = load_server()
@@ -15707,6 +15897,7 @@ devices:
                 json.dumps(
                     {
                         "data": {
+                            "entities": [],
                             "deleted_entities": [
                                 {
                                     "device_id": "deleted-1",
@@ -16135,7 +16326,7 @@ devices:
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertEqual(state["last_deleted_devices_fingerprint"], "after")
             self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
-            self.assertIn("Pending deleted devices Diff", page)
+            self.assertIn("Pending deleted devices cleanup", page)
             self.assertIn("Pending diff unavailable", page)
             self.assertIn("Confirm Changes", page)
             self.assertIn("Revert Changes", page)
@@ -16205,15 +16396,14 @@ devices:
             self.assertIn("- removed entries returned: 0", page)
             self.assertIn("Confirm Changes: keep this cleanup. Removed deleted devices stay removed.", page)
             self.assertIn("Revert Changes: restore only deleted devices removed by this cleanup.", page)
-            self.assertIn("<h2>Pending deleted devices Diff</h2>", page)
+            self.assertIn("<h2>Pending deleted devices cleanup</h2>", page)
             self.assertNotIn("<h2>Deletion of deleted_devices Preview</h2>", page)
-            self.assertIn("Confirm Changes accepts this diff.", page)
-            self.assertIn("deleted devices before cleanup", page)
-            self.assertIn("deleted devices now", page)
-            self.assertIn("diff-del", page)
-            self.assertIn("d Button", page)
-            self.assertIn("diff-add", page)
-            self.assertIn("New Delete", page)
+            self.assertIn("Confirm Changes keeps this cleanup.", page)
+            self.assertIn("Old Button", page)
+            self.assertIn("Advanced raw diff", page)
+            self.assertNotIn("deleted devices before cleanup", page)
+            self.assertNotIn("deleted devices now", page)
+            self.assertNotIn("class='diff-line diff-del'", page)
 
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()
@@ -16754,6 +16944,96 @@ devices:
             self.assertTrue(server.run_deleted_devices_revert_job())
 
             self.assertEqual(json.loads(entity_path.read_text()), current_entities)
+
+    def test_confirm_deleted_devices_refuses_non_array_current_registry_and_keeps_rollback(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": {"id": "old"}}}))
+
+            self.assertFalse(server.run_deleted_devices_confirm_job())
+            state = server.read_state()
+
+            self.assertTrue(state["deleted_devices_pending_confirmation"])
+            self.assertTrue(rollback.exists())
+            self.assertIn("data.deleted_devices must be an array", state["last_message"])
+
+    def test_revert_v1_repairs_non_array_device_tombstones_without_dropping_live_devices(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            registry_path = storage / "core.device_registry"
+            snapshot = {"data": {"devices": [], "deleted_devices": [{"id": "old"}]}}
+            registry_path.write_text(json.dumps(snapshot))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+            current = {"data": {"devices": [{"id": "new-live"}], "deleted_devices": {"id": "old"}}}
+            registry_path.write_text(json.dumps(current))
+
+            self.assertTrue(server.run_deleted_devices_revert_job())
+            state = server.read_state()
+
+            self.assertEqual(
+                json.loads(registry_path.read_text()),
+                {"data": {"devices": [{"id": "new-live"}], "deleted_devices": [{"id": "old"}]}},
+            )
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertFalse(rollback.exists())
+
+    def test_revert_v1_repairs_non_array_entity_tombstones_without_dropping_live_entities(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.configure_paths(server, root)
+            server.OPTIONS_PATH.write_text(json.dumps({"require_fresh_backup": False}))
+            storage = server.CONFIG_DIR / ".storage"
+            storage.mkdir()
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
+            entity_path = storage / "core.entity_registry"
+            snapshot = {"data": {"entities": [], "deleted_entities": [{"id": "old-entity", "entity_id": "sensor.old"}]}}
+            entity_path.write_text(json.dumps(snapshot))
+            server.core_stop = lambda: None
+            server.core_start = lambda: None
+
+            self.assertTrue(server.run_deleted_devices_preview_job())
+            self.assertTrue(server.run_deleted_devices_delete_job())
+            rollback = Path(server.read_state()["deleted_devices_rollback_path"])
+            entity_path.write_text(json.dumps({"data": {"entities": [{"entity_id": "sensor.new"}], "deleted_entities": {"id": "old-entity"}}}))
+
+            self.assertTrue(server.run_deleted_devices_revert_job())
+            state = server.read_state()
+
+            self.assertEqual(
+                json.loads(entity_path.read_text()),
+                {
+                    "data": {
+                        "entities": [{"entity_id": "sensor.new"}],
+                        "deleted_entities": [{"id": "old-entity", "entity_id": "sensor.old"}],
+                    }
+                },
+            )
+            self.assertFalse(state["deleted_devices_pending_confirmation"])
+            self.assertFalse(rollback.exists())
 
     def test_v1_startup_recovery_preserves_entity_registry_created_after_snapshot(self):
         server = load_server()
@@ -18231,7 +18511,7 @@ devices:
             self.assertIn("last_diff_cursor", replay["state"])
             self.assertNotIn("raw apply diff body", payload)
 
-    def test_pending_deleted_devices_diff_is_transient_in_snapshot_and_ws_frames(self):
+    def test_pending_deleted_devices_tree_is_snapshot_primary_and_raw_diff_is_lazy(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -18263,13 +18543,18 @@ devices:
             persisted = json.loads(server.STATE_PATH.read_text())
 
             for state in (replay["state"], full["state"], patch["patch"]):
-                self.assertIn("deleted devices before cleanup", state["deleted_devices_pending_diff"])
-                self.assertIn("deleted devices now", state["deleted_devices_pending_diff"])
-                self.assertEqual(state["deleted_devices_pending_diff_error"], "")
+                self.assertEqual(state["deleted_devices_pending_tree"]["device_groups"][0]["device"]["label"], "Old Button")
+                self.assertEqual(state["deleted_devices_pending_tree_error"], "")
+                self.assertNotIn("deleted_devices_pending_diff", state)
+                self.assertNotIn("deleted_devices_pending_diff_error", state)
+            self.assertNotIn("deleted_devices_pending_diff", json.dumps(replay))
             self.assertNotIn("deleted_devices_pending_diff", persisted)
-            self.assertNotIn("deleted_devices_pending_diff_error", persisted)
 
-    def test_pending_deleted_devices_diff_snapshot_clears_when_not_applicable_or_errors(self):
+            raw = server.web.dispatch_command(server.context(), "pending_deleted_devices_diff_get")
+            self.assertTrue(raw["ok"])
+            self.assertIn("deleted devices before cleanup", raw["diff"])
+
+    def test_pending_deleted_devices_tree_snapshot_clears_when_not_applicable_or_errors(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -18278,16 +18563,16 @@ devices:
             stale_state.update(
                 {
                     "deleted_devices_pending_confirmation": False,
-                    "deleted_devices_pending_diff": "stale diff",
-                    "deleted_devices_pending_diff_error": "stale error",
+                    "deleted_devices_pending_tree": {"stale": True},
+                    "deleted_devices_pending_tree_error": "stale error",
                     "state_revision": 1,
                 }
             )
             server.STATE_PATH.write_text(json.dumps(stale_state))
 
             cleared = server.web.dispatch_command(server.context(), "replay")["state"]
-            self.assertEqual(cleared["deleted_devices_pending_diff"], "")
-            self.assertEqual(cleared["deleted_devices_pending_diff_error"], "")
+            self.assertIsNone(cleared["deleted_devices_pending_tree"])
+            self.assertEqual(cleared["deleted_devices_pending_tree_error"], "")
 
             server.write_state(
                 {
@@ -18296,9 +18581,9 @@ devices:
                 }
             )
             errored = server.web.dispatch_command(server.context(), "replay")["state"]
-            self.assertEqual(errored["deleted_devices_pending_diff"], "")
-            self.assertTrue(errored["deleted_devices_pending_diff_error"])
-            self.assertNotEqual(errored["deleted_devices_pending_diff_error"], "stale error")
+            self.assertIsNone(errored["deleted_devices_pending_tree"])
+            self.assertTrue(errored["deleted_devices_pending_tree_error"])
+            self.assertNotEqual(errored["deleted_devices_pending_tree_error"], "stale error")
 
             server.write_state(
                 {
@@ -18310,8 +18595,8 @@ devices:
                 server.context(),
                 base_revision=server.read_state()["state_revision"] - 1,
             )[0]["patch"]
-            self.assertEqual(patch["deleted_devices_pending_diff"], "")
-            self.assertEqual(patch["deleted_devices_pending_diff_error"], "")
+            self.assertIsNone(patch["deleted_devices_pending_tree"])
+            self.assertEqual(patch["deleted_devices_pending_tree_error"], "")
 
     def test_debug_snapshot_exposes_backend_version(self):
         server = load_server()

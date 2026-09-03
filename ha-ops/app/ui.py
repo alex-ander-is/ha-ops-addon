@@ -174,6 +174,85 @@ def render_conflict_detail(detail, include_wrap_control=True):
     )
 
 
+def render_deleted_devices_tree(tree):
+    if not isinstance(tree, dict):
+        return f"<p>{_('text.no_deleted_devices')}</p>"
+    parts = []
+    for warning in tree.get("warnings") or []:
+        parts.append(f"<p class='action-hint'>{html.escape(str(warning))}</p>")
+    groups = tree.get("device_groups") or []
+    orphans = tree.get("orphan_entity_groups") or []
+    if not groups and not orphans:
+        parts.append(f"<p>{_('text.no_deleted_devices')}</p>")
+        return "".join(parts)
+    parts.append("<div class='deleted-devices-tree'>")
+    for group in groups:
+        device = group.get("device") or {}
+        summary_bits = [
+            device.get("label") or device.get("id") or _("label.deleted_devices"),
+            " / ".join(item for item in [device.get("manufacturer"), device.get("model"), device.get("model_id")] if item),
+            device.get("area"),
+        ]
+        summary = " · ".join(html.escape(str(item)) for item in summary_bits if item)
+        counts = group.get("counts") or {}
+        meta = _("text.deleted_device_group_counts", deleted=count_nonnegative(counts.get("deleted_entities")), active=count_nonnegative(counts.get("active_entities")))
+        parts.append("<vaadin-details class='deleted-device-group' opened>")
+        parts.append(
+            "<vaadin-details-summary slot='summary'>"
+            f"<span class='deleted-device-summary-main'>{summary}</span>"
+            f"<span class='deleted-device-summary-meta'>{html.escape(meta)}</span>"
+            "</vaadin-details-summary>"
+        )
+        details = []
+        if device.get("source_commit") or device.get("source_path"):
+            details.append(" ".join(item for item in [str(device.get("source_commit") or "")[:12], device.get("source_path") or ""] if item))
+        if device.get("identifiers"):
+            details.append(", ".join(":".join(map(str, item)) if isinstance(item, list) else str(item) for item in device.get("identifiers")[:3]))
+        if details:
+            parts.append("<p><small>" + html.escape(" · ".join(details)) + "</small></p>")
+        parts.extend(render_entity_list(_("label.deleted_entities"), group.get("deleted_entities") or []))
+        parts.extend(render_entity_list(_("label.active_entities"), group.get("active_entities") or []))
+        parts.append("</vaadin-details>")
+    for group in orphans:
+        label = group.get("label") or _("label.deleted_entities")
+        parts.append("<vaadin-details class='deleted-device-group orphan-entities' opened>")
+        parts.append(
+            "<vaadin-details-summary slot='summary'>"
+            f"<span class='deleted-device-summary-main'>{html.escape(str(label))}</span>"
+            "</vaadin-details-summary>"
+        )
+        parts.extend(render_entity_list(_("label.deleted_entities"), group.get("deleted_entities") or []))
+        parts.append("</vaadin-details>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def count_nonnegative(value):
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def render_entity_list(label, entities):
+    if not entities:
+        return []
+    items = []
+    for entity in entities:
+        text = entity.get("entity_id") or entity.get("name") or entity.get("id") or json.dumps(entity, ensure_ascii=False, sort_keys=True)
+        items.append(f"<li>{html.escape(str(text))}</li>")
+    return [f"<p class='deleted-entity-label'>{html.escape(label)}</p><ul>{''.join(items)}</ul>"]
+
+
+def render_pending_deleted_devices_raw_fallback():
+    return (
+        "<vaadin-details class='pending-raw-diff' data-pending-raw-diff>"
+        f"<vaadin-details-summary slot='summary'>{_('heading.advanced_raw_diff')}</vaadin-details-summary>"
+        f"<p class='muted'>{_('text.raw_diff_loads_on_expand')}</p>"
+        "</vaadin-details>"
+    )
+
+
 def render_addons(selected, get_installed_addons, addon_slug_value, addon_display_name, addon_is_zigbee2mqtt):
     selected = set(selected)
     try:
@@ -1272,6 +1351,55 @@ def render_page(data):
       padding: 0 10px 14px 44px;
       border-bottom: 1px solid var(--ha-border);
     }}
+    .deleted-devices-tree {{
+      display: grid;
+      gap: 10px;
+      min-width: 0;
+    }}
+    .deleted-device-group {{
+      display: block;
+      border: 1px solid var(--ha-border);
+      border-radius: 8px;
+      padding: 0;
+      min-width: 0;
+      background: var(--ha-card-bg);
+      overflow: hidden;
+    }}
+    .deleted-device-group::part(content) {{
+      min-width: 0;
+      max-width: 100%;
+      overflow: hidden;
+      padding: 0 12px 12px;
+    }}
+    .deleted-device-group vaadin-details-summary {{
+      width: 100%;
+    }}
+    .deleted-device-summary-main {{
+      display: block;
+      font-size: 1rem;
+      font-weight: 700;
+      overflow-wrap: anywhere;
+    }}
+    .deleted-device-summary-meta {{
+      display: block;
+      color: var(--ha-muted);
+      font-size: .9rem;
+      font-weight: 400;
+      margin-top: 2px;
+      overflow-wrap: anywhere;
+    }}
+    .deleted-device-group ul {{
+      margin: 4px 0 0;
+      padding-left: 1.25rem;
+    }}
+    .deleted-entity-label {{
+      margin: 10px 0 0;
+      font-weight: 600;
+    }}
+    .pending-raw-diff {{
+      display: block;
+      margin-top: 12px;
+    }}
     .unresolved-block + .unresolved-block {{
       margin-top: 14px;
     }}
@@ -1624,11 +1752,15 @@ def render_page(data):
       deletedDevicesLabel: {js_t('label.deleted_devices')},
       deletedEntitiesLabel: {js_t('label.deleted_entities')},
       deletedDevicesAndEntitiesLabel: {js_t('label.deleted_devices_and_entities')},
+      activeEntitiesLabel: {js_t('label.active_entities')},
       deletedDevicesPendingNotice: {js_t('notice.deleted_devices_pending')},
       pendingDeletedDevicesMessage: {js_t('message.pending_deleted_devices')},
       pendingDeletedDevicesRemoved: {js_t('text.cleanup_removed')},
       pendingDeletedDevicesTitle: {js_t('heading.pending_deleted_devices_diff')},
       pendingDiffUnavailable: {js_t('error.pending_diff_unavailable')},
+      advancedRawDiff: {js_t('heading.advanced_raw_diff')},
+      rawDiffLoadsOnExpand: {js_t('text.raw_diff_loads_on_expand')},
+      deletedDeviceGroupCounts: {js_t('text.deleted_device_group_counts')},
       conflictDiffTitle: {js_t('title.conflict_diff')},
       statusDone: {js_t('status.done')},
       statusPendingDecision: {js_t('status.pending_decision')},

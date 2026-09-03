@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.30
+
+- Replace pending deleted-device cleanup raw diffs with a semantic Vaadin Details tree, lazy-load the advanced raw diff only when expanded, and fail closed on malformed registry arrays.
+
 ## 0.10.29
 
 - Show the pending deleted-device cleanup rollback diff in the reactive UI and keep maintenance actions fenced until the pending decision is confirmed or reverted.

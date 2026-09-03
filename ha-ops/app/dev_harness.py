@@ -435,6 +435,7 @@ class HarnessScenarioController:
         )
 
     def _write_deleted_devices_preview(self, ctx, details):
+        tree = self._deleted_devices_tree("preview")
         ctx.write_state(
             {
                 "last_run_at": ctx.utc_now(),
@@ -443,6 +444,23 @@ class HarnessScenarioController:
                 "last_message": "Harness deleted devices preview finished.",
                 "last_details": [*details, "Harness deleted devices preview finished."],
                 "last_deleted_devices_preview": "Harness deleted devices preview.",
+                "last_deleted_devices_tree": tree,
+                "last_deleted_devices_tree_error": "",
+                "last_deleted_devices_enrichment": {
+                    "schema": 1,
+                    "devices": [
+                        {
+                            "id": "deleted-device",
+                            "recovered_name": "Detached Button",
+                            "manufacturer": "Example",
+                            "model": "Button",
+                            "model_id": "",
+                            "identifiers": [["mqtt", "zigbee2mqtt_0xaaaabbbbccccdddd"]],
+                            "source_commit": "abcdef1234567890",
+                            "source_path": "homeassistant/.storage/core.device_registry",
+                        }
+                    ],
+                },
                 "last_deleted_devices_rows": [
                     {
                         "id": "deleted-device",
@@ -498,6 +516,9 @@ class HarnessScenarioController:
                 "last_details": [*details, "Harness deleted devices cleanup is waiting for confirmation."],
                 "last_deleted_devices_preview": "No deleted devices or entities found.",
                 "last_deleted_devices_rows": [],
+                "last_deleted_devices_tree": None,
+                "last_deleted_devices_tree_error": "",
+                "last_deleted_devices_enrichment": None,
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_device_count": 0,
                 "last_deleted_devices_entity_count": 0,
@@ -505,8 +526,45 @@ class HarnessScenarioController:
                 "deleted_devices_rollback_path": str(rollback_path),
                 "deleted_devices_pending_device_count": 1,
                 "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_pending_tree": self._deleted_devices_tree("pending"),
+                "deleted_devices_pending_tree_error": "",
             }
         )
+
+    def _deleted_devices_tree(self, generated_from):
+        return {
+            "schema": 1,
+            "generated_from": generated_from,
+            "counts": {"devices": 1, "deleted_entities": 2, "active_entities": 1, "orphan_deleted_entities": 1},
+            "warnings": [],
+            "device_groups": [
+                {
+                    "device": {
+                        "id": "deleted-device",
+                        "label": "Detached Button",
+                        "name": "Detached Button",
+                        "manufacturer": "Example",
+                        "model": "Button",
+                        "model_id": "",
+                        "area": "Kitchen",
+                        "identifiers": [["mqtt", "zigbee2mqtt_0xaaaabbbbccccdddd"]],
+                        "source_commit": "abcdef1234567890",
+                        "source_path": "homeassistant/.storage/core.device_registry",
+                    },
+                    "deleted_entities": [{"id": "entity-a", "entity_id": "binary_sensor.zigbee2mqtt_running", "name": ""}],
+                    "active_entities": [{"id": "entity-live", "entity_id": "sensor.detached_button_battery", "name": "Battery"}],
+                    "counts": {"deleted_entities": 1, "active_entities": 1},
+                }
+            ],
+            "orphan_entity_groups": [
+                {
+                    "device_id": "",
+                    "label": "Deleted entities",
+                    "deleted_entities": [{"id": "entity-b", "entity_id": "binary_sensor.kitchen_presence_occupancy", "name": "Kitchen Presence Occupancy"}],
+                    "counts": {"deleted_entities": 1},
+                }
+            ],
+        }
 
     def _write_deleted_devices_reverted(self, ctx, details):
         ctx.write_state(
@@ -520,6 +578,8 @@ class HarnessScenarioController:
                 "deleted_devices_rollback_path": None,
                 "deleted_devices_pending_device_count": 0,
                 "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_pending_tree": None,
+                "deleted_devices_pending_tree_error": "",
             }
         )
 
@@ -535,6 +595,8 @@ class HarnessScenarioController:
                 "deleted_devices_rollback_path": None,
                 "deleted_devices_pending_device_count": 0,
                 "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_pending_tree": None,
+                "deleted_devices_pending_tree_error": "",
             }
         )
 
@@ -719,6 +781,9 @@ class DevHarnessContext(app_context.AppContext):
 
     def deleted_devices_pending_diff(self, rollback_path):
         return "--- deleted devices before cleanup\n+++ deleted devices now\n@@ -1 +0,0 @@\n- deleted-device\n"
+
+    def deleted_devices_pending_tree(self, rollback_path):
+        return self.harness_controller._deleted_devices_tree("pending")
 
     def dev_harness_record_duplicate_rejection(self, action):
         self.harness_controller.record_duplicate_rejection(action)

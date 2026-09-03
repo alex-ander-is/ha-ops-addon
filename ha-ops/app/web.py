@@ -452,6 +452,7 @@ def render_page(ctx):
     save_push_retry_pending = bool(state.get("save_push_retry_pending"))
     deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
     deleted_devices_rows = state.get("last_deleted_devices_rows") or []
+    deleted_devices_tree = state.get("last_deleted_devices_tree")
     retained_devices_rows = state.get("last_retained_devices_rows") or []
     internal_ids_rows = state.get("last_internal_ids_rows") or []
     run_disabled = "disabled" if job_running else ""
@@ -617,16 +618,23 @@ def render_page(ctx):
                 ),
             )
             deleted_devices_generated_html = ""
-            try:
-                deleted_devices_preview_html = (
-                    f"<p class='muted'>{_('notice.deleted_devices_pending')}</p>"
-                    f"{ui.render_conflict_detail(ctx.deleted_devices_pending_diff(deleted_devices_rollback_path))}"
-                )
-            except Exception as exc:
-                deleted_devices_preview_html = f"<p>{html.escape(_('error.pending_diff_unavailable', error=str(exc)))}</p>"
+            tree = state.get("deleted_devices_pending_tree")
+            tree_error = state.get("deleted_devices_pending_tree_error") or ""
+            if not tree and not tree_error:
+                try:
+                    tree = ctx.deleted_devices_pending_tree(deleted_devices_rollback_path)
+                except Exception as exc:
+                    tree_error = str(exc)
+            deleted_devices_preview_html = (
+                f"<p class='muted'>{_('notice.deleted_devices_pending')}</p>"
+                + (ui.render_deleted_devices_tree(tree) if tree else f"<p>{html.escape(_('error.pending_diff_unavailable', error=tree_error))}</p>")
+                + ui.render_pending_deleted_devices_raw_fallback()
+            )
         else:
             deleted_devices_preview_html = (
-                ui.render_deleted_devices_table(deleted_devices_rows)
+                ui.render_deleted_devices_tree(deleted_devices_tree)
+                if deleted_devices_tree
+                else ui.render_deleted_devices_table(deleted_devices_rows)
                 if state.get("last_deleted_devices_generated_at")
                 else html.escape(deleted_devices_preview_text)
             )
@@ -1093,19 +1101,25 @@ def command_result(ok, message="", **extra):
 
 def _deleted_devices_transient_snapshot_fields(ctx, state):
     if state.get("deleted_devices_pending_confirmation") and state.get("deleted_devices_rollback_path"):
+        pending_tree = state.get("deleted_devices_pending_tree")
+        if (
+            isinstance(pending_tree, dict)
+            and pending_tree.get("schema") == 1
+        ) or (pending_tree is None and state.get("deleted_devices_pending_tree_error")):
+            return {}
         try:
             return {
-                "deleted_devices_pending_diff": ctx.deleted_devices_pending_diff(state["deleted_devices_rollback_path"]),
-                "deleted_devices_pending_diff_error": "",
+                "deleted_devices_pending_tree": ctx.deleted_devices_pending_tree(state["deleted_devices_rollback_path"]),
+                "deleted_devices_pending_tree_error": "",
             }
         except Exception as exc:
             return {
-                "deleted_devices_pending_diff": "",
-                "deleted_devices_pending_diff_error": state_store.redact_sensitive_text(str(exc)),
+                "deleted_devices_pending_tree": None,
+                "deleted_devices_pending_tree_error": state_store.redact_sensitive_text(str(exc)),
             }
     return {
-        "deleted_devices_pending_diff": "",
-        "deleted_devices_pending_diff_error": "",
+        "deleted_devices_pending_tree": None,
+        "deleted_devices_pending_tree_error": "",
     }
 
 
@@ -1154,6 +1168,18 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                 if not diff:
                     raise RuntimeError(_("error.diff_file_missing"))
             return command_result(True, "diff", diff=diff)
+        except Exception as exc:
+            return command_result(False, str(exc))
+    if command == "pending_deleted_devices_diff_get":
+        try:
+            state = ctx.read_state()
+            if not state.get("deleted_devices_pending_confirmation") or not state.get("deleted_devices_rollback_path"):
+                raise RuntimeError(_("error.deleted_devices_cleanup_not_pending"))
+            return command_result(
+                True,
+                "pending deleted devices diff",
+                diff=ctx.deleted_devices_pending_diff(state["deleted_devices_rollback_path"]),
+            )
         except Exception as exc:
             return command_result(False, str(exc))
     if command in WS_MUTATING_COMMANDS:
@@ -1271,7 +1297,7 @@ def ingress_route(path, *endpoints):
     return path
 
 
-GET_ENDPOINTS = ("/health", "/debug-snapshot", "/diff-get", "/ws", "/__dev_harness__/diagnostics")
+GET_ENDPOINTS = ("/health", "/debug-snapshot", "/diff-get", "/pending-deleted-devices-diff-get", "/ws", "/__dev_harness__/diagnostics")
 
 POST_ENDPOINTS = (
     "/generate-key",
@@ -1491,6 +1517,10 @@ def create_handler(ctx):
                 cursor = query.get("cursor", [""])[0]
                 path = query.get("path", [""])[0]
                 result = dispatch_command(ctx, "diff_get", {"cursor": cursor, "path": path})
+                self.send_json(result, status=200 if result.get("ok") else 409)
+                return
+            if route == "/pending-deleted-devices-diff-get":
+                result = dispatch_command(ctx, "pending_deleted_devices_diff_get")
                 self.send_json(result, status=200 if result.get("ok") else 409)
                 return
             if route == "/ws":

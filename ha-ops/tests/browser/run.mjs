@@ -1019,14 +1019,14 @@ async function assertMobilePreviewUsability(page, phase) {
   assert(hidden.length === 0, `${phase} had invisible/offscreen preview controls: ${JSON.stringify(hidden)}`);
 }
 
-async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
+async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRawDiffRequests) {
   await harnessPost(baseUrl, "__dev_harness__/clear-previews");
   await page.reload();
   await waitForInteractiveTransport(page, "cleanup preview page reload");
 
   await page.getByRole("button", { name: "Check deleted devices and entities" }).click();
   await page.getByTestId("deleted-devices-preview-section").getByText("Detached Button").waitFor({ timeout: 5000 });
-  await assertDeletedDevicesGridLayout(page);
+  await assertDeletedDevicesSemanticTreeLayout(page);
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview");
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
   await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: "Approve Deletion" }).waitFor({ timeout: 5000 });
@@ -1078,17 +1078,21 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   assert(await page.getByRole("button", { name: "Check retained devices" }).isDisabled(), "retained check enabled during pending deleted cleanup");
   assert(await page.getByRole("button", { name: "Check actions IDs" }).isDisabled(), "internal IDs check enabled during pending deleted cleanup");
   const pendingSection = page.getByTestId("deleted-devices-preview-section");
-  await pendingSection.getByText("Pending deleted devices Diff").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("Pending deleted devices cleanup").waitFor({ timeout: 5000 });
   await pendingSection.getByText("Harness deleted devices cleanup is waiting for confirmation.").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("No deleted devices or entities found.").count()) === 0, "pending deleted cleanup showed stale empty preview");
-  await waitFor("pending deleted cleanup rendered deleted diff line", async () => {
-    const deletedText = await pendingSection.locator(".diff-del").evaluateAll((nodes) =>
-      nodes.map((node) => node.textContent || "").join("\n")
-    );
-    return deletedText.includes("deleted-device") ? deletedText : null;
-  });
+  await pendingSection.getByText("Detached Button").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("Example / Button").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("binary_sensor.zigbee2mqtt_running").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("binary_sensor.kitchen_presence_occupancy").waitFor({ timeout: 5000 });
+  await pendingSection.getByText("sensor.detached_button_battery").waitFor({ timeout: 5000 });
+  assert((await pendingSection.getByText("deleted devices before cleanup").count()) === 0, "pending raw diff loaded before expansion");
+  const beforeRawExpansion = pendingRawDiffRequests.length;
+  const rawDetails = pendingSection.locator("ha-ops-pending-raw-diff").locator("vaadin-details");
+  await rawDetails.locator("vaadin-details-summary").click();
   await pendingSection.getByText("deleted devices before cleanup").waitFor({ timeout: 5000 });
   await pendingSection.getByText("deleted devices now").waitFor({ timeout: 5000 });
+  assert(pendingRawDiffRequests.length === beforeRawExpansion + 1, "pending raw diff was not lazy-loaded exactly once on expansion");
   assert((await pendingSection.locator("ul li").filter({ hasText: /removed by this cleanup/ }).count()) === 0, "pending deleted cleanup rendered dash summary as a list item");
   await pendingSection.getByRole("button", { name: "Confirm Changes" }).waitFor({ timeout: 5000 });
   await pendingSection.getByRole("button", { name: "Revert Changes" }).waitFor({ timeout: 5000 });
@@ -1133,43 +1137,20 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir) {
   assert(!(await page.getByRole("button", { name: "Check disk usage" }).isDisabled()), "disk usage stayed disabled after deleted cleanup confirm");
 }
 
-async function assertDeletedDevicesGridLayout(page) {
+async function assertDeletedDevicesSemanticTreeLayout(page) {
   const metrics = await page.getByTestId("deleted-devices-preview-section").evaluate((section) => {
-    const table = section.querySelector(".deleted-devices-table");
-    const rectFor = (selector) => {
-      const element = table?.querySelector(selector);
-      if (!element) return null;
+    const tree = section.querySelector(".deleted-devices-tree");
+    const groups = Array.from(section.querySelectorAll(".deleted-device-group")).map((element) => {
       const rect = element.getBoundingClientRect();
       return {
         left: rect.left,
-        top: rect.top,
+        right: rect.right,
         width: rect.width,
-        height: rect.height,
         text: element.textContent.trim(),
       };
-    };
-    const textRectFor = (selector) => {
-      const element = table?.querySelector(selector);
-      const textElement = element?.querySelector("code") || element;
-      if (!element || !textElement) return null;
-      const cellRect = element.getBoundingClientRect();
-      let textRect = textElement.getBoundingClientRect();
-      const textNode = Array.from(textElement.childNodes).find((node) => node.nodeType === Node.TEXT_NODE);
-      if (textNode) {
-        const range = document.createRange();
-        range.selectNodeContents(textNode);
-        textRect = range.getBoundingClientRect();
-        range.detach();
-      }
-      return {
-        cellLeft: cellRect.left,
-        textLeft: textRect.left,
-        inset: textRect.left - cellRect.left,
-        text: textElement.textContent.trim(),
-      };
-    };
+    });
     const lineHeightFor = (text) => {
-      const walker = document.createTreeWalker(table, NodeFilter.SHOW_ELEMENT);
+      const walker = document.createTreeWalker(tree, NodeFilter.SHOW_ELEMENT);
       while (walker.nextNode()) {
         const element = walker.currentNode;
         if (element.textContent.trim() === text) {
@@ -1196,95 +1177,36 @@ async function assertDeletedDevicesGridLayout(page) {
       }
       return null;
     };
-    const tableRect = table?.getBoundingClientRect();
+    const treeRect = tree?.getBoundingClientRect();
     return {
-      table: tableRect ? {
-        left: tableRect.left,
-        top: tableRect.top,
-        width: tableRect.width,
-        height: tableRect.height,
+      tree: treeRect ? {
+        left: treeRect.left,
+        right: treeRect.right,
+        width: treeRect.width,
+        height: treeRect.height,
       } : null,
-      idHeader: rectFor(".deleted-device-header .deleted-device-col-id"),
-      identifiersHeader: rectFor(".deleted-device-header .deleted-device-col-identifiers"),
-      originalHeader: rectFor(".deleted-device-header .deleted-device-col-original-name"),
-      nameHeader: rectFor(".deleted-device-header .deleted-device-col-name"),
-      areaHeader: rectFor(".deleted-device-header .deleted-device-col-area"),
-      entityHeader: rectFor(".deleted-device-header .deleted-device-col-entity-id"),
-      deviceHeader: rectFor(".deleted-device-header .deleted-device-col-device"),
-      sourceHeader: rectFor(".deleted-device-header .deleted-device-col-source"),
-      headerTextInsets: [
-        textRectFor(".deleted-device-header .deleted-device-col-id"),
-        textRectFor(".deleted-device-header .deleted-device-col-original-name"),
-        textRectFor(".deleted-device-header .deleted-device-col-area"),
-        textRectFor(".deleted-device-header .deleted-device-col-device"),
-        textRectFor(".deleted-device-header .deleted-device-col-identifiers"),
-        textRectFor(".deleted-device-header .deleted-device-col-name"),
-        textRectFor(".deleted-device-header .deleted-device-col-entity-id"),
-        textRectFor(".deleted-device-header .deleted-device-col-source"),
-      ],
-      firstRowId: rectFor(".deleted-device-row .deleted-device-col-id"),
-      firstRowIdentifiers: rectFor(".deleted-device-row .deleted-device-col-identifiers"),
-      firstRowOriginal: rectFor(".deleted-device-row .deleted-device-col-original-name"),
-      firstRowName: rectFor(".deleted-device-row .deleted-device-col-name"),
-      firstRowArea: rectFor(".deleted-device-row .deleted-device-col-area"),
-      firstRowEntity: rectFor(".deleted-device-row .deleted-device-col-entity-id"),
-      firstRowDevice: rectFor(".deleted-device-row .deleted-device-col-device"),
-      firstRowSource: rectFor(".deleted-device-row .deleted-device-col-source"),
+      groupCount: groups.length,
+      groups,
+      semanticDetailsCount: section.querySelectorAll(".deleted-devices-tree vaadin-details.deleted-device-group").length,
+      semanticSummaryCount: section.querySelectorAll(".deleted-devices-tree vaadin-details.deleted-device-group > vaadin-details-summary[slot='summary']").length,
+      articleGroupCount: section.querySelectorAll(".deleted-devices-tree article.deleted-device-group").length,
+      legacyTableCount: section.querySelectorAll(".deleted-devices-table").length,
+      clientWidth: document.documentElement.clientWidth,
       longEntity: lineHeightFor("binary_sensor.kitchen_presence_occupancy"),
     };
   });
-  const headerPairs = [
-    ["ID/Identifiers", metrics.idHeader, metrics.identifiersHeader],
-    ["Original Name/Name", metrics.originalHeader, metrics.nameHeader],
-    ["Area/Entity ID", metrics.areaHeader, metrics.entityHeader],
-    ["Manufacturer and Model/Source", metrics.deviceHeader, metrics.sourceHeader],
-  ];
-  for (const [label, primary, secondary] of headerPairs) {
-    assert(primary && secondary, `deleted-device grid missing ${label} header metrics: ${JSON.stringify(metrics)}`);
-    assert(Math.abs(primary.left - secondary.left) <= 1, `deleted-device ${label} columns are not aligned: ${JSON.stringify({ primary, secondary })}`);
-    assert(Math.abs(primary.width - secondary.width) <= 1, `deleted-device ${label} columns have different widths: ${JSON.stringify({ primary, secondary })}`);
-  }
-  const rowPairs = [
-    ["ID/Identifiers", metrics.firstRowId, metrics.firstRowIdentifiers],
-    ["Original Name/Name", metrics.firstRowOriginal, metrics.firstRowName],
-    ["Area/Entity ID", metrics.firstRowArea, metrics.firstRowEntity],
-    ["Manufacturer and Model/Source", metrics.firstRowDevice, metrics.firstRowSource],
-  ];
-  for (const [label, primary, secondary] of rowPairs) {
-    assert(primary && secondary, `deleted-device grid missing ${label} row metrics: ${JSON.stringify(metrics)}`);
-    assert(Math.abs(primary.left - secondary.left) <= 1, `deleted-device row ${label} columns are not aligned: ${JSON.stringify({ primary, secondary })}`);
-    assert(Math.abs(primary.width - secondary.width) <= 1, `deleted-device row ${label} columns have different widths: ${JSON.stringify({ primary, secondary })}`);
-  }
-  const tablePairs = [
-    ["ID", metrics.idHeader, metrics.firstRowId],
-    ["Identifiers", metrics.identifiersHeader, metrics.firstRowIdentifiers],
-    ["Original Name", metrics.originalHeader, metrics.firstRowOriginal],
-    ["Name", metrics.nameHeader, metrics.firstRowName],
-    ["Area", metrics.areaHeader, metrics.firstRowArea],
-    ["Entity ID", metrics.entityHeader, metrics.firstRowEntity],
-    ["Manufacturer and Model", metrics.deviceHeader, metrics.firstRowDevice],
-    ["Source", metrics.sourceHeader, metrics.firstRowSource],
-  ];
-  for (const [label, header, row] of tablePairs) {
-    assert(header && row, `deleted-device grid missing ${label} table metrics: ${JSON.stringify(metrics)}`);
-    assert(Math.abs(header.left - row.left) <= 1, `deleted-device ${label} header and row columns are not aligned: ${JSON.stringify({ header, row })}`);
-    assert(Math.abs(header.width - row.width) <= 1, `deleted-device ${label} header and row columns have different widths: ${JSON.stringify({ header, row })}`);
-  }
-  assert(metrics.table && metrics.idHeader, `deleted-device grid missing table/header metrics: ${JSON.stringify(metrics)}`);
-  assert(
-    Math.abs(metrics.idHeader.left - metrics.table.left) <= 1,
-    `deleted-device first grid column is shifted instead of only padded internally: ${JSON.stringify({ table: metrics.table, idHeader: metrics.idHeader })}`,
-  );
-  const textInsets = metrics.headerTextInsets || [];
-  assert(textInsets.length === 8 && textInsets.every(Boolean), `deleted-device header text inset metrics missing: ${JSON.stringify(metrics)}`);
-  for (const item of textInsets) {
-    assert(item.inset >= 11, `deleted-device header cell has no internal left padding: ${JSON.stringify(item)}`);
-    assert(Math.abs(item.inset - textInsets[0].inset) <= 1, `deleted-device header paddings differ: ${JSON.stringify(textInsets)}`);
-  }
-  assert(metrics.longEntity, `long deleted-device entity row was not rendered: ${JSON.stringify(metrics)}`);
+  assert(metrics.tree, `deleted-device semantic tree missing: ${JSON.stringify(metrics)}`);
+  assert(metrics.groupCount >= 2, `deleted-device semantic tree missing device groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.semanticDetailsCount >= 2, `deleted-device semantic tree did not use Vaadin Details groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.semanticSummaryCount === metrics.semanticDetailsCount, `deleted-device Vaadin Details summaries missing: ${JSON.stringify(metrics)}`);
+  assert(metrics.articleGroupCount === 0, `deleted-device semantic tree used custom article groups: ${JSON.stringify(metrics)}`);
+  assert(metrics.legacyTableCount === 0, `deleted-device legacy table was rendered: ${JSON.stringify(metrics)}`);
+  const overflowing = (metrics.groups || []).filter((group) => group.left < -2 || group.right > metrics.clientWidth + 2);
+  assert(overflowing.length === 0, `deleted-device semantic tree overflowed horizontally: ${JSON.stringify({ metrics, overflowing })}`);
+  assert(metrics.longEntity, `long deleted-device entity was not rendered: ${JSON.stringify(metrics)}`);
   assert(
     metrics.longEntity.textHeight <= metrics.longEntity.lineHeight * 1.4,
-    `long deleted-device entity ID wrapped: ${JSON.stringify(metrics.longEntity)}`,
+    `long deleted-device entity label wrapped: ${JSON.stringify(metrics.longEntity)}`,
   );
 }
 
@@ -1357,8 +1279,10 @@ async function main() {
     const page = await context.newPage();
     page.on("websocket", (ws) => websockets.push(ws.url()));
     const diffGetRequests = [];
+    const pendingRawDiffRequests = [];
     page.on("request", (request) => {
       if (new URL(request.url()).pathname.endsWith("/diff-get")) diffGetRequests.push(request.url());
+      if (new URL(request.url()).pathname.endsWith("/pending-deleted-devices-diff-get")) pendingRawDiffRequests.push(request.url());
     });
     await page.goto(baseUrl);
     await assertLogPanelLayout(page, "matched", "initial desktop");
@@ -1404,7 +1328,7 @@ async function main() {
     await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "save");
     await assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, "save preview wrapping");
     await assertSaveCommitSubjectFlow(page, baseUrl);
-    await runCleanupPreviewScenarios(page, baseUrl, artifactsDir);
+    await runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRawDiffRequests);
 
     await harnessPost(baseUrl, "__dev_harness__/arm", { action: "preview", gate: "running" });
     await page.getByRole("button", { name: "Preview Git to HA" }).click();

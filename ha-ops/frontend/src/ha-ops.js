@@ -726,6 +726,109 @@ function renderDeletedDevicesTable(rows) {
   `;
 }
 
+function entityLabel(entity) {
+  return entity?.entity_id || entity?.name || entity?.id || "";
+}
+
+function renderEntityList(label, entities) {
+  if (!entities?.length) return nothing;
+  return html`<p class="deleted-entity-label">${label}</p><ul>${entities.map((entity) => html`<li>${entityLabel(entity)}</li>`)}</ul>`;
+}
+
+function renderDeletedDevicesTree(tree) {
+  if (!tree || typeof tree !== "object") return html`<p>${TEXT.noDeletedDevices}</p>`;
+  const deviceGroups = tree.device_groups || [];
+  const orphanGroups = tree.orphan_entity_groups || [];
+  if (!deviceGroups.length && !orphanGroups.length) return html`<p>${TEXT.noDeletedDevices}</p>`;
+  return html`
+    <div class="deleted-devices-tree">
+      ${(tree.warnings || []).map((warning) => html`<p class="action-hint">${warning}</p>`)}
+      ${deviceGroups.map((group) => {
+        const device = group.device || {};
+        const counts = group.counts || {};
+        const model = [device.manufacturer, device.model, device.model_id].filter(Boolean).join(" / ");
+        const summary = [device.label || device.id || TEXT.deletedDevicesLabel, model, device.area].filter(Boolean).join(" · ");
+        const meta = (TEXT.deletedDeviceGroupCounts || "{deleted} deleted, {active} active")
+          .replace("{deleted}", String(Number(counts.deleted_entities || 0)))
+          .replace("{active}", String(Number(counts.active_entities || 0)));
+        const source = [String(device.source_commit || "").slice(0, 12), device.source_path].filter(Boolean).join(" ");
+        const identifiers = (device.identifiers || []).slice(0, 3).map((identifier) =>
+          Array.isArray(identifier) ? identifier.join(":") : String(identifier)
+        ).join(", ");
+        return html`
+          <vaadin-details class="deleted-device-group" opened>
+            <vaadin-details-summary slot="summary">
+              <span class="deleted-device-summary-main">${summary}</span>
+              <span class="deleted-device-summary-meta">${meta}</span>
+            </vaadin-details-summary>
+            ${source || identifiers ? html`<p><small>${[source, identifiers].filter(Boolean).join(" · ")}</small></p>` : nothing}
+            ${renderEntityList(TEXT.deletedEntitiesLabel, group.deleted_entities || [])}
+            ${renderEntityList(TEXT.activeEntitiesLabel || "Active entities", group.active_entities || [])}
+          </vaadin-details>
+        `;
+      })}
+      ${orphanGroups.map((group) => html`
+        <vaadin-details class="deleted-device-group orphan-entities" opened>
+          <vaadin-details-summary slot="summary">
+            <span class="deleted-device-summary-main">${group.label || TEXT.deletedEntitiesLabel}</span>
+          </vaadin-details-summary>
+          ${renderEntityList(TEXT.deletedEntitiesLabel, group.deleted_entities || [])}
+        </vaadin-details>
+      `)}
+    </div>
+  `;
+}
+
+class HaOpsPendingRawDiff extends LitElement {
+  static properties = { opened: { type: Boolean }, diff: { type: String }, diffState: { type: String } };
+  static styles = css`
+    :host { display: block; min-width: 0; max-width: 100%; margin-top: .85rem; }
+    vaadin-details { border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; min-width: 0; max-width: 100%; }
+    vaadin-details::part(content) { min-width: 0; max-width: 100%; overflow: hidden; }
+    vaadin-details-summary { width: 100%; }
+    pre { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; margin: 0; padding: .75rem; overflow-x: auto; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; border-top: 1px solid var(--ha-ops-border, #d0d7de); background: var(--ha-ops-code-bg, #f6f8fa); }
+    .line { display: block; min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ha-ops-code-text, #24292f); }
+    .diff-add { color: var(--ha-ops-diff-add-text, #116329); background: var(--ha-ops-diff-add-bg, #dafbe1); }
+    .diff-del { color: var(--ha-ops-diff-del-text, #82071e); background: var(--ha-ops-diff-del-bg, #ffebe9); }
+    .diff-hunk { color: var(--ha-ops-diff-hunk-text, #0550ae); background: var(--ha-ops-diff-hunk-bg, #ddf4ff); }
+    .diff-file, .diff-context { background: transparent; }
+    [role="status"] { padding: .75rem; color: var(--ha-ops-muted-text, #57606a); }
+  `;
+  constructor() {
+    super();
+    this.opened = false;
+    this.diff = "";
+    this.diffState = "idle";
+  }
+  render() {
+    return html`
+      <vaadin-details .opened=${this.opened} @opened-changed=${this.onOpenedChanged}>
+        <vaadin-details-summary slot="summary">${TEXT.advancedRawDiff || "Advanced raw diff"}</vaadin-details-summary>
+        ${this.diffState === "loaded"
+          ? html`<pre aria-label=${TEXT.conflictDiffTitle || "Conflict diff"}>${highlightedDiffLines(this.diff)}</pre>`
+          : html`<div role="status">${this.diffState === "error" ? this.diff : TEXT.rawDiffLoadsOnExpand || "Raw registry diff loads only when this section is expanded."}</div>`}
+      </vaadin-details>
+    `;
+  }
+  async onOpenedChanged(event) {
+    const opened = Boolean(event.detail.value);
+    this.opened = opened;
+    if (!opened || this.diffState === "loaded" || this.diffState === "loading") return;
+    this.diffState = "loading";
+    try {
+      const response = await fetch("pending-deleted-devices-diff-get");
+      const payload = await response.json();
+      if (!response.ok || !payload.ok) throw new Error(payload.message || "Raw diff unavailable");
+      this.diff = payload.diff || "";
+      this.diffState = "loaded";
+    } catch (error) {
+      this.diff = error.message;
+      this.diffState = "error";
+    }
+  }
+}
+customElements.define("ha-ops-pending-raw-diff", HaOpsPendingRawDiff);
+
 function renderRetainedDevicesTable(rows, disabled) {
   if (!rows?.length) return html`<p>${TEXT.noRetainedDevices}</p>`;
   return html`
@@ -1252,13 +1355,13 @@ class HaOpsApp extends LitElement {
     if (this.state.deleted_devices_pending_confirmation) {
       const entries = deletedEntriesLabel(this.state, "deleted_devices_pending");
       const pendingCount = Number(this.state.deleted_devices_pending_device_count || 0) + Number(this.state.deleted_devices_pending_entity_count || 0);
-      const title = (TEXT.pendingDeletedDevicesTitle || "Pending {entries} Diff").replace("{entries}", entries);
+      const title = (TEXT.pendingDeletedDevicesTitle || "Pending {entries} cleanup").replace("{entries}", entries);
       const removedText = (TEXT.pendingDeletedDevicesRemoved || "- {entries} removed by this cleanup: {count}")
         .replace("{entries}", entries)
         .replace("{count}", String(pendingCount))
         .replace(/^\s*-\s*/, "");
-      const pendingDiff = this.state.deleted_devices_pending_diff || "";
-      const pendingDiffError = this.state.deleted_devices_pending_diff_error || "";
+      const pendingTree = this.state.deleted_devices_pending_tree;
+      const pendingTreeError = this.state.deleted_devices_pending_tree_error || "";
       const unavailableTemplate = TEXT.pendingDiffUnavailable || "Pending diff unavailable: {error}";
       return html`
         <section class="card wide" data-testid="deleted-devices-preview-section">
@@ -1266,11 +1369,8 @@ class HaOpsApp extends LitElement {
           <p>${this.state.last_message || TEXT.pendingDeletedDevicesMessage || "Deleted devices cleanup is waiting for your decision."}</p>
           <p>${removedText}</p>
           <p>${TEXT.deletedDevicesPendingNotice || "Confirm Changes keeps this cleanup. Revert Changes restores only entries removed by this cleanup."}</p>
-          ${pendingDiff
-            ? html`<div class="conflict-diff" role="region" aria-label=${TEXT.conflictDiffTitle || "Conflict diff"}>
-                <div class="diff-lines">${highlightedDiffLines(pendingDiff)}</div>
-              </div>`
-            : html`<p>${unavailableTemplate.replace("{error}", pendingDiffError)}</p>`}
+          ${pendingTree ? renderDeletedDevicesTree(pendingTree) : html`<p>${unavailableTemplate.replace("{error}", pendingTreeError)}</p>`}
+          <ha-ops-pending-raw-diff></ha-ops-pending-raw-diff>
           <div class="actions deletion-actions"><div class="action-row">
             <form method="post" action="deleted-devices-confirm" data-async-form="true" data-preserve-display-state="true">
               <button type="submit" ?disabled=${this.isRunning()}>${TEXT.confirmChanges || "Confirm Changes"}</button>
@@ -1283,6 +1383,7 @@ class HaOpsApp extends LitElement {
       `;
     }
     const rows = this.state.last_deleted_devices_rows || [];
+    const tree = this.state.last_deleted_devices_tree;
     const count = Number(this.state.last_deleted_devices_count || 0);
     const visible = Boolean(this.state.last_deleted_devices_generated_at) || cleanupRunning && this.state.last_action === "deleted_devices_preview";
     if (!visible) return nothing;
@@ -1293,7 +1394,7 @@ class HaOpsApp extends LitElement {
       <section class="card wide" data-testid="deleted-devices-preview-section">
         <h2>${TEXT.deletedDevicesPreview}</h2>
         <p>${TEXT.generatedAt} <span data-transient="deleted-devices-generated">${this.state.last_deleted_devices_generated_at || ""}</span></p>
-        <div data-transient="deleted-devices-preview">${renderDeletedDevicesTable(rows)}</div>
+        <div data-transient="deleted-devices-preview">${tree ? renderDeletedDevicesTree(tree) : renderDeletedDevicesTable(rows)}</div>
         ${count > 0 ? html`
           <div class="actions deletion-actions"><div class="action-row">
             <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${confirmMessage}>

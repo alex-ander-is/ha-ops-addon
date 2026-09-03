@@ -427,14 +427,85 @@ def read_entity_registry(config_dir):
     return path, text, json.loads(text)
 
 
+def _parse_registry_text(registry_name, text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise i18n.error("error.registry_json_invalid", registry=registry_name, error=str(exc)) from exc
+
+
+def registry_collection(data, registry_name, collection_name):
+    if not isinstance(data, dict):
+        raise i18n.error("error.registry_json_must_be_object", registry=registry_name)
+    registry_data = data.get("data")
+    if not isinstance(registry_data, dict):
+        raise i18n.error("error.registry_data_must_be_object", registry=registry_name)
+    value = registry_data.get(collection_name)
+    if not isinstance(value, list):
+        raise i18n.error("error.registry_collection_must_be_array", registry=registry_name, path=f"data.{collection_name}")
+    return value
+
+
+def validated_deleted_devices(data):
+    return registry_collection(data, "core.device_registry", "deleted_devices")
+
+
+def validated_deleted_entities(data):
+    return registry_collection(data, "core.entity_registry", "deleted_entities")
+
+
+def validated_devices(data):
+    return registry_collection(data, "core.device_registry", "devices")
+
+
+def validated_entities(data):
+    return registry_collection(data, "core.entity_registry", "entities")
+
+
+def validated_areas(data):
+    return registry_collection(data, "core.area_registry", "areas")
+
+
+def read_validated_device_registry(config_dir):
+    path = device_registry_path(config_dir)
+    if not path.exists():
+        raise RuntimeError(f"Home Assistant device registry not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    data = _parse_registry_text("core.device_registry", text)
+    validated_devices(data)
+    validated_deleted_devices(data)
+    return path, text, data
+
+
+def read_validated_entity_registry(config_dir):
+    path = entity_registry_path(config_dir)
+    if not path.exists():
+        return path, None, None
+    text = path.read_text(encoding="utf-8")
+    data = _parse_registry_text("core.entity_registry", text)
+    validated_entities(data)
+    validated_deleted_entities(data)
+    return path, text, data
+
+
+def read_validated_area_registry(config_dir):
+    path = area_registry_path(config_dir)
+    if not path.exists():
+        return path, None, None
+    text = path.read_text(encoding="utf-8")
+    data = _parse_registry_text("core.area_registry", text)
+    validated_areas(data)
+    return path, text, data
+
+
 def registry_fingerprint(device_text, entity_text):
     entity_component = entity_text if entity_text is not None else "<missing core.entity_registry>"
     return fingerprint_text(f"{device_text}\n\0\n{entity_component}")
 
 
-def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint):
-    path, text, _data = read_device_registry(config_dir)
-    _entity_path, entity_text, _entity_data = read_entity_registry(config_dir)
+def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint, enrichment=None):
+    path, text, _data = read_validated_device_registry(config_dir)
+    _entity_path, entity_text, _entity_data = read_validated_entity_registry(config_dir)
     current_fingerprint = registry_fingerprint(text, entity_text)
     if expected_fingerprint and current_fingerprint != expected_fingerprint:
         raise RuntimeError("Deleted devices changed since preview. Run Check deleted devices again.")
@@ -443,8 +514,8 @@ def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint):
     # Sidecars are fully committed before the manifest makes them discoverable.
     device_record = _snapshot_record(manifest_file, "core.device_registry", text)
     entity_record = _snapshot_record(manifest_file, "core.entity_registry", entity_text)
-    device_count = len(deleted_devices(json.loads(text)))
-    entity_count = len(deleted_entities(json.loads(entity_text))) if entity_text is not None else 0
+    device_count = len(validated_deleted_devices(_parse_registry_text("core.device_registry", text)))
+    entity_count = len(validated_deleted_entities(_parse_registry_text("core.entity_registry", entity_text))) if entity_text is not None else 0
     manifest = {
         "version": ROLLBACK_MANIFEST_VERSION,
         "phase": ROLLBACK_PHASE_RESTORE_REQUIRED,
@@ -456,6 +527,8 @@ def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint):
             "core.entity_registry": entity_record,
         },
     }
+    if enrichment:
+        manifest["deleted_devices_enrichment"] = sanitize_manifest_deleted_devices_enrichment(enrichment)
     # The directory fsync in _durable_replace_bytes is the commit point.  No
     # state publication or registry mutation happens before this returns.
     _durable_replace_bytes(
@@ -471,8 +544,32 @@ def create_deleted_devices_rollback(config_dir, work_dir, expected_fingerprint):
     }
 
 
+def sanitize_manifest_deleted_devices_enrichment(enrichment):
+    sanitized = sanitize_deleted_devices_enrichment(enrichment)
+    manifest_enrichment = {
+        "schema": 1,
+        "devices": [
+            {"id": device_id, **values}
+            for device_id, values in sorted(sanitized["by_id"].items())
+        ],
+    }
+    if sanitized["warnings"]:
+        manifest_enrichment["warnings"] = sanitized["warnings"]
+    return manifest_enrichment
+
+
 def _replace_registry_from_snapshot(destination, payload):
     _durable_replace_bytes(destination, payload)
+
+
+def _restore_v1_tombstones_into_current(current_data, snapshot_entries, name):
+    if name == "core.device_registry":
+        validated_devices(current_data)
+        current_data.setdefault("data", {})["deleted_devices"] = list(snapshot_entries)
+        return len(snapshot_entries), 0
+    validated_entities(current_data)
+    current_data.setdefault("data", {})["deleted_entities"] = list(snapshot_entries)
+    return 0, len(snapshot_entries)
 
 
 def _restore_v1_registry(config_dir, source, manifest, payloads):
@@ -497,7 +594,7 @@ def _restore_v1_registry(config_dir, source, manifest, payloads):
                 result_texts[name] = None
             continue
         snapshot_data = json.loads(original.decode("utf-8"))
-        snapshot_entries = deleted_devices(snapshot_data) if name == "core.device_registry" else deleted_entities(snapshot_data)
+        snapshot_entries = validated_deleted_devices(snapshot_data) if name == "core.device_registry" else validated_deleted_entities(snapshot_data)
         try:
             current_text = destination.read_text(encoding="utf-8")
             current_data = json.loads(current_text)
@@ -513,7 +610,34 @@ def _restore_v1_registry(config_dir, source, manifest, payloads):
                 restored_entities = len(snapshot_entries)
                 merged_entities = len(snapshot_entries)
             continue
-        current_entries = deleted_devices(current_data) if name == "core.device_registry" else deleted_entities(current_data)
+        try:
+            current_entries = validated_deleted_devices(current_data) if name == "core.device_registry" else validated_deleted_entities(current_data)
+        except RuntimeError:
+            # If only the tombstone collection is malformed, preserve valid
+            # live registry records and repair just the tombstones from the
+            # verified rollback sidecar. Broader shape failures fall back to
+            # the established full snapshot restore below.
+            try:
+                repaired_devices, repaired_entities = _restore_v1_tombstones_into_current(current_data, snapshot_entries, name)
+            except RuntimeError:
+                _replace_registry_from_snapshot(destination, original)
+                result_texts[name] = original.decode("utf-8")
+                if name == "core.device_registry":
+                    restored_devices = len(snapshot_entries)
+                    merged_devices = len(snapshot_entries)
+                else:
+                    restored_entities = len(snapshot_entries)
+                    merged_entities = len(snapshot_entries)
+                continue
+            _durable_replace_bytes(destination, (json.dumps(current_data, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            result_texts[name] = destination.read_text(encoding="utf-8")
+            if name == "core.device_registry":
+                restored_devices = repaired_devices
+                merged_devices = repaired_devices
+            else:
+                restored_entities = repaired_entities
+                merged_entities = repaired_entities
+            continue
         merged = merge_deleted_devices(current_entries, snapshot_entries) if name == "core.device_registry" else merge_deleted_entities(current_entries, snapshot_entries)
         if name == "core.device_registry":
             current_data.setdefault("data", {})["deleted_devices"] = merged
@@ -533,6 +657,60 @@ def _restore_v1_registry(config_dir, source, manifest, payloads):
     }
 
 
+def _pending_tree_from_v1_manifest(config_dir, source):
+    manifest, payloads = load_rollback_manifest(source)
+    rollback_data = _parse_registry_text("core.device_registry", payloads["core.device_registry"].decode("utf-8"))
+    validated_devices(rollback_data)
+    validated_deleted_devices(rollback_data)
+    entity_payload = payloads["core.entity_registry"]
+    rollback_entity_data = None
+    if entity_payload is not None:
+        rollback_entity_data = _parse_registry_text("core.entity_registry", entity_payload.decode("utf-8"))
+        validated_entities(rollback_entity_data)
+        validated_deleted_entities(rollback_entity_data)
+    _current_path, _current_text, current_data = read_validated_device_registry(config_dir)
+    _entity_path, _entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+    _area_path, _area_text, area_data = read_validated_area_registry(config_dir)
+    # Active entities come from current context, deleted tombstones from the
+    # verified rollback sidecars.
+    if rollback_entity_data is not None and current_entity_data is not None:
+        context_entity_data = {
+            "data": {
+                "entities": validated_entities(current_entity_data),
+                "deleted_entities": validated_deleted_entities(rollback_entity_data),
+            }
+        }
+    else:
+        context_entity_data = rollback_entity_data
+    return build_deleted_devices_tree_from_data(
+        rollback_data,
+        context_entity_data,
+        area_data,
+        generated_from="pending",
+        enrichment=manifest.get("deleted_devices_enrichment"),
+    )
+
+
+def build_deleted_devices_pending_tree(config_dir, rollback_file):
+    source = Path(rollback_file)
+    if rollback_manifest_is_v1(source):
+        return _pending_tree_from_v1_manifest(config_dir, source)
+    if not source.exists():
+        raise RuntimeError("Deleted devices rollback snapshot is missing.")
+    rollback_text = source.read_text(encoding="utf-8")
+    rollback_data = _parse_registry_text("core.device_registry", rollback_text)
+    validated_devices(rollback_data)
+    validated_deleted_devices(rollback_data)
+    _area_path, _area_text, area_data = read_validated_area_registry(config_dir)
+    entity_snapshot = entity_rollback_path(source)
+    entity_data = None
+    if entity_snapshot.exists():
+        entity_data = _parse_registry_text("core.entity_registry", entity_snapshot.read_text(encoding="utf-8"))
+        validated_entities(entity_data)
+        validated_deleted_entities(entity_data)
+    return build_deleted_devices_tree_from_data(rollback_data, entity_data, area_data, generated_from="pending")
+
+
 def restore_deleted_devices_rollback(config_dir, rollback_file):
     source = Path(rollback_file)
     if source.name == ROLLBACK_MANIFEST_NAME:
@@ -543,11 +721,11 @@ def restore_deleted_devices_rollback(config_dir, rollback_file):
         # entities.  Preserve the established device-only fallback rather than
         # presenting a vague registry label.
         raise RuntimeError("Deleted devices rollback snapshot is missing.")
-    rollback_data = json.loads(source.read_text(encoding="utf-8"))
-    restored_devices = deleted_devices(rollback_data)
+    rollback_data = _parse_registry_text("core.device_registry", source.read_text(encoding="utf-8"))
+    restored_devices = validated_deleted_devices(rollback_data)
 
-    dest, _text, current_data = read_device_registry(config_dir)
-    current_devices = deleted_devices(current_data)
+    dest, _text, current_data = read_validated_device_registry(config_dir)
+    current_devices = validated_deleted_devices(current_data)
     merged_devices = merge_deleted_devices(current_devices, restored_devices)
     current_data.setdefault("data", {})["deleted_devices"] = merged_devices
 
@@ -560,10 +738,10 @@ def restore_deleted_devices_rollback(config_dir, rollback_file):
     merged_entities = []
     entity_text = None
     if entity_snapshot.exists():
-        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
-        restored_entities = deleted_entities(rollback_entity_data)
-        entity_dest, _current_entity_text, current_entity_data = read_entity_registry(config_dir)
-        current_entities = deleted_entities(current_entity_data)
+        rollback_entity_data = _parse_registry_text("core.entity_registry", entity_snapshot.read_text(encoding="utf-8"))
+        restored_entities = validated_deleted_entities(rollback_entity_data)
+        entity_dest, _current_entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+        current_entities = validated_deleted_entities(current_entity_data)
         merged_entities = merge_deleted_entities(current_entities, restored_entities)
         current_entity_data.setdefault("data", {})["deleted_entities"] = merged_entities
         tmp_entity_path = entity_dest.with_name(f".{entity_dest.name}.tmp")
@@ -693,22 +871,22 @@ def deleted_devices_cleanup_status(config_dir, rollback_file):
                 "terminal_phase": metadata["phase"],
             }
         _manifest, payloads = load_rollback_manifest(source)
-        rollback_data = json.loads(payloads["core.device_registry"].decode("utf-8"))
-        removed_devices = deleted_devices(rollback_data)
+        rollback_data = _parse_registry_text("core.device_registry", payloads["core.device_registry"].decode("utf-8"))
+        removed_devices = validated_deleted_devices(rollback_data)
         removed_keys = {deleted_device_key(device) for device in removed_devices}
-        _path, text, current_data = read_device_registry(config_dir)
-        current_devices = deleted_devices(current_data)
+        _path, text, current_data = read_validated_device_registry(config_dir)
+        current_devices = validated_deleted_devices(current_data)
         returned = [device for device in current_devices if deleted_device_key(device) in removed_keys]
         added = [device for device in current_devices if deleted_device_key(device) not in removed_keys]
         entity_payload = payloads["core.entity_registry"]
         removed_entities = current_entities = returned_entities = added_entities = []
         entity_text = None
         if entity_payload is not None:
-            rollback_entity_data = json.loads(entity_payload.decode("utf-8"))
-            removed_entities = deleted_entities(rollback_entity_data)
+            rollback_entity_data = _parse_registry_text("core.entity_registry", entity_payload.decode("utf-8"))
+            removed_entities = validated_deleted_entities(rollback_entity_data)
             removed_entity_keys = {deleted_entity_key(entity) for entity in removed_entities}
-            _entity_path, entity_text, current_entity_data = read_entity_registry(config_dir)
-            current_entities = deleted_entities(current_entity_data)
+            _entity_path, entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+            current_entities = validated_deleted_entities(current_entity_data)
             returned_entities = [entity for entity in current_entities if deleted_entity_key(entity) in removed_entity_keys]
             added_entities = [entity for entity in current_entities if deleted_entity_key(entity) not in removed_entity_keys]
         return {
@@ -726,11 +904,11 @@ def deleted_devices_cleanup_status(config_dir, rollback_file):
         }
     if not source.exists():
         raise RuntimeError("Deleted devices rollback snapshot is missing.")
-    rollback_data = json.loads(source.read_text(encoding="utf-8"))
-    removed_devices = deleted_devices(rollback_data)
+    rollback_data = _parse_registry_text("core.device_registry", source.read_text(encoding="utf-8"))
+    removed_devices = validated_deleted_devices(rollback_data)
     removed_keys = {deleted_device_key(device) for device in removed_devices}
-    _path, text, current_data = read_device_registry(config_dir)
-    current_devices = deleted_devices(current_data)
+    _path, text, current_data = read_validated_device_registry(config_dir)
+    current_devices = validated_deleted_devices(current_data)
     returned = [device for device in current_devices if deleted_device_key(device) in removed_keys]
     added = [device for device in current_devices if deleted_device_key(device) not in removed_keys]
     entity_snapshot = entity_rollback_path(source)
@@ -740,11 +918,11 @@ def deleted_devices_cleanup_status(config_dir, rollback_file):
     added_entities = []
     entity_text = None
     if entity_snapshot.exists():
-        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
-        removed_entities = deleted_entities(rollback_entity_data)
+        rollback_entity_data = _parse_registry_text("core.entity_registry", entity_snapshot.read_text(encoding="utf-8"))
+        removed_entities = validated_deleted_entities(rollback_entity_data)
         removed_entity_keys = {deleted_entity_key(entity) for entity in removed_entities}
-        _entity_path, entity_text, current_entity_data = read_entity_registry(config_dir)
-        current_entities = deleted_entities(current_entity_data)
+        _entity_path, entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+        current_entities = validated_deleted_entities(current_entity_data)
         returned_entities = [entity for entity in current_entities if deleted_entity_key(entity) in removed_entity_keys]
         added_entities = [entity for entity in current_entities if deleted_entity_key(entity) not in removed_entity_keys]
     return {
@@ -769,28 +947,28 @@ def deleted_devices_pending_diff(config_dir, rollback_file):
     source = Path(rollback_file)
     if source.name == ROLLBACK_MANIFEST_NAME:
         _manifest, payloads = load_rollback_manifest(source)
-        rollback_data = json.loads(payloads["core.device_registry"].decode("utf-8"))
-        _path, _text, current_data = read_device_registry(config_dir)
-        removed_devices = deleted_devices(rollback_data)
+        rollback_data = _parse_registry_text("core.device_registry", payloads["core.device_registry"].decode("utf-8"))
+        _path, _text, current_data = read_validated_device_registry(config_dir)
+        removed_devices = validated_deleted_devices(rollback_data)
         diff = []
         if removed_devices:
-            diff.extend(difflib.unified_diff(json.dumps(removed_devices, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted devices before cleanup", tofile="deleted devices now", lineterm=""))
+            diff.extend(difflib.unified_diff(json.dumps(removed_devices, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(validated_deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted devices before cleanup", tofile="deleted devices now", lineterm=""))
         if payloads["core.entity_registry"] is not None:
-            rollback_entity_data = json.loads(payloads["core.entity_registry"].decode("utf-8"))
-            _entity_path, _entity_text, current_entity_data = read_entity_registry(config_dir)
-            removed_entities = deleted_entities(rollback_entity_data)
+            rollback_entity_data = _parse_registry_text("core.entity_registry", payloads["core.entity_registry"].decode("utf-8"))
+            _entity_path, _entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+            removed_entities = validated_deleted_entities(rollback_entity_data)
             if removed_entities:
-                diff.extend(difflib.unified_diff(json.dumps(removed_entities, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted entities before cleanup", tofile="deleted entities now", lineterm=""))
+                diff.extend(difflib.unified_diff(json.dumps(removed_entities, ensure_ascii=False, indent=2, sort_keys=True).splitlines(), json.dumps(validated_deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines(), fromfile="deleted entities before cleanup", tofile="deleted entities now", lineterm=""))
         return "\n".join(diff) if diff else "No deleted devices difference."
     if not source.exists():
         raise RuntimeError("Deleted devices rollback snapshot is missing.")
-    rollback_data = json.loads(source.read_text(encoding="utf-8"))
-    _path, _text, current_data = read_device_registry(config_dir)
-    removed_devices = deleted_devices(rollback_data)
+    rollback_data = _parse_registry_text("core.device_registry", source.read_text(encoding="utf-8"))
+    _path, _text, current_data = read_validated_device_registry(config_dir)
+    removed_devices = validated_deleted_devices(rollback_data)
     diff = []
     if removed_devices:
         before_lines = json.dumps(removed_devices, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
-        current_lines = json.dumps(deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+        current_lines = json.dumps(validated_deleted_devices(current_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
         diff.extend(
             difflib.unified_diff(
                 before_lines,
@@ -802,12 +980,12 @@ def deleted_devices_pending_diff(config_dir, rollback_file):
         )
     entity_snapshot = entity_rollback_path(source)
     if entity_snapshot.exists():
-        rollback_entity_data = json.loads(entity_snapshot.read_text(encoding="utf-8"))
-        _entity_path, _entity_text, current_entity_data = read_entity_registry(config_dir)
-        removed_entities = deleted_entities(rollback_entity_data)
+        rollback_entity_data = _parse_registry_text("core.entity_registry", entity_snapshot.read_text(encoding="utf-8"))
+        _entity_path, _entity_text, current_entity_data = read_validated_entity_registry(config_dir)
+        removed_entities = validated_deleted_entities(rollback_entity_data)
         if removed_entities:
             before_entity_lines = json.dumps(removed_entities, ensure_ascii=False, indent=2, sort_keys=True).splitlines()
-            current_entity_lines = json.dumps(deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
+            current_entity_lines = json.dumps(validated_deleted_entities(current_entity_data), ensure_ascii=False, indent=2, sort_keys=True).splitlines()
             diff.extend(
                 difflib.unified_diff(
                     before_entity_lines,
@@ -962,15 +1140,20 @@ def enrich_deleted_device_rows_from_history(rows, devices, history_context):
     ]
 
 
-def area_names(config_dir):
-    data = read_optional_registry(area_registry_path(config_dir))
-    areas = data.get("data", {}).get("areas", [])
+def area_names_from_data(area_data):
+    areas = validated_areas(area_data) if area_data is not None else []
     return {area.get("id"): area.get("name") for area in areas if area.get("id")}
 
 
-def entities_by_device(config_dir):
-    data = read_optional_registry(entity_registry_path(config_dir))
-    entities = data.get("data", {}).get("entities", []) + data.get("data", {}).get("deleted_entities", [])
+def area_names(config_dir):
+    _path, _text, data = read_validated_area_registry(config_dir)
+    return area_names_from_data(data)
+
+
+def entities_by_device_from_data(entity_data):
+    entities = []
+    if entity_data is not None:
+        entities = validated_entities(entity_data) + validated_deleted_entities(entity_data)
     grouped = {}
     for entity in entities:
         device_id = entity.get("device_id")
@@ -978,6 +1161,11 @@ def entities_by_device(config_dir):
             continue
         grouped.setdefault(device_id, []).append(entity)
     return grouped
+
+
+def entities_by_device(config_dir):
+    _path, _text, data = read_validated_entity_registry(config_dir)
+    return entities_by_device_from_data(data)
 
 
 def deleted_device_rows(config_dir, devices):
@@ -1021,11 +1209,198 @@ def deleted_entity_rows(config_dir, entities):
     return rows
 
 
+def _text_value(value):
+    return str(value).strip() if value not in (None, "") else ""
+
+
+def _identifiers_display(identifiers, limit=3):
+    result = []
+    for identifier in identifiers or []:
+        if not isinstance(identifier, list):
+            continue
+        parts = [_text_value(part) for part in identifier[:2]]
+        parts = [part for part in parts if part]
+        if parts:
+            result.append(parts)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _entity_summary(entity):
+    return {
+        "id": _text_value(entity.get("id")),
+        "entity_id": _text_value(entity.get("entity_id")),
+        "name": _text_value(entity.get("original_name") or entity.get("name")),
+        "device_class": _text_value(entity.get("original_device_class")),
+    }
+
+
+def _device_display(device, areas, row_by_id=None, enrichment_by_id=None):
+    device_id = _text_value(device.get("id"))
+    row = (row_by_id or {}).get(device_id, {})
+    enrichment = (enrichment_by_id or {}).get(device_id, {})
+    name = _text_value(
+        enrichment.get("recovered_name")
+        or row.get("recovered_name")
+        or normalize_recovered_name(device.get("name_by_user") or device.get("name"))
+        or device.get("name_by_user")
+        or device.get("name")
+        or device_id
+    )
+    area_id = _text_value(device.get("area_id"))
+    manufacturer = _text_value(enrichment.get("manufacturer") or row.get("recovered_manufacturer") or device.get("manufacturer"))
+    model = _text_value(enrichment.get("model") or row.get("recovered_model") or device.get("model"))
+    model_id = _text_value(enrichment.get("model_id") or row.get("recovered_model_id") or device.get("model_id"))
+    return {
+        "id": device_id,
+        "label": name or device_id or _("label.deleted_devices"),
+        "name": name,
+        "manufacturer": manufacturer,
+        "model": model,
+        "model_id": model_id,
+        "area": areas.get(area_id) or area_id,
+        "identifiers": enrichment.get("identifiers") or row.get("recovered_identifiers") or _identifiers_display(device.get("identifiers")),
+        "source_commit": _text_value(enrichment.get("source_commit") or row.get("source_commit")),
+        "source_path": _text_value(enrichment.get("source_path") or row.get("source_path")),
+    }
+
+
+def build_deleted_devices_tree_from_data(
+    device_data,
+    entity_data=None,
+    area_data=None,
+    generated_from="preview",
+    rows=None,
+    enrichment=None,
+):
+    deleted = [device for device in validated_deleted_devices(device_data) if isinstance(device, dict)]
+    current_devices = [device for device in validated_devices(device_data) if isinstance(device, dict)]
+    deleted_entities_list = [
+        entity for entity in (validated_deleted_entities(entity_data) if entity_data is not None else []) if isinstance(entity, dict)
+    ]
+    active_entities = [
+        entity for entity in (validated_entities(entity_data) if entity_data is not None else []) if isinstance(entity, dict)
+    ]
+    areas = area_names_from_data(area_data) if area_data is not None else {}
+    row_by_id = {
+        str(row.get("id")): row
+        for row in rows or []
+        if isinstance(row, dict) and row.get("id") and row.get("kind") != "deleted_entity"
+    }
+    enrichment_result = sanitize_deleted_devices_enrichment(enrichment)
+    enrichment_by_id = enrichment_result["by_id"]
+    warnings = list(enrichment_result["warnings"])
+    deleted_entity_groups = {}
+    for entity in deleted_entities_list:
+        deleted_entity_groups.setdefault(_text_value(entity.get("device_id")), []).append(entity)
+    active_entity_groups = {}
+    for entity in active_entities:
+        active_entity_groups.setdefault(_text_value(entity.get("device_id")), []).append(entity)
+    device_groups = []
+    deleted_device_ids = set()
+    for device in deleted:
+        device_id = _text_value(device.get("id"))
+        deleted_device_ids.add(device_id)
+        related_deleted = deleted_entity_groups.pop(device_id, [])
+        related_active = active_entity_groups.get(device_id, [])
+        display = _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
+        device_groups.append(
+            {
+                "device": display,
+                "deleted_entities": [_entity_summary(entity) for entity in related_deleted],
+                "active_entities": [_entity_summary(entity) for entity in related_active],
+                "counts": {
+                    "deleted_entities": len(related_deleted),
+                    "active_entities": len(related_active),
+                },
+            }
+        )
+    orphan_entities = []
+    for device_id, entities in sorted(deleted_entity_groups.items()):
+        if device_id and device_id in deleted_device_ids:
+            continue
+        orphan_entities.append(
+            {
+                "device_id": device_id,
+                "label": device_id or _("label.deleted_entities"),
+                "deleted_entities": [_entity_summary(entity) for entity in entities],
+                "counts": {"deleted_entities": len(entities)},
+            }
+        )
+    return {
+        "schema": 1,
+        "generated_from": generated_from,
+        "device_groups": device_groups,
+        "orphan_entity_groups": orphan_entities,
+        "counts": {
+            "devices": len(device_groups),
+            "deleted_entities": len(deleted_entities_list),
+            "active_entities": len(active_entities),
+            "orphan_deleted_entities": sum(group["counts"]["deleted_entities"] for group in orphan_entities),
+        },
+        "warnings": warnings,
+    }
+
+
+def build_deleted_devices_enrichment_from_tree(tree):
+    devices = []
+    for group in (tree or {}).get("device_groups") or []:
+        device = group.get("device") if isinstance(group, dict) else None
+        if not isinstance(device, dict) or not device.get("id"):
+            continue
+        devices.append(
+            {
+                "id": str(device.get("id")),
+                "recovered_name": _text_value(device.get("name") or device.get("label")),
+                "manufacturer": _text_value(device.get("manufacturer")),
+                "model": _text_value(device.get("model")),
+                "model_id": _text_value(device.get("model_id")),
+                "identifiers": _identifiers_display(device.get("identifiers")),
+                "source_commit": _text_value(device.get("source_commit"))[:40],
+                "source_path": _text_value(device.get("source_path"))[:240],
+            }
+        )
+        if len(devices) >= 200:
+            break
+    return {"schema": 1, "devices": devices}
+
+
+def sanitize_deleted_devices_enrichment(enrichment):
+    warnings = []
+    if not enrichment:
+        return {"by_id": {}, "warnings": warnings}
+    if not isinstance(enrichment, dict) or enrichment.get("schema") != 1:
+        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")]}
+    manifest_warnings = enrichment.get("warnings")
+    if isinstance(manifest_warnings, list):
+        warnings.extend(str(warning) for warning in manifest_warnings if warning)
+    devices = enrichment.get("devices")
+    if not isinstance(devices, list) or len(devices) > 200:
+        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")]}
+    by_id = {}
+    for item in devices:
+        if not isinstance(item, dict) or not item.get("id"):
+            warnings.append(_("warning.deleted_devices_enrichment_ignored"))
+            continue
+        by_id[str(item["id"])] = {
+            "recovered_name": _text_value(item.get("recovered_name"))[:160],
+            "manufacturer": _text_value(item.get("manufacturer"))[:120],
+            "model": _text_value(item.get("model"))[:120],
+            "model_id": _text_value(item.get("model_id"))[:120],
+            "identifiers": _identifiers_display(item.get("identifiers")),
+            "source_commit": _text_value(item.get("source_commit"))[:40],
+            "source_path": _text_value(item.get("source_path"))[:240],
+        }
+    return {"by_id": by_id, "warnings": sorted(set(warnings))}
+
+
 def build_deleted_devices_preview(config_dir, history_context=None):
-    _path, text, data = read_device_registry(config_dir)
-    devices = deleted_devices(data)
-    _entity_path, entity_text, entity_data = read_entity_registry(config_dir)
-    entities = deleted_entities(entity_data)
+    _path, text, data = read_validated_device_registry(config_dir)
+    _entity_path, entity_text, entity_data = read_validated_entity_registry(config_dir)
+    _area_path, _area_text, area_data = read_validated_area_registry(config_dir)
+    devices = validated_deleted_devices(data)
+    entities = validated_deleted_entities(entity_data) if entity_data is not None else []
     total = len(devices) + len(entities)
     label = deleted_entries_label(len(devices), len(entities))
     lines = [_("preview.deleted_entries_title", entries=label, count=total)]
@@ -1037,34 +1412,38 @@ def build_deleted_devices_preview(config_dir, history_context=None):
         lines.extend(f"- {entity.get('entity_id') or entity.get('id') or json.dumps(entity, ensure_ascii=False, sort_keys=True)}" for entity in entities)
     if not total:
         lines.append(_("preview.deleted_entries_none"))
+    rows = [
+        *enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
+        *deleted_entity_rows(config_dir, entities),
+    ]
+    tree = build_deleted_devices_tree_from_data(data, entity_data, area_data, generated_from="preview", rows=rows)
     return {
         "count": total,
         "device_count": len(devices),
         "entity_count": len(entities),
         "fingerprint": registry_fingerprint(text, entity_text),
         "summary": "\n".join(lines),
-        "rows": [
-            *enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
-            *deleted_entity_rows(config_dir, entities),
-        ],
+        "rows": rows,
+        "tree": tree,
+        "enrichment": build_deleted_devices_enrichment_from_tree(tree),
     }
 
 
 def device_registry_fingerprint(config_dir):
-    _path, text, _data = read_device_registry(config_dir)
-    _entity_path, entity_text, _entity_data = read_entity_registry(config_dir)
+    _path, text, _data = read_validated_device_registry(config_dir)
+    _entity_path, entity_text, _entity_data = read_validated_entity_registry(config_dir)
     return registry_fingerprint(text, entity_text)
 
 
 def clear_deleted_devices(config_dir, expected_fingerprint):
-    path, text, data = read_device_registry(config_dir)
-    entity_path, entity_text, entity_data = read_entity_registry(config_dir)
+    path, text, data = read_validated_device_registry(config_dir)
+    entity_path, entity_text, entity_data = read_validated_entity_registry(config_dir)
     current_fingerprint = registry_fingerprint(text, entity_text)
     if expected_fingerprint and current_fingerprint != expected_fingerprint:
         raise RuntimeError("Deleted devices changed since preview. Run Check deleted devices again.")
 
-    devices = deleted_devices(data)
-    entities = deleted_entities(entity_data)
+    devices = validated_deleted_devices(data)
+    entities = validated_deleted_entities(entity_data) if entity_data is not None else []
     removed = len(devices) + len(entities)
     data.setdefault("data", {})["deleted_devices"] = []
     device_temp = path.with_name(f".{path.name}.deleted-entries.tmp")

@@ -134,6 +134,7 @@ class JobContext:
     create_deleted_devices_rollback: Any
     create_release_snapshot: Any
     deleted_devices_cleanup_status: Any
+    deleted_devices_pending_tree: Any
     device_registry_fingerprint: Any
     discard_deleted_devices_rollback: Any
     enforce_apply_limits: Any
@@ -400,6 +401,9 @@ def refresh_deleted_devices_preview_updates(ctx):
     return {
         "last_deleted_devices_preview": preview["summary"],
         "last_deleted_devices_rows": preview["rows"],
+        "last_deleted_devices_tree": preview.get("tree"),
+        "last_deleted_devices_tree_error": "",
+        "last_deleted_devices_enrichment": preview.get("enrichment"),
         "last_deleted_devices_count": preview["count"],
         "last_deleted_devices_device_count": preview.get("device_count", 0),
         "last_deleted_devices_entity_count": preview.get("entity_count", 0),
@@ -1156,6 +1160,9 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
                 "last_details": details,
                 "last_deleted_devices_preview": preview["summary"],
                 "last_deleted_devices_rows": preview["rows"],
+                "last_deleted_devices_tree": preview.get("tree"),
+                "last_deleted_devices_tree_error": "",
+                "last_deleted_devices_enrichment": preview.get("enrichment"),
                 "last_deleted_devices_count": count,
                 "last_deleted_devices_device_count": preview.get("device_count", 0),
                 "last_deleted_devices_entity_count": preview.get("entity_count", 0),
@@ -1176,6 +1183,9 @@ def run_deleted_devices_preview_job(ctx, lock_acquired=False):
                 "last_details": details,
                 "last_deleted_devices_preview": "",
                 "last_deleted_devices_rows": [],
+                "last_deleted_devices_tree": None,
+                "last_deleted_devices_tree_error": str(exc),
+                "last_deleted_devices_enrichment": None,
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_device_count": 0,
                 "last_deleted_devices_entity_count": 0,
@@ -1578,7 +1588,7 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
         ctx.add_detail(details, _("detail.stopping_core_for_deleted_devices"))
         ctx.core_stop()
         core_stopped = True
-        rollback = ctx.create_deleted_devices_rollback(fingerprint)
+        rollback = ctx.create_deleted_devices_rollback(fingerprint, state.get("last_deleted_devices_enrichment"))
         write_state(
             {
                 "deleted_devices_pending_confirmation": True,
@@ -1588,6 +1598,8 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 "deleted_devices_applied_fingerprint": None,
                 "deleted_devices_pending_device_count": device_count,
                 "deleted_devices_pending_entity_count": entity_count,
+                "deleted_devices_pending_tree": state.get("last_deleted_devices_tree"),
+                "deleted_devices_pending_tree_error": "",
                 "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_RESTORE_REQUIRED,
             }
         )
@@ -1628,6 +1640,12 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
 
         if rollback.get("format") == "manifest_v1":
             ctx.set_deleted_devices_rollback_phase(rollback["path"], "pending_confirmation")
+        pending_tree = None
+        pending_tree_error = ""
+        try:
+            pending_tree = ctx.deleted_devices_pending_tree(rollback["path"])
+        except Exception as tree_exc:
+            pending_tree_error = str(tree_exc)
 
         write_state(
             {
@@ -1643,6 +1661,9 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 "last_backup_slug": backup_slug,
                 "last_deleted_devices_preview": _("text.no_deleted_devices"),
                 "last_deleted_devices_rows": [],
+                "last_deleted_devices_tree": None,
+                "last_deleted_devices_tree_error": "",
+                "last_deleted_devices_enrichment": None,
                 "last_deleted_devices_count": 0,
                 "last_deleted_devices_device_count": 0,
                 "last_deleted_devices_entity_count": 0,
@@ -1655,6 +1676,8 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                 "deleted_devices_applied_fingerprint": result["fingerprint"],
                 "deleted_devices_pending_device_count": result.get("removed_devices", device_count),
                 "deleted_devices_pending_entity_count": result.get("removed_entities", entity_count),
+                "deleted_devices_pending_tree": pending_tree,
+                "deleted_devices_pending_tree_error": pending_tree_error,
                 "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
@@ -1695,6 +1718,9 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                             else {
                                 "last_deleted_devices_preview": _("text.no_deleted_devices"),
                                 "last_deleted_devices_rows": [],
+                                "last_deleted_devices_tree": None,
+                                "last_deleted_devices_tree_error": "",
+                                "last_deleted_devices_enrichment": None,
                                 "last_deleted_devices_count": 0,
                                 "last_deleted_devices_device_count": 0,
                                 "last_deleted_devices_entity_count": 0,
@@ -1709,6 +1735,8 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                         "deleted_devices_applied_fingerprint": result.get("fingerprint") if result else None,
                         "deleted_devices_pending_device_count": result.get("removed_devices", device_count) if result else device_count,
                         "deleted_devices_pending_entity_count": result.get("removed_entities", entity_count) if result else entity_count,
+                        "deleted_devices_pending_tree": state.get("last_deleted_devices_tree"),
+                        "deleted_devices_pending_tree_error": "",
                         "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_MANUAL,
                     }
                     if rollback_restore_failed
@@ -1718,6 +1746,9 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                     {
                         "last_deleted_devices_preview": _("text.no_deleted_devices"),
                         "last_deleted_devices_rows": [],
+                        "last_deleted_devices_tree": None,
+                        "last_deleted_devices_tree_error": "",
+                        "last_deleted_devices_enrichment": None,
                         "last_deleted_devices_count": 0,
                         "last_deleted_devices_device_count": 0,
                         "last_deleted_devices_entity_count": 0,
@@ -1730,6 +1761,8 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                         "deleted_devices_applied_fingerprint": None,
                         "deleted_devices_pending_device_count": 0,
                         "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_pending_tree": None,
+                        "deleted_devices_pending_tree_error": "",
                         "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
                     if registry_changed and not restored_preview and not rollback_restore_failed
@@ -1744,6 +1777,8 @@ def run_deleted_devices_delete_job(ctx, lock_acquired=False):
                         "deleted_devices_applied_fingerprint": None,
                         "deleted_devices_pending_device_count": 0,
                         "deleted_devices_pending_entity_count": 0,
+                        "deleted_devices_pending_tree": None,
+                        "deleted_devices_pending_tree_error": "",
                         "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                     }
                     if (restored_preview and not rollback_restore_failed)
@@ -1824,6 +1859,8 @@ def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
                 "deleted_devices_applied_fingerprint": None,
                 "deleted_devices_pending_device_count": 0,
                 "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_pending_tree": None,
+                "deleted_devices_pending_tree_error": "",
                 "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
@@ -1884,9 +1921,16 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
         # A prior Revert can have restored the registries and published its
         # terminal phase before artifact cleanup failed. Retrying it only
         # needs to finish that cleanup; it must not restore a second time.
-        cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
-        if cleanup_status.get("terminal_phase"):
-            if cleanup_status["terminal_phase"] != registry_cleanup.ROLLBACK_PHASE_REVERTED:
+        terminal_phase = None
+        if registry_cleanup.rollback_manifest_is_v1(rollback_path):
+            terminal_phase = registry_cleanup.load_rollback_manifest_metadata(rollback_path).get("phase")
+            if terminal_phase not in registry_cleanup.ROLLBACK_TERMINAL_PHASES:
+                terminal_phase = None
+        else:
+            cleanup_status = ctx.deleted_devices_cleanup_status(rollback_path)
+            terminal_phase = cleanup_status.get("terminal_phase")
+        if terminal_phase:
+            if terminal_phase != registry_cleanup.ROLLBACK_PHASE_REVERTED:
                 raise i18n.error("error.deleted_devices_already_confirmed", entries=entries)
             ctx.discard_deleted_devices_rollback(rollback_path)
             preview_updates = refresh_deleted_devices_preview_updates(ctx)
@@ -1905,6 +1949,8 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                     "deleted_devices_applied_fingerprint": None,
                     "deleted_devices_pending_device_count": 0,
                     "deleted_devices_pending_entity_count": 0,
+                    "deleted_devices_pending_tree": None,
+                    "deleted_devices_pending_tree_error": "",
                     "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
                 }
             )
@@ -1955,6 +2001,8 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                 "deleted_devices_applied_fingerprint": None,
                 "deleted_devices_pending_device_count": 0,
                 "deleted_devices_pending_entity_count": 0,
+                "deleted_devices_pending_tree": None,
+                "deleted_devices_pending_tree_error": "",
                 "deleted_devices_recovery_phase": state_store.DELETED_DEVICES_RECOVERY_NONE,
             }
         )
@@ -1989,6 +2037,8 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
                                 "deleted_devices_applied_fingerprint": None,
                                 "deleted_devices_pending_device_count": 0,
                                 "deleted_devices_pending_entity_count": 0,
+                                "deleted_devices_pending_tree": None,
+                                "deleted_devices_pending_tree_error": "",
                             }
                             if core_start_failed_after_restore
                             else {}
