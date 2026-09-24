@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.35
+
+- Group deleted ZHA diagnostic entities with their device when one complete, unique IEEE address proves the association.
+
 ## 0.10.34
 
 - Group deleted-registry entities under a uniquely proven Zigbee IEEE device, explain stale Zigbee2MQTT App/Supervisor entries without mislabelling other Apps, and retain that explanation through pending cleanup replay.

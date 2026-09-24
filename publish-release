@@ -3,7 +3,12 @@ set -euo pipefail
 
 remote='git@github.com:alex-ander-is/ha-ops-addon.git'
 branch='main'
-tag='0.10.34'
+tag="$(awk -F'"' '/^version: "/ { print $2; exit }' ha-ops/config.yaml)"
+
+[[ "$tag" ]] || {
+  printf 'could not read HA Ops version from ha-ops/config.yaml\n' >&2
+  exit 1
+}
 
 [[ "$(git remote get-url origin)" == "$remote" ]] || {
   printf 'origin does not match %s\n' "$remote" >&2

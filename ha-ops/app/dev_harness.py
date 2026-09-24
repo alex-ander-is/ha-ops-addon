@@ -535,7 +535,7 @@ class HarnessScenarioController:
         return {
             "schema": 1,
             "generated_from": generated_from,
-            "counts": {"devices": 5, "deleted_entities": 7, "active_entities": 0, "orphan_deleted_entities": 0},
+            "counts": {"devices": 4, "deleted_entities": 7, "active_entities": 0, "orphan_deleted_entities": 0},
             "warnings": [],
             "device_groups": [
                 {
@@ -590,9 +590,13 @@ class HarnessScenarioController:
                         "source_commit": "",
                         "source_path": "",
                     },
-                    "deleted_entities": [{"id": "entity-b", "entity_id": "binary_sensor.kitchen_presence_occupancy", "name": "Kitchen Presence Occupancy"}],
+                    "deleted_entities": [
+                        {"id": "entity-b", "entity_id": "binary_sensor.kitchen_presence_occupancy", "name": "Kitchen Presence Occupancy"},
+                        {"id": "entity-e", "entity_id": "sensor.tze204_qasjif9e_ts0601_rssi", "name": ""},
+                        {"id": "entity-f", "entity_id": "sensor.tze204_qasjif9e_ts0601_lqi", "name": ""},
+                    ],
                     "active_entities": [],
-                    "counts": {"deleted_entities": 1, "active_entities": 0},
+                    "counts": {"deleted_entities": 3, "active_entities": 0},
                 },
                 {
                     "device": {
@@ -610,26 +614,6 @@ class HarnessScenarioController:
                     "deleted_entities": [
                         {"id": "entity-c", "entity_id": "sensor.kitchen_rc_battery", "name": ""},
                         {"id": "entity-d", "entity_id": "sensor.kitchen_rc_linkquality", "name": ""},
-                    ],
-                    "active_entities": [],
-                    "counts": {"deleted_entities": 2, "active_entities": 0},
-                },
-                {
-                    "device": {
-                        "id": "tze204_qasjif9e_ts0601",
-                        "label": "Tze204 Qasjif9e Ts0601",
-                        "name": "Tze204 Qasjif9e Ts0601",
-                        "manufacturer": "",
-                        "model": "",
-                        "model_id": "",
-                        "area": "",
-                        "identifiers": [],
-                        "source_commit": "",
-                        "source_path": "",
-                    },
-                    "deleted_entities": [
-                        {"id": "entity-e", "entity_id": "sensor.tze204_qasjif9e_ts0601_rssi", "name": ""},
-                        {"id": "entity-f", "entity_id": "sensor.tze204_qasjif9e_ts0601_lqi", "name": ""},
                     ],
                     "active_entities": [],
                     "counts": {"deleted_entities": 2, "active_entities": 0},

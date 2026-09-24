@@ -1098,7 +1098,6 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
   await pendingSection.getByText("binary_sensor.kitchen_presence_occupancy").waitFor({ timeout: 5000 });
   await pendingSection.getByText("Kitchen RC").waitFor({ timeout: 5000 });
   await pendingSection.getByText("sensor.kitchen_rc_battery").waitFor({ timeout: 5000 });
-  await pendingSection.getByText("Tze204 Qasjif9e Ts0601").waitFor({ timeout: 5000 });
   await pendingSection.getByText("sensor.tze204_qasjif9e_ts0601_rssi").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("deleted devices before cleanup").count()) === 0, "pending raw diff loaded before expansion");
   const beforeRawExpansion = pendingRawDiffRequests.length;
@@ -1227,16 +1226,15 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
         group.text.includes("Zigbee2MQTT") && group.text.includes("App / Supervisor") && group.text.includes("binary_sensor.zigbee2mqtt_running")
       ),
       kitchenPresenceGrouped: groups.some((group) =>
-        group.text.includes("Kitchen Presence") && group.text.includes("binary_sensor.kitchen_presence_occupancy")
+        group.text.includes("Kitchen Presence") &&
+        group.text.includes("binary_sensor.kitchen_presence_occupancy") &&
+        group.text.includes("sensor.tze204_qasjif9e_ts0601_rssi") &&
+        group.text.includes("sensor.tze204_qasjif9e_ts0601_lqi")
       ),
       kitchenRcGrouped: groups.some((group) =>
         group.text.includes("Kitchen RC") && group.text.includes("sensor.kitchen_rc_battery") && group.text.includes("sensor.kitchen_rc_linkquality")
       ),
-      tzeGrouped: groups.some((group) =>
-        group.text.includes("Tze204 Qasjif9e Ts0601") &&
-        group.text.includes("sensor.tze204_qasjif9e_ts0601_rssi") &&
-        group.text.includes("sensor.tze204_qasjif9e_ts0601_lqi")
-      ),
+      standaloneTzeGroup: groups.some((group) => group.text.includes("Tze204 Qasjif9e Ts0601")),
     };
   });
   assert(metrics.tree, `deleted-device semantic tree missing: ${JSON.stringify(metrics)}`);
@@ -1253,7 +1251,7 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
   assert(metrics.zigbee2mqttDisplay, `Zigbee2MQTT hassio device was not rendered as a readable app group: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenPresenceGrouped, `kitchen presence entity was not grouped under its device: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenRcGrouped, `kitchen RC entities were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
-  assert(metrics.tzeGrouped, `TZE link metrics were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
+  assert(!metrics.standaloneTzeGroup, `TZE link metrics remained in a standalone device group: ${JSON.stringify(metrics)}`);
   const overflowing = (metrics.groups || []).filter((group) => group.left < -2 || group.right > metrics.clientWidth + 2);
   assert(overflowing.length === 0, `deleted-device semantic tree overflowed horizontally: ${JSON.stringify({ metrics, overflowing })}`);
   assert(metrics.longEntity, `long deleted-device entity was not rendered: ${JSON.stringify(metrics)}`);

@@ -27,6 +27,8 @@ def area_registry_path(config_dir):
 
 ZIGBEE_IEEE_RE = re.compile(r"0x[0-9a-fA-F]{16}")
 ZIGBEE_IEEE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])0x[0-9a-fA-F]{16}(?![A-Za-z0-9])")
+ZHA_IEEE_RE = re.compile(r"(?:[0-9a-fA-F]{2}:){7}[0-9a-fA-F]{2}")
+ZHA_IEEE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9:])(?:[0-9a-fA-F]{2}:){7}[0-9a-fA-F]{2}(?![A-Za-z0-9:])")
 HASSIO_Z2M_IDENTIFIER_RE = re.compile(r"^([0-9a-f]{6,})_([a-z0-9_-]+)$")
 ZIGBEE2MQTT_SLUG_TOKEN_RE = re.compile(r"(?:^|[_-])(?:zigbee2mqtt|z2m)(?:$|[_-])")
 ZIGBEE2MQTT_PATHS = (
@@ -91,6 +93,20 @@ def mqtt_zigbee2mqtt_identifier(device):
             if ZIGBEE_IEEE_RE.fullmatch(ieee):
                 return ieee
     return None
+
+
+def deleted_device_zigbee_ieee(device):
+    """Return one canonical Zigbee IEEE address proven by a device identifier."""
+    mqtt_ieee = mqtt_zigbee2mqtt_identifier(device)
+    if mqtt_ieee:
+        return mqtt_ieee
+    for identifier in device.get("identifiers") or []:
+        if not isinstance(identifier, list) or len(identifier) != 2:
+            continue
+        domain, value = identifier
+        if domain == "zha" and isinstance(value, str) and ZHA_IEEE_RE.fullmatch(value):
+            return "0x" + value.replace(":", "").lower()
+    return ""
 
 
 def retained_discovery_topic_ieees(topics):
@@ -1289,13 +1305,14 @@ def _unique_id_ieee(entity):
     if not isinstance(value, str):
         return ""
     matches = ZIGBEE_IEEE_TOKEN_RE.findall(value)
+    matches.extend("0x" + match.replace(":", "") for match in ZHA_IEEE_TOKEN_RE.findall(value))
     return matches[0].lower() if len(matches) == 1 else ""
 
 
 def _deleted_device_ieee_index(devices):
     values = {}
     for device in devices:
-        ieee = mqtt_zigbee2mqtt_identifier(device)
+        ieee = deleted_device_zigbee_ieee(device)
         if ieee:
             values.setdefault(ieee, []).append(_text_value(device.get("id")))
     return {ieee: ids[0] for ieee, ids in values.items() if len(ids) == 1 and ids[0]}

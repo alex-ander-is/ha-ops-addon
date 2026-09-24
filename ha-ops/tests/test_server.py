@@ -15594,7 +15594,12 @@ devices:
                                 },
                                 {"id": "mosquitto-app", "identifiers": [["hassio", "61804cda_mosquitto"]]},
                                 {"id": "physical-z2m", "identifiers": [["mqtt", "zigbee2mqtt_0x00124B000000ABCD"]]},
-                                {"id": "kitchen_presence", "name": "kitchen_presence", "area_id": "kitchen"},
+                                {
+                                    "id": "kitchen_presence",
+                                    "name": "kitchen_presence",
+                                    "area_id": "kitchen",
+                                    "identifiers": [["zha", "a4:c1:38:a3:71:09:9d:d7"]],
+                                },
                             ],
                         }
                     }
@@ -15611,8 +15616,16 @@ devices:
                                 {"id": "entity-kitchen", "entity_id": "binary_sensor.kitchen_presence_occupancy"},
                                 {"id": "entity-kitchen-rc-battery", "entity_id": "sensor.kitchen_rc_battery"},
                                 {"id": "entity-kitchen-rc-lq", "entity_id": "sensor.kitchen_rc_linkquality"},
-                                {"id": "entity-tze-rssi", "entity_id": "sensor.tze204_qasjif9e_ts0601_rssi"},
-                                {"id": "entity-tze-lqi", "entity_id": "sensor.tze204_qasjif9e_ts0601_lqi"},
+                                {
+                                    "id": "entity-tze-rssi",
+                                    "entity_id": "sensor.tze204_qasjif9e_ts0601_rssi",
+                                    "unique_id": "a4:c1:38:a3:71:09:9d:d7-1-0-rssi",
+                                },
+                                {
+                                    "id": "entity-tze-lqi",
+                                    "entity_id": "sensor.tze204_qasjif9e_ts0601_lqi",
+                                    "unique_id": "a4:c1:38:a3:71:09:9d:d7-1-0-lqi",
+                                },
                                 {"id": "entity-orphan", "entity_id": "sensor.unrelated_orphan"},
                             ],
                         }
@@ -15634,18 +15647,21 @@ devices:
             self.assertNotIn("presentation_reason", groups_by_id["mosquitto-app"])
             self.assertEqual(groups_by_id["physical-z2m"]["deleted_entities"][0]["entity_id"], "sensor.unlinked_physical")
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["label"], "Kitchen Presence")
-            self.assertEqual(groups_by_id["kitchen_presence"]["deleted_entities"][0]["entity_id"], "binary_sensor.kitchen_presence_occupancy")
+            self.assertEqual(
+                [entity["entity_id"] for entity in groups_by_id["kitchen_presence"]["deleted_entities"]],
+                [
+                    "binary_sensor.kitchen_presence_occupancy",
+                    "sensor.tze204_qasjif9e_ts0601_rssi",
+                    "sensor.tze204_qasjif9e_ts0601_lqi",
+                ],
+            )
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["area"], "Kitchen")
             self.assertEqual(groups_by_id["kitchen_rc"]["device"]["model"], "")
             self.assertEqual(
                 [entity["entity_id"] for entity in groups_by_id["kitchen_rc"]["deleted_entities"]],
                 ["sensor.kitchen_rc_battery", "sensor.kitchen_rc_linkquality"],
             )
-            self.assertEqual(groups_by_id["tze204_qasjif9e_ts0601"]["device"]["model"], "")
-            self.assertEqual(
-                [entity["entity_id"] for entity in groups_by_id["tze204_qasjif9e_ts0601"]["deleted_entities"]],
-                ["sensor.tze204_qasjif9e_ts0601_rssi", "sensor.tze204_qasjif9e_ts0601_lqi"],
-            )
+            self.assertNotIn("tze204_qasjif9e_ts0601", groups_by_id)
             self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.unrelated_orphan")
 
     def test_deleted_devices_unique_id_ieee_link_requires_one_unambiguous_complete_token(self):
