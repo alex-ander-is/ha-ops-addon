@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote='git@github.com:alex-ander-is/ha-ops-addon.git'
+branch='main'
+tag='0.10.34'
+
+[[ "$(git remote get-url origin)" == "$remote" ]] || {
+  printf 'origin does not match %s\n' "$remote" >&2
+  exit 1
+}
+[[ "$(git branch --show-current)" == "$branch" ]] || {
+  printf 'current branch is not %s\n' "$branch" >&2
+  exit 1
+}
+git rev-parse --verify "$tag^{tag}" >/dev/null
+git push origin "$branch" "$tag"
