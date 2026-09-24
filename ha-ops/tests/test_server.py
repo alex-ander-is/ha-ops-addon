@@ -15497,6 +15497,10 @@ devices:
             self.assertTrue(server.run_deleted_devices_confirm_job())
             confirmed = server.read_state()
             self.assertEqual(confirmed["last_message"], "Confirmed deleted entities cleanup.")
+            self.assertIsNone(confirmed["last_deleted_devices_generated_at"])
+            self.assertEqual(confirmed["last_deleted_devices_rows"], [])
+            self.assertIsNone(confirmed["last_deleted_devices_tree"])
+            self.assertFalse(confirmed["deleted_devices_pending_confirmation"])
             self.assertTrue(
                 any(
                     "Important: run HA to Git Preview and Save now to commit this registry cleanup" in detail

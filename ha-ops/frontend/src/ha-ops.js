@@ -15,6 +15,7 @@ const WS_COMMANDS = new Set([
   "internal_ids_preview", "internal_ids_migrate", "deleted_devices_delete",
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
+const TERMINAL_STATE_SYNC_COMMANDS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
 
 function knownVersion(value) {
   const version = String(value || "").trim();
@@ -1173,6 +1174,7 @@ class HaOpsApp extends LitElement {
       entry.sent = true;
       const response = await result;
       if (!response.ok) throw new Error(response.message || "Command rejected");
+      if (TERMINAL_STATE_SYNC_COMMANDS.has(command)) await this.pollCommandState(envelope.command_id);
       return response;
     }
     if (socket && socket.readyState !== window.WebSocket?.CLOSED) {
@@ -1190,9 +1192,16 @@ class HaOpsApp extends LitElement {
   }
 
   async pollHttpCommand(commandId) {
+    await this.pollCommandState(commandId);
+    this.setConnection("http");
+  }
+
+  async pollCommandState(commandId) {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
-      await this.loadHttpBaseline();
+      const response = await fetch("debug-snapshot");
+      if (!response.ok) throw new Error("Could not refresh HA Ops state.");
+      this.applyBaseline(await response.json());
       const status = this.state.command_records?.[commandId]?.status;
       if (status === "terminal") return;
       if (status === "failed_unknown") throw new Error("Command outcome is unknown.");

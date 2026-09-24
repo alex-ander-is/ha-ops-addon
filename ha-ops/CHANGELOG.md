@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.36
+
+- Remove the pending deleted-devices decision UI as soon as Confirm succeeds, even when its WebSocket state update is delayed.
+
 ## 0.10.35
 
 - Group deleted ZHA diagnostic entities with their device when one complete, unique IEEE address proves the association.

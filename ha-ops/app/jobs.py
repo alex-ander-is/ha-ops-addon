@@ -1852,6 +1852,7 @@ def run_deleted_devices_confirm_job(ctx, lock_acquired=False):
                 "last_action": "deleted_devices_confirm",
                 "last_message": _("message.confirmed_deleted_devices_cleanup", entries=entries),
                 "last_details": details,
+                **state_store.DELETED_DEVICES_PREVIEW_CLEAR_UPDATES,
                 "deleted_devices_pending_confirmation": False,
                 "deleted_devices_rollback_path": None,
                 "deleted_devices_rollback_format": None,

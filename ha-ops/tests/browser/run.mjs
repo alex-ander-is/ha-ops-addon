@@ -1141,6 +1141,12 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
     const state = await diagnostics(baseUrl);
     return state.state?.last_action === "deleted_devices_confirm" && state.state?.last_status === "success" ? state : null;
   });
+  await waitFor("deleted devices pending cleanup controls clear without reload", async () => {
+    const confirm = page.getByRole("button", { name: "Confirm Changes" });
+    const revert = page.getByRole("button", { name: "Revert Changes" });
+    const hiddenOrAbsent = async (control) => (await control.count()) === 0 || !(await control.first().isVisible());
+    return await hiddenOrAbsent(confirm) && await hiddenOrAbsent(revert) ? true : null;
+  });
   await page.reload();
   await waitForInteractiveTransport(page, "cleanup confirm reload");
   assert((await page.getByTestId("deleted-devices-preview-section").count()) === 0, "confirm left stale pending deleted cleanup section");
