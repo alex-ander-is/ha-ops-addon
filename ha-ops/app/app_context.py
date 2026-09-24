@@ -817,7 +817,17 @@ class AppContext:
             return None
 
     def build_deleted_devices_preview(self):
-        return registry_cleanup.build_deleted_devices_preview(self.config_dir, self.deleted_devices_history_context())
+        current_slug = None
+        try:
+            slugs = [addon.get("slug") for addon in self.get_installed_addons() if isinstance(addon, dict) and self.addon_is_zigbee2mqtt(addon)]
+            valid = [slug for slug in slugs if registry_cleanup.valid_zigbee2mqtt_app_slug(slug)]
+            if len(valid) == 1:
+                current_slug = valid[0]
+        except Exception as exc:
+            self.log(f"deleted_devices App presentation disabled: {exc}")
+        return registry_cleanup.build_deleted_devices_preview(
+            self.config_dir, self.deleted_devices_history_context(), current_slug
+        )
 
     def list_retained_discovery_topics(self):
         return registry_cleanup.list_retained_discovery_topics(self.run_command, self.mqtt_service())

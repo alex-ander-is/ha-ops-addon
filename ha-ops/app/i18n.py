@@ -520,6 +520,7 @@ EN_TEXT = {
     "text.current_state": "Current state:",
     "text.deleted_device_group_active_count": "{active} active entities",
     "text.deleted_device_group_remove_count": "{deleted} entities to remove",
+    "text.deleted_device_previous_zigbee2mqtt_app": "Historical presentation only: these entities are associated with previous Zigbee2MQTT App/Supervisor slug {old_slug}; current App slug is {current_slug}.",
     "text.diff_detail_unavailable": "Diff detail unavailable for this file.",
     "warning.version_mismatch": "A new HA Ops version {version} is available. Correct client operation is not guaranteed until you reload HA Ops.",
     "warning.deleted_devices_enrichment_ignored": "Display metadata was unavailable; showing registry-derived labels.",

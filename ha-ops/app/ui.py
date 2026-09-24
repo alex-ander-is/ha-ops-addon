@@ -220,6 +220,12 @@ def render_deleted_devices_tree(tree):
             details.append(" ".join(item for item in [str(device.get("source_commit") or "")[:12], device.get("source_path") or ""] if item))
         if details:
             parts.append("<p><small>" + html.escape(" · ".join(details)) + "</small></p>")
+        reason = group.get("presentation_reason") or {}
+        if reason.get("kind") == "previous_zigbee2mqtt_app":
+            old_slug = html.escape(str(reason.get("old_slug") or ""))
+            current_slug = html.escape(str(reason.get("current_slug") or ""))
+            message = _("text.deleted_device_previous_zigbee2mqtt_app", old_slug=old_slug, current_slug=current_slug)
+            parts.append(f"<p class='action-hint'>{message}</p>")
         parts.extend(render_entity_list(_("label.entities_to_remove"), group.get("deleted_entities") or []))
         parts.extend(render_entity_list(_("label.active_entities"), group.get("active_entities") or []))
         parts.append("</vaadin-details>")
@@ -1814,6 +1820,7 @@ def render_page(data):
       rawDiffLoadsOnExpand: {js_t('text.raw_diff_loads_on_expand')},
       deletedDeviceGroupActiveCount: {js_t('text.deleted_device_group_active_count')},
       deletedDeviceGroupRemoveCount: {js_t('text.deleted_device_group_remove_count')},
+      deletedDevicePreviousZigbee2mqttApp: {js_t('text.deleted_device_previous_zigbee2mqtt_app')},
       conflictDiffTitle: {js_t('title.conflict_diff')},
       statusDone: {js_t('status.done')},
       statusPendingDecision: {js_t('status.pending_decision')},

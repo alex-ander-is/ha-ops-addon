@@ -26,6 +26,9 @@ def area_registry_path(config_dir):
 
 
 ZIGBEE_IEEE_RE = re.compile(r"0x[0-9a-fA-F]{16}")
+ZIGBEE_IEEE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])0x[0-9a-fA-F]{16}(?![A-Za-z0-9])")
+HASSIO_Z2M_IDENTIFIER_RE = re.compile(r"^([0-9a-f]{6,})_([a-z0-9_-]+)$")
+ZIGBEE2MQTT_SLUG_TOKEN_RE = re.compile(r"(?:^|[_-])(?:zigbee2mqtt|z2m)(?:$|[_-])")
 ZIGBEE2MQTT_PATHS = (
     "zigbee2mqtt/database.db",
     "zigbee2mqtt/configuration.yaml",
@@ -555,6 +558,8 @@ def sanitize_manifest_deleted_devices_enrichment(enrichment):
     }
     if sanitized["warnings"]:
         manifest_enrichment["warnings"] = sanitized["warnings"]
+    if sanitized.get("current_zigbee2mqtt_slug"):
+        manifest_enrichment["presentation_context"] = {"current_zigbee2mqtt_slug": sanitized["current_zigbee2mqtt_slug"]}
     return manifest_enrichment
 
 
@@ -682,12 +687,15 @@ def _pending_tree_from_v1_manifest(config_dir, source):
         }
     else:
         context_entity_data = rollback_entity_data
+    enrichment = manifest.get("deleted_devices_enrichment")
+    sanitized = sanitize_deleted_devices_enrichment(enrichment)
     return build_deleted_devices_tree_from_data(
         rollback_data,
         context_entity_data,
         area_data,
         generated_from="pending",
-        enrichment=manifest.get("deleted_devices_enrichment"),
+        enrichment=enrichment,
+        current_zigbee2mqtt_slug=sanitized.get("current_zigbee2mqtt_slug"),
     )
 
 
@@ -1252,12 +1260,10 @@ def _hassio_addon_display_from_identifiers(identifiers):
     for identifier in identifiers or []:
         if not isinstance(identifier, list) or len(identifier) < 2:
             continue
-        domain = _semantic_slug(identifier[0])
-        value = _semantic_slug(identifier[1])
-        if domain != "hassio" or not value:
+        parsed = _hassio_zigbee2mqtt_identifier(identifier)
+        if not parsed:
             continue
-        match = re.fullmatch(r"[0-9a-f]{6,}_(.+)", value)
-        addon_slug = match.group(1) if match else value
+        _owner, addon_slug = parsed
         label = _humanize_semantic_slug(addon_slug)
         if label:
             return {
@@ -1266,6 +1272,52 @@ def _hassio_addon_display_from_identifiers(identifiers):
                 "model": "Supervisor",
             }
     return {}
+
+
+def _hassio_zigbee2mqtt_identifier(identifier):
+    """Return a strictly raw historic Supervisor owner/slug pair, if proven."""
+    if not isinstance(identifier, list) or len(identifier) != 2:
+        return None
+    if identifier[0] != "hassio" or not isinstance(identifier[1], str):
+        return None
+    match = HASSIO_Z2M_IDENTIFIER_RE.fullmatch(identifier[1])
+    return match.groups() if match else None
+
+
+def _unique_id_ieee(entity):
+    value = entity.get("unique_id") if isinstance(entity, dict) else None
+    if not isinstance(value, str):
+        return ""
+    matches = ZIGBEE_IEEE_TOKEN_RE.findall(value)
+    return matches[0].lower() if len(matches) == 1 else ""
+
+
+def _deleted_device_ieee_index(devices):
+    values = {}
+    for device in devices:
+        ieee = mqtt_zigbee2mqtt_identifier(device)
+        if ieee:
+            values.setdefault(ieee, []).append(_text_value(device.get("id")))
+    return {ieee: ids[0] for ieee, ids in values.items() if len(ids) == 1 and ids[0]}
+
+
+def _device_group_presentation_reason(device, current_slug):
+    if not valid_zigbee2mqtt_app_slug(current_slug):
+        return None
+    for identifier in device.get("identifiers") or []:
+        parsed = _hassio_zigbee2mqtt_identifier(identifier)
+        if parsed and historic_zigbee2mqtt_app_slug(parsed[1]) and parsed[1].lower() != current_slug.lower():
+            return {"kind": "previous_zigbee2mqtt_app", "old_slug": parsed[1], "current_slug": current_slug}
+    return None
+
+
+def valid_zigbee2mqtt_app_slug(value):
+    return isinstance(value, str) and bool(HASSIO_Z2M_IDENTIFIER_RE.fullmatch(f"000000_{value}"))
+
+
+def historic_zigbee2mqtt_app_slug(value):
+    """Return whether a raw historic App slug explicitly names Zigbee2MQTT."""
+    return valid_zigbee2mqtt_app_slug(value) and bool(ZIGBEE2MQTT_SLUG_TOKEN_RE.search(value))
 
 
 def _entity_object_id(entity):
@@ -1431,8 +1483,10 @@ def build_deleted_devices_tree_from_data(
     generated_from="preview",
     rows=None,
     enrichment=None,
+    current_zigbee2mqtt_slug=None,
 ):
     deleted = [device for device in validated_deleted_devices(device_data) if isinstance(device, dict)]
+    deleted_device_ids = {_text_value(device.get("id")) for device in deleted}
     current_devices = [device for device in validated_devices(device_data) if isinstance(device, dict)]
     deleted_entities_list = [
         entity for entity in (validated_deleted_entities(entity_data) if entity_data is not None else []) if isinstance(entity, dict)
@@ -1451,6 +1505,7 @@ def build_deleted_devices_tree_from_data(
     warnings = list(enrichment_result["warnings"])
     device_displays = {}
     candidates_by_device_id = {}
+    ieee_by_device_id = _deleted_device_ieee_index(deleted)
     for device in deleted:
         device_id = _text_value(device.get("id"))
         display = _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
@@ -1459,6 +1514,8 @@ def build_deleted_devices_tree_from_data(
     deleted_entity_groups = {}
     for entity in deleted_entities_list:
         device_id = _text_value(entity.get("device_id"))
+        if device_id not in deleted_device_ids:
+            device_id = ieee_by_device_id.get(_unique_id_ieee(entity), "")
         if not device_id:
             device_id = _infer_deleted_entity_device_id(entity, candidates_by_device_id)
         deleted_entity_groups.setdefault(device_id, []).append(entity)
@@ -1473,8 +1530,7 @@ def build_deleted_devices_tree_from_data(
         related_deleted = deleted_entity_groups.pop(device_id, [])
         related_active = active_entity_groups.get(device_id, [])
         display = device_displays.get(device_id) or _device_display(device, areas, row_by_id=row_by_id, enrichment_by_id=enrichment_by_id)
-        device_groups.append(
-            {
+        group = {
                 "device": display,
                 "deleted_entities": [_entity_summary(entity) for entity in related_deleted],
                 "active_entities": [_entity_summary(entity) for entity in related_active],
@@ -1483,7 +1539,10 @@ def build_deleted_devices_tree_from_data(
                     "active_entities": len(related_active),
                 },
             }
-        )
+        reason = _device_group_presentation_reason(device, current_zigbee2mqtt_slug)
+        if reason:
+            group["presentation_reason"] = reason
+        device_groups.append(group)
     synthetic_groups = []
     regrouped_deleted_entity_groups = {}
     for device_id, entities in deleted_entity_groups.items():
@@ -1543,21 +1602,25 @@ def build_deleted_devices_enrichment_from_tree(tree):
         )
         if len(devices) >= 200:
             break
-    return {"schema": 1, "devices": devices}
+    result = {"schema": 1, "devices": devices}
+    context = (tree or {}).get("presentation_context")
+    if isinstance(context, dict) and isinstance(context.get("current_zigbee2mqtt_slug"), str):
+        result["presentation_context"] = {"current_zigbee2mqtt_slug": context["current_zigbee2mqtt_slug"]}
+    return result
 
 
 def sanitize_deleted_devices_enrichment(enrichment):
     warnings = []
     if not enrichment:
-        return {"by_id": {}, "warnings": warnings}
+        return {"by_id": {}, "warnings": warnings, "current_zigbee2mqtt_slug": None}
     if not isinstance(enrichment, dict) or enrichment.get("schema") != 1:
-        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")]}
+        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")], "current_zigbee2mqtt_slug": None}
     manifest_warnings = enrichment.get("warnings")
     if isinstance(manifest_warnings, list):
         warnings.extend(str(warning) for warning in manifest_warnings if warning)
     devices = enrichment.get("devices")
     if not isinstance(devices, list) or len(devices) > 200:
-        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")]}
+        return {"by_id": {}, "warnings": [_("warning.deleted_devices_enrichment_ignored")], "current_zigbee2mqtt_slug": None}
     by_id = {}
     for item in devices:
         if not isinstance(item, dict) or not item.get("id"):
@@ -1572,10 +1635,16 @@ def sanitize_deleted_devices_enrichment(enrichment):
             "source_commit": _text_value(item.get("source_commit"))[:40],
             "source_path": _text_value(item.get("source_path"))[:240],
         }
-    return {"by_id": by_id, "warnings": sorted(set(warnings))}
+    context = enrichment.get("presentation_context")
+    current_slug = context.get("current_zigbee2mqtt_slug") if isinstance(context, dict) else None
+    if not valid_zigbee2mqtt_app_slug(current_slug):
+        current_slug = None
+        if context is not None:
+            warnings.append(_("warning.deleted_devices_enrichment_ignored"))
+    return {"by_id": by_id, "warnings": sorted(set(warnings)), "current_zigbee2mqtt_slug": current_slug}
 
 
-def build_deleted_devices_preview(config_dir, history_context=None):
+def build_deleted_devices_preview(config_dir, history_context=None, current_zigbee2mqtt_slug=None):
     _path, text, data = read_validated_device_registry(config_dir)
     _entity_path, entity_text, entity_data = read_validated_entity_registry(config_dir)
     _area_path, _area_text, area_data = read_validated_area_registry(config_dir)
@@ -1596,7 +1665,9 @@ def build_deleted_devices_preview(config_dir, history_context=None):
         *enrich_deleted_device_rows_from_history(deleted_device_rows(config_dir, devices), devices, history_context),
         *deleted_entity_rows(config_dir, entities),
     ]
-    tree = build_deleted_devices_tree_from_data(data, entity_data, area_data, generated_from="preview", rows=rows)
+    tree = build_deleted_devices_tree_from_data(data, entity_data, area_data, generated_from="preview", rows=rows, current_zigbee2mqtt_slug=current_zigbee2mqtt_slug)
+    if current_zigbee2mqtt_slug:
+        tree["presentation_context"] = {"current_zigbee2mqtt_slug": current_zigbee2mqtt_slug}
     return {
         "count": total,
         "device_count": len(devices),

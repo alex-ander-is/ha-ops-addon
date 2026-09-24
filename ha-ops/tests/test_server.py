@@ -2076,6 +2076,7 @@ class ServerTests(unittest.TestCase):
                     "last_deleted_devices_count": 1,
                     "last_deleted_devices_fingerprint": "old-deleted",
                     "last_deleted_devices_generated_at": "2026-05-22T12:00:00+00:00",
+                    "last_deleted_devices_enrichment": {"schema": 1, "devices": [], "presentation_context": {"current_zigbee2mqtt_slug": "reviewed_z2m"}},
                 }
             )
 
@@ -2094,6 +2095,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_deleted_devices_rows"], [])
             self.assertEqual(state["last_deleted_devices_count"], 0)
             self.assertIsNone(state["last_deleted_devices_fingerprint"])
+            self.assertIsNone(state["last_deleted_devices_enrichment"])
 
     def test_startup_clears_internal_ids_preview_after_addon_version_change(self):
         server = load_server()
@@ -2177,6 +2179,7 @@ class ServerTests(unittest.TestCase):
                     "last_deleted_devices_preview": "old preview",
                     "last_deleted_devices_count": 1,
                     "last_deleted_devices_fingerprint": "fingerprint",
+                    "last_deleted_devices_enrichment": {"schema": 1, "devices": [], "presentation_context": {"current_zigbee2mqtt_slug": "reviewed_z2m"}},
                     "deleted_devices_pending_confirmation": True,
                     "deleted_devices_rollback_path": "/tmp/rollback",
                     "deleted_devices_rollback_fingerprint": "before",
@@ -2204,6 +2207,7 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_message"], "Deleted 1 deleted_devices entry. Confirm or revert the changes.")
             self.assertEqual(state["last_deleted_devices_preview"], "old preview")
             self.assertEqual(state["last_deleted_devices_count"], 1)
+            self.assertEqual(state["last_deleted_devices_enrichment"]["presentation_context"]["current_zigbee2mqtt_slug"], "reviewed_z2m")
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
             self.assertIsNone(state["last_preview_commit"])
@@ -15586,8 +15590,10 @@ devices:
                             "deleted_devices": [
                                 {
                                     "id": "b31f14db9f048950d3525ebb1f34ed93",
-                                    "identifiers": [["hassio", "61804cda_zigbee2mqtt"]],
+                                    "identifiers": [["hassio", "61804cda_old_zigbee2mqtt"]],
                                 },
+                                {"id": "mosquitto-app", "identifiers": [["hassio", "61804cda_mosquitto"]]},
+                                {"id": "physical-z2m", "identifiers": [["mqtt", "zigbee2mqtt_0x00124B000000ABCD"]]},
                                 {"id": "kitchen_presence", "name": "kitchen_presence", "area_id": "kitchen"},
                             ],
                         }
@@ -15600,7 +15606,8 @@ devices:
                         "data": {
                             "entities": [],
                             "deleted_entities": [
-                                {"id": "entity-z2m", "entity_id": "binary_sensor.zigbee2mqtt_running"},
+                                {"id": "entity-z2m", "entity_id": "binary_sensor.zigbee2mqtt_running", "device_id": "b31f14db9f048950d3525ebb1f34ed93"},
+                                {"id": "entity-physical-z2m", "entity_id": "sensor.unlinked_physical", "device_id": "stale-device-id", "unique_id": "z2m_0x00124B000000aBcD_lqi"},
                                 {"id": "entity-kitchen", "entity_id": "binary_sensor.kitchen_presence_occupancy"},
                                 {"id": "entity-kitchen-rc-battery", "entity_id": "sensor.kitchen_rc_battery"},
                                 {"id": "entity-kitchen-rc-lq", "entity_id": "sensor.kitchen_rc_linkquality"},
@@ -15613,14 +15620,19 @@ devices:
                 )
             )
 
+            server.get_installed_addons = lambda: [{"slug": "new_zigbee2mqtt", "name": "Zigbee2MQTT"}]
             self.assertTrue(server.run_deleted_devices_preview_job())
             tree = server.read_state()["last_deleted_devices_tree"]
             groups_by_id = {group["device"]["id"]: group for group in tree["device_groups"]}
 
-            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["label"], "Zigbee2MQTT")
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["label"], "OLD Zigbee2MQTT")
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["manufacturer"], "App")
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["device"]["model"], "Supervisor")
+            self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["presentation_reason"], {"kind": "previous_zigbee2mqtt_app", "old_slug": "old_zigbee2mqtt", "current_slug": "new_zigbee2mqtt"})
             self.assertEqual(groups_by_id["b31f14db9f048950d3525ebb1f34ed93"]["deleted_entities"][0]["entity_id"], "binary_sensor.zigbee2mqtt_running")
+            self.assertEqual(groups_by_id["mosquitto-app"]["device"]["label"], "Mosquitto")
+            self.assertNotIn("presentation_reason", groups_by_id["mosquitto-app"])
+            self.assertEqual(groups_by_id["physical-z2m"]["deleted_entities"][0]["entity_id"], "sensor.unlinked_physical")
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["label"], "Kitchen Presence")
             self.assertEqual(groups_by_id["kitchen_presence"]["deleted_entities"][0]["entity_id"], "binary_sensor.kitchen_presence_occupancy")
             self.assertEqual(groups_by_id["kitchen_presence"]["device"]["area"], "Kitchen")
@@ -15635,6 +15647,37 @@ devices:
                 ["sensor.tze204_qasjif9e_ts0601_rssi", "sensor.tze204_qasjif9e_ts0601_lqi"],
             )
             self.assertEqual(tree["orphan_entity_groups"][0]["deleted_entities"][0]["entity_id"], "sensor.unrelated_orphan")
+
+    def test_deleted_devices_unique_id_ieee_link_requires_one_unambiguous_complete_token(self):
+        registry_cleanup = load_server().app_context.registry_cleanup
+        device_data = {
+            "data": {
+                "devices": [],
+                "deleted_devices": [
+                    {"id": "good", "identifiers": [["mqtt", "zigbee2mqtt_0x00124B000000ABCD"]]},
+                    {"id": "duplicate-a", "identifiers": [["mqtt", "zigbee2mqtt_0x00124B000000EEEE"]]},
+                    {"id": "duplicate-b", "identifiers": [["mqtt", "zigbee2mqtt_0x00124B000000EEEE"]]},
+                ],
+            }
+        }
+        entity_data = {
+            "data": {
+                "entities": [],
+                "deleted_entities": [
+                    {"id": "valid", "entity_id": "sensor.valid", "unique_id": "z2m_0x00124B000000aBcD_lqi"},
+                    {"id": "long", "entity_id": "sensor.long", "unique_id": "z2m_0x00124B000000ABCD0"},
+                    {"id": "prefix", "entity_id": "sensor.prefix", "unique_id": "az2m0x00124B000000ABCD"},
+                    {"id": "two", "entity_id": "sensor.two", "unique_id": "0x00124B000000ABCD_0x00124B000000ABCD"},
+                    {"id": "duplicate", "entity_id": "sensor.duplicate", "unique_id": "z2m_0x00124B000000EEEE_lqi"},
+                ],
+            }
+        }
+
+        tree = registry_cleanup.build_deleted_devices_tree_from_data(device_data, entity_data, {"data": {"areas": []}})
+        groups = {group["device"]["id"]: group for group in tree["device_groups"]}
+        self.assertEqual([entity["id"] for entity in groups["good"]["deleted_entities"]], ["valid"])
+        orphan_ids = {entity["id"] for group in tree["orphan_entity_groups"] for entity in group["deleted_entities"]}
+        self.assertEqual(orphan_ids, {"long", "prefix", "two", "duplicate"})
 
     def test_deleted_devices_preview_rejects_non_array_consumed_registry_paths(self):
         cases = [
@@ -15702,7 +15745,7 @@ devices:
             storage = server.CONFIG_DIR / ".storage"
             storage.mkdir()
             registry_path = storage / "core.device_registry"
-            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Registry Label"}]}}))
+            registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": [{"id": "device-1", "name": "Registry Label", "identifiers": [["hassio", "61804cda_old_z2m"]]}]}}))
             fingerprint = server._CTX.device_registry_fingerprint()
             enrichment = {
                 "schema": 1,
@@ -15718,8 +15761,14 @@ devices:
                         "source_path": "homeassistant/.storage/core.device_registry",
                     }
                 ],
+                "presentation_context": {"current_zigbee2mqtt_slug": "new_z2m"},
             }
             rollback = server._CTX.create_deleted_devices_rollback(fingerprint, enrichment)
+            manifest = json.loads(Path(rollback["path"]).read_text())
+            self.assertEqual(
+                manifest["deleted_devices_enrichment"]["presentation_context"],
+                {"current_zigbee2mqtt_slug": "new_z2m"},
+            )
             server._CTX.set_deleted_devices_rollback_phase(rollback["path"], "pending_confirmation")
             registry_path.write_text(json.dumps({"data": {"devices": [], "deleted_devices": []}}))
             server.write_state(
@@ -15734,6 +15783,7 @@ devices:
 
             reloaded_server = load_server()
             self.configure_paths(reloaded_server, root)
+            reloaded_server.get_installed_addons = lambda: self.fail("pending replay must not query Supervisor Apps")
             reloaded_server._CTX.repair_startup_state()
             tree = reloaded_server.read_state()["deleted_devices_pending_tree"]
 
@@ -15741,6 +15791,7 @@ devices:
             self.assertEqual(tree["device_groups"][0]["device"]["manufacturer"], "Acme")
             self.assertEqual(tree["device_groups"][0]["device"]["model"], "Wall Button")
             self.assertEqual(tree["device_groups"][0]["device"]["source_commit"], "1234567890abcdef")
+            self.assertEqual(tree["device_groups"][0]["presentation_reason"], {"kind": "previous_zigbee2mqtt_app", "old_slug": "old_z2m", "current_slug": "new_z2m"})
             self.assertNotIn("Stale Wrong Label", json.dumps(tree))
 
     def test_pending_replay_ignores_invalid_manifest_enrichment_with_warning(self):

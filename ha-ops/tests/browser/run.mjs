@@ -1026,6 +1026,10 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
 
   await page.getByRole("button", { name: "Check deleted devices and entities" }).click();
   await page.getByTestId("deleted-devices-preview-section").getByRole("button", { name: /Zigbee2MQTT · App \/ Supervisor/ }).waitFor({ timeout: 5000 });
+  const previewSection = page.getByTestId("deleted-devices-preview-section");
+  await previewSection.getByText(/previous Zigbee2MQTT App\/Supervisor slug old_z2m; current App slug is new_z2m/).waitFor({ timeout: 5000 });
+  const previewMosquitto = previewSection.locator("vaadin-details", { hasText: "Mosquitto" });
+  assert((await previewMosquitto.getByText(/previous Zigbee2MQTT App\/Supervisor slug/).count()) === 0, "non-Zigbee2MQTT App rendered an obsolete-App explanation in preview");
   await assertDeletedDevicesSemanticTreeLayout(page);
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview");
   await saveScreenshot(page, artifactsDir, "deleted-devices-preview-section", page.getByTestId("deleted-devices-preview-section"));
@@ -1087,6 +1091,9 @@ async function runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRa
   await pendingSection.getByText("Harness deleted devices cleanup is waiting for confirmation.").waitFor({ timeout: 5000 });
   assert((await pendingSection.getByText("No deleted devices or entities found.").count()) === 0, "pending deleted cleanup showed stale empty preview");
   await pendingSection.getByRole("button", { name: /Zigbee2MQTT · App \/ Supervisor/ }).waitFor({ timeout: 5000 });
+  await pendingSection.getByText(/previous Zigbee2MQTT App\/Supervisor slug old_z2m; current App slug is new_z2m/).waitFor({ timeout: 5000 });
+  const pendingMosquitto = pendingSection.locator("vaadin-details", { hasText: "Mosquitto" });
+  assert((await pendingMosquitto.getByText(/previous Zigbee2MQTT App\/Supervisor slug/).count()) === 0, "non-Zigbee2MQTT App rendered an obsolete-App explanation in pending replay");
   await pendingSection.getByText("binary_sensor.zigbee2mqtt_running").waitFor({ timeout: 5000 });
   await pendingSection.getByText("binary_sensor.kitchen_presence_occupancy").waitFor({ timeout: 5000 });
   await pendingSection.getByText("Kitchen RC").waitFor({ timeout: 5000 });
@@ -1242,7 +1249,7 @@ async function assertDeletedDevicesSemanticTreeLayout(page) {
   assert(metrics.entitiesToRemoveCount >= 4, `deleted-device tree did not use Entities to remove labels: ${JSON.stringify(metrics)}`);
   assert(!metrics.activeZeroVisible, `deleted-device tree rendered noisy zero active count: ${JSON.stringify(metrics)}`);
   assert(!metrics.probableGroupVisible, `deleted-device tree rendered unnecessary probable group suffix: ${JSON.stringify(metrics)}`);
-  assert(metrics.rightIdentifiers.some((identifier) => identifier.text.includes("hassio:61804cda_zigbee2mqtt") && identifier.rightGap <= 24), `hassio identifier was not aligned to the right edge: ${JSON.stringify(metrics)}`);
+  assert(metrics.rightIdentifiers.some((identifier) => identifier.text.includes("hassio:61804cda_old_z2m") && identifier.rightGap <= 24), `hassio identifier was not aligned to the right edge: ${JSON.stringify(metrics)}`);
   assert(metrics.zigbee2mqttDisplay, `Zigbee2MQTT hassio device was not rendered as a readable app group: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenPresenceGrouped, `kitchen presence entity was not grouped under its device: ${JSON.stringify(metrics)}`);
   assert(metrics.kitchenRcGrouped, `kitchen RC entities were not grouped into a probable device group: ${JSON.stringify(metrics)}`);
@@ -1293,7 +1300,7 @@ async function assertDeletedDevicesSemanticTreeMobileLayout(page) {
   assert(!metrics.activeZeroVisible, `mobile deleted-device tree rendered noisy zero active count: ${JSON.stringify(metrics)}`);
   assert(metrics.overflowingItems.length === 0, `mobile deleted-device tree clipped entity labels: ${JSON.stringify(metrics)}`);
   assert(metrics.identifiers.some((identifier) =>
-    identifier.text.includes("hassio:61804cda_zigbee2mqtt") &&
+    identifier.text.includes("hassio:61804cda_old_z2m") &&
     identifier.left >= identifier.summaryLeft - 2 &&
     identifier.right <= identifier.summaryRight + 2
   ), `mobile hassio identifier did not wrap within summary: ${JSON.stringify(metrics)}`);

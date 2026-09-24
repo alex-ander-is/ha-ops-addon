@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.10.34
+
+- Group deleted-registry entities under a uniquely proven Zigbee IEEE device, explain stale Zigbee2MQTT App/Supervisor entries without mislabelling other Apps, and retain that explanation through pending cleanup replay.
+
 ## 0.10.33
 
 - Tighten deleted-registry cleanup cards by moving identifiers into the card header, hiding empty active-entity counts, using `Entities to remove` copy, and wrapping long entity IDs on mobile.

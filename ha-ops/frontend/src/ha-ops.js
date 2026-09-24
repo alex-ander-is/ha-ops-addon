@@ -761,6 +761,7 @@ function renderDeletedDevicesTree(tree) {
         const identifiers = (device.identifiers || []).slice(0, 3).map((identifier) =>
           Array.isArray(identifier) ? identifier.join(":") : String(identifier)
         ).join(", ");
+        const reason = group.presentation_reason || {};
         return html`
           <vaadin-details class="deleted-device-group" opened>
             <vaadin-details-summary slot="summary">
@@ -773,6 +774,7 @@ function renderDeletedDevicesTree(tree) {
               </div>
             </vaadin-details-summary>
             ${source ? html`<p><small>${source}</small></p>` : nothing}
+            ${reason.kind === "previous_zigbee2mqtt_app" ? html`<p class="action-hint">${(TEXT.deletedDevicePreviousZigbee2mqttApp || "Historical presentation only: these entities are associated with previous Zigbee2MQTT App/Supervisor slug {old_slug}; current App slug is {current_slug}.").replace("{old_slug}", reason.old_slug || "").replace("{current_slug}", reason.current_slug || "")}</p>` : nothing}
             ${renderEntityList(TEXT.entitiesToRemoveLabel || "Entities to remove", group.deleted_entities || [])}
             ${renderEntityList(TEXT.activeEntitiesLabel || "Active entities", group.active_entities || [])}
           </vaadin-details>
