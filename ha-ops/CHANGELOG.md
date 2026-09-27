@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.11.1
+
+- Archive the retired `.ha-ops/areas` organizer experiment, remove its inactive implementation and skipped projection tests, and retain a guard that rejects legacy enabled settings before Save or Apply can change configuration.
+
 ## 0.11.0
 
 - Explain Home Assistant entity and device registry preview changes as added, removed, or changed records, highlighting identifier changes and removals for review while keeping the raw diff available.

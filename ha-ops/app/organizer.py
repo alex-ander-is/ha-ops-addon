@@ -73,10 +73,8 @@ class OrganizerRemovedError(RuntimeError):
 
 def _raise_removed():
     raise OrganizerRemovedError(
-        "Home Assistant organizer area split is paused. The .ha-ops/areas "
-        "organizer projection implementation has been removed. Keep the "
-        "organizer UI disabled until a new organizer design is explicitly "
-        "approved."
+        "Home Assistant organizer area split is archived and unsupported. "
+        "Keep the organizer UI disabled."
     )
 
 

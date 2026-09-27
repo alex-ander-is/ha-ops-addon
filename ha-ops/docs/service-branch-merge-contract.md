@@ -215,17 +215,9 @@ Save can preserve registry data exactly as Home Assistant writes it.
 
 ## Organizer Interaction
 
-Do not treat missing root heap files as absent automations, scripts, or scenes
-when organizer is enabled. The organized area view may be authoritative in Git:
-
-```text
-homeassistant/.ha-ops/areas/*/automations.yaml
-homeassistant/.ha-ops/areas/*/scripts.yaml
-homeassistant/.ha-ops/areas/*/scenes.yaml
-homeassistant/.ha-ops/areas/organizer-index.json
-```
-
-Useful reference: `ha-ops/docs/organizer-contract.md`.
+The `.ha-ops/areas` organizer experiment is archived and cannot be enabled.
+Service-branch merges use the normal Home Assistant heap files. For historical
+context only, see `ha-ops/docs/archive/organizer-area-split.md`.
 
 ## UI State That Is Intentional
 

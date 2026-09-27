@@ -9,7 +9,7 @@ file content.
 - Support hunk selection only for clean, managed text modifications that exist
   on both sides.
 - Keep file-level decisions for conflicts, binary files, add/delete, rename,
-  copy, mode changes, organizer heap outputs, and ambiguous normalized changes.
+  copy, mode changes, generated metadata, and ambiguous normalized changes.
 - For an eligible path, hunk mode replaces file-level controls:
   - Save offers `Take from HA` / `Keep Git`.
   - Apply offers `Take from Git` / `Keep HA`.
@@ -47,10 +47,10 @@ file content.
   the previous `ha-ops/ha-live`, so unselected Git hunks stay visible in later
   previews.
 
-## Organizer and registry storage
+## Generated metadata and registry storage
 
-- Use file-level fallback for organizer heap and derived metadata paths.
-- Allowlisted `.storage` files may use hunks when the organizer is enabled.
+- Use file-level fallback for derived metadata paths.
+- Allowlisted `.storage` files may use hunks when safe.
 - Registry storage may use semantic raw-record groups where safe:
   - derive operations from raw old/new records;
   - group a changed device with all changed active entities whose old or new

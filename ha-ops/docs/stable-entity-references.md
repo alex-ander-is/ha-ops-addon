@@ -73,26 +73,14 @@ suffixes like _2.
 
 ## Conversion Rules
 
-Work on all Home Assistant automation, script, and scene YAML files that exist
-in the Git checkout:
+Work on the normal Home Assistant heap files in the Git checkout:
 
-- split organizer view: `ha-config/homeassistant/.ha-ops/areas/*/automations.yaml`
-- split organizer view: `ha-config/homeassistant/.ha-ops/areas/*/scripts.yaml`
-- split organizer view: `ha-config/homeassistant/.ha-ops/areas/*/scenes.yaml`
-- heap files, when present: `ha-config/homeassistant/automations.yaml`
-- heap files, when present: `ha-config/homeassistant/scripts.yaml`
-- heap files, when present: `ha-config/homeassistant/scenes.yaml`
+- `ha-config/homeassistant/automations.yaml`
+- `ha-config/homeassistant/scripts.yaml`
+- `ha-config/homeassistant/scenes.yaml`
 
-Do not assume both layouts are present. If `.ha-ops/areas` exists and heap
-files are absent, that is normal for organizer-enabled Git.
-
-Organizer service buckets are dot-prefixed:
-
-- `.unknown` for items with no route
-- `.mixed` for items with equally plausible area routes
-
-The only service buckets are `.unknown` and `.mixed`. Plain `unknown` can be a
-real Home Assistant area directory; `_mixed` is not a valid service bucket.
+The former `.ha-ops/areas` organizer layout is archived and is not a managed
+HA Ops configuration format.
 
 Use these registries as lookup sources:
 
@@ -120,12 +108,7 @@ Before finishing, run:
 
 ```sh
 # from ha-config/homeassistant
-managed_paths=()
-for path in automations.yaml scripts.yaml scenes.yaml \
-  .ha-ops/areas/*/automations.yaml .ha-ops/areas/*/scripts.yaml .ha-ops/areas/*/scenes.yaml \
-  .ha-ops/areas/.*/automations.yaml .ha-ops/areas/.*/scripts.yaml .ha-ops/areas/.*/scenes.yaml; do
-  [ -e "$path" ] && managed_paths+=("$path")
-done
+managed_paths=(automations.yaml scripts.yaml scenes.yaml)
 rg --hidden -n "\\bdevice_id:" "${managed_paths[@]}"
 rg --hidden -n "entity_id: [0-9a-f]{16,}|- [0-9a-f]{16,}" "${managed_paths[@]}"
 python3 - <<'PY'
@@ -133,8 +116,6 @@ from pathlib import Path
 import yaml
 paths = [
     *[Path(name) for name in ("automations.yaml", "scripts.yaml", "scenes.yaml") if Path(name).exists()],
-    *sorted(Path(".ha-ops/areas").glob("*/*.yaml")),
-    *sorted(Path(".ha-ops/areas").glob(".*/*.yaml")),
 ]
 for path in paths:
     yaml.safe_load(path.read_text())

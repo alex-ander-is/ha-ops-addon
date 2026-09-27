@@ -19,30 +19,22 @@ HA Ops manages Home Assistant config with Git-backed previews and service branch
 - `ha-ops.json` is optional; when it is missing, HA Ops uses a built-in default manifest.
 - There is no user-facing `export` branch.
 
-## Organizer Contract
+## Archived Organizer Experiment
 
-HA Ops has an opt-in contract for a virtual split of Home Assistant UI-managed
-automations, scripts, and scenes. Live Home Assistant keeps the normal heap
-files. Keep organizer disabled for production Save and Apply flows; disabled
-targets use the heap files directly and remove stale generated `.ha-ops/areas`
-metadata. Enabled `.ha-ops/areas` projection remains blocked pending a
-production-safe rewrite. See `docs/organizer-contract.md` for the paused
-contract and safety invariants.
+The `.ha-ops/areas` area-split organizer has been retired. HA Ops supports the
+normal Home Assistant heap files for automations, scripts, and scenes. A stale
+organizer setting is rejected and generated area metadata is removed; it must
+not be reactivated. Historical context is in
+`docs/archive/organizer-area-split.md` and Git history.
 
 ## Stable Entity References
 
-When editing Home Assistant automations, scripts, and scenes in Git, keep them
-independent of Home Assistant registry UUIDs. This applies to both the future
-organizer split view under `homeassistant/.ha-ops/areas/<area>/` and the heap files
-`homeassistant/automations.yaml`, `homeassistant/scripts.yaml`, and
-`homeassistant/scenes.yaml` when those files are present. Convert opaque
+When editing Home Assistant automations, scripts, and scenes in Git, keep the
+heap files `homeassistant/automations.yaml`, `homeassistant/scripts.yaml`, and
+`homeassistant/scenes.yaml` independent of Home Assistant registry UUIDs. Convert opaque
 `entity_id` registry ids to real stable `entity_id` values, remove `device_id`
 usage, and prefer state, numeric state, MQTT, or service actions. See
 `docs/stable-entity-references.md`.
-
-Future organizer service buckets are dot-prefixed: `.unknown` for unrouted
-items and `.mixed` for equally plausible area routes. Real areas, including an
-area named `Unknown`, use normal non-dot directory names.
 
 Suggested request for agents:
 
