@@ -1,5 +1,6 @@
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,7 +24,14 @@ class PrePushHookTests(unittest.TestCase):
         self.fake_bin = self.root / "bin"
         self.fake_bin.mkdir()
         python = self.fake_bin / "python3"
-        python.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$PYTHON_COMMAND_LOG"\n')
+        python.write_text(
+            '#!/bin/sh\n'
+            'if [ "$1" = "-m" ]; then\n'
+            '  printf "%s\\n" "$*" >> "$PYTHON_COMMAND_LOG"\n'
+            '  exit 0\n'
+            'fi\n'
+            f'exec "{sys.executable}" "$@"\n'
+        )
         python.chmod(0o755)
         self.python_command_log = self.root / "python-command.log"
 
@@ -55,6 +63,14 @@ class PrePushHookTests(unittest.TestCase):
         run(["git", "add", "."], cwd=self.repo)
         run(["git", "commit", "-m", message], cwd=self.repo)
         return self.rev_parse("HEAD")
+
+    def release_commit(self, kind, version, note="Change"):
+        self.write_file("ha-ops/config.yaml", f'version: "{version}"\n')
+        self.write_file(
+            "ha-ops/CHANGELOG.md",
+            f"# Changelog\n\n## {version}\n\n- {note}.\n\n## 0.1.1\n\n- Initial.\n",
+        )
+        return self.commit(f"{note}\n\nRelease-Type: {kind}\nRelease-Impact: {note} impacts users")
 
     def invoke_hook(self, stdin):
         env = os.environ.copy()
@@ -120,17 +136,54 @@ class PrePushHookTests(unittest.TestCase):
         self.assertIn("missing local tag 0.2.0", result.stderr)
 
     def test_allows_release_files_with_matching_tag_pushed_together(self):
-        self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
-        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.1\n\n- Initial.\n")
-        head = self.commit("Release with tag")
-        run(["git", "tag", "0.2.0"], cwd=self.repo)
+        head = self.release_commit("minor", "0.2.0")
+        run(["git", "tag", "-a", "0.2.0", "-m", "HA Ops 0.2.0"], cwd=self.repo)
         stdin = self.branch_push_stdin(head)
-        stdin += f"refs/tags/0.2.0 {head} refs/tags/0.2.0 {ZERO_SHA}\n"
+        stdin += f"refs/tags/0.2.0 {self.rev_parse('0.2.0')} refs/tags/0.2.0 {ZERO_SHA}\n"
 
         result = self.invoke_hook(stdin)
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Running HA Ops tests before push", result.stdout)
+
+    def test_rejects_patch_classification_for_minor_bump(self):
+        head = self.release_commit("patch", "0.2.0")
+        run(["git", "tag", "-a", "0.2.0", "-m", "HA Ops 0.2.0"], cwd=self.repo)
+
+        result = self.invoke_hook(self.branch_push_stdin(head))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("patch release from 0.1.1 must be 0.1.2", result.stderr)
+
+    def test_rejects_release_without_impact_trailers(self):
+        self.write_file("ha-ops/config.yaml", 'version: "0.2.0"\n')
+        self.write_file("ha-ops/CHANGELOG.md", "# Changelog\n\n## 0.2.0\n\n- Change.\n\n## 0.1.1\n\n- Initial.\n")
+        head = self.commit("Change")
+        run(["git", "tag", "-a", "0.2.0", "-m", "HA Ops 0.2.0"], cwd=self.repo)
+
+        result = self.invoke_hook(self.branch_push_stdin(head))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Release-Type", result.stderr)
+
+    def test_rejects_lightweight_release_tag(self):
+        head = self.release_commit("minor", "0.2.0")
+        run(["git", "tag", "0.2.0"], cwd=self.repo)
+
+        result = self.invoke_hook(self.branch_push_stdin(head))
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be annotated", result.stderr)
+
+    def test_accepts_major_bump_from_zero_series(self):
+        head = self.release_commit("major", "1.0.0", note="Break old API")
+        run(["git", "tag", "-a", "1.0.0", "-m", "HA Ops 1.0.0"], cwd=self.repo)
+        stdin = self.branch_push_stdin(head)
+        stdin += f"refs/tags/1.0.0 {self.rev_parse('1.0.0')} refs/tags/1.0.0 {ZERO_SHA}\n"
+
+        result = self.invoke_hook(stdin)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

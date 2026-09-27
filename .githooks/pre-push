@@ -61,6 +61,9 @@ if [ "$requires_release_check" = "1" ]; then
       exit 1
     }
 
+    hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+    "$hook_dir/../release-policy.py" check "$branch_remote_sha" "$branch_local_sha" || exit 1
+
     if git ls-remote --exit-code --tags "$REMOTE_NAME" "refs/tags/$version" >/dev/null 2>&1; then
       :
     else

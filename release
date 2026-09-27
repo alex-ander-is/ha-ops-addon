@@ -1,0 +1,162 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$ROOT"
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: ./release --kind major|minor|patch [version]
+       ./release -h|--help
+
+Prepare an HA Ops release from the current config.yaml version. The release
+type is mandatory: major is an incompatible change (X++), minor is new or
+changed functionality (Y++), and patch is a compatible fix or maintenance
+(Z++). The optional version must equal the computed version.
+
+Enter a one-line release impact reason, then multiline English changelog text.
+Finish the changelog with a single "." line. The first nonempty changelog line
+becomes the behavior-focused commit subject.
+
+The script edits and stages ha-ops/config.yaml and ha-ops/CHANGELOG.md.
+Other already staged files join the release commit; unstaged files do not.
+At the final y/N prompt, N leaves release files staged without a commit or tag.
+Y commits with Release-Type and Release-Impact trailers, creates an annotated
+plain X.Y.Z tag, and publishes branch and tag via ./publish-release.
+Before that prompt, failures restore release files and their clean staged state.
+EOF
+}
+
+kind=""
+version_arg=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --kind)
+      [[ $# -ge 2 ]] || die '--kind needs major, minor, or patch'
+      kind="$2"
+      shift 2
+      ;;
+    -*)
+      die "unknown option: $1"
+      ;;
+    *)
+      [[ -z "$version_arg" ]] || die 'expected at most one version argument'
+      version_arg="$1"
+      shift
+      ;;
+  esac
+done
+
+[[ "$kind" == major || "$kind" == minor || "$kind" == patch ]] || die 'choose --kind major, minor, or patch'
+[[ "$(git branch --show-current)" == main ]] || die 'release must run on main'
+[[ "$(git remote get-url origin)" == 'git@github.com:alex-ander-is/ha-ops-addon.git' ]] || die 'unexpected origin'
+git diff --quiet -- ha-ops/config.yaml ha-ops/CHANGELOG.md || die 'release files already have unstaged edits'
+git diff --cached --quiet -- ha-ops/config.yaml ha-ops/CHANGELOG.md || die 'release files already have staged edits'
+
+current="$(sed -n 's/^version: "\([^"]*\)"$/\1/p' ha-ops/config.yaml)"
+[[ -n "$current" ]] || die 'could not read current HA Ops version'
+git rev-parse --verify "refs/tags/$current^{tag}" >/dev/null 2>&1 || die "current version $current needs a local annotated tag"
+version="$(python3 release-policy.py next "$current" "$kind")"
+if [[ -n "$version_arg" ]]; then
+  [[ "$version_arg" == "$version" ]] || die "$kind release from $current must be $version, not $version_arg"
+fi
+if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+  die "tag $version already exists"
+fi
+
+printf 'Release impact (one line, English): '
+IFS= read -r impact
+[[ -n "${impact//[[:space:]]/}" ]] || die 'release impact must not be empty'
+[[ "$impact" != *$'\n'* ]] || die 'release impact must be one line'
+
+body_file="$(mktemp)"
+backup_dir="$(mktemp -d)"
+cp ha-ops/config.yaml "$backup_dir/config.yaml"
+cp ha-ops/CHANGELOG.md "$backup_dir/CHANGELOG.md"
+release_started=1
+release_finished=0
+restore_release_files() {
+  local status=$?
+  if [[ "$release_started" == 1 && "$release_finished" != 1 ]]; then
+    cp "$backup_dir/config.yaml" ha-ops/config.yaml
+    cp "$backup_dir/CHANGELOG.md" ha-ops/CHANGELOG.md
+    git reset -q -- ha-ops/config.yaml ha-ops/CHANGELOG.md
+    printf 'Release files were restored before the final prompt.\n' >&2
+  fi
+  rm -f "$body_file"
+  rm -rf "$backup_dir"
+  return "$status"
+}
+trap restore_release_files EXIT
+
+printf 'Enter changelog lines in English; finish with a single dot line:\n'
+while IFS= read -r line; do
+  [[ "$line" == . ]] && break
+  printf '%s\n' "$line" >> "$body_file"
+done
+
+subject="$(python3 - "$body_file" <<'PY'
+import sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    subject = line.strip().lstrip("-* ").strip()
+    if subject:
+        print(subject[:72])
+        break
+else:
+    raise SystemExit("changelog needs a nonempty line")
+PY
+)"
+
+python3 - "$version" "$body_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+version, body_file = sys.argv[1:]
+config = Path("ha-ops/config.yaml")
+text = config.read_text(encoding="utf-8")
+updated, count = re.subn(r'^version: "[^"]+"$', f'version: "{version}"', text, count=1, flags=re.MULTILINE)
+if count != 1:
+    raise SystemExit("config.yaml needs exactly one version line")
+config.write_text(updated, encoding="utf-8")
+
+changelog = Path("ha-ops/CHANGELOG.md")
+text = changelog.read_text(encoding="utf-8")
+body = Path(body_file).read_text(encoding="utf-8").strip()
+if f"## {version}" in text:
+    raise SystemExit(f"changelog already contains {version}")
+marker = "\n## "
+index = text.find(marker)
+if index < 0:
+    raise SystemExit("changelog has no version section")
+changelog.write_text(text[:index + 1] + f"## {version}\n\n{body}\n\n" + text[index + 1:], encoding="utf-8")
+PY
+
+git add -- ha-ops/config.yaml ha-ops/CHANGELOG.md
+printf '\nRelease files staged for %s (%s).\n' "$version" "$kind"
+git status --short
+release_finished=1
+
+printf '\nCommit, tag, and publish %s? [y/N]: ' "$version"
+IFS= read -r confirm
+case "$confirm" in
+  y|Y|yes|YES)
+    git commit -m "$subject" -m "$impact" -m "Release-Type: $kind" -m "Release-Impact: $impact"
+    git tag -a "$version" -m "HA Ops $version: $subject"
+    ./publish-release
+    ;;
+  *)
+    printf 'Stopped before commit. Release files remain staged.\n'
+    ;;
+esac

@@ -32,6 +32,23 @@ https://github.com/alex-ander-is/ha-ops-addon
 
 See [`ha-ops/README.md`](./ha-ops/README.md) for setup and behavior.
 
+## Releasing HA Ops
+
+Classify the change before preparing a release: `major` for an incompatible
+change (the first digit increases), `minor` for new or changed compatible
+functionality, or `patch` for a compatible fix or maintenance. This rule also
+applies while the App is below `1.0`: an incompatible `0.Y.Z` release becomes
+`1.0.0`. The history of `0.10.x` patch tags is not a version-selection rule.
+
+Stage the intended code changes, then run `./release --kind minor` (or the
+appropriate kind). It computes the version from `ha-ops/config.yaml`, asks for
+an impact reason and multiline changelog entry, and shows the staged release
+files before the final confirmation. Answering `N` stops without a commit, tag,
+or push. Answering `y` commits the staged changes, creates the matching
+annotated tag, and publishes through `./publish-release`. The commit records
+`Release-Type` and `Release-Impact`; both the publisher and pre-push hook
+verify them against the version increment and changelog.
+
 ## Presentation Assets
 
 - `ha-ops/icon.png` is the Home Assistant Apps list icon.

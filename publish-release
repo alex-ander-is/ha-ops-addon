@@ -19,4 +19,17 @@ tag="$(awk -F'"' '/^version: "/ { print $2; exit }' ha-ops/config.yaml)"
   exit 1
 }
 git rev-parse --verify "$tag^{tag}" >/dev/null
+[[ "$(git rev-parse "$tag^{}")" == "$(git rev-parse HEAD)" ]] || {
+  printf 'tag %s does not point to HEAD\n' "$tag" >&2
+  exit 1
+}
+[[ -z "$(git status --porcelain)" ]] || {
+  printf 'working tree must be clean before publishing\n' >&2
+  exit 1
+}
+base="$(git rev-parse origin/main)"
+if [[ "$base" == "$(git rev-parse HEAD)" ]]; then
+  base="$(git describe --tags --abbrev=0 HEAD^ | sed 's/^v//')"
+fi
+python3 release-policy.py check "$base" HEAD
 git push origin "$branch" "$tag"
