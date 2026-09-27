@@ -18292,6 +18292,28 @@ devices:
             self.assertIn("new-b", result["diff"])
             self.assertNotIn("new-a", result["diff"])
 
+    def test_diff_get_explains_registry_change_for_preview_file(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            path = "homeassistant/.storage/core.entity_registry"
+            diff = "\n".join([
+                f"diff --git a/{path} b/{path}",
+                f"--- a/{path}",
+                f"+++ b/{path}",
+                "@@ -1 +1 @@",
+                '-      {"id":"same","entity_id":"sensor.test","name":"Old"},',
+                '+      {"id":"same","entity_id":"sensor.test","name":"New"},',
+            ])
+            server.write_state({"last_save_diff": diff, "last_save_preview_paths": [path]})
+            cursor = server.read_state()["last_save_diff_cursor"]
+
+            result = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor, "path": path})
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["semantic"]["counts"], {"changed": 1})
+            self.assertEqual(result["semantic"]["rows"][0]["fields"], ["name"])
+
     def test_diff_cursor_survives_unrelated_state_writes(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

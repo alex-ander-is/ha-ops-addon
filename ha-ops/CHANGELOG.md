@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 0.11.0
+
+- Explain Home Assistant entity and device registry preview changes as added, removed, or changed records, highlighting identifier changes and removals for review while keeping the raw diff available.
+- Pair devices by unambiguous hardware identifiers when their internal registry ID changes, and fall back to the raw diff for changes that cannot be explained safely.
+- Add the HA Ops repository URL to App metadata.
+
 ## 0.10.36
 
 - Remove the pending deleted-devices decision UI as soon as Confirm succeeds, even when its WebSocket state update is delayed.

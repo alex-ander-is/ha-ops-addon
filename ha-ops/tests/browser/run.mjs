@@ -1428,6 +1428,29 @@ async function main() {
     await assertSamePreviewDecisionRefreshKeepsDiff(page, baseUrl, "save");
     await assertWrapControlsAndOverflow(page, baseUrl, diffGetRequests, "save preview wrapping");
     await assertSaveCommitSubjectFlow(page, baseUrl);
+
+    const registrySeed = await harnessPost(baseUrl, "__dev_harness__/seed-registry-preview");
+    await refreshBackendSnapshot(page);
+    const registryRow = page.getByTestId("preview-file").first();
+    await registryRow.locator("vaadin-details-summary").click();
+    await registryRow.locator(".registry-summary").waitFor();
+    const registryText = await registryRow.locator(".registry-summary").innerText();
+    assert(registryText.includes("Added: 1") && registryText.includes("Removed: 1") && registryText.includes("Changed: 1"),
+      `registry summary counts are missing: ${registryText}`);
+    assert(registryText.includes("sensor.old → sensor.new") && registryText.includes("entity_id"),
+      `registry changed record is unclear: ${registryText}`);
+    assert(registryText.includes("sensor.added") && registryText.includes("sensor.removed"),
+      `registry additions or removals are missing: ${registryText}`);
+    assert((await registryRow.locator(".raw-registry-diff").getAttribute("opened")) === null,
+      "advanced raw registry diff should start collapsed");
+    await saveScreenshot(page, artifactsDir, "registry-preview-desktop", registryRow);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await saveScreenshot(page, artifactsDir, "registry-preview-mobile", registryRow);
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    assert((await page.getByTestId("preview-file").count()) === 1 && registrySeed.path.endsWith("core.entity_registry"),
+      "registry preview fixture was not isolated");
+    await harnessPost(baseUrl, "__dev_harness__/clear-previews");
+    await refreshBackendSnapshot(page);
     await runCleanupPreviewScenarios(page, baseUrl, artifactsDir, pendingRawDiffRequests);
 
     await harnessPost(baseUrl, "__dev_harness__/arm", { action: "preview", gate: "running" });

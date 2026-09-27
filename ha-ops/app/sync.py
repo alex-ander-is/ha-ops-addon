@@ -752,7 +752,10 @@ def normalized_storage_pretty_text_from_text(name, text):
     except json.JSONDecodeError:
         return None
     data = normalized_storage_data(name, data)
-    return json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    # Keep each registry entry on one line so a preview can explain complete
+    # changed records without guessing from partial unified-diff hunks.
+    data = json.loads(json.dumps(data, sort_keys=True, ensure_ascii=False))
+    return render_registry_commit_json(data, set(registry_collection_keys(name))) + "\n"
 
 
 def registry_collection_keys(name):

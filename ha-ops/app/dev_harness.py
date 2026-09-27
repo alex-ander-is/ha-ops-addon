@@ -865,6 +865,28 @@ class DevHarnessContext(app_context.AppContext):
         if route == "/__dev_harness__/clear-previews":
             self.write_state(state_store.ALL_PREVIEW_CLEAR_UPDATES)
             return {"ok": True}
+        if route == "/__dev_harness__/seed-registry-preview":
+            path = "homeassistant/.storage/core.entity_registry"
+            diff = "\n".join([
+                f"diff --git a/{path} b/{path}",
+                f"--- a/{path}",
+                f"+++ b/{path}",
+                "@@ -1,2 +1,2 @@",
+                '-      {"entity_id":"sensor.old","id":"same","name":"Old"},',
+                '-      {"entity_id":"sensor.removed","id":"gone","name":"Removed"},',
+                '+      {"entity_id":"sensor.new","id":"same","name":"New"},',
+                '+      {"entity_id":"sensor.added","id":"fresh","name":"Added"},',
+            ])
+            self.write_state({
+                **state_store.ALL_PREVIEW_CLEAR_UPDATES,
+                "last_status": "success",
+                "last_action": "save_preview",
+                "last_save_diff": diff,
+                "last_save_preview_commit": "harness-registry-preview",
+                "last_save_preview_fingerprint": "harness-registry-preview-fingerprint",
+                "last_save_preview_paths": [path],
+            })
+            return {"ok": True, "path": path}
         if route == "/__dev_harness__/replace-retained-preview":
             return self.harness_controller.replace_retained_preview(self)
         if route == "/__dev_harness__/backend-version":

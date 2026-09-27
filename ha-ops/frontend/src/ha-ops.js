@@ -286,7 +286,7 @@ customElements.define("ha-ops-log", HaOpsLog);
 class HaOpsPreviewFile extends LitElement {
   static properties = {
     path: { type: String }, cursor: { type: Object }, generation: { type: Number },
-    expanded: { type: Boolean }, diff: { type: String }, diffState: { type: String },
+    expanded: { type: Boolean }, diff: { type: String }, semantic: { type: Object }, diffState: { type: String },
     selected: { type: Boolean }, choice: { type: String }, conflict: { type: Boolean },
     direction: { type: String }, running: { type: Boolean }, wrapLines: { type: Boolean },
   };
@@ -314,6 +314,14 @@ class HaOpsPreviewFile extends LitElement {
     .unicode-escape { border-bottom: 1px dotted currentColor; cursor: help; }
     .hunk { color: var(--ha-ops-diff-hunk-text, #0550ae); background: var(--ha-ops-diff-hunk-bg, #ddf4ff); }
     .meta { color: var(--ha-ops-muted-text, #57606a); font-weight: 600; }
+    .registry-summary { padding: .75rem; border-top: 1px solid var(--ha-ops-border, #d0d7de); }
+    .registry-summary h4 { margin: 0 0 .4rem; }
+    .registry-summary p { margin: 0 0 .5rem; }
+    .registry-summary ul { margin: 0; padding-left: 1.4rem; }
+    .registry-summary li { margin: .25rem 0; overflow-wrap: anywhere; }
+    .registry-summary .review { color: #82071e; font-weight: 600; margin-left: .35rem; }
+    .registry-summary small { display: block; color: var(--ha-ops-muted-text, #57606a); }
+    .raw-registry-diff { margin-top: .75rem; }
     [role="status"] { padding: .75rem; color: var(--ha-ops-muted-text, #57606a); }
     @media (max-width: 700px) {
       .summary-row { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
@@ -329,6 +337,7 @@ class HaOpsPreviewFile extends LitElement {
     this.generation = 0;
     this.expanded = false;
     this.diff = "";
+    this.semantic = null;
     this.diffState = "idle";
     this.selected = false;
     this.choice = "";
@@ -340,7 +349,7 @@ class HaOpsPreviewFile extends LitElement {
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
     const pathChanged = changed.has("path") && changed.get("path") !== this.path;
-    if (cursorChanged || changed.has("generation") || pathChanged) { this.expanded = false; this.diff = ""; this.diffState = "idle"; }
+    if (cursorChanged || changed.has("generation") || pathChanged) { this.expanded = false; this.diff = ""; this.semantic = null; this.diffState = "idle"; }
   }
   render() {
     return html`
@@ -379,7 +388,21 @@ class HaOpsPreviewFile extends LitElement {
           </div>
         </vaadin-details-summary>
         ${this.expanded ? this.diffState === "loaded"
-          ? html`<pre class=${this.wrapLines ? "wrap-lines" : ""} aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
+          ? this.semantic ? html`
+              <section class="registry-summary" aria-label=${TEXT.registryChanges || "Registry changes"}>
+                <h4>${TEXT.registryChanges || "Registry changes"}</h4>
+                <p>${TEXT.registryAdded || "Added"}: ${this.semantic.counts.added || 0} · ${TEXT.registryRemoved || "Removed"}: ${this.semantic.counts.removed || 0} · ${TEXT.registryChanged || "Changed"}: ${this.semantic.counts.changed || 0}</p>
+                <ul>${this.semantic.rows.map(row => html`<li>
+                  ${row.kind === "added" ? TEXT.registryAdded : row.kind === "removed" ? TEXT.registryRemoved : TEXT.registryChanged}: <code>${row.old_label ? `${row.old_label} → ${row.label}` : row.label}</code>
+                  ${row.review ? html`<span class="review">${TEXT.registryReview || "Review"}</span>` : nothing}
+                  ${row.fields.length ? html`<small>${(TEXT.registryFields || "Fields: {fields}").replace("{fields}", row.fields.join(", "))}</small>` : nothing}
+                </li>`)}</ul>
+                <vaadin-details class="raw-registry-diff">
+                  <vaadin-details-summary slot="summary">${TEXT.advancedRawDiff || "Advanced raw diff"}</vaadin-details-summary>
+                  <pre class=${this.wrapLines ? "wrap-lines" : ""} aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>
+                </vaadin-details>
+              </section>`
+            : html`<pre class=${this.wrapLines ? "wrap-lines" : ""} aria-label="Diff detail">${highlightedDiffLines(this.diff)}</pre>`
           : html`<div role="status">${this.diffState === "stale" ? TEXT.unavailableDiff : TEXT.loadingDiff}</div>`
           : nothing}
       </vaadin-details>
@@ -406,9 +429,11 @@ class HaOpsPreviewFile extends LitElement {
       const payload = await response.json();
       if (!payload.ok || Number(this.cursor?.generation) !== Number(this.generation)) throw new Error("stale");
       this.diff = payload.diff;
+      this.semantic = payload.semantic || null;
       this.diffState = "loaded";
     } catch (_error) {
       this.diff = "";
+      this.semantic = null;
       this.diffState = "stale";
     }
   }

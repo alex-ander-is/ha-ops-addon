@@ -16,6 +16,7 @@ import git_ops
 import i18n
 import jobs as job_logic
 import manifest as manifest_logic
+import registry_diff
 import state as state_store
 import sync as sync_logic
 import ui
@@ -1167,7 +1168,8 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                 diff = by_path.get(str(path), "")
                 if not diff:
                     raise RuntimeError(_("error.diff_file_missing"))
-            return command_result(True, "diff", diff=diff)
+            semantic = registry_diff.summarize_registry_diff(diff, str(path)) if path else None
+            return command_result(True, "diff", diff=diff, semantic=semantic)
         except Exception as exc:
             return command_result(False, str(exc))
     if command == "pending_deleted_devices_diff_get":
@@ -1332,6 +1334,7 @@ POST_ENDPOINTS = (
     "/__dev_harness__/arm",
     "/__dev_harness__/release",
     "/__dev_harness__/clear-previews",
+    "/__dev_harness__/seed-registry-preview",
     "/__dev_harness__/replace-retained-preview",
     "/__dev_harness__/backend-version",
 )
