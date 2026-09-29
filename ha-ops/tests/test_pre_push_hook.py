@@ -45,6 +45,7 @@ class PrePushHookTests(unittest.TestCase):
         self.write_file("ha-ops/app.py", "print('hello')\n")
         run(["git", "add", "."], cwd=self.repo)
         run(["git", "commit", "-m", "Initial"], cwd=self.repo)
+        run(["git", "tag", "-a", "0.1.1", "-m", "HA Ops 0.1.1"], cwd=self.repo)
         self.base = self.rev_parse("HEAD")
         run(["git", "push", "origin", "main"], cwd=self.repo)
 
@@ -184,6 +185,47 @@ class PrePushHookTests(unittest.TestCase):
         result = self.invoke_hook(stdin)
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_accepts_release_after_multiple_unpublished_versions(self):
+        releases = (
+            ("patch", "0.1.2"),
+            ("minor", "0.2.0"),
+            ("major", "1.0.0"),
+            ("major", "2.0.0"),
+            ("patch", "2.0.1"),
+        )
+        for kind, version in releases:
+            self.write_file("ha-ops/config.yaml", f'version: "{version}"\n')
+            changelog = self.repo / "ha-ops/CHANGELOG.md"
+            current = changelog.read_text()
+            self.write_file(
+                "ha-ops/CHANGELOG.md",
+                current.replace(
+                    "# Changelog\n\n",
+                    f"# Changelog\n\n## {version}\n\n- Release {version}.\n\n",
+                    1,
+                ),
+            )
+            head = self.commit(
+                f"Release {version}\n\nRelease-Type: {kind}\nRelease-Impact: {version} changes behavior"
+            )
+            run(["git", "tag", "-a", version, "-m", f"HA Ops {version}"], cwd=self.repo)
+
+        self.write_file("release-tooling.note", "Release tooling maintenance.\n")
+        head = self.commit("Fix release tooling")
+
+        stdin = self.branch_push_stdin(head)
+        stdin += f"refs/tags/2.0.1 {self.rev_parse('2.0.1')} refs/tags/2.0.1 {ZERO_SHA}\n"
+
+        result = self.invoke_hook(stdin)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.write_file("ha-ops/app.py", "print('unreleased app change')\n")
+        head = self.commit("Unreleased app change")
+        rejected = self.invoke_hook(self.branch_push_stdin(head))
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("HA Ops App changes after tag 2.0.1 need a new release", rejected.stderr)
 
 
 if __name__ == "__main__":

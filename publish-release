@@ -18,18 +18,39 @@ tag="$(awk -F'"' '/^version: "/ { print $2; exit }' ha-ops/config.yaml)"
   printf 'current branch is not %s\n' "$branch" >&2
   exit 1
 }
-git rev-parse --verify "$tag^{tag}" >/dev/null
-[[ "$(git rev-parse "$tag^{}")" == "$(git rev-parse HEAD)" ]] || {
-  printf 'tag %s does not point to HEAD\n' "$tag" >&2
+git rev-parse --verify "$tag^{tag}" >/dev/null || {
+  printf 'tag %s is missing or is not an annotated tag\n' "$tag" >&2
   exit 1
 }
 [[ -z "$(git status --porcelain)" ]] || {
   printf 'working tree must be clean before publishing\n' >&2
   exit 1
 }
-base="$(git rev-parse origin/main)"
-if [[ "$base" == "$(git rev-parse HEAD)" ]]; then
-  base="$(git describe --tags --abbrev=0 HEAD^ | sed 's/^v//')"
+release_commit="$(git rev-parse "$tag^{commit}")"
+git merge-base --is-ancestor "$release_commit" HEAD || {
+  printf 'tag %s is not an ancestor of HEAD\n' "$tag" >&2
+  exit 1
+}
+unreleased_app_changes="$(git diff --name-only "$release_commit" HEAD -- ha-ops ':!ha-ops/tests')"
+[[ -z "$unreleased_app_changes" ]] || {
+  printf 'HA Ops App changes after tag %s need a new release:\n%s\n' "$tag" "$unreleased_app_changes" >&2
+  exit 1
+}
+head_version="$(awk -F'"' '/^version: "/ { print $2; exit }' ha-ops/config.yaml)"
+tag_version="$(git show "$release_commit:ha-ops/config.yaml" | awk -F'"' '/^version: "/ { print $2; exit }')"
+[[ "$head_version" == "$tag" && "$tag_version" == "$tag" ]] || {
+  printf 'HEAD and tag %s must both declare version %s\n' "$tag" "$tag" >&2
+  exit 1
+}
+remote_base="$(git rev-parse origin/main)"
+git merge-base --is-ancestor "$remote_base" "$release_commit" || {
+  printf 'release %s is not based on origin/main\n' "$tag" >&2
+  exit 1
+}
+base="$(git describe --tags --abbrev=0 "$release_commit^" | sed 's/^v//')"
+if [[ -z "$base" ]]; then
+  printf 'could not find the previous release tag before %s\n' "$tag" >&2
+  exit 1
 fi
-python3 release-policy.py check "$base" HEAD
+python3 release-policy.py check "$base" "$release_commit"
 git push origin "$branch" "$tag"

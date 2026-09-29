@@ -61,8 +61,25 @@ if [ "$requires_release_check" = "1" ]; then
       exit 1
     }
 
+    release_commit=$(git rev-parse "refs/tags/$version^{commit}")
+    git merge-base --is-ancestor "$release_commit" "$branch_local_sha" || {
+      echo "Push rejected: tag $version is not included in the pushed main branch." >&2
+      exit 1
+    }
+    unreleased_app_changes=$(git diff --name-only "$release_commit" "$branch_local_sha" -- ha-ops ':!ha-ops/tests')
+    [ -z "$unreleased_app_changes" ] || {
+      echo "Push rejected: HA Ops App changes after tag $version need a new release:" >&2
+      echo "$unreleased_app_changes" >&2
+      exit 1
+    }
+    tag_version=$(git show "$release_commit:ha-ops/config.yaml" | sed -n 's/^version:[[:space:]]*"\([^"]*\)"$/\1/p' | head -n 1)
+    [ "$tag_version" = "$version" ] || {
+      echo "Push rejected: tag $version points to a commit with version $tag_version." >&2
+      exit 1
+    }
+    previous_release=$(git describe --tags --abbrev=0 "$release_commit^" | sed 's/^v//')
     hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-    "$hook_dir/../release-policy.py" check "$branch_remote_sha" "$branch_local_sha" || exit 1
+    "$hook_dir/../release-policy.py" check "$previous_release" "$release_commit" || exit 1
 
     if git ls-remote --exit-code --tags "$REMOTE_NAME" "refs/tags/$version" >/dev/null 2>&1; then
       :

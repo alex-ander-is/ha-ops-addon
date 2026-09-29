@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ class ReleaseScriptTests(unittest.TestCase):
         (self.repo / "ha-ops").mkdir()
         (self.repo / "ha-ops/config.yaml").write_text('version: "0.11.0"\n')
         (self.repo / "ha-ops/CHANGELOG.md").write_text("# Changelog\n\n## 0.11.0\n\n- Previous release.\n")
-        for name in ("release", "release-policy.py"):
+        for name in ("release", "publish-release", "release-policy.py"):
             shutil.copy2(ROOT / name, self.repo / name)
         for args in (
             ["git", "init", "-b", "main"],
@@ -33,6 +34,8 @@ class ReleaseScriptTests(unittest.TestCase):
         ):
             result = run(args, self.repo)
             self.assertEqual(result.returncode, 0, result.stderr)
+        result = run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], self.repo)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -91,6 +94,67 @@ class ReleaseScriptTests(unittest.TestCase):
         result = run(["./release", "--kind", "patch", "0.12.0"], self.repo)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("patch release from 0.11.0 must be 0.11.1", result.stderr)
+
+    def test_publish_validates_against_previous_release_when_multiple_releases_are_ahead(self):
+        versions = (
+            ("patch", "0.11.1"),
+            ("major", "1.0.0"),
+            ("major", "2.0.0"),
+            ("patch", "2.0.1"),
+        )
+        for kind, version in versions:
+            config = self.repo / "ha-ops/config.yaml"
+            config.write_text(f'version: "{version}"\n')
+            changelog = self.repo / "ha-ops/CHANGELOG.md"
+            current = changelog.read_text()
+            changelog.write_text(current.replace(
+                "# Changelog\n\n",
+                f"# Changelog\n\n## {version}\n\n- Release {version}.\n\n",
+                1,
+            ))
+            run(["git", "add", "ha-ops/config.yaml", "ha-ops/CHANGELOG.md"], self.repo)
+            commit = run([
+                "git", "commit", "-m", f"Release {version}",
+                "-m", f"Release-Type: {kind}",
+                "-m", f"Release-Impact: {version} changes user behavior",
+            ], self.repo)
+            self.assertEqual(commit.returncode, 0, commit.stderr)
+            tag = run(["git", "tag", "-a", version, "-m", f"HA Ops {version}"], self.repo)
+            self.assertEqual(tag.returncode, 0, tag.stderr)
+
+        (self.repo / "publish-release.note").write_text("Release tooling maintenance.\n")
+        run(["git", "add", "publish-release.note"], self.repo)
+        maintenance = run(["git", "commit", "-m", "Fix release tooling"], self.repo)
+        self.assertEqual(maintenance.returncode, 0, maintenance.stderr)
+
+        fake_bin = self.repo.parent / f"{self.repo.name}-fake-bin"
+        fake_bin.mkdir()
+        push_log = self.repo.parent / f"{self.repo.name}-push.log"
+        real_git = shutil.which("git")
+        fake_git = fake_bin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "push" ]; then printf "%s\\n" "$*" >> "$PUBLISH_PUSH_LOG"; exit 0; fi\n'
+            f'exec "{real_git}" "$@"\n'
+        )
+        fake_git.chmod(0o755)
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["PUBLISH_PUSH_LOG"] = str(push_log)
+
+        result = run(["./publish-release"], self.repo, env=env)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("push origin main 2.0.1", push_log.read_text())
+
+        (self.repo / "ha-ops/app.py").write_text("print('unreleased app change')\n")
+        run(["git", "add", "ha-ops/app.py"], self.repo)
+        app_change = run(["git", "commit", "-m", "Unreleased app change"], self.repo)
+        self.assertEqual(app_change.returncode, 0, app_change.stderr)
+        rejected = run(["./publish-release"], self.repo, env=env)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("HA Ops App changes after tag 2.0.1 need a new release", rejected.stderr)
+        self.assertEqual(push_log.read_text().count("push origin main 2.0.1"), 1)
 
 
 if __name__ == "__main__":
