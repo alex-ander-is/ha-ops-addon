@@ -413,11 +413,15 @@ class HaOpsPreviewFile extends LitElement {
     this.direction = "apply";
     this.running = false;
     this.wrapLines = true;
+    this.diffRequestId = 0;
   }
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
     const pathChanged = changed.has("path") && changed.get("path") !== this.path;
-    if (cursorChanged || changed.has("generation") || pathChanged) { this.expanded = false; this.diff = ""; this.semantic = null; this.diffState = "idle"; }
+    if (cursorChanged || changed.has("generation") || pathChanged) {
+      this.diffRequestId += 1;
+      this.expanded = false; this.diff = ""; this.semantic = null; this.diffState = "idle";
+    }
   }
   render() {
     return html`
@@ -489,17 +493,25 @@ class HaOpsPreviewFile extends LitElement {
     `;
   }
   async setExpanded(expanded) {
+    const requestId = ++this.diffRequestId;
     this.expanded = expanded;
     if (!expanded || this.diffState === "loaded") return;
+    const cursor = JSON.stringify(this.cursor);
+    const path = this.path;
+    const generation = this.generation;
     this.diffState = "loading";
     try {
-      const response = await fetch(`diff-get?cursor=${encodeURIComponent(JSON.stringify(this.cursor))}&path=${encodeURIComponent(this.path)}`);
+      const response = await fetch(`diff-get?cursor=${encodeURIComponent(cursor)}&path=${encodeURIComponent(path)}`);
       const payload = await response.json();
+      if (requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
+        || generation !== this.generation) return;
       if (!payload.ok || Number(this.cursor?.generation) !== Number(this.generation)) throw new Error("stale");
       this.diff = payload.diff;
       this.semantic = payload.semantic || null;
       this.diffState = "loaded";
     } catch (_error) {
+      if (requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
+        || generation !== this.generation) return;
       this.diff = "";
       this.semantic = null;
       this.diffState = "stale";
@@ -1216,10 +1228,16 @@ class HaOpsApp extends LitElement {
   async loadConflictDiff(path) {
     if (this.conflictDiffs.has(path) || this.mutationBlocked()) return;
     const generation = Number(this.state.operation_generation || 0);
+    const conflictKey = this.conflictSelectionKey;
+    const currentState = this.state;
+    const currentDiffs = this.conflictDiffs;
     const response = await fetch(`conflict-diff-get?generation=${generation}&path=${encodeURIComponent(path)}`);
     const payload = await response.json();
-    if (!response.ok || !payload.ok || payload.generation !== generation
-      || !this.state.conflicts?.includes(path) || this.mutationBlocked()) {
+    if (Number(this.state.operation_generation || 0) !== generation
+      || this.conflictSelectionKey !== conflictKey
+      || this.state !== currentState || this.conflictDiffs !== currentDiffs
+      || !this.state.conflicts?.includes(path) || this.mutationBlocked()) return;
+    if (!response.ok || !payload.ok || payload.generation !== generation) {
       throw new Error(payload.message || t("error.git_conflict_path_not_pending"));
     }
     this.conflictDiffs.set(path, payload.diff);

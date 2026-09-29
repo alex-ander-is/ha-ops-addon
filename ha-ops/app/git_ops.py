@@ -39,6 +39,19 @@ def ensure_repo(options, data_dir, git_env, run_command, reset_to_origin=True):
     branch = options.get("repo_branch", "main")
     remote_ref = f"refs/remotes/origin/{branch}"
     remote_exists = git_ref_exists(repo_dir, remote_ref, run_command)
+    local_ref = f"refs/heads/{branch}"
+    # A reset may only advance a local branch to its fetched remote. In
+    # particular, a clean checkout can still contain unpublished commits.
+    if reset_to_origin and remote_exists and git_ref_exists(repo_dir, local_ref, run_command):
+        ancestor = run_command(
+            ["git", "merge-base", "--is-ancestor", local_ref, remote_ref],
+            env=env, cwd=repo_dir,
+        )
+        if ancestor.returncode != 0:
+            raise RuntimeError(
+                f"Local {branch} contains commits absent from origin/{branch}. "
+                "Preserve or publish them before this operation; HA Ops will not reset the branch."
+            )
 
     if not reset_to_origin and git_ref_exists(repo_dir, f"refs/heads/{branch}", run_command):
         checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)

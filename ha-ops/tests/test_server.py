@@ -13638,6 +13638,87 @@ devices:
                 ctx.ensure_repo(options, reset_to_origin=False)
             self.assertEqual(document.read_text(), "user work\n")
 
+    def test_unpushed_local_commit_survives_rejected_repo_reset(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
+            ctx.work_dir.mkdir(parents=True)
+            options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config"}
+            repo = ctx.ensure_repo(options)
+            tracked = repo / "homeassistant" / "configuration.yaml"
+            tracked.write_text("local unpublished change\n")
+            self.git_commit_all(repo, "unpublished user commit")
+            local_tip = self.git(["rev-parse", "main"], repo).stdout.strip()
+            remote_tip = self.git(["rev-parse", "origin/main"], repo).stdout.strip()
+
+            with self.assertRaisesRegex(RuntimeError, "commits absent from origin"):
+                ctx.ensure_repo(options)
+
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), local_tip)
+            self.assertEqual(self.git(["rev-parse", "origin/main"], repo).stdout.strip(), remote_tip)
+            self.assertEqual(tracked.read_text(), "local unpublished change\n")
+
+    def test_repo_jobs_refuse_unpushed_commit_before_service_or_live_changes(self):
+        server = load_server()
+        actions = (
+            ("preview", "run_preview_job"),
+            ("apply", "run_apply_job"),
+            ("reset", "run_reset_git_state_job"),
+        )
+        for action, method in actions:
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                remote = self.seed_remote(root)
+                ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
+                ctx.work_dir.mkdir(parents=True)
+                options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config"}
+                ctx.options_path.write_text(json.dumps(options))
+                repo = ctx.ensure_repo(options)
+                tracked = repo / "homeassistant" / "configuration.yaml"
+                tracked.write_text("local unpublished change\n")
+                self.git_commit_all(repo, "unpublished user commit")
+                local_tip = self.git(["rev-parse", "main"], repo).stdout.strip()
+                remote_tip = self.git(["rev-parse", "origin/main"], repo).stdout.strip()
+                service_tips = {
+                    name: self.git(["rev-parse", f"origin/{name}"], repo).stdout.strip()
+                    for name in ("ha-ops/ha-live", "ha-ops/base")
+                }
+
+                self.assertFalse(getattr(ctx, method)())
+
+                self.assertIn("commits absent from origin", ctx.read_state()["last_message"])
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), local_tip)
+                self.assertEqual(self.git(["rev-parse", "origin/main"], repo).stdout.strip(), remote_tip)
+                for name, tip in service_tips.items():
+                    self.assertEqual(self.git(["rev-parse", f"origin/{name}"], repo).stdout.strip(), tip)
+                self.assertEqual(tracked.read_text(), "local unpublished change\n")
+
+    def test_repo_reset_preserves_main_when_checkout_is_on_service_branch(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
+            options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config"}
+            repo = ctx.ensure_repo(options)
+            tracked = repo / "homeassistant" / "configuration.yaml"
+            tracked.write_text("local unpublished change\n")
+            self.git_commit_all(repo, "unpublished user commit")
+            local_tip = self.git(["rev-parse", "main"], repo).stdout.strip()
+            self.git(["checkout", "ha-ops/ha-live"], repo)
+            service_tip = self.git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+            with self.assertRaisesRegex(RuntimeError, "commits absent from origin"):
+                ctx.ensure_repo(options)
+
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), local_tip)
+            self.assertEqual(self.git(["rev-parse", "HEAD"], repo).stdout.strip(), service_tip)
+            self.assertEqual(self.git(["branch", "--show-current"], repo).stdout.strip(), "ha-ops/ha-live")
+            self.assertEqual(self.git(["show", "main:homeassistant/configuration.yaml"], repo).stdout,
+                             "local unpublished change\n")
+
     def test_save_preview_discards_export_leftovers_before_switching_from_ha_live_to_main(self):
         server = load_server()
         sync = server.sync_logic

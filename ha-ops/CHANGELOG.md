@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 1.0.1
+
+- Preserve unpublished local repository commits before Preview, Apply, or Reset can reset Git state.
+- Ignore late preview and conflict diff responses after their reviewed state changes.
+
 ## 1.0.0
 
 - Move HA Ops controls to a static Lit/Vaadin client backed by a versioned JSON API.

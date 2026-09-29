@@ -1,6 +1,6 @@
 name: "HA Ops"
 description: "Git-backed Home Assistant config operator with preview, backups, and rollback"
-version: "1.0.0"
+version: "1.0.1"
 slug: "ha_ops"
 url: https://github.com/alex-ander-is/ha-ops-addon
 init: false

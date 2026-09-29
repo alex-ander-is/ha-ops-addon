@@ -96,8 +96,69 @@ try {
   await page.getByRole("button", { name: "Preview Git to HA" }).click();
   const previewState = await waitForState(baseUrl, (state) => state.last_action === "preview" && state.last_status === "success", "Git to HA preview");
   assert(previewState.last_preview_paths.length > 0, "Preview returned no reviewed paths");
-  await page.getByTestId("reactive-previews").waitFor({ state: "attached" });
+  await page.reload();
+  await page.locator("ha-ops-preview-file").first().waitFor({ state: "attached" });
   await inspectPage(page, "apply-preview-desktop");
+  let releaseOldDiff;
+  let oldDiffStarted;
+  const oldDiffRequest = new Promise((resolve) => { oldDiffStarted = resolve; });
+  const oldDiffGate = new Promise((resolve) => { releaseOldDiff = resolve; });
+  await page.route("**/diff-get?*", async (route) => {
+    oldDiffStarted();
+    await oldDiffGate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, diff: "STALE PREVIEW DIFF" }) });
+  });
+  await page.locator("ha-ops-preview-file").first().evaluate((file) => { file.__diffRequest = file.setExpanded(true); });
+  await oldDiffRequest;
+  await page.locator("ha-ops-preview-file").first().evaluate(async (file) => {
+    file.cursor = { ...file.cursor, artifact: "replacement-preview" };
+    await file.updateComplete;
+  });
+  releaseOldDiff();
+  const stalePreview = await page.locator("ha-ops-preview-file").first().evaluate(async (file) => {
+    await file.__diffRequest;
+    return { diff: file.diff, state: file.diffState, expanded: file.expanded };
+  });
+  assert(stalePreview.diff === "" && stalePreview.state !== "loaded" && !stalePreview.expanded,
+    `Late preview diff reopened a stale panel: ${JSON.stringify(stalePreview)}`);
+  await page.unroute("**/diff-get?*");
+
+  let releaseOldConflict;
+  let oldConflictStarted;
+  const oldConflictRequest = new Promise((resolve) => { oldConflictStarted = resolve; });
+  const oldConflictGate = new Promise((resolve) => { releaseOldConflict = resolve; });
+  await page.route("**/conflict-diff-get?*", async (route) => {
+    oldConflictStarted();
+    await oldConflictGate;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ok: true, generation: 50, diff: "STALE CONFLICT DIFF" }) });
+  });
+  await page.locator("ha-ops-app").evaluate((app) => {
+    app.state = { ...app.state, operation_generation: 50, conflicts: ["homeassistant/configuration.yaml"] };
+    app.reconcileSelections();
+    app.__conflictDiffRequest = app.loadConflictDiff("homeassistant/configuration.yaml").catch(() => {});
+  });
+  await oldConflictRequest;
+  await page.locator("ha-ops-app").evaluate((app) => {
+    app.state = { ...app.state, operation_generation: 51, conflicts: ["homeassistant/configuration.yaml"] };
+    app.reconcileSelections();
+  });
+  releaseOldConflict();
+  const staleConflict = await page.locator("ha-ops-app").evaluate(async (app) => {
+    await app.__conflictDiffRequest;
+    return app.conflictDiffs.has("homeassistant/configuration.yaml");
+  });
+  assert(!staleConflict, "Late conflict diff enabled a stale choice");
+  const conflictControls = await page.locator("ha-ops-app").evaluate(async (app) => {
+    app.state = { ...app.state, active_operation: null, conflicts: ["homeassistant/configuration.yaml"] };
+    app.reconcileSelections();
+    await app.updateComplete;
+    const panel = app.renderRoot.querySelector('[data-testid="git-conflicts"]');
+    const buttons = [...(panel?.querySelectorAll("vaadin-button") || [])];
+    return { blocked: app.mutationBlocked(), count: buttons.length, disabled: buttons.every((button) => button.disabled) };
+  });
+  assert(!conflictControls.blocked && conflictControls.count >= 2 && conflictControls.disabled,
+    `Stale conflict choices are available: ${JSON.stringify(conflictControls)}`);
+  await page.unroute("**/conflict-diff-get?*");
   await secondTab.reload();
   await secondTab.getByTestId("reactive-previews").waitFor({ state: "attached" });
   assert((await stateAt(baseUrl)).last_preview_fingerprint === previewState.last_preview_fingerprint, "Second tab lost the server preview");
