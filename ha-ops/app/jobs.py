@@ -565,6 +565,11 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
             if retry_internal_ids_paths:
                 raise RuntimeError(retry_internal_ids_dirty_message(retry_internal_ids_paths))
             commit = str(state.get("save_push_retry_commit") or "").strip()
+            if ctx.git_commit(repo_dir, branch) != ctx.git_commit(repo_dir, commit):
+                raise RuntimeError(
+                    "Cannot retry Save push while newer local commits follow the pending Save commit. "
+                    "Preserve those commits and review the branch before retrying."
+                )
             ctx.add_detail(details, _("detail.using_branch_commit", branch=branch, commit=commit))
             ctx.add_detail(details, _("detail.retried_save_push"))
             ctx.push_commit_to_branch(repo_dir, env, commit, branch)

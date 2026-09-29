@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 1.0.2
+
+- Preserve newer local commits when retrying or cancelling a failed Save push.
+- Verify Save, Apply, conflict controls, Internal IDs, recovery and HTTP fallback in desktop and phone browsers.
+- Mark the Vaadin migration complete in the UI documentation.
+
 ## 1.0.1
 
 - Preserve unpublished local repository commits before Preview, Apply, or Reset can reset Git state.

@@ -1,6 +1,6 @@
 # Vaadin UI Migration Plan
 
-Status: approved architecture; implementation and verification are in progress.
+Status: implemented in HA Ops 1.0.0; regression coverage expanded in the 1.0.2 patch.
 
 ## Goal
 
@@ -10,9 +10,11 @@ OSS, update the conflict workflow, migrate the Internal IDs preview, and remove
 duplicate server-rendered UI. Keep the existing server command and safety
 contracts. JavaScript is required for the ingress UI.
 
-The 2026-09-28 audit approved implementation with a static client and a
-fail-closed command boundary. Completion depends on the Python and browser
-verification described below.
+The 2026-09-28 audit approved a static client and a fail-closed command
+boundary. The 1.0.0 release shipped the migration. The 1.0.2 patch adds
+browser coverage for Save, Apply, conflict choices, Internal IDs controls,
+recovery presentation, and HTTP fallback, and protects newer local commits
+when retrying or cancelling a failed Save push.
 
 ## Current boundaries
 

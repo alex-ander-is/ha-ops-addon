@@ -8837,29 +8837,13 @@ class ServerTests(unittest.TestCase):
             local_commit = server.git_head_or_unborn(repo)
             self.assertNotEqual(local_commit, pending_commit)
 
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
+            self.assertFalse(server.run_save_job())
             state = server.read_state()
-            self.assertFalse(state["save_push_retry_pending"])
-            self.assertIsNone(state["save_push_retry_commit"])
-            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
-            self.assertNotEqual(server.git_head_or_unborn(repo), local_commit)
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.remote_file(remote, "homeassistant/manual.yaml")
-
-            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            preview_state = server.read_state()
-            self.assertIn("homeassistant/packages/second.yaml", preview_state["last_save_preview_paths"])
-            self.assertNotIn("homeassistant/manual.yaml", preview_state["last_save_preview_paths"])
-            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
-            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
-
-            self.assertNotEqual(self.remote_rev(remote, "main"), local_commit)
-            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
-            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
-            self.assertEqual(self.remote_file(remote, "homeassistant/packages/second.yaml"), "second:\n")
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertIn("newer local commits", state["last_message"])
+            self.assertEqual(server.git_head_or_unborn(repo), local_commit)
+            self.assertEqual(self.remote_main_subject(remote), "base")
             with self.assertRaises(subprocess.CalledProcessError):
                 self.remote_file(remote, "homeassistant/manual.yaml")
 
@@ -9074,28 +9058,14 @@ class ServerTests(unittest.TestCase):
             self.assertNotEqual(local_commit, pending_commit)
 
             response = self.post_json(server, "/clear-preview", body=b"direction=save")
-            self.assertEqual(response.responses[-1], 200)
-            self.assertIn("Save preview cancelled", response.wfile.getvalue().decode())
+            self.assertEqual(response.responses[-1], 409)
+            self.assertIn("newer local commits", response.wfile.getvalue().decode())
 
             state = server.read_state()
-            self.assertFalse(state["save_push_retry_pending"])
-            self.assertIsNone(state["save_push_retry_commit"])
-            self.assertEqual(server.git_head_or_unborn(repo), self.remote_rev(remote, "main"))
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertEqual(server.git_head_or_unborn(repo), local_commit)
             self.assertEqual(self.remote_main_subject(remote), "base")
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.remote_file(remote, "homeassistant/packages/new.yaml")
-            with self.assertRaises(subprocess.CalledProcessError):
-                self.remote_file(remote, "homeassistant/manual.yaml")
-
-            (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            server.write_state({"save_preview_selected_paths": ["homeassistant/packages/second.yaml"]})
-            self.assertTrue(server.run_save_job(commit_subject="Second Save Subject"), server.read_state()["last_message"])
-
-            self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertNotEqual(self.remote_rev(remote, "main"), local_commit)
-            self.assertEqual(self.remote_main_subject(remote), "Second Save Subject")
-            self.assertEqual(self.remote_file(remote, "homeassistant/packages/second.yaml"), "second:\n")
             with self.assertRaises(subprocess.CalledProcessError):
                 self.remote_file(remote, "homeassistant/packages/new.yaml")
             with self.assertRaises(subprocess.CalledProcessError):
@@ -9432,7 +9402,7 @@ class ServerTests(unittest.TestCase):
             self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
             self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
 
-    def test_valid_save_push_retry_pushes_pending_commit_with_unrelated_dirty_tracked_file(self):
+    def test_save_retry_preserves_newer_commit_and_dirty_tracked_file(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -9478,25 +9448,22 @@ class ServerTests(unittest.TestCase):
             config_file = repo / "homeassistant" / "configuration.yaml"
             config_file.write_text("dirty local edit\n")
 
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
+            self.assertFalse(server.run_save_job())
 
             state = server.read_state()
-            self.assertFalse(state["save_push_retry_pending"])
-            self.assertIsNone(state["save_push_retry_commit"])
-            self.assertEqual(state["last_status"], "warning")
-            self.assertEqual(
-                state["last_message"],
-                "Save push retry pushed the pending commit. Local checkout changes are still present, so the Save preview was not rebuilt.",
-            )
+            self.assertTrue(state["save_push_retry_pending"])
+            self.assertEqual(state["save_push_retry_commit"], pending_commit)
+            self.assertEqual(state["last_status"], "error")
+            self.assertIn("newer local commits", state["last_message"])
             self.assertEqual(state["last_save_preview_paths"], ["homeassistant/packages/new.yaml"])
             self.assertEqual(state["save_preview_selected_paths"], ["homeassistant/packages/new.yaml"])
-            self.assertEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertEqual(self.remote_main_subject(remote), "Original Save Subject")
-            self.assertEqual(server.git_head_or_unborn(repo), pending_commit)
-            self.assertNotEqual(server.git_head_or_unborn(repo), local_commit)
+            self.assertEqual(self.remote_main_subject(remote), "base")
+            self.assertEqual(server.git_head_or_unborn(repo), local_commit)
             self.assertIn("homeassistant/configuration.yaml", self.repo_status(repo))
-            self.assertIn("homeassistant/manual.yaml", self.repo_status(repo))
-            self.assertEqual(self.remote_file(remote, "homeassistant/packages/new.yaml"), "homeassistant:\n")
+            self.assertEqual((repo / "homeassistant" / "manual.yaml").read_text(), "manual\n")
+            self.assertEqual(config_file.read_text(), "dirty local edit\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.remote_file(remote, "homeassistant/packages/new.yaml")
             with self.assertRaises(subprocess.CalledProcessError):
                 self.remote_file(remote, "homeassistant/manual.yaml")
 

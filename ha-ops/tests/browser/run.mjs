@@ -76,6 +76,104 @@ async function inspectPage(page, label) {
   await page.screenshot({ path: path.join(artifactsDir, `${label}.png`), fullPage: true });
 }
 
+async function exerciseWorkflow(page, baseUrl, label) {
+  await page.reload();
+  await page.locator("ha-ops-app").waitFor();
+  const initial = await page.locator("ha-ops-app").evaluate(async (app) => {
+    await app.updateComplete;
+    return { buttons: [...app.querySelectorAll("vaadin-button")].map((item) => item.textContent.trim()),
+      connection: app.connection, blocked: app.mutationBlocked(), status: app.state.last_status,
+      active: app.state.active_operation };
+  });
+  const savePreviewLabel = initial.buttons.includes("Preview HA to Git") ? "Preview HA to Git" : "Review Post-Apply HA Changes";
+  assert(initial.buttons.includes(savePreviewLabel), `${label} Save preview control absent: ${JSON.stringify(initial)}`);
+  await page.getByRole("button", { name: savePreviewLabel }).click();
+  const saveState = await waitForState(baseUrl, (state) => state.last_action === "save_preview" && state.last_status === "success", `${label} Save preview`);
+  assert(saveState.last_save_preview_paths?.length === 2, `${label} Save preview paths missing`);
+  await page.reload();
+  const save = page.locator('ha-ops-preview[direction="save"]');
+  await save.waitFor();
+  await save.getByRole("button", { name: "Select All" }).click();
+  await waitForState(baseUrl, (state) => state.save_preview_selected_paths?.length === 2, `${label} Save selection`);
+  await save.getByRole("button", { name: "Save HA to Git" }).click();
+  await waitForState(baseUrl, (state) => state.last_action === "save" && state.last_status === "success", `${label} Save completion`);
+  await page.reload();
+  await page.waitForFunction(() => !document.querySelector("ha-ops-app")?.replayPending, undefined, { timeout: 5000 });
+  const afterSave = await page.locator("ha-ops-app").evaluate((app) => ({ blocked: app.mutationBlocked(),
+    operation: app.state.active_operation, connection: app.connection, replay: app.replayPending,
+    status: app.state.last_status, accepted: app.acceptedCommandId }));
+  assert(!afterSave.blocked, `${label} Save left controls blocked: ${JSON.stringify(afterSave)}`);
+  await page.getByRole("button", { name: "Preview Git to HA" }).click();
+  await waitForState(baseUrl, (state) => state.last_action === "preview" && state.last_status === "success", `${label} Apply preview`);
+  await page.reload();
+  const apply = page.locator('ha-ops-preview[direction="apply"]');
+  await apply.waitFor();
+  await apply.getByRole("button", { name: "Select All" }).click();
+  await waitForState(baseUrl, (state) => state.apply_preview_selected_paths?.length === 2, `${label} Apply selection`);
+  await apply.getByRole("button", { name: "Apply Git to HA" }).click();
+  await waitForState(baseUrl, (state) => state.last_action === "apply" && state.last_status === "success", `${label} Apply completion`);
+  await page.reload();
+  await page.waitForFunction(() => !document.querySelector("ha-ops-app")?.replayPending, undefined, { timeout: 5000 });
+
+  // Render the conflict decision states against the same Vaadin components.
+  const conflict = await page.locator("ha-ops-app").evaluate(async (app) => {
+    const path = "homeassistant/configuration.yaml";
+    app.state = { ...app.state, active_operation: null, last_status: "success",
+      last_save_preview_paths: [path], last_save_preview_conflict_paths: [path],
+      save_preview_selected_paths: [path], save_preview_resolutions: {}, save_preview_id: `${app.state.save_preview_id}-conflict` };
+    await app.updateComplete;
+    const save = app.querySelector('ha-ops-preview[direction="save"]');
+    await save.updateComplete;
+    const before = save.isFinalActionDisabled();
+    app.state = { ...app.state, save_preview_resolutions: { [path]: "ha" },
+      last_preview_paths: [path], last_preview_conflict_paths: [path],
+      apply_preview_selected_paths: [path], apply_preview_resolutions: {} };
+    await app.updateComplete;
+    const apply = app.querySelector('ha-ops-preview[direction="apply"]');
+    await apply.updateComplete;
+    const file = save.renderRoot.querySelector("ha-ops-preview-file");
+    await file.updateComplete;
+    return { saveNeedsChoice: before, saveEnabled: !save.isFinalActionDisabled(),
+      applyGitDefault: apply.effectiveChoice(path) === "git", applyEnabled: !apply.isFinalActionDisabled(),
+      saveChoices: file.renderRoot.querySelectorAll("vaadin-button[aria-pressed]").length };
+  });
+  assert(conflict.saveNeedsChoice && conflict.saveEnabled && conflict.applyGitDefault && conflict.applyEnabled
+    && conflict.saveChoices >= 2, `${label} conflict controls: ${JSON.stringify(conflict)}`);
+
+  const ids = await page.locator("ha-ops-app").evaluate(async (app) => {
+    const path = "homeassistant/automations.yaml";
+    const row = { path, changes: 1, unresolved: 0, selected: false, diff_sha256: "fixture-digest" };
+    app.state = { ...app.state, last_save_preview_paths: [], last_preview_paths: [],
+      last_internal_ids_generated_at: "2026-09-29", last_internal_ids_preview_id: "browser-ids-preview",
+      last_internal_ids_rows: [row], last_internal_ids_unresolved: [] };
+    app.internalDiffs = new Map([[path, "diff --git a/automations.yaml b/automations.yaml"]]);
+    await app.updateComplete;
+    const section = app.querySelector('[data-testid="internal-ids-preview-section"]');
+    const checkbox = section.querySelector("vaadin-checkbox");
+    const button = [...section.querySelectorAll("vaadin-button")].find((item) => item.textContent.includes("Migrate"));
+    const initiallyDisabled = button?.disabled;
+    app.state = { ...app.state, last_internal_ids_rows: [{ ...row, selected: true }] };
+    await app.updateComplete;
+    const enabled = ![...app.querySelectorAll('[data-testid="internal-ids-preview-section"] vaadin-button')]
+      .find((item) => item.textContent.includes("Migrate"))?.disabled;
+    return { checkbox: Boolean(checkbox), initiallyDisabled, enabled };
+  });
+  assert(ids.checkbox && ids.initiallyDisabled && ids.enabled, `${label} Internal IDs controls: ${JSON.stringify(ids)}`);
+
+  const recovery = await page.locator("ha-ops-app").evaluate(async (app) => {
+    app.state = { ...app.state, active_operation: { command: "apply", command_id: "fixture",
+      phase: "recovery_required", evidence: { guidance: "Review affected targets" } } };
+    await app.updateComplete;
+    return { alert: Boolean(app.querySelector('[data-testid="operation-recovery"]')),
+      previewHidden: !app.querySelector("ha-ops-preview"), blocked: app.mutationBlocked(),
+      disabled: [...app.querySelectorAll("vaadin-button")].filter((item) => item.textContent.includes("Preview"))
+        .every((item) => item.disabled) };
+  });
+  assert(recovery.alert && recovery.previewHidden && recovery.blocked && recovery.disabled,
+    `${label} recovery controls: ${JSON.stringify(recovery)}`);
+  await page.screenshot({ path: path.join(artifactsDir, `${label}-recovery.png`), fullPage: true });
+}
+
 const { child, ready } = await startHarness();
 let browser;
 try {
@@ -169,6 +267,16 @@ try {
   await phone.goto(baseUrl);
   await inspectPage(phone, "apply-preview-mobile");
   await phone.getByText("Change List").waitFor();
+  await exerciseWorkflow(page, baseUrl, "desktop");
+  await exerciseWorkflow(phone, baseUrl, "phone");
+  const fallback = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await fallback.addInitScript(() => { Object.defineProperty(window, "WebSocket", { value: undefined }); });
+  const fallbackPage = await fallback.newPage();
+  await fallbackPage.goto(baseUrl);
+  await fallbackPage.waitForFunction(() => document.querySelector("ha-ops-app")?.connection === "http");
+  await fallbackPage.getByRole("button", { name: "Preview Git to HA" }).click();
+  await waitForState(baseUrl, (state) => state.last_action === "preview" && state.last_status === "success", "HTTP fallback Preview");
+  await fallbackPage.screenshot({ path: path.join(artifactsDir, "http-fallback-phone.png"), fullPage: true });
   assert(pageErrors.length === 0, `Browser errors: ${pageErrors.join("; ")}`);
   console.log(JSON.stringify({ ok: true, screenshots: artifactsDir }));
 } finally {

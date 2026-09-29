@@ -193,6 +193,11 @@ def git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
 def discard_unpushed_head_commit(repo_dir, env, branch, commit, run_command):
     if not git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
         return False
+    if git_commit(repo_dir, branch, run_command) != git_commit(repo_dir, commit, run_command):
+        raise RuntimeError(
+            "Cannot cancel Save push retry while newer local commits follow the pending Save commit. "
+            "Preserve those commits and review the branch before cancelling."
+        )
     assert_no_untracked_files(repo_dir, run_command)
     dirty = git_status_porcelain(repo_dir, run_command)
     if dirty:
