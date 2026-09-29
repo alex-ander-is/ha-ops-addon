@@ -154,11 +154,18 @@ async function exerciseWorkflow(page, baseUrl, label) {
     const initiallyDisabled = button?.disabled;
     app.state = { ...app.state, last_internal_ids_rows: [{ ...row, selected: true }] };
     await app.updateComplete;
-    const enabled = ![...app.querySelectorAll('[data-testid="internal-ids-preview-section"] vaadin-button')]
-      .find((item) => item.textContent.includes("Migrate"))?.disabled;
-    return { checkbox: Boolean(checkbox), initiallyDisabled, enabled };
+    const migrate = [...app.querySelectorAll('[data-testid="internal-ids-preview-section"] vaadin-button')]
+      .find((item) => item.textContent.includes("Migrate"));
+    const enabled = !migrate?.disabled;
+    migrate.click();
+    await app.updateComplete;
+    const confirmationOpen = app.confirmOpen && Boolean(app.querySelector("vaadin-confirm-dialog[opened]"));
+    app.confirmOpen = false;
+    app.confirmCommand = null;
+    return { checkbox: Boolean(checkbox), initiallyDisabled, enabled, confirmationOpen };
   });
-  assert(ids.checkbox && ids.initiallyDisabled && ids.enabled, `${label} Internal IDs controls: ${JSON.stringify(ids)}`);
+  assert(ids.checkbox && ids.initiallyDisabled && ids.enabled && ids.confirmationOpen,
+    `${label} Internal IDs controls: ${JSON.stringify(ids)}`);
 
   const recovery = await page.locator("ha-ops-app").evaluate(async (app) => {
     app.state = { ...app.state, active_operation: { command: "apply", command_id: "fixture",
