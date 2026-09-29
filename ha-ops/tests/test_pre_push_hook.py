@@ -146,6 +146,7 @@ class PrePushHookTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Running HA Ops tests before push", result.stdout)
+        self.assertNotIn("Verified minor release", result.stdout)
 
     def test_rejects_patch_classification_for_minor_bump(self):
         head = self.release_commit("patch", "0.2.0")

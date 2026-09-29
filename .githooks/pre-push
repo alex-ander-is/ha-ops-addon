@@ -79,7 +79,7 @@ if [ "$requires_release_check" = "1" ]; then
     }
     previous_release=$(git describe --tags --abbrev=0 "$release_commit^" | sed 's/^v//')
     hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-    "$hook_dir/../release-policy.py" check "$previous_release" "$release_commit" || exit 1
+    "$hook_dir/../release-policy.py" check "$previous_release" "$release_commit" >/dev/null || exit 1
 
     if git ls-remote --exit-code --tags "$REMOTE_NAME" "refs/tags/$version" >/dev/null 2>&1; then
       :
