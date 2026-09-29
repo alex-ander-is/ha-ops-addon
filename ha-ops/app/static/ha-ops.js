@@ -2245,7 +2245,8 @@ var Te=globalThis,Ie=Te.ShadowRoot&&(Te.ShadyCSS===void 0||Te.ShadyCSS.nativeSha
               <section class="action-section"><h2>${h("heading.retained_devices")}</h2><div class="action-row">
                 ${this.actionButton("retained_devices_preview",h("action.check_retained_devices"),{disabled:n})}
               </div></section>
-              <section class="action-section"><h2>${h("heading.actions_ids")}</h2><div class="action-row">
+              <section class="action-section"><h2>${h("heading.actions_ids")}</h2>
+                <p class="muted">${h("notice.internal_ids_flow")}</p><div class="action-row">
                 ${this.actionButton("internal_ids_preview",h("action.check_actions_ids"),{disabled:n})}
               </div></section>
             </div>

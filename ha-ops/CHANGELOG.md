@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.0.1
+
+- Explain which Home Assistant registry references are scanned, show a Zigbee2MQTT topic example, and state when changes reach live HA.
+
 ## 2.0.0
 
 - Use root automations.yaml, scripts.yaml, and scenes.yaml throughout Save, Apply, and Check actions IDs.

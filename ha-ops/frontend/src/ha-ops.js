@@ -1307,7 +1307,8 @@ class HaOpsApp extends LitElement {
               <section class="action-section"><h2>${t("heading.retained_devices")}</h2><div class="action-row">
                 ${this.actionButton("retained_devices_preview", t("action.check_retained_devices"), { disabled: controlsBlocked })}
               </div></section>
-              <section class="action-section"><h2>${t("heading.actions_ids")}</h2><div class="action-row">
+              <section class="action-section"><h2>${t("heading.actions_ids")}</h2>
+                <p class="muted">${t("notice.internal_ids_flow")}</p><div class="action-row">
                 ${this.actionButton("internal_ids_preview", t("action.check_actions_ids"), { disabled: controlsBlocked })}
               </div></section>
             </div>
