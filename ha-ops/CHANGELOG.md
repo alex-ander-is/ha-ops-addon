@@ -26,10 +26,6 @@ Released sections are immutable. Put every new change into a new version section
 - Keep exact Check actions IDs diffs tied to the active preview and fence uncertain Save or Apply outcomes for reviewed recovery after restart.
 - Preserve the existing temporary Apply rollback on caught errors without creating a second durable copy.
 
-## 0.11.1
-
-- Archive the retired `.ha-ops/areas` organizer experiment, remove its inactive implementation and skipped projection tests, and retain a guard that rejects legacy enabled settings before Save or Apply can change configuration.
-
 ## 0.11.0
 
 - Explain Home Assistant entity and device registry preview changes as added, removed, or changed records, highlighting identifier changes and removals for review while keeping the raw diff available.
@@ -136,11 +132,6 @@ Released sections are immutable. Put every new change into a new version section
 - Replace reactive Change List radio buttons with adjacent `Use HA Version` and `Use Git Version` action buttons.
 - Render preview files as independent Vaadin Details rows so multiple diffs can stay open while Expand All and Collapse All continue to work.
 - Keep per-file diff loading lazy and prevent checkbox or version-button activation from accidentally toggling the row.
-
-## 0.10.12
-
-- Remove completed or cancelled HA Ops ToDo documents for reactive UI, diff stability, and organizer round-trip testing.
-- Update organizer paused messaging so it no longer points agents or users to a cancelled rewrite ToDo.
 
 ## 0.10.11
 
@@ -343,33 +334,6 @@ Released sections are immutable. Put every new change into a new version section
 
 - Create both normalized Save preview diff roots before comparing HA-only additions so HA-to-Git preview does not fail on directory-only `diff` inputs.
 
-## 0.8.39
-
-- Keep disabled organizer Save and Apply flows on Home Assistant heap YAML files, remove stale `.ha-ops/areas` metadata, and verify immediate round trips stay no-diff.
-- Mark the enabled `.ha-ops/areas` organizer projection as blocked pending the round-trip rewrite; disabled organizer Save and Apply remain production-safe.
-
-## 0.8.38
-
-- Suppress HA-to-Git Save organizer route-only item moves inside multi-item area files when the composed Home Assistant heap content is unchanged.
-
-## 0.8.37
-
-- Render stale-service-branch HA-to-Git Save organizer index conflicts as reviewable preview conflicts instead of crashing while normalizing the diff.
-
-## 0.8.36
-
-- Hide HA-to-Git Save organizer route-only additions when live and Git contain the same automation, script, or scene item through different organizer area paths.
-- Keep hidden organizer route-only additions out of unrelated Save commits while preserving still-live items when a selected organizer file also contains a real deletion.
-
-## 0.8.35
-
-- Hide Git-to-HA Apply organizer route-only changes when the composed automation, script, and scene heap semantics are unchanged.
-- Reject nested organizer heap files before Git-to-HA Apply preview can hide them as route-only no-op changes.
-
-## 0.8.34
-
-- Make partial Git-to-HA Apply converge for organizer-backed Home Assistant automations and scripts by materializing selected area YAML changes into the live heap files while leaving unselected organizer and storage diffs pending.
-
 ## 0.8.33
 
 - Refresh the Git-to-HA Apply Change List after a successful partial Apply so applied files disappear, unselected files remain visible, and the refreshed preview commit tracks the repo branch.
@@ -404,12 +368,10 @@ Released sections are immutable. Put every new change into a new version section
 ## 0.8.27
 
 - Remove the duplicate textual preview summary above the interactive Change List.
-- Keep unmanaged organizer area files out of Git-to-HA previews and apply trees.
 
 ## 0.8.26
 
 - Show stale HA Ops internal Git branch push failures as warnings with Reset Git State guidance.
-- Keep Apply preview organizer diffs anchored to the Git organized YAML so added files keep their area path and block scalar formatting.
 
 ## 0.8.25
 
@@ -445,7 +407,6 @@ Released sections are immutable. Put every new change into a new version section
 ## 0.8.19
 
 - Add a lower Collapse Diff button to expanded per-file preview diffs.
-- Keep organizer YAML dumps from writing explicit null values.
 - Show rendered characters when hovering over Unicode escape codes in diffs.
 
 ## 0.8.18
@@ -460,14 +421,6 @@ Released sections are immutable. Put every new change into a new version section
 ## 0.8.16
 
 - Move per-file preview choice actions below expanded diffs and keep the wrap control in the file header.
-
-## 0.8.15
-
-- Use the Home Assistant YAML dumper for organizer output instead of custom Jinja scalar formatting.
-
-## 0.8.14
-
-- Normalize Home Assistant organizer Jinja YAML scalars to avoid quote-only Save preview diffs.
 
 ## 0.8.13
 
@@ -551,22 +504,13 @@ Released sections are immutable. Put every new change into a new version section
 
 - Reject HA Ops pushes that forget to include a version bump, changelog entry, and matching release tag.
 
-## 0.7.24
-
-- Keep HA Ops organizer from parsing Home Assistant time strings like `21:00:00` as sexagesimal integers.
-
 ## 0.7.23
 
 - Highlight post-apply HA registry follow-up with a persistent warning and orange HA to Git preview button.
-- Preserve organizer contract docs during HA to Git previews and saves.
 
 ## 0.7.22
 
 - Keep the Managed Targets checkbox column fixed to checkbox width.
-
-## 0.7.21
-
-- Keep long Home Assistant organizer YAML scalars on one line to avoid noisy Save HA to Git diffs.
 
 ## 0.7.20
 
@@ -677,14 +621,7 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.6.20
 
-- Allow organizer-managed automations, scripts, and scenes to be added or removed in Git without comparing against stale live counts.
 - Store and recheck a canonical RFC 8785 live automation/script/scene fingerprint between Preview Git to HA and Apply Git to HA.
-- Verify that organizer apply writes the same automation/script/scene identities and counts that came from the Git source.
-
-## 0.6.19
-
-- Compare organizer-enabled Git to HA previews in the organized area view to avoid heap YAML rewrite noise.
-- Normalize organizer index id order in preview diffs.
 
 ## 0.6.18
 
@@ -792,7 +729,6 @@ Released sections are immutable. Put every new change into a new version section
 
 ## 0.5.4
 
-- Use dot-prefixed organizer service buckets `.unknown` and `.mixed`.
 - Keep real Home Assistant areas such as `Unknown` separate from service buckets.
 - Document stable entity-reference conversion for automation, script, and scene YAML.
 
@@ -800,23 +736,6 @@ Released sections are immutable. Put every new change into a new version section
 
 - Merge managed App selection into the targets table.
 - Hide the protected-storage implementation detail from the main targets table.
-
-## 0.5.2
-
-- Move the Home Assistant organizer toggle into the main action card so it is visible without scrolling.
-
-## 0.5.1
-
-- Add the Home Assistant organizer UI toggle.
-- Stop Git-to-HA when a split organizer view exists in Git but the organizer toggle is off.
-- Allow HA-to-Git with the organizer toggle off to convert Git back to heap YAML files.
-
-## 0.5.0
-
-- Add opt-in Home Assistant organizer for UI-managed automations, scripts, and scenes.
-- Store organized Git views under `.ha-ops/areas` and compose them back to Home Assistant heap files on Apply.
-- Keep organizer migration explicit with a Home Assistant UI toggle.
-- Add organizer integrity checks, routing fallbacks, and Save/Apply safety coverage.
 
 ## 0.4.38
 
