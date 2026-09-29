@@ -11864,6 +11864,28 @@ devices:
                 ctx.ensure_repo(options, reset_to_origin=False)
             self.assertEqual(document.read_text(), "user work\n")
 
+    def test_nested_empty_checkout_directories_do_not_block_git_sync(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
+            ctx.work_dir.mkdir(parents=True)
+            options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config"}
+            repo = ctx.ensure_repo(options)
+            empty_leaf = repo / "addons" / "old-addon" / "nested"
+            empty_leaf.mkdir(parents=True)
+
+            self.assertEqual(self.git(["status", "--porcelain"], repo).stdout, "")
+            server.app_context.git_ops.assert_no_untracked_files(repo, ctx.run_command)
+            ctx.ensure_repo(options, reset_to_origin=False)
+
+            hidden_file = empty_leaf / "user-note.txt"
+            hidden_file.write_text("keep me\n")
+            with self.assertRaisesRegex(RuntimeError, "untracked or ignored files"):
+                server.app_context.git_ops.assert_no_untracked_files(repo, ctx.run_command)
+            self.assertEqual(hidden_file.read_text(), "keep me\n")
+
     def test_unpushed_local_commit_survives_rejected_repo_reset(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -15669,6 +15691,71 @@ devices:
             self.assertTrue(duplicate["duplicate"])
             self.assertEqual(len(scheduled), 1)
             self.assertEqual(server.read_state()["command_records"][command_id]["status"], "accepted")
+
+    def test_failed_preview_before_live_write_releases_recovery_fence(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            ctx = server.context()
+            command_id = str(uuid.uuid4())
+            claimed, _record = ctx.claim_command(
+                command_id, "preview", ctx.read_state()["operation_generation"], {}
+            )
+            self.assertTrue(claimed)
+
+            def run_preview_job(lock_acquired=False):
+                try:
+                    ctx.write_state({"last_status": "error", "last_message": "Git checkout rejected"})
+                    return False
+                finally:
+                    if lock_acquired:
+                        ctx.run_lock.release()
+
+            original = server.web.start_background
+            server.web.start_background = lambda callback: callback()
+            try:
+                self.assertTrue(server.web.start_reserved_background(ctx, run_preview_job, command_id=command_id))
+            finally:
+                server.web.start_background = original
+
+            state = ctx.read_state()
+            self.assertEqual(state["command_records"][command_id]["status"], "terminal")
+            self.assertFalse(state["command_records"][command_id]["result"]["ok"])
+            self.assertIsNone(state["active_operation"])
+
+    def test_startup_clears_only_recorded_failed_preview_fence(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            store = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            command_id = str(uuid.uuid4())
+            store.begin_repair()
+            store.mark_repaired()
+            claimed, _record = store.claim_command(command_id, "preview", store.read_state()["operation_generation"], {})
+            self.assertTrue(claimed)
+            store.update_command(command_id, "running")
+            store.update_command(command_id, "terminal", {
+                "ok": False, "status": "error", "safe_terminal": False, "message": "Git checkout rejected",
+            })
+            self.assertEqual(store.read_state()["active_operation"]["phase"], "recovery_required")
+
+            restarted = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            restarted.begin_repair()
+            self.assertIsNone(restarted.reconcile_startup_fence())
+            restarted.mark_repaired()
+            self.assertIsNone(restarted.read_state()["active_operation"])
+            self.assertEqual(restarted.read_state()["command_records"][command_id]["status"], "terminal")
+
+            server.write_state({"active_operation": {
+                "command_id": command_id, "command": "preview", "phase": "recovery_required",
+            }})
+            current = store.read_state()
+            records = current["command_records"]
+            records[command_id]["status"] = "failed_unknown"
+            server.write_state({"command_records": records})
+            uncertain = server.app_context.state_store.OperationStore(server.STATE_PATH)
+            uncertain.begin_repair()
+            self.assertEqual(uncertain.reconcile_startup_fence()["phase"], "recovery_required")
 
     def test_ws_cleanup_block_terminalizes_claimed_command_id(self):
         server = load_server()

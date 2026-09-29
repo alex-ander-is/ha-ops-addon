@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.0.2
+
+- Ignore recursively empty Git checkout directories while still refusing untracked files.
+- Clear the recovery fence after a handled Preview failure, and refresh the client from API when WebSocket updates are missed.
+- On upgrade, clear an old Preview recovery fence only when its command record proves a completed error.
+- Update the Actions IDs browser fixture to use root automations.yaml.
+
 ## 2.0.1
 
 - Explain which Home Assistant registry references are scanned, show a Zigbee2MQTT topic example, and state when changes reach live HA.

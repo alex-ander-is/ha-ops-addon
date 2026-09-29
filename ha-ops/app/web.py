@@ -688,7 +688,8 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                             "ok": final_state.get("last_status") not in {"error", "interrupted"},
                             "status": final_state.get("last_status"),
                             "message": final_state.get("last_message", ""),
-                            "safe_terminal": action == "apply" and (
+                            "safe_terminal": action in {"preview", "save_preview"} or (
+                                action == "apply" and
                                 (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
                             ),
                         },

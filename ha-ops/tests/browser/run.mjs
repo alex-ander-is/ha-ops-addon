@@ -52,7 +52,10 @@ async function waitForState(baseUrl, predicate, label) {
     if (predicate(state)) return state;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  throw new Error(`Timed out waiting for ${label}`);
+  const state = await stateAt(baseUrl);
+  throw new Error(`Timed out waiting for ${label}: ${JSON.stringify({
+    last_action: state.last_action, last_status: state.last_status, last_message: state.last_message,
+  })}`);
 }
 
 async function inspectPage(page, label) {
@@ -103,8 +106,14 @@ async function exerciseWorkflow(page, baseUrl, label) {
     operation: app.state.active_operation, connection: app.connection, replay: app.replayPending,
     status: app.state.last_status, accepted: app.acceptedCommandId }));
   assert(!afterSave.blocked, `${label} Save left controls blocked: ${JSON.stringify(afterSave)}`);
+  await page.locator("ha-ops-app").evaluate((app) => {
+    const receive = app.receive.bind(app);
+    app.receive = (frame) => { if (frame.type !== "state_patch") receive(frame); };
+  });
   await page.getByRole("button", { name: "Preview Git to HA" }).click();
   await waitForState(baseUrl, (state) => state.last_action === "preview" && state.last_status === "success", `${label} Apply preview`);
+  await page.waitForFunction(() => document.querySelector("ha-ops-app")?.state.last_action === "preview" &&
+    document.querySelector("ha-ops-app")?.state.last_status === "success", undefined, { timeout: 5000 });
   await page.reload();
   const apply = page.locator('ha-ops-preview[direction="apply"]');
   await apply.waitFor();

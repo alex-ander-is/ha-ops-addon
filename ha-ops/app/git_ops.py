@@ -94,7 +94,9 @@ def assert_no_untracked_files(repo_dir, run_command):
         path = repo_dir / line[len("Would remove "):]
         # Git reports directories left empty by a prior preview. They need no
         # cleanup and should not make a later Save fail.
-        if path.is_dir() and not any(path.iterdir()):
+        if path.is_dir() and not path.is_symlink() and not any(
+            child.is_symlink() or not child.is_dir() for child in path.rglob("*")
+        ):
             continue
         candidates.append(line)
     if candidates:

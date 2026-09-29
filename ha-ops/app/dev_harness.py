@@ -871,9 +871,7 @@ class DevHarnessContext(app_context.AppContext):
                 {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]], "name": "fixture_remote"}
             ]}}))
             (z2m / "state.json").write_text(json.dumps([{"ieee_address": "0x00124b00226b31f8", "friendly_name": "fixture_remote"}]))
-            area = config / ".ha-ops" / "areas" / "fixture"
-            area.mkdir(parents=True, exist_ok=True)
-            (area / "automations.yaml").write_text("""- id: 'fixture'
+            (config / "automations.yaml").write_text("""- id: 'fixture'
   alias: Fixture action
   triggers: []
   conditions: []

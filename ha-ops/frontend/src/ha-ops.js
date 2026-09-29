@@ -1500,6 +1500,9 @@ class HaOpsApp extends LitElement {
       this.reconcileAcceptedCommand();
       this.requestUpdate();
       if (TERMINAL_STATE_SYNC_COMMANDS.has(command)) await this.pollCommandState(envelope.command_id);
+      if (["preview", "save_preview"].includes(command)) {
+        await this.pollCommandState(envelope.command_id, 120000, 1000);
+      }
       return response;
     }
     if (WS_COMMANDS.has(command) && socket && socket.readyState !== window.WebSocket?.CLOSED) {
@@ -1524,8 +1527,8 @@ class HaOpsApp extends LitElement {
     if (!this.socket || this.socket.readyState !== window.WebSocket.OPEN) this.setConnection("http");
   }
 
-  async pollCommandState(commandId) {
-    const deadline = Date.now() + 10000;
+  async pollCommandState(commandId, timeoutMs = 10000, intervalMs = 100) {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const response = await fetch("api/v1/state");
       if (!response.ok) throw new Error("Could not refresh HA Ops state.");
@@ -1533,7 +1536,7 @@ class HaOpsApp extends LitElement {
       const status = this.state.command_records?.[commandId]?.status;
       if (status === "terminal") return;
       if (status === "failed_unknown") throw new Error("Command outcome is unknown.");
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
     throw new Error("Command did not finish before the HTTP fallback timeout.");
   }

@@ -754,6 +754,18 @@ class OperationStore:
                     "command": "unknown", "command_id": None, "phase": "recovery_required",
                     "message": "Operation evidence is invalid; review state manually before another mutation.",
                 }
+            elif (
+                operation.get("command") in {"preview", "save_preview"}
+                and operation.get("phase") == "recovery_required"
+                and isinstance(operation.get("command_id"), str)
+                and isinstance(records.get(operation.get("command_id")), dict)
+                and records[operation["command_id"]].get("status") == "terminal"
+                and isinstance(records[operation["command_id"]].get("result"), dict)
+                and records[operation["command_id"]]["result"].get("ok") is False
+                and records[operation["command_id"]]["result"].get("status") == "error"
+            ):
+                current[ACTIVE_OPERATION_KEY] = None
+                current.update(ALL_PREVIEW_CLEAR_UPDATES)
             elif operation["phase"] == "accepted":
                 command_id = operation.get("command_id")
                 record = records.get(command_id)
