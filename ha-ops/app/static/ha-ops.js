@@ -2299,7 +2299,6 @@ var Te=globalThis,Ie=Te.ShadowRoot&&(Te.ShadyCSS===void 0||Te.ShadyCSS.nativeSha
           ${this.actionButton("generate_key",h("action.generate_deploy_key"),{disabled:n})}
         </section>
         <section class="card wide"><h2>${h("heading.managed_targets")}</h2>
-          <p>${h("text.split_organizer_blocked")}</p>
           <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${h("label.managed")}</th><th>${h("label.target")}</th><th>${h("label.type")}</th><th>${h("label.source")}</th></tr></thead><tbody>
             ${(this.view.targets||[]).map(a=>d`<tr><td></td><td><code>${a.id||""}</code></td><td>${a.type||""}</td><td>${a.source||""}</td></tr>`)}
             ${(this.view.addons||[]).map(a=>d`<tr><td><vaadin-checkbox aria-label=${`${h("label.managed")} ${a.name}`}

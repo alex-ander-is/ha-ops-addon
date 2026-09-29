@@ -57,7 +57,7 @@ when retrying or cancelling a failed Save push.
    with a current preview ID and path, selected changed paths with diff digests,
    unresolved count, and Vaadin confirmation. The migration command sends
    preview ID and selected path/digest pairs, never row indexes.
-7. Migrate the remaining targets, Apps, organizer, redundant data, Git
+7. Migrate the remaining targets, Apps, redundant data, Git
    access, release snapshots, and cleanup controls in the same pass so the
    page has no server-rendered interactive controls. Keep localized text and
    visibly disabled button styling consistent.

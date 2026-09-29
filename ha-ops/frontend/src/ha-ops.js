@@ -1403,7 +1403,6 @@ class HaOpsApp extends LitElement {
           ${this.actionButton("generate_key", t("action.generate_deploy_key"), { disabled: controlsBlocked })}
         </section>
         <section class="card wide"><h2>${t("heading.managed_targets")}</h2>
-          <p>${t("text.split_organizer_blocked")}</p>
           <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${t("label.managed")}</th><th>${t("label.target")}</th><th>${t("label.type")}</th><th>${t("label.source")}</th></tr></thead><tbody>
             ${(this.view.targets || []).map((target) => html`<tr><td></td><td><code>${target.id || ""}</code></td><td>${target.type || ""}</td><td>${target.source || ""}</td></tr>`)}
             ${(this.view.addons || []).map((addon) => html`<tr><td><vaadin-checkbox aria-label=${`${t("label.managed")} ${addon.name}`}

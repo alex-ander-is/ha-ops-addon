@@ -123,13 +123,10 @@ def zigbee2mqtt_friendly_names(config_dir, z2m_dirs=None):
 
 
 def managed_files(config_dir):
-    root = Path(config_dir) / ".ha-ops"
-    if not root.exists():
-        return []
+    root = Path(config_dir)
     return [
-        path
-        for path in sorted(root.rglob("*.yaml"))
-        if path.name in {"automations.yaml", "scripts.yaml", "scenes.yaml"}
+        path for path in (root / "automations.yaml", root / "scripts.yaml", root / "scenes.yaml")
+        if path.is_file()
     ]
 
 

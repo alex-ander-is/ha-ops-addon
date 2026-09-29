@@ -227,16 +227,8 @@ def save_preview_resolutions_for_current_preview(state, commit, preview):
         if missing:
             raise RuntimeError(_("message.choose_save_preview_conflicts", count=len(missing)))
     resolutions = {path: stored.get(path, "ha") if path in selected_set else "git" for path in paths}
-    preserve_triggers = preview.get("suppressed_preserve_triggers") or {}
     for path in preview.get("suppressed_paths") or []:
-        triggers = preserve_triggers.get(path) or []
-        selected_ha_triggers = [
-            trigger
-            for trigger in triggers
-            if trigger in selected_set and stored.get(trigger, "ha") == "ha"
-        ]
-        preserve_from_ha = bool(selected_ha_triggers)
-        resolutions.setdefault(path, "ha" if preserve_from_ha else "git")
+        resolutions.setdefault(path, "git")
     return resolutions
 
 
@@ -296,16 +288,14 @@ def dirty_paths(ctx, repo_dir):
     return [status_path(line) for line in (ctx.git_status_porcelain(repo_dir) or "").splitlines() if line.strip()]
 
 
-def internal_ids_migration_prefixes(options):
+def internal_ids_migration_paths(options):
     apply_path = str(options.get("apply_path") or "homeassistant").strip().strip("/")
-    prefixes = [".ha-ops/"]
-    if apply_path:
-        prefixes.insert(0, f"{apply_path}/.ha-ops/")
-    return prefixes
+    prefix = f"{apply_path}/" if apply_path and apply_path != "." else ""
+    return {f"{prefix}{name}" for name in ("automations.yaml", "scripts.yaml", "scenes.yaml")}
 
 
 def internal_ids_migration_path(path, options):
-    return any(path.startswith(prefix) for prefix in internal_ids_migration_prefixes(options))
+    return path in internal_ids_migration_paths(options)
 
 
 def dirty_checkout_message(paths, action):

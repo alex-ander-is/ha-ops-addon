@@ -213,12 +213,6 @@ state changes.
 `include_redundant_data` intentionally bypasses the normal reduced diff view so
 Save can preserve registry data exactly as Home Assistant writes it.
 
-## Organizer Interaction
-
-The `.ha-ops/areas` organizer experiment is archived and cannot be enabled.
-Service-branch merges use the normal Home Assistant heap files. For historical
-context only, see `ha-ops/docs/archive/organizer-area-split.md`.
-
 ## UI State That Is Intentional
 
 Disabled button styling is global and intentional. New disabled buttons should

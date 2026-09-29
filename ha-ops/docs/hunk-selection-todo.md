@@ -79,6 +79,6 @@ file content.
 - Raw registry changes hidden by display normalization invalidate the map.
 - Device/entity additions, removals, and moves close correctly; dangling
   references fail before live work.
-- Organizer heaps, conflicts, binaries, add/delete, rename, copy, and mode
+- Home Assistant heap files, conflicts, binaries, add/delete, rename, copy, and mode
   changes use file-level fallback.
 - Hunk state clears on every lifecycle transition listed above.

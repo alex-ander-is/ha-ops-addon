@@ -17,6 +17,3 @@ Before changing or reviewing the HA Ops 0.8 service-branch preview/save/apply
 flow, read `ha-ops/docs/service-branch-merge-contract.md`. It documents the
 parts of the branch, preview, conflict, `.storage`, and UI behavior that are
 intentional versus unsafe shortcuts.
-
-Before changing or reviewing `.ha-ops/areas` organizer behavior, also read
-`ha-ops/docs/organizer-contract.md`.

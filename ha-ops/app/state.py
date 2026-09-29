@@ -116,6 +116,7 @@ TRANSIENT_SNAPSHOT_FIELDS = {
     "deleted_devices_pending_diff",
     "deleted_devices_pending_diff_error",
 }
+RETIRED_STATE_FIELDS = {"homeassistant_organizer_enabled"}
 
 
 def _valid_timestamp(value):
@@ -509,7 +510,6 @@ def default_state():
         "deleted_devices_pending_tree_error": "",
         "deleted_devices_recovery_phase": DELETED_DEVICES_RECOVERY_NONE,
         "managed_addons": [],
-        "homeassistant_organizer_enabled": None,
         "include_redundant_data": False,
         "post_apply_save_recommended": False,
         "save_push_retry_pending": False,
@@ -585,6 +585,8 @@ def _read_diff_artifact(path, cursor, expected_generation=None):
 
 def hydrate_diff_fields(path, current):
     current = dict(default_state(), **dict(current or {}))
+    for field in RETIRED_STATE_FIELDS:
+        current.pop(field, None)
     generation = current.get("operation_generation")
     for field, cursor_field in DIFF_CURSOR_FIELDS.items():
         if not current.get(field) and current.get(cursor_field):
@@ -597,7 +599,7 @@ def sanitize_state_for_persistence(current):
     for field in DIFF_FIELDS:
         if current.get(field):
             current[field] = ""
-    for field in TRANSIENT_SNAPSHOT_FIELDS:
+    for field in TRANSIENT_SNAPSHOT_FIELDS | RETIRED_STATE_FIELDS:
         current.pop(field, None)
     return current
 
@@ -640,7 +642,11 @@ def redacted_state_snapshot(current):
 
 def read_state(path, hydrate_diffs=True):
     current = load_json(path, default_state())
-    return hydrate_diff_fields(path, current) if hydrate_diffs else current
+    if hydrate_diffs:
+        return hydrate_diff_fields(path, current)
+    for field in RETIRED_STATE_FIELDS:
+        current.pop(field, None)
+    return current
 
 
 def write_state(path, updates):

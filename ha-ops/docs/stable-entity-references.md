@@ -79,9 +79,6 @@ Work on the normal Home Assistant heap files in the Git checkout:
 - `ha-config/homeassistant/scripts.yaml`
 - `ha-config/homeassistant/scenes.yaml`
 
-The former `.ha-ops/areas` organizer layout is archived and is not a managed
-HA Ops configuration format.
-
 Use these registries as lookup sources:
 
 - `homeassistant/.storage/core.entity_registry`

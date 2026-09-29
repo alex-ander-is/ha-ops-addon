@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.0.0
+
+- Use root automations.yaml, scripts.yaml, and scenes.yaml throughout Save, Apply, and Check actions IDs.
+- Reject unsupported legacy manifest fields and source layouts during Save and Apply validation, and clear the retired UI preference from state.
+- Remove obsolete controls and documentation while preserving semantic preview fingerprints.
+
 ## 1.0.3
 
 - Preserve unpublished local commits when cancelling a failed Save push.

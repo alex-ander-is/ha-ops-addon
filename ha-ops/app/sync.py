@@ -10,7 +10,7 @@ from typing import Any, Callable
 import i18n
 import storage_managed
 import targets as target_model
-import organizer
+import heap_fingerprint
 import policies
 
 
@@ -232,8 +232,6 @@ def clean_homeassistant_export_destination(dest, target, ctx):
         if dest_path.exists() or dest_path.is_symlink():
             safe_remove_path(dest_path)
     clear_managed_destination_path(dest / storage_managed.MANAGED_DIR, ctx.export_excludes, ctx.work_dir, ctx.run_command)
-    if target and homeassistant_organizer_enabled(target):
-        organizer.clean_organized_root(dest, organizer_options(target), preserve_unmanaged=True)
 
 
 def export_homeassistant_config(src, dest, target, ctx):
@@ -268,101 +266,27 @@ def export_homeassistant_config(src, dest, target, ctx):
     return copied, zigbee2mqtt_count, storage_count, managed_storage_count
 
 
-def organizer_options(target):
-    if not target or "organizer" not in target:
-        return None
-    value = target.get("organizer")
-    if value is False:
-        return {"enabled": False}
-    if value is True:
-        return {}
-    if not isinstance(value, dict):
-        return None
-    enabled = value.get("enabled", False)
-    if not enabled:
-        options = dict(value)
-        options["enabled"] = False
-        return options
-    options = dict(value)
-    options.pop("enabled", None)
-    return options
-
-
-def organizer_cleanup_options(target):
-    value = target.get("organizer") if target else None
-    if isinstance(value, dict):
-        options = dict(value)
-        options.pop("enabled", None)
-        return options
-    return organizer_options(target) or {}
-
-
-def homeassistant_organizer_enabled(target):
-    options = organizer_options(target)
-    return options is not None and organizer.organizer_projection_enabled(options)
-
-
-def require_homeassistant_organizer_projection_available(target):
-    if target and target.get("type") == "homeassistant":
-        organizer.require_projection_available(organizer_options(target))
-
-
-def ensure_organized_view_is_enabled(src, target):
-    options = organizer_options(target)
-    if not target or target.get("type") != "homeassistant" or organizer.organizer_projection_enabled(options):
-        return
-    options = options or organizer_cleanup_options(target)
-    if organizer.has_organized_view(src, options):
-        root_name = organizer.organized_root_name(options)
+def validated_homeassistant_source(src, target):
+    if "organizer" in target:
+        raise RuntimeError("Unsupported Home Assistant target field 'organizer'.")
+    legacy_root = Path(src) / ".ha-ops" / "areas"
+    if legacy_root.exists() or legacy_root.is_symlink():
         raise RuntimeError(
-            f"Home Assistant organizer view exists in Git at {root_name}, but the .ha-ops/areas "
-            "organizer projection is paused and the organizer must stay disabled. Use Save HA to "
-            "Git with the organizer disabled to convert Git back to heap YAML files, or remove the "
-            "stale .ha-ops/areas view from Git."
+            f"Unsupported old Home Assistant source layout at {legacy_root}. "
+            "Convert it to normal heap YAML files manually before Save or Apply."
         )
-
-
-def organize_homeassistant_export(path, target, details, ctx):
-    options = organizer_options(target)
-    if options is None or not organizer.has_heap_files(path):
-        return None
-    projection_enabled = organizer.organizer_projection_enabled(options)
-    summary = organizer.split_live_heaps_to_git(path, path, options=options)
-    total = sum(summary[kind]["output_count"] for kind in ("automations", "scripts", "scenes"))
-    if total and details is not None:
-        message = (
-            f"Organized {total} Home Assistant automation/script/scene item(s) for Git."
-            if projection_enabled
-            else f"Preserved {total} Home Assistant automation/script/scene item(s) as heap YAML for Git."
-        )
-        ctx.add_detail(details, message)
-    return summary
-
-
-def materialize_homeassistant_source(src, target, ctx):
-    options = organizer_options(target)
-    require_homeassistant_organizer_projection_available(target)
-    ensure_organized_view_is_enabled(src, target)
-    if options is None or not organizer.has_organized_view(src, options):
-        return Path(src)
-
-    temp = ctx.work_dir / "organizer-materialized" / safe_preview_name(target.get("id") or "homeassistant")
-    clear_tree(temp, ctx.work_dir, ctx.run_command)
-    sync_tree(Path(src), temp, True, None, ctx.run_command)
-    organizer.compose_git_view_to_live(temp, temp, options=options)
-    organizer.clean_organized_root(temp, options)
-    return temp
+    return Path(src)
 
 
 def managed_ha_heaps_fingerprint(path):
     path = Path(path)
-    if not all((path / filename).exists() for filename in organizer.HEAP_FILES.values()):
+    if not all((path / filename).exists() for filename in heap_fingerprint.HEAP_FILES.values()):
         return None
-    return organizer.fingerprint_heaps(path)
+    return heap_fingerprint.fingerprint_heaps(path)
 
 
 def apply_homeassistant_config(src, dest, target, ctx, details=None, validate_protected_storage=False):
-    src = materialize_homeassistant_source(src, target, ctx)
+    src = validated_homeassistant_source(src, target)
     if not src.exists() or not has_managed_content(src):
         if details is not None:
             ctx.add_detail(details, _("detail.skipped_homeassistant_no_git_config", target=target["id"]))
@@ -417,8 +341,6 @@ def apply_homeassistant_config(src, dest, target, ctx, details=None, validate_pr
         ctx.add_detail(details, _("detail.skipped_managed_config_entries_missing"))
     if skipped_protected and details is not None:
         ctx.add_detail(details, _("detail.skipped_protected_storage_files", paths=", ".join(skipped_protected)))
-    if not homeassistant_organizer_enabled(target):
-        organizer.clean_organized_root(dest, organizer_cleanup_options(target))
     return skipped_protected
 
 
@@ -1052,10 +974,6 @@ def homeassistant_source_symlinks(src, target, ctx):
     for name in managed_dirs:
         found.extend(collect_symlinks_under(src / name, src, ctx.export_excludes))
 
-    options = organizer_options(target)
-    if options is not None:
-        found.extend(collect_symlinks_under(organizer.organized_root(src, options), src, ctx.export_excludes))
-
     src_storage = src / ".storage"
     for name in ctx.storage_allowlist:
         src_path = src_storage / name
@@ -1114,7 +1032,7 @@ def destination_tree_has_managed_extra(src, dest, excludes):
 
 
 def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
-    src = materialize_homeassistant_source(src, target, ctx)
+    src = validated_homeassistant_source(src, target)
     changes = ChangeSet()
     if not src.exists() or not has_managed_content(src):
         return changes
@@ -1182,7 +1100,7 @@ def homeassistant_change_set(src, dest, target, ctx, mode="apply"):
 
 
 def validate_homeassistant_storage_apply_source(src, dest, target, ctx):
-    src = materialize_homeassistant_source(src, target, ctx)
+    src = validated_homeassistant_source(src, target)
     if not src.exists() or not has_managed_content(src):
         return
 
@@ -1269,8 +1187,6 @@ def apply_recovery_inventory(resolved_targets, ctx):
                 roots.update(Path(name) for name in ctx.zigbee2mqtt_paths)
             roots.update(Path(".storage") / name for name in ctx.storage_allowlist)
             roots.add(Path(".storage") / storage_managed.CORE_CONFIG_ENTRIES_RAW)
-            if not homeassistant_organizer_enabled(target):
-                roots.add(organizer.organized_root(live, organizer_cleanup_options(target)).relative_to(live))
         else:
             roots = {Path(".")}
         inventory[target_id] = {
@@ -1422,12 +1338,11 @@ def build_save_export(resolved_targets, details, ctx):
 
         export_path = export_root / target["id"]
         if target["type"] == "homeassistant":
-            require_homeassistant_organizer_projection_available(target)
+            validated_homeassistant_source(target["source_path"], target)
             ctx.add_detail(details, _("detail.exporting_config_only", target=target["id"], path=live_path))
             copied_count, zigbee2mqtt_count, storage_count, managed_storage_count = export_homeassistant_config(
                 live_path, export_path, target, ctx
             )
-            organize_homeassistant_export(export_path, target, details, ctx)
             ctx.add_detail(details, _("detail.exported_homeassistant_paths", count=copied_count))
             if zigbee2mqtt_count:
                 ctx.add_detail(details, _("detail.exported_legacy_zigbee2mqtt_paths", count=zigbee2mqtt_count))
@@ -1453,8 +1368,6 @@ def apply_save_export(resolved_targets, export_root, details, ctx):
         if target["type"] == "homeassistant":
             ctx.add_detail(details, _("detail.saving_config_only", target=target["id"], path=source_path))
             clean_homeassistant_export_destination(source_path, target, ctx)
-            if not homeassistant_organizer_enabled(target):
-                organizer.clean_organized_root(source_path, organizer_cleanup_options(target))
             sync_tree(export_path, source_path, False, None, ctx.run_command)
         else:
             ctx.add_detail(details, _("detail.saving_target", target=target["id"], path=source_path))
@@ -1737,9 +1650,6 @@ def homeassistant_managed_save_relative_path(relative, target, ctx):
         return len(relative.parts) == 2 and relative.parts[1] in ctx.storage_allowlist
     if first == storage_managed.MANAGED_DIR:
         return not is_excluded_path(relative, Path("."), ctx.export_excludes)
-    if target and homeassistant_organizer_enabled(target):
-        organized = organizer.organized_root(Path("."), organizer_options(target))
-        return relative == organized or relative.is_relative_to(organized)
     return False
 
 
@@ -1804,8 +1714,6 @@ def restore_unmanaged_save_merge_paths(repo_dir, resolved_targets, ctx):
 
 def stage_managed_save_worktree(repo_dir, resolved_targets, ctx):
     repo_dir = Path(repo_dir)
-    collapse_duplicate_organizer_route_items(repo_dir, resolved_targets, ctx)
-
     add = ctx.run_command(["git", "add", "-A"], cwd=repo_dir)
     if add.returncode != 0:
         raise RuntimeError(f"git add failed:\n{add.stderr.strip()}")
@@ -1840,7 +1748,7 @@ def sync_applied_normalized_storage_to_repo_worktree(repo_dir, resolved_targets,
     for target in resolved_targets:
         if target.get("type") != "homeassistant":
             continue
-        source_root = materialize_homeassistant_source(Path(target["source_path"]), target, ctx)
+        source_root = validated_homeassistant_source(Path(target["source_path"]), target)
         source_storage = source_root / ".storage"
         live_storage = Path(target["live_path"]) / ".storage"
         repo_storage = repo_dir / target_repo_source_relative(repo_dir, target) / ".storage"
@@ -2067,474 +1975,14 @@ def merge_change_paths(repo_dir, ctx):
 
 
 def merge_preview_candidate_paths(repo_dir, resolved_targets, ctx):
-    return sorted(set(merge_change_paths(repo_dir, ctx)) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)))
-
-
-def organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx):
-    repo_dir = Path(repo_dir)
-    paths = set()
-    for target in resolved_targets:
-        if target.get("type") != "homeassistant":
-            continue
-        options = organizer_options(target)
-        if options is None:
-            continue
-        source_relative = target_repo_source_relative(repo_dir, target)
-        organized_relative = source_relative / organizer.organized_root_name(options)
-        result = ctx.run_command(
-            ["git", "ls-tree", "-r", "--name-only", "HEAD", "--", organized_relative.as_posix()],
-            cwd=repo_dir,
-        )
-        if result.returncode == 0:
-            paths.update(line.strip() for line in result.stdout.splitlines() if line.strip())
-        source_path = repo_dir / source_relative
-        for relative in organizer.generated_organized_relative_files(source_path, options):
-            paths.add((source_relative / relative).as_posix())
-    return sorted(paths)
-
-
-def organizer_heap_fingerprint_for_diff(root, options, scratch_root, ctx):
-    clear_tree(scratch_root, ctx.work_dir, ctx.run_command)
-    sync_tree(root, scratch_root, True, [".git/"], ctx.run_command)
-    if organizer.has_organized_view(scratch_root, options):
-        organizer.compose_git_view_to_live(scratch_root, scratch_root, options=options)
-    if not organizer.has_heap_files(scratch_root):
-        return None
-    return organizer.fingerprint_heaps(scratch_root)
-
-
-def rewrite_equal_organizer_save_diff_to_live_route(root, options):
-    if organizer.has_organized_view(root, options):
-        organizer.compose_git_view_to_live(root, root, options=options)
-    if organizer.has_heap_files(root):
-        organizer.split_live_heaps_to_git(root, root, options=options)
-        normalize_organizer_index_for_diff(root, options)
-
-
-def organizer_payload_key(value):
-    return organizer.canonical_json_bytes(value)
-
-
-def organizer_parse_exceptions():
-    yaml_error = getattr(getattr(organizer, "yaml", None), "YAMLError", None)
-    exceptions = [OSError, UnicodeDecodeError, RuntimeError, json.JSONDecodeError]
-    if yaml_error is not None:
-        exceptions.append(yaml_error)
-    return tuple(exceptions)
-
-
-def organizer_file_items(path, kind):
-    if kind == "automations":
-        data = organizer.yaml_load(path, [])
-        return {
-            organizer.automation_identity(item, index): organizer_payload_key(item)
-            for index, item in enumerate(data)
-        }
-    if kind == "scripts":
-        data = organizer.yaml_load(path, {})
-        return {str(key): organizer_payload_key(value) for key, value in data.items()}
-    data = organizer.yaml_load(path, [])
-    return {
-        organizer.scene_identity(item, index): organizer_payload_key(item)
-        for index, item in enumerate(data)
-    }
-
-
-def organizer_file_ordered_items(path, kind):
-    if kind == "automations":
-        data = organizer.yaml_load(path, [])
-        return [
-            (organizer.automation_identity(item, index), organizer_payload_key(item), item)
-            for index, item in enumerate(data)
-        ]
-    if kind == "scripts":
-        data = organizer.yaml_load(path, {})
-        return [(str(key), organizer_payload_key(value), (key, value)) for key, value in data.items()]
-    data = organizer.yaml_load(path, [])
-    return [
-        (organizer.scene_identity(item, index), organizer_payload_key(item), item)
-        for index, item in enumerate(data)
-    ]
-
-
-def write_organizer_file_ordered_items(path, kind, items):
-    if kind == "scripts":
-        organizer.yaml_dump(path, {key: value for _identity, _payload, (key, value) in items})
-        return
-    organizer.yaml_dump(path, [item for _identity, _payload, item in items])
-
-
-def organizer_items_by_identity(root, options, kind):
-    items = {}
-    filename = organizer.HEAP_FILES[kind]
-    for relative in organizer.generated_organized_relative_files(root, options):
-        if relative.name != filename:
-            continue
-        items.update(organizer_file_items(Path(root) / relative, kind))
-    return items
-
-
-def organizer_file_duplicates_items(path, kind, existing_items):
-    file_items = organizer_file_items(path, kind)
-    if not file_items:
-        return False
-    return all(existing_items.get(identity) == payload for identity, payload in file_items.items())
-
-
-def mirror_duplicate_organizer_items(source_path, dest_path, kind, existing_items):
-    source_items = organizer_file_ordered_items(source_path, kind)
-    duplicate_items = [
-        item
-        for item in source_items
-        if existing_items.get(item[0]) == item[1]
-    ]
-    if not duplicate_items:
-        return
-    ensure_dir(dest_path.parent)
-    if len(duplicate_items) == len(source_items):
-        shutil.copy2(source_path, dest_path)
-        return
-    write_organizer_file_ordered_items(dest_path, kind, duplicate_items)
-
-
-def organizer_kind_for_generated_path(path):
-    filename = Path(path).name
-    for kind, heap_filename in organizer.HEAP_FILES.items():
-        if filename == heap_filename:
-            return kind
-    return None
-
-
-def organizer_target_relative_path(path, source_relative, options):
-    try:
-        target_relative = Path(path).relative_to(source_relative)
-    except ValueError:
-        return None
-    organized_root = Path(organizer.organized_root_name(options))
-    try:
-        target_relative.relative_to(organized_root)
-    except ValueError:
-        return None
-    return target_relative
-
-
-def organizer_git_ref_file_items(repo_dir, ref, path, kind, scratch_root, ctx):
-    result = ctx.run_command(["git", "show", f"{ref}:{path}"], cwd=repo_dir)
-    if result.returncode != 0:
-        return {}
-    scratch_path = scratch_root / safe_preview_name(path)
-    ensure_dir(scratch_path.parent)
-    scratch_path.write_text(result.stdout)
-    return organizer_file_items(scratch_path, kind)
-
-
-def organizer_worktree_file_items(repo_dir, path, kind):
-    worktree_path = Path(repo_dir) / path
-    if not worktree_path.exists() or not worktree_path.is_file():
-        return {}
-    return organizer_file_items(worktree_path, kind)
-
-
-def organizer_suppressed_save_preserve_triggers(repo_dir, resolved_targets, suppressed_paths, visible_paths, ctx):
-    repo_dir = Path(repo_dir)
-    suppressed_set = {str(path) for path in suppressed_paths if str(path)}
-    visible_set = {str(path) for path in visible_paths if str(path)}
-    if not suppressed_set or not visible_set:
-        return {}
-
-    scratch_root = ctx.work_dir / "save-merge-organizer-preserve"
-    clear_tree(scratch_root, ctx.work_dir, ctx.run_command)
-    preserve_triggers = {}
-    for target in resolved_targets:
-        if target.get("type") != "homeassistant":
-            continue
-        options = organizer_options(target)
-        if options is None:
-            continue
-        source_relative = target_repo_source_relative(repo_dir, target)
-        for suppressed_path in sorted(suppressed_set):
-            suppressed_relative = organizer_target_relative_path(suppressed_path, source_relative, options)
-            if suppressed_relative is None:
-                continue
-            kind = organizer_kind_for_generated_path(suppressed_relative)
-            if kind is None:
-                continue
-            suppressed_items = organizer_worktree_file_items(repo_dir, suppressed_path, kind)
-            if not suppressed_items:
-                suppressed_items = organizer_git_ref_file_items(
-                    repo_dir,
-                    "HEAD",
-                    suppressed_path,
-                    kind,
-                    scratch_root / safe_preview_name(suppressed_path),
-                    ctx,
-                )
-            if not suppressed_items:
-                continue
-            triggers = []
-            for visible_path in sorted(visible_set):
-                visible_relative = organizer_target_relative_path(visible_path, source_relative, options)
-                if visible_relative is None or visible_path == suppressed_path:
-                    continue
-                if organizer_kind_for_generated_path(visible_relative) != kind:
-                    continue
-                head_items = organizer_git_ref_file_items(
-                    repo_dir,
-                    "HEAD",
-                    visible_path,
-                    kind,
-                    scratch_root / safe_preview_name(visible_path),
-                    ctx,
-                )
-                if not head_items:
-                    head_items = {}
-                try:
-                    worktree_items = organizer_worktree_file_items(repo_dir, visible_path, kind)
-                except organizer_parse_exceptions():
-                    continue
-                removes_duplicate_item = any(
-                    head_items.get(identity) == payload
-                    and worktree_items.get(identity) != payload
-                    for identity, payload in suppressed_items.items()
-                )
-                adds_duplicate_item = any(
-                    worktree_items.get(identity) == payload
-                    and head_items.get(identity) != payload
-                    for identity, payload in suppressed_items.items()
-                )
-                if removes_duplicate_item or adds_duplicate_item:
-                    triggers.append(visible_path)
-            if triggers:
-                preserve_triggers[suppressed_path] = sorted(set(triggers))
-    return preserve_triggers
-
-
-def collapse_duplicate_organizer_route_items(repo_dir, resolved_targets, ctx):
-    repo_dir = Path(repo_dir)
-    scratch_root = ctx.work_dir / "save-merge-organizer-collapse"
-    clear_tree(scratch_root, ctx.work_dir, ctx.run_command)
-    for target in resolved_targets:
-        if target.get("type") != "homeassistant":
-            continue
-        options = organizer_options(target)
-        if options is None:
-            continue
-        source_relative = target_repo_source_relative(repo_dir, target)
-        source_path = repo_dir / source_relative
-        if not organizer.has_organized_view(source_path, options):
-            continue
-        safe_name = safe_preview_name(source_relative.as_posix())
-        collapse_target_duplicate_organizer_route_items(
-            repo_dir,
-            source_relative,
-            source_path,
-            options,
-            scratch_root / safe_name,
-            ctx,
-        )
-
-
-def collapse_target_duplicate_organizer_route_items(repo_dir, source_relative, source_path, options, scratch_root, ctx):
-    for kind, filename in organizer.HEAP_FILES.items():
-        relatives = [
-            relative
-            for relative in organizer.generated_organized_relative_files(source_path, options)
-            if relative.name == filename
-        ]
-        if len(relatives) < 2:
-            continue
-        ha_live_items = {}
-        current_items = {}
-        occurrences = {}
-        for relative in relatives:
-            repo_path = (source_relative / relative).as_posix()
-            ha_live_items[relative] = organizer_git_ref_file_items(
-                repo_dir,
-                HA_LIVE_BRANCH,
-                repo_path,
-                kind,
-                scratch_root / safe_preview_name(repo_path),
-                ctx,
-            )
-            items = organizer_file_ordered_items(source_path / relative, kind)
-            current_items[relative] = items
-            for index, item in enumerate(items):
-                occurrences.setdefault(item[0], []).append((relative, index, item))
-
-        removals = {}
-        for identity, items in occurrences.items():
-            if len(items) < 2:
-                continue
-            ha_matches = [
-                item
-                for item in items
-                if ha_live_items.get(item[0], {}).get(identity) == item[2][1]
-            ]
-            if not ha_matches:
-                continue
-            keep = sorted(ha_matches, key=lambda item: item[0].as_posix())[0]
-            for item in items:
-                if item == keep:
-                    continue
-                removals.setdefault(item[0], set()).add(item[1])
-
-        for relative, indexes in removals.items():
-            path = source_path / relative
-            kept = [
-                item
-                for index, item in enumerate(current_items.get(relative, []))
-                if index not in indexes
-            ]
-            if kept:
-                write_organizer_file_ordered_items(path, kind, kept)
-            elif path.exists() or path.is_symlink():
-                safe_remove_path(path)
-                prune_empty_organizer_dirs(path.parent, organizer.organized_root(source_path, options))
-
-
-def prune_empty_organizer_dirs(path, root):
-    path = Path(path)
-    root = Path(root)
-    while path != root and root in path.parents and path.exists() and path.is_dir() and not any(path.iterdir()):
-        path.rmdir()
-        path = path.parent
-
-
-def hide_duplicate_organizer_route_files(before_target, after_target, options):
-    for kind, filename in organizer.HEAP_FILES.items():
-        before_files = {
-            relative
-            for relative in organizer.generated_organized_relative_files(before_target, options)
-            if relative.name == filename
-        }
-        after_files = {
-            relative
-            for relative in organizer.generated_organized_relative_files(after_target, options)
-            if relative.name == filename
-        }
-        for relative in sorted(after_files - before_files):
-            before_items = organizer_items_by_identity(before_target, options, kind)
-            mirror_duplicate_organizer_items(after_target / relative, before_target / relative, kind, before_items)
-        for relative in sorted(before_files - after_files):
-            after_items = organizer_items_by_identity(after_target, options, kind)
-            mirror_duplicate_organizer_items(before_target / relative, after_target / relative, kind, after_items)
-
-
-def remove_duplicate_organizer_route_items_from_modified_files(before_target, after_target, options):
-    for kind, filename in organizer.HEAP_FILES.items():
-        relatives = sorted(
-            {
-                relative
-                for relative in organizer.generated_organized_relative_files(before_target, options)
-                if relative.name == filename
-            }
-            | {
-                relative
-                for relative in organizer.generated_organized_relative_files(after_target, options)
-                if relative.name == filename
-            }
-        )
-        before_items_by_file = {}
-        after_items_by_file = {}
-        try:
-            for relative in relatives:
-                before_path = before_target / relative
-                after_path = after_target / relative
-                if before_path.exists():
-                    before_items_by_file[relative] = organizer_file_ordered_items(before_path, kind)
-                if after_path.exists():
-                    after_items_by_file[relative] = organizer_file_ordered_items(after_path, kind)
-        except organizer_parse_exceptions():
-            continue
-
-        def items_outside(items_by_file, current_relative):
-            items = {}
-            for relative, file_items in items_by_file.items():
-                if relative == current_relative:
-                    continue
-                for identity, payload, _item in file_items:
-                    items[identity] = payload
-            return items
-
-        def prune_route_only_items(root, relative, source_items_by_file, other_items_by_file):
-            path = root / relative
-            current_items = source_items_by_file.get(relative)
-            if not current_items or not path.exists():
-                return
-            counterpart_items = {
-                identity: payload
-                for identity, payload, _item in other_items_by_file.get(relative, [])
-            }
-            other_items = items_outside(other_items_by_file, relative)
-            kept = [
-                item
-                for item in current_items
-                if not (
-                    counterpart_items.get(item[0]) != item[1]
-                    and other_items.get(item[0]) == item[1]
-                )
-            ]
-            if len(kept) == len(current_items):
-                return
-            if kept:
-                write_organizer_file_ordered_items(path, kind, kept)
-            elif path.exists() or path.is_symlink():
-                safe_remove_path(path)
-                prune_empty_organizer_dirs(path.parent, organizer.organized_root(root, options))
-
-        for relative in relatives:
-            prune_route_only_items(before_target, relative, before_items_by_file, after_items_by_file)
-            prune_route_only_items(after_target, relative, after_items_by_file, before_items_by_file)
-
-
-def normalize_organizer_save_diff_files(before_root, after_root, resolved_targets, repo_dir, ctx):
-    repo_dir = Path(repo_dir)
-    scratch_root = ctx.work_dir / "save-merge-organizer-fingerprint"
-    for target in resolved_targets:
-        if target.get("type") != "homeassistant":
-            continue
-        options = organizer_options(target)
-        if options is None:
-            continue
-        source_relative = target_repo_source_relative(repo_dir, target)
-        before_target = before_root / source_relative
-        after_target = after_root / source_relative
-        if not before_target.exists() or not after_target.exists():
-            continue
-        if not organizer.has_organized_view(before_target, options) and not organizer.has_organized_view(after_target, options):
-            continue
-
-        hide_duplicate_organizer_route_files(before_target, after_target, options)
-        remove_duplicate_organizer_route_items_from_modified_files(before_target, after_target, options)
-        safe_name = safe_preview_name(source_relative.as_posix())
-        try:
-            before_fingerprint = organizer_heap_fingerprint_for_diff(
-                before_target,
-                options,
-                scratch_root / safe_name / "before",
-                ctx,
-            )
-            after_fingerprint = organizer_heap_fingerprint_for_diff(
-                after_target,
-                options,
-                scratch_root / safe_name / "after",
-                ctx,
-            )
-        except (RuntimeError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if not before_fingerprint or before_fingerprint != after_fingerprint:
-            continue
-
-        rewrite_equal_organizer_save_diff_to_live_route(before_target, options)
-        rewrite_equal_organizer_save_diff_to_live_route(after_target, options)
-        mirror_organizer_generated_view_for_apply_diff(after_target, before_target, options)
+    return sorted(set(merge_change_paths(repo_dir, ctx)))
 
 
 def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=True):
     paths = managed_save_merge_paths(
         repo_dir,
         resolved_targets,
-        set(merge_change_paths(repo_dir, ctx)) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)),
+        merge_change_paths(repo_dir, ctx),
         ctx,
     )
     if not paths:
@@ -2579,7 +2027,6 @@ def merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=Tr
             after_root,
             normalized_save_registry_paths(resolved_targets, repo_dir),
         )
-    normalize_organizer_save_diff_files(before_root, after_root, resolved_targets, repo_dir, ctx)
     return save_preview_diff(before_root, after_root, ctx.run_command)
 
 
@@ -2690,7 +2137,7 @@ def merge_preview_for_save(repo_dir, resolved_targets, include_redundant_data, c
     raw_paths = managed_save_merge_paths(
         repo_dir,
         resolved_targets,
-        set(raw_status_paths) | set(organizer_generated_save_merge_paths(repo_dir, resolved_targets, ctx)),
+        raw_status_paths,
         ctx,
     )
     diff = merge_diff_normalized(repo_dir, resolved_targets, ctx, normalize_registry=not include_redundant_data)
@@ -2713,13 +2160,6 @@ def merge_preview_for_save(repo_dir, resolved_targets, include_redundant_data, c
         "paths": paths,
         "diff": diff if paths else "",
         "suppressed_paths": suppressed_paths,
-        "suppressed_preserve_triggers": organizer_suppressed_save_preserve_triggers(
-            repo_dir,
-            resolved_targets,
-            suppressed_paths,
-            paths,
-            ctx,
-        ),
     }
 
 
@@ -2817,50 +2257,6 @@ def normalize_save_preview_diff_files(repo_copy, preview_copy, registry_paths):
             continue
         write_normalized_storage_file(repo_file, repo_file)
         write_normalized_storage_file(preview_file, preview_file)
-
-
-def restore_source_organized_view_for_apply_diff(preview_copy, target, ctx):
-    options = organizer_options(target)
-    if options is None:
-        return False
-    source_path = Path(target.get("source_path") or "")
-    if not organizer.has_organized_view(source_path, options):
-        return False
-
-    organizer.clean_organized_root(preview_copy, options, preserve_unmanaged=True)
-    for relative in organizer.generated_organized_relative_files(source_path, options):
-        source_file = source_path / relative
-        preview_file = preview_copy / relative
-        ensure_dir(preview_file.parent)
-        shutil.copy2(source_file, preview_file)
-    return True
-
-
-def mirror_organizer_generated_view_for_apply_diff(source_root, dest_root, options):
-    organizer.clean_organized_root(dest_root, options, preserve_unmanaged=True)
-    for relative in organizer.generated_organized_relative_files(source_root, options):
-        source_file = source_root / relative
-        dest_file = dest_root / relative
-        ensure_dir(dest_file.parent)
-        shutil.copy2(source_file, dest_file)
-
-
-def normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target, ctx):
-    options = organizer_options(target)
-    if options is None:
-        return False
-    if not organizer.has_heap_files(baseline_copy) and not organizer.has_heap_files(preview_copy):
-        return False
-    baseline_fingerprint = organizer.fingerprint_heaps(baseline_copy) if organizer.has_heap_files(baseline_copy) else None
-    preview_fingerprint = organizer.fingerprint_heaps(preview_copy) if organizer.has_heap_files(preview_copy) else None
-    organizer.split_live_heaps_to_git(baseline_copy, baseline_copy, options=options)
-    organizer.split_live_heaps_to_git(preview_copy, preview_copy, options=options)
-    restore_source_organized_view_for_apply_diff(preview_copy, target, ctx)
-    if baseline_fingerprint and baseline_fingerprint == preview_fingerprint:
-        mirror_organizer_generated_view_for_apply_diff(preview_copy, baseline_copy, options)
-    normalize_organizer_index_for_diff(baseline_copy, options)
-    normalize_organizer_index_for_diff(preview_copy, options)
-    return True
 
 
 def load_storage_json(path):
@@ -2969,25 +2365,6 @@ def storage_registry_warnings(target_id, baseline_path, preview_path):
     return warnings
 
 
-def normalize_organizer_index_for_diff(root, options):
-    index_path = organizer.organized_root(root, options) / organizer.INDEX_NAME
-    try:
-        data = json.loads(index_path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return False
-    changed = False
-    for kind in ("automations", "scripts", "scenes"):
-        ids = data.get(kind, {}).get("ids")
-        if isinstance(ids, list):
-            sorted_ids = sorted(ids, key=str)
-            if ids != sorted_ids:
-                data[kind]["ids"] = sorted_ids
-                changed = True
-    if changed:
-        index_path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
-    return changed
-
-
 def save_preview_diff_normalized(repo_dir, preview_repo, resolved_targets, ctx):
     registry_paths = normalized_save_registry_paths(resolved_targets, repo_dir)
     if not registry_paths:
@@ -3045,13 +2422,6 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
                 "conflicts": conflicts,
                 "fingerprint": merge_conflict_fingerprint(conflicts, repo_dir, diff, ctx),
                 "suppressed_paths": suppressed_paths,
-                "suppressed_preserve_triggers": organizer_suppressed_save_preserve_triggers(
-                    repo_dir,
-                    resolved_targets,
-                    suppressed_paths,
-                    paths,
-                    ctx,
-                ),
                 "warnings": editor_config_preview_warnings(paths, initial_export),
             }
 
@@ -3070,7 +2440,6 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
             "paths": paths,
             "fingerprint": fingerprint_text(diff),
             "suppressed_paths": preview["suppressed_paths"],
-            "suppressed_preserve_triggers": preview.get("suppressed_preserve_triggers", {}),
             "warnings": editor_config_preview_warnings(paths, initial_export),
         }
     finally:
@@ -3082,8 +2451,8 @@ def build_save_preview(resolved_targets, repo_dir, details, ctx, include_redunda
 def export_target_to_path(target, dest, ctx):
     live_path = Path(target["live_path"])
     if target["type"] == "homeassistant":
+        validated_homeassistant_source(target["source_path"], target)
         export_homeassistant_config(live_path, dest, target, ctx)
-        organize_homeassistant_export(dest, target, None, ctx)
         return
     clean_export_destination(
         dest,
@@ -3222,9 +2591,6 @@ def homeassistant_managed_save_source_files(target, source_path, ctx):
 
     add_managed_files_under(files, source_path, Path(storage_managed.MANAGED_DIR), ctx.export_excludes)
 
-    if target and homeassistant_organizer_enabled(target):
-        files.update(organizer.generated_organized_relative_files(source_path, organizer_options(target)))
-
     return sorted(files)
 
 
@@ -3320,8 +2686,7 @@ def target_diff_normalized(target, baseline_path, preview_path, ctx):
         return target_diff(target, baseline_path, preview_path, ctx.run_command)
 
     registry_paths = sorted(set(normalized_storage_paths_under(baseline_path)) | set(normalized_storage_paths_under(preview_path)))
-    normalize_organizer = organizer_options(target) is not None
-    if not registry_paths and not normalize_organizer:
+    if not registry_paths:
         return target_diff(target, baseline_path, preview_path, ctx.run_command)
 
     diff_root = ctx.work_dir / "apply-preview-diff" / safe_preview_name(str(target["id"]))
@@ -3330,7 +2695,6 @@ def target_diff_normalized(target, baseline_path, preview_path, ctx):
     clear_tree(diff_root, ctx.work_dir, ctx.run_command)
     sync_tree(baseline_path, baseline_copy, True, [".git/"], ctx.run_command)
     sync_tree(preview_path, preview_copy, True, [".git/"], ctx.run_command)
-    normalize_organizer_apply_diff_files(baseline_copy, preview_copy, target, ctx)
     normalize_save_preview_diff_files(baseline_copy, preview_copy, registry_paths)
     return target_diff(target, baseline_copy, preview_copy, ctx.run_command)
 
@@ -3487,47 +2851,6 @@ def restore_preview_paths_from_baseline(preview_path, baseline_path, keep_paths)
             safe_remove_path(preview_file)
 
 
-def is_organizer_generated_relative(path, options):
-    relative = Path(path)
-    organized_root = Path(organizer.organized_root_name(options))
-    try:
-        under_root = relative.relative_to(organized_root)
-    except ValueError:
-        return False
-    return len(under_root.parts) >= 1 and relative.name in {*organizer.HEAP_FILES.values(), organizer.INDEX_NAME}
-
-
-def apply_organizer_preview_path_decisions(selected_path, baseline_path, preview_path, target, keep_paths, ctx):
-    options = organizer_options(target)
-    if options is None:
-        return False
-    if not organizer.has_heap_files(baseline_path) and not organizer.has_heap_files(preview_path):
-        return False
-
-    organizer_keep_paths = [
-        Path(path)
-        for path in keep_paths
-        if is_organizer_generated_relative(path, options)
-    ]
-    if not organizer_keep_paths:
-        return False
-
-    safe_id = safe_preview_name(str(target["id"]))
-    decision_root = ctx.work_dir / "apply-preview-selected-organizer" / safe_id
-    baseline_organized = decision_root / "baseline"
-    selected_organized = decision_root / "selected"
-    clear_tree(decision_root, ctx.work_dir, ctx.run_command)
-    sync_tree(baseline_path, baseline_organized, True, [".git/"], ctx.run_command)
-    sync_tree(preview_path, selected_organized, True, [".git/"], ctx.run_command)
-
-    organizer.split_live_heaps_to_git(baseline_organized, baseline_organized, options=options)
-    organizer.split_live_heaps_to_git(selected_organized, selected_organized, options=options)
-    restore_source_organized_view_for_apply_diff(selected_organized, target, ctx)
-    restore_preview_paths_from_baseline(selected_organized, baseline_organized, organizer_keep_paths)
-    organizer.compose_git_view_to_live(selected_organized, selected_path, options=options)
-    return True
-
-
 def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
     selected_root = ctx.work_dir / "apply-preview-selected"
     clear_tree(selected_root, ctx.work_dir, ctx.run_command)
@@ -3549,15 +2872,6 @@ def selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, ctx):
         sync_tree(preview_path, selected_path, True, [".git/"], ctx.run_command)
         keep_paths = keep_by_target.get(target_id, [])
         restore_preview_paths_from_baseline(selected_path, baseline_path, keep_paths)
-        if target.get("type") == "homeassistant":
-            apply_organizer_preview_path_decisions(
-                selected_path,
-                baseline_path,
-                preview_path,
-                target,
-                keep_paths,
-                ctx,
-            )
         updated = dict(target)
         updated["source_path"] = str(selected_path)
         if updated.get("type") == "homeassistant":

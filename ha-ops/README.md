@@ -19,16 +19,6 @@ HA Ops manages Home Assistant config with Git-backed previews and service branch
 - `ha-ops.json` is optional; when it is missing, HA Ops uses a built-in default manifest.
 - There is no user-facing `export` branch.
 
-## Archived Organizer Experiment
-
-The `.ha-ops/areas` area-split organizer has been retired. HA Ops supports the
-normal Home Assistant heap files for automations, scripts, and scenes. A stale
-organizer setting is rejected and generated area metadata is removed; it must
-not be reactivated. Historical context is in
-`docs/archive/organizer-area-split.md` and Git history.
-The former enabled projection was blocked pending production-safe evidence;
-keep organizer disabled for existing Git targets.
-
 ## Stable Entity References
 
 When editing Home Assistant automations, scripts, and scenes in Git, keep the

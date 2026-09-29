@@ -751,7 +751,6 @@ class ServerTests(unittest.TestCase):
 
         original_export_homeassistant_config = sync.export_homeassistant_config
         original_export_target_to_path = sync.export_target_to_path
-        original_organize_homeassistant_export = sync.organize_homeassistant_export
 
         def fake_export_homeassistant_config(src, dest, target, ctx):
             dest.mkdir(parents=True, exist_ok=True)
@@ -766,7 +765,6 @@ class ServerTests(unittest.TestCase):
             i18n.EN_TEXT.update(replacements)
             sync.export_homeassistant_config = fake_export_homeassistant_config
             sync.export_target_to_path = fake_export_target_to_path
-            sync.organize_homeassistant_export = lambda path, target, details, ctx: None
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 live_ha = root / "live-ha"
@@ -831,7 +829,6 @@ class ServerTests(unittest.TestCase):
         finally:
             sync.export_homeassistant_config = original_export_homeassistant_config
             sync.export_target_to_path = original_export_target_to_path
-            sync.organize_homeassistant_export = original_organize_homeassistant_export
             i18n.EN_TEXT.update(originals)
 
     def test_f020_preview_status_lines_render_from_translation_catalog(self):
@@ -1337,24 +1334,6 @@ class ServerTests(unittest.TestCase):
         (root / "scripts.yaml").write_text(f"{normalized}_script:\n  sequence: []\n")
         (root / "scenes.yaml").write_text(f"- id: {normalized}_scene\n  name: {label} Scene\n  entities: {{}}\n")
 
-    def write_stale_organizer_view(self, root):
-        area = root / ".ha-ops" / "areas" / "home"
-        area.mkdir(parents=True, exist_ok=True)
-        (area / "automations.yaml").write_text("- id: stale_auto\n")
-        (area / "scripts.yaml").write_text("stale_script:\n  sequence: []\n")
-        (root / ".ha-ops" / "areas" / "organizer-index.json").write_text(
-            json.dumps(
-                {
-                    "version": 1,
-                    "automations": {"count": 1, "ids": ["stale_auto"]},
-                    "scripts": {"count": 1, "ids": ["stale_script"]},
-                    "scenes": {"count": 0, "ids": []},
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        )
 
     def remote_parents(self, remote, ref):
         result = subprocess.run(
@@ -2006,7 +1985,7 @@ class ServerTests(unittest.TestCase):
                     "last_save_preview": "old save",
                     "last_save_commit_subject": "Old custom subject",
                     "last_internal_ids_preview": "old internal ids preview",
-                    "last_internal_ids_rows": [{"index": 0, "path": ".ha-ops/areas/synthetic/automations.yaml"}],
+                    "last_internal_ids_rows": [{"index": 0, "path": "automations.yaml"}],
                     "last_internal_ids_count": 1,
                     "last_preview_fingerprint": "keep",
                 }
@@ -2087,7 +2066,7 @@ class ServerTests(unittest.TestCase):
                     "last_internal_ids_rows": [
                         {
                             "index": 0,
-                            "path": ".ha-ops/areas/synthetic/automations.yaml",
+                            "path": "automations.yaml",
                             "selected": True,
                             "diff": "old diff",
                         }
@@ -2316,7 +2295,7 @@ class ServerTests(unittest.TestCase):
                     "last_internal_ids_generated_at": "2026-05-22T12:00:00+00:00",
                     "last_internal_ids_preview": "old diff",
                     "last_internal_ids_count": 1,
-                    "last_internal_ids_rows": [{"index": 0, "path": ".ha-ops/areas/synthetic/automations.yaml"}],
+                    "last_internal_ids_rows": [{"index": 0, "path": "automations.yaml"}],
                 }
             )
 
@@ -3988,31 +3967,6 @@ class ServerTests(unittest.TestCase):
             server.apply_homeassistant_config(root / "missing", live, {"id": "homeassistant"})
             self.assertEqual((live / "configuration.yaml").read_text(), "homeassistant:\n")
 
-    def test_apply_rejects_enabled_organizer_heap_source_before_heap_mode_copy(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            live = server.CONFIG_DIR
-            source = root / "repo" / "homeassistant"
-            self.write_heap_yaml_set(source, "Git")
-            (live / "configuration.yaml").write_text("live_only:\n")
-            self.write_stale_organizer_view(live)
-
-            target = {
-                "id": "homeassistant",
-                "type": "homeassistant",
-                "source": "homeassistant",
-                "source_path": str(source),
-                "live_path": str(live),
-                "organizer": {"enabled": True},
-            }
-
-            error = server.sync_logic.organizer.OrganizerRemovedError
-            with self.assertRaisesRegex(error, "organizer area split is archived"):
-                server.apply_homeassistant_config(source, live, target)
-
-            self.assertEqual((live / "configuration.yaml").read_text(), "live_only:\n")
 
     def test_apply_preview_shows_protected_storage_changes(self):
         server = load_server()
@@ -4435,307 +4389,6 @@ class ServerTests(unittest.TestCase):
             self.assertNotIn("git_object", preview["diff"])
             self.assertNotIn("live_object", preview["diff"])
 
-    def archived_apply_preview_organizer_diff_ignores_heap_order_rewrite(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            live = server.CONFIG_DIR
-            source = root / "repo" / "homeassistant"
-            live_storage = live / ".storage"
-            live_storage.mkdir(parents=True)
-            live.joinpath("automations.yaml").write_text(
-                "\n".join(
-                    [
-                        "- id: wardrobe_auto",
-                        "  alias: Wardrobe Auto",
-                        "- id: bathroom_auto",
-                        "  alias: Bathroom Auto",
-                        "",
-                    ]
-                )
-            )
-            live.joinpath("scripts.yaml").write_text("{}\n")
-            live.joinpath("scenes.yaml").write_text("[]\n")
-            (live_storage / "core.area_registry").write_text(
-                json.dumps(
-                    {
-                        "data": {
-                            "areas": [
-                                {"id": "bathroom", "name": "Bathroom"},
-                                {"id": "wardrobe", "name": "Wardrobe"},
-                            ]
-                        }
-                    }
-                )
-            )
-            (live_storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (live_storage / "core.entity_registry").write_text(
-                json.dumps(
-                    {
-                        "data": {
-                            "entities": [
-                                {
-                                    "entity_id": "automation.bathroom_auto",
-                                    "unique_id": "bathroom_auto",
-                                    "area_id": "bathroom",
-                                },
-                                {
-                                    "entity_id": "automation.wardrobe_auto",
-                                    "unique_id": "wardrobe_auto",
-                                    "area_id": "wardrobe",
-                                },
-                            ]
-                        }
-                    }
-                )
-            )
-            server.sync_logic.organizer.split_live_heaps_to_git(live, source, options={})
-
-            preview = server.build_apply_preview(
-                [
-                    {
-                        "id": "homeassistant",
-                        "type": "homeassistant",
-                        "source_path": str(source),
-                        "live_path": str(live),
-                        "delete": False,
-                        "organizer": {"enabled": True},
-                    }
-                ]
-            )
-
-            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
-            self.assertNotIn("automations.yaml", preview["diff"])
-            self.assertNotIn("wardrobe_auto", preview["diff"])
-            self.assertNotIn("bathroom_auto", preview["diff"])
-
-    def archived_apply_preview_organizer_diff_ignores_route_only_items(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            live = server.CONFIG_DIR
-            source = root / "repo" / "homeassistant"
-            areas = source / ".ha-ops" / "areas"
-            home = areas / "home"
-            home.mkdir(parents=True)
-            live.joinpath("automations.yaml").write_text(
-                "\n".join(
-                    [
-                        "- id: battery_attention",
-                        "  alias: Battery Attention",
-                        "  trigger: []",
-                        "  condition: []",
-                        "  action:",
-                        "  - service: script.battery_attention_scan",
-                        "",
-                    ]
-                )
-            )
-            live.joinpath("scripts.yaml").write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention needed",
-                        "",
-                    ]
-                )
-            )
-            live.joinpath("scenes.yaml").write_text("[]\n")
-            (live / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.area_registry").write_text(
-                json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}})
-            )
-            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (live / ".storage" / "core.entity_registry").write_text(
-                json.dumps(
-                    {
-                        "data": {
-                            "entities": [
-                                {
-                                    "entity_id": "automation.battery_attention",
-                                    "unique_id": "battery_attention",
-                                },
-                                {
-                                    "entity_id": "script.battery_attention_scan",
-                                    "unique_id": "battery_attention_scan",
-                                },
-                            ]
-                        }
-                    }
-                )
-            )
-            (home / "automations.yaml").write_text((live / "automations.yaml").read_text())
-            (home / "scripts.yaml").write_text((live / "scripts.yaml").read_text())
-            (areas / "organizer-index.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 1, "ids": ["battery_attention"]},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    }
-                )
-            )
-            target = {
-                "id": "homeassistant",
-                "type": "homeassistant",
-                "source_path": str(source),
-                "live_path": str(live),
-                "delete": False,
-                "organizer": {"enabled": True},
-            }
-
-            preview = server.build_apply_preview([target])
-
-            self.assertIn("Target homeassistant: no file changes.", preview["diff"])
-            self.assertEqual(preview["paths"], [])
-            self.assertNotIn(".ha-ops/areas/.unknown/automations.yaml", preview["diff"])
-            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", preview["diff"])
-            self.assertNotIn(".ha-ops/areas/home/automations.yaml", preview["diff"])
-            self.assertNotIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
-
-            (home / "scripts.yaml").write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention changed",
-                        "",
-                    ]
-                )
-            )
-
-            preview = server.build_apply_preview([target])
-
-            self.assertIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
-            self.assertIn("Battery attention changed", preview["diff"])
-            self.assertIn("homeassistant/.ha-ops/areas/home/scripts.yaml", preview["paths"])
-
-    def archived_apply_preview_organizer_diff_rejects_nested_heap_file(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            live = server.CONFIG_DIR
-            source = root / "repo" / "homeassistant"
-            nested = source / ".ha-ops" / "areas" / "home" / "nested" / "automations.yaml"
-            (live / "automations.yaml").write_text("[]\n")
-            (live / "scripts.yaml").write_text("{}\n")
-            (live / "scenes.yaml").write_text("[]\n")
-            (live / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
-            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (live / ".storage" / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
-            nested.parent.mkdir(parents=True)
-            nested.write_text(
-                "\n".join(
-                    [
-                        "- id: battery_attention",
-                        "  alias: Battery Attention",
-                        "  trigger: []",
-                        "  action: []",
-                        "",
-                    ]
-                )
-            )
-            (source / ".ha-ops" / "areas" / "organizer-index.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 0, "ids": []},
-                        "scenes": {"count": 0, "ids": []},
-                    }
-                )
-            )
-            target = {
-                "id": "homeassistant",
-                "type": "homeassistant",
-                "source_path": str(source),
-                "live_path": str(live),
-                "delete": False,
-                "organizer": {"enabled": True},
-            }
-
-            with self.assertRaisesRegex(RuntimeError, "unreferenced organizer file.*home/nested/automations.yaml"):
-                server.build_apply_preview([target])
-
-    def archived_apply_preview_organizer_diff_uses_git_organized_yaml_for_added_files(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            live = server.CONFIG_DIR
-            source = root / "repo" / "homeassistant"
-            (live / "automations.yaml").write_text("[]\n")
-            (live / "scripts.yaml").write_text("{}\n")
-            (live / "scenes.yaml").write_text("[]\n")
-            (live / ".storage").mkdir(parents=True)
-            (live / ".storage" / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
-            (live / ".storage" / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (live / ".storage" / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
-            scripts = source / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            scripts.parent.mkdir(parents=True)
-            (scripts.parent / "lighting-contract.md").write_text("# Contract\n")
-            scripts.write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: battery_attention_scan",
-                        "  sequence:",
-                        "  - variables:",
-                        "      current_silent_json: >-",
-                        "        {%- set ns = namespace(items=[]) -%}",
-                        "        {%- for item in states.sensor",
-                        "            if item.entity_id.startswith('sensor.')",
-                        "            and item.entity_id.endswith('_last_seen') -%}",
-                        "          {{ item.entity_id }}",
-                        "        {%- endfor -%}",
-                        "        {{ ns.items | to_json }}",
-                        "",
-                    ]
-                )
-            )
-            (source / ".ha-ops" / "areas" / "organizer-index.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    }
-                )
-            )
-
-            preview = server.build_apply_preview(
-                [
-                    {
-                        "id": "homeassistant",
-                        "type": "homeassistant",
-                        "source_path": str(source),
-                        "live_path": str(live),
-                        "delete": False,
-                        "organizer": {"enabled": True},
-                    }
-                ]
-            )
-
-            self.assertIn(".ha-ops/areas/home/scripts.yaml", preview["diff"])
-            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", preview["diff"])
-            self.assertNotIn("lighting-contract.md", preview["diff"])
-            self.assertNotIn("lighting-contract.md", preview["paths"])
-            self.assertIn("current_silent_json: >-", preview["diff"])
-            self.assertNotIn('current_silent_json: "{%-', preview["diff"])
-            self.assertNotIn("\\n", preview["diff"])
 
     def test_default_manifest_uses_selected_addons(self):
         server = load_server()
@@ -4750,92 +4403,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(targets[1]["source"], "addons/local_zigbee2mqtt")
             self.assertFalse(targets[1]["delete"])
 
-    def test_default_manifest_ignores_blocked_homeassistant_organizer_ui_preference(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-
-            manifest = server.default_manifest({"apply_path": "homeassistant"})
-            self.assertNotIn("organizer", manifest["targets"][0])
-
-            server.write_state({"homeassistant_organizer_enabled": True})
-            manifest = server.default_manifest({"apply_path": "homeassistant"})
-            self.assertNotIn("organizer", manifest["targets"][0])
-
-            server.set_homeassistant_organizer_enabled(False)
-            manifest = server.default_manifest({"apply_path": "homeassistant"})
-            self.assertFalse(manifest["targets"][0]["organizer"])
-
-    def test_set_homeassistant_organizer_rejects_enabled_while_projection_is_blocked(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-
-            with self.assertRaisesRegex(RuntimeError, "organizer area split is archived"):
-                server.set_homeassistant_organizer_enabled(True)
-
-            self.assertIsNone(server.read_state().get("homeassistant_organizer_enabled"))
-
-    def test_loaded_manifest_ignores_stale_organizer_ui_preference(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            repo = root / "repo"
-            repo.mkdir()
-            (repo / "ha-ops.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "targets": [
-                            {
-                                "id": "homeassistant",
-                                "type": "homeassistant",
-                                "source": "homeassistant",
-                            }
-                        ],
-                    }
-                )
-            )
-
-            server.write_state({"homeassistant_organizer_enabled": True})
-            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
-            self.assertNotIn("organizer", manifest["targets"][0])
-
-    def test_loaded_manifest_keeps_organizer_until_disabled_ui_preference_is_set(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            repo = root / "repo"
-            repo.mkdir()
-            (repo / "ha-ops.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "targets": [
-                            {
-                                "id": "homeassistant",
-                                "type": "homeassistant",
-                                "source": "homeassistant",
-                                "organizer": {"enabled": True, "organized_root": ".custom"},
-                            }
-                        ],
-                    }
-                )
-            )
-
-            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
-            self.assertEqual(
-                manifest["targets"][0]["organizer"],
-                {"enabled": True, "organized_root": ".custom"},
-            )
-
-            server.set_homeassistant_organizer_enabled(False)
-            manifest, _path = server.load_manifest(repo, {"manifest_path": "ha-ops.json"}, [])
-            self.assertFalse(manifest["targets"][0]["organizer"])
 
     def test_policy_booleans_are_centralized_for_manifest_and_targets(self):
         server = load_server()
@@ -5014,247 +4581,6 @@ class ServerTests(unittest.TestCase):
                 "Save Home Assistant config 2026-06-24\u00a0•\u00a019-00-00",
             )
 
-    def archived_save_ha_to_git_uses_homeassistant_organizer_ui_toggle(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = root / "remote.git"
-            subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
-            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text("{}\n")
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            storage = server.CONFIG_DIR / ".storage"
-            storage.mkdir()
-            (storage / "core.area_registry").write_text(
-                json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}})
-            )
-            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (storage / "core.entity_registry").write_text(
-                json.dumps(
-                    {
-                        "data": {
-                            "entities": [
-                                {
-                                    "entity_id": "automation.live_auto",
-                                    "unique_id": "live_auto",
-                                    "area_id": "home",
-                                }
-                            ]
-                        }
-                    }
-                )
-            )
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job())
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-
-            self.assertIn("homeassistant/.ha-ops/areas/home/automations.yaml", result.stdout)
-            self.assertNotIn("homeassistant/automations.yaml", result.stdout)
-
-    def test_disabled_organizer_save_heap_view_then_apply_is_noop(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = root / "remote.git"
-            self.git(["init", "--bare", str(remote)], root)
-            self.write_heap_yaml_set(server.CONFIG_DIR, "Live")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                        "require_fresh_backup": False,
-                        "create_ha_backup": False,
-                        "create_release_snapshot": False,
-                        "reload_yaml_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.do_core_check = lambda: None
-            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
-            server.core_stop = lambda: None
-            server.core_start = lambda: None
-            server.set_homeassistant_organizer_enabled(False)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-            result = self.git(["--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"], root)
-
-            self.assertIn("homeassistant/configuration.yaml", result.stdout)
-            self.assertIn("homeassistant/automations.yaml", result.stdout)
-            self.assertIn("homeassistant/scripts.yaml", result.stdout)
-            self.assertIn("homeassistant/scenes.yaml", result.stdout)
-            self.assertNotIn("homeassistant/.ha-ops/areas", result.stdout)
-
-            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("no file changes", state["last_diff"].lower())
-            self.assertEqual(state["last_preview_paths"], [])
-
-            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("no file changes", state["last_diff"].lower())
-            self.assertEqual(state["last_preview_paths"], [])
-            self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), self.remote_file(remote, "homeassistant/automations.yaml"))
-            self.assertFalse((server.CONFIG_DIR / ".ha-ops" / "areas").exists())
-
-    def test_disabled_organizer_apply_heap_view_then_save_is_noop(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = root / "remote.git"
-            seed = root / "seed"
-            self.git(["init", "--bare", str(remote)], root)
-            self.git(["init", str(seed)], root)
-            self.git(["checkout", "-b", "main"], seed)
-            self.write_heap_yaml_set(seed / "homeassistant", "Git")
-            self.git_commit_all(seed, "base")
-            self.git(["remote", "add", "origin", str(remote)], seed)
-            self.git(["push", "-u", "origin", "main"], seed)
-            self.push_service_branches(seed)
-            self.write_stale_organizer_view(server.CONFIG_DIR)
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                        "require_fresh_backup": False,
-                        "create_ha_backup": False,
-                        "create_release_snapshot": False,
-                        "reload_yaml_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.do_core_check = lambda: None
-            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
-            server.core_stop = lambda: None
-            server.core_start = lambda: None
-            server.set_homeassistant_organizer_enabled(False)
-
-            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
-            self.assertEqual(
-                set(server.read_state()["last_preview_paths"]),
-                {
-                    "homeassistant/automations.yaml",
-                    "homeassistant/configuration.yaml",
-                    "homeassistant/scenes.yaml",
-                    "homeassistant/scripts.yaml",
-                },
-            )
-            self.select_all_apply_preview_files(server)
-            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
-
-            self.assertEqual((server.CONFIG_DIR / "configuration.yaml").read_text(), self.remote_file(remote, "homeassistant/configuration.yaml"))
-            self.assertEqual((server.CONFIG_DIR / "automations.yaml").read_text(), self.remote_file(remote, "homeassistant/automations.yaml"))
-            self.assertEqual((server.CONFIG_DIR / "scripts.yaml").read_text(), self.remote_file(remote, "homeassistant/scripts.yaml"))
-            self.assertEqual((server.CONFIG_DIR / "scenes.yaml").read_text(), self.remote_file(remote, "homeassistant/scenes.yaml"))
-            self.assertFalse((server.CONFIG_DIR / ".ha-ops" / "areas").exists())
-
-            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("no file changes", state["last_diff"].lower())
-            self.assertEqual(state["last_preview_paths"], [])
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("no save changes", state["last_save_preview"].lower())
-            self.assertEqual(state["last_save_preview_paths"], [])
-            result = self.git(["--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"], root)
-            self.assertNotIn("homeassistant/.ha-ops/areas", result.stdout)
-
-    def archived_save_preview_preserves_organizer_contract_docs(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = root / "remote.git"
-            seed = root / "seed"
-            self.git(["init", "--bare", str(remote)], root)
-            self.git(["init", str(seed)], root)
-            self.git(["checkout", "-b", "main"], seed)
-            area = seed / "homeassistant" / ".ha-ops" / "areas" / "dining_room"
-            area.mkdir(parents=True)
-            (area / "lighting-contract.md").write_text("# Contract\n")
-            (area / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
-            index = seed / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 1, "ids": ["live_auto"]},
-                        "scripts": {"count": 0, "ids": []},
-                        "scenes": {"count": 0, "ids": []},
-                    }
-                )
-            )
-            self.git_commit_all(seed, "base")
-            self.git(["remote", "add", "origin", str(remote)], seed)
-            self.git(["push", "-u", "origin", "main"], seed)
-            self.push_service_branches(seed)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("- id: live_auto\n  alias: Live Auto\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text("{}\n")
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            storage = server.CONFIG_DIR / ".storage"
-            storage.mkdir()
-            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": []}}))
-            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-
-            self.assertNotIn("lighting-contract.md", state["last_save_preview"])
-            self.assertNotIn("lighting-contract.md", state["last_save_diff"])
-            repo_doc = server.DATA_DIR / "ha-config" / "homeassistant" / ".ha-ops" / "areas" / "dining_room" / "lighting-contract.md"
-            self.assertEqual(repo_doc.read_text(), "# Contract\n")
 
     def test_save_unknown_base_blocks_same_file_difference(self):
         server = load_server()
@@ -5546,8 +4872,8 @@ class ServerTests(unittest.TestCase):
             updater = root / "updater"
             self.git(["clone", str(remote), str(updater)], root)
             self.git(["checkout", "main"], updater)
-            battery = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            battery.parent.mkdir(parents=True)
+            battery = updater / "homeassistant" / "git-notes.txt"
+            battery.parent.mkdir(parents=True, exist_ok=True)
             battery.write_text("battery_attention_scan:\n  alias: battery_attention_scan\n")
             self.git_commit_all(updater, "add battery attention")
             self.git(["push", "origin", "main"], updater)
@@ -5570,937 +4896,10 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(server.read_state()["last_save_preview"], "No Save changes.")
             self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(
-                self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"),
+                self.remote_file(remote, "homeassistant/git-notes.txt"),
                 "battery_attention_scan:\n  alias: battery_attention_scan\n",
             )
 
-    def archived_save_preview_organizer_diff_ignores_route_only_battery_attention(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            battery = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            battery.parent.mkdir(parents=True)
-            battery.write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention needed",
-                        "",
-                    ]
-                )
-            )
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("ha\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(battery.read_text())
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
-            self.assertIn("homeassistant/configuration.yaml", state["last_save_preview"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", state["last_save_preview"])
-            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", state["last_save_diff"])
-            self.assertNotIn(".ha-ops/areas/home/scripts.yaml", state["last_save_diff"])
-
-            server.write_state({"save_preview_selected_paths": ["homeassistant/configuration.yaml"]})
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-            self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "ha\n")
-            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"), battery.read_text())
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
-
-    def archived_empty_save_preview_organizer_route_only_battery_attention_is_noop(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            battery = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            battery.parent.mkdir(parents=True)
-            battery.write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention needed",
-                        "",
-                    ]
-                )
-            )
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(battery.read_text())
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(state["last_save_preview"], "No Save changes.")
-            self.assertEqual(state["last_save_preview_paths"], [])
-            before_save = self.remote_rev(remote, "main")
-
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            self.assertEqual(self.remote_rev(remote, "main"), before_save)
-            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"), battery.read_text())
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
-            state = server.read_state()
-            self.assertEqual(state["last_save_preview"], "No Save changes.")
-            self.assertEqual(state["last_save_preview_paths"], [])
-            self.assertEqual(state["save_preview_selected_paths"], [])
-
-    def archived_save_preview_organizer_mixed_home_file_route_only_move_is_noop(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            battery_script = "\n".join(
-                [
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                ]
-            )
-            home_script = "\n".join(
-                [
-                    "  alias: Home Script",
-                    "  sequence:",
-                    "  - service: logbook.log",
-                    "    data:",
-                    "      message: home",
-                ]
-            )
-            scripts = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    battery_script,
-                    "home_script:",
-                    home_script,
-                    "",
-                ]
-            )
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            area_registry = json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}})
-            device_registry = json.dumps({"data": {"devices": []}})
-            entity_registry = json.dumps(
-                {
-                    "data": {
-                        "entities": [
-                            {
-                                "entity_id": "script.battery_attention_scan",
-                                "unique_id": "battery_attention_scan",
-                            },
-                            {
-                                "entity_id": "script.home_script",
-                                "unique_id": "home_script",
-                                "area_id": "home",
-                            },
-                        ]
-                    }
-                }
-            )
-            home_scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            home_scripts.parent.mkdir(parents=True)
-            home_scripts.write_text(scripts)
-            repo_storage = updater / "homeassistant" / ".storage"
-            repo_storage.mkdir(parents=True)
-            (repo_storage / "core.area_registry").write_text(area_registry)
-            (repo_storage / "core.device_registry").write_text(device_registry)
-            (repo_storage / "core.entity_registry").write_text(entity_registry)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 2, "ids": ["battery_attention_scan", "home_script"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add home scripts")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            live_storage = server.CONFIG_DIR / ".storage"
-            live_storage.mkdir(parents=True)
-            (live_storage / "core.area_registry").write_text(area_registry)
-            (live_storage / "core.device_registry").write_text(device_registry)
-            (live_storage / "core.entity_registry").write_text(entity_registry)
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(scripts)
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(state["last_save_preview"], "No Save changes.")
-            self.assertEqual(state["last_save_preview_paths"], [])
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_diff"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", state["last_save_diff"])
-            before_save = self.remote_rev(remote, "main")
-
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            self.assertEqual(self.remote_rev(remote, "main"), before_save)
-            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"), scripts)
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
-
-    def archived_save_preview_organizer_real_addition_does_not_duplicate_route_only_item(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            battery_script = "\n".join(
-                [
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                ]
-            )
-            new_script = "\n".join(
-                [
-                    "  alias: New Script",
-                    "  sequence:",
-                    "  - service: logbook.log",
-                    "    data:",
-                    "      message: new",
-                ]
-            )
-            git_scripts = "\n".join(["battery_attention_scan:", battery_script, ""])
-            live_scripts = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    battery_script,
-                    "new_script:",
-                    new_script,
-                    "",
-                ]
-            )
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            home_scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            home_scripts.parent.mkdir(parents=True)
-            home_scripts.write_text(git_scripts)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(live_scripts)
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(
-                set(state["last_save_preview_paths"]),
-                {
-                    "homeassistant/.ha-ops/areas/.unknown/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/organizer-index.json",
-                },
-            )
-            self.assertIn("- Modified: homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", state["last_save_preview"])
-            self.assertIn("+new_script:", state["last_save_diff"])
-            self.assertNotIn("+battery_attention_scan:", state["last_save_diff"])
-
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", result.stdout)
-            saved_scripts = self.remote_file(remote, "homeassistant/.ha-ops/areas/.unknown/scripts.yaml")
-            self.assertEqual(saved_scripts.count("battery_attention_scan:"), 1)
-            self.assertIn("new_script:", saved_scripts)
-            saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
-            self.assertEqual(saved_index["scripts"], {"count": 2, "ids": ["battery_attention_scan", "new_script"]})
-
-    def archived_save_preview_include_redundant_data_hides_route_only_battery_attention(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            battery = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            battery.parent.mkdir(parents=True)
-            battery.write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention needed",
-                        "",
-                    ]
-                )
-            )
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            repo_storage = updater / "homeassistant" / ".storage"
-            repo_storage.mkdir(parents=True)
-            repo_registry = {"data": {"devices": [{"id": "device-1", "modified_at": "git-modified-at", "sw_version": "1"}]}}
-            live_registry = {"data": {"devices": [{"id": "device-1", "modified_at": "live-modified-at", "sw_version": "1"}]}}
-            (repo_storage / "core.device_registry").write_text(json.dumps(repo_registry))
-            self.git_commit_all(updater, "add battery attention and registry")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            live_storage = server.CONFIG_DIR / ".storage"
-            live_storage.mkdir(parents=True)
-            (live_storage / "core.device_registry").write_text(json.dumps(live_registry))
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(battery.read_text())
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-            server.write_state({"include_redundant_data": True})
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(state["last_save_preview_paths"], ["homeassistant/.storage/core.device_registry"])
-            self.assertIn("homeassistant/.storage/core.device_registry", state["last_save_preview"])
-            self.assertIn("modified_at", state["last_save_diff"])
-            self.assertIn("git-modified-at", state["last_save_diff"])
-            self.assertIn("live-modified-at", state["last_save_diff"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview"])
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", state["last_save_preview"])
-            self.assertNotIn(".ha-ops/areas/.unknown/scripts.yaml", state["last_save_diff"])
-            self.assertNotIn(".ha-ops/areas/home/scripts.yaml", state["last_save_diff"])
-
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-            self.assertEqual(json.loads(self.remote_file(remote, "homeassistant/.storage/core.device_registry")), live_registry)
-            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/home/scripts.yaml"), battery.read_text())
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
-
-    def archived_save_preview_organizer_mixed_route_only_item_and_real_deletion_preserves_live_item(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            battery_script = "\n".join(
-                [
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                ]
-            )
-            old_script = "\n".join(
-                [
-                    "  alias: Old Script",
-                    "  sequence:",
-                    "  - service: logbook.log",
-                    "    data:",
-                    "      message: old",
-                ]
-            )
-            git_scripts = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    battery_script,
-                    "old_script:",
-                    old_script,
-                    "",
-                ]
-            )
-            live_scripts = "\n".join(["battery_attention_scan:", battery_script, ""])
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            home_scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            home_scripts.parent.mkdir(parents=True)
-            home_scripts.write_text(git_scripts)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 2, "ids": ["battery_attention_scan", "old_script"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add scripts")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(live_scripts)
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(
-                set(state["last_save_preview_paths"]),
-                {
-                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/organizer-index.json",
-                },
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview"])
-            self.assertIn("old_script", state["last_save_diff"])
-            self.assertIn("-old_script:", state["last_save_diff"])
-            self.assertNotIn("-battery_attention_scan:", state["last_save_diff"])
-            self.assertNotIn("-  alias: Battery Attention Scan", state["last_save_diff"])
-
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", result.stdout)
-            saved_scripts = self.remote_file(remote, "homeassistant/.ha-ops/areas/.unknown/scripts.yaml")
-            self.assertIn("battery_attention_scan", saved_scripts)
-            self.assertNotIn("old_script", saved_scripts)
-            saved_index = json.loads(self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"))
-            self.assertEqual(saved_index["scripts"], {"count": 1, "ids": ["battery_attention_scan"]})
-
-    def archived_save_preview_organizer_selected_file_keeps_unchecked_index_at_git(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "git\n")
-
-            battery_script = "\n".join(
-                [
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                ]
-            )
-            old_script = "\n".join(
-                [
-                    "  alias: Old Script",
-                    "  sequence:",
-                    "  - service: logbook.log",
-                    "    data:",
-                    "      message: old",
-                ]
-            )
-            git_scripts = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    battery_script,
-                    "old_script:",
-                    old_script,
-                    "",
-                ]
-            )
-            live_scripts = "\n".join(["battery_attention_scan:", battery_script, ""])
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            home_scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            home_scripts.parent.mkdir(parents=True)
-            home_scripts.write_text(git_scripts)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            git_index = (
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 2, "ids": ["battery_attention_scan", "old_script"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            index.write_text(git_index)
-            self.git_commit_all(updater, "add scripts")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("git\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(live_scripts)
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(
-                set(state["last_save_preview_paths"]),
-                {
-                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/organizer-index.json",
-                },
-            )
-
-            server.write_state({"save_preview_selected_paths": ["homeassistant/.ha-ops/areas/home/scripts.yaml"]})
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", result.stdout)
-            saved_scripts = self.remote_file(remote, "homeassistant/.ha-ops/areas/.unknown/scripts.yaml")
-            self.assertIn("battery_attention_scan", saved_scripts)
-            self.assertNotIn("old_script", saved_scripts)
-            self.assertEqual(
-                self.remote_file(remote, "homeassistant/.ha-ops/areas/organizer-index.json"),
-                git_index,
-            )
-            state = server.read_state()
-            self.assertEqual(state["last_status"], "success")
-            self.assertEqual(state["save_preview_selected_paths"], [])
-
-    def archived_save_preview_organizer_diff_keeps_changed_battery_attention_payload(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "base\n")
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            scripts.parent.mkdir(parents=True)
-            scripts.write_text(
-                "\n".join(
-                    [
-                        "battery_attention_scan:",
-                        "  alias: Battery Attention Scan",
-                        "  sequence:",
-                        "  - service: notify.mobile_app",
-                        "    data:",
-                        "      message: Battery attention needed",
-                        "",
-                    ]
-                )
-            )
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(
-                scripts.read_text().replace("Battery attention needed", "Battery attention changed")
-            )
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview_paths"])
-            self.assertIn("Battery attention changed", state["last_save_diff"])
-
-    def archived_save_modified_route_only_battery_attention_removes_old_route(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "base\n")
-
-            git_script = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                    "",
-                ]
-            )
-            live_script = git_script.replace("Battery attention needed", "Battery attention changed")
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            scripts.parent.mkdir(parents=True)
-            scripts.write_text(git_script)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-            self.push_service_branches(updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text(live_script)
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", state["last_save_preview_paths"])
-            self.assertIn("Battery attention changed", state["last_save_diff"])
-
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
-
-            result = subprocess.run(
-                ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
-                check=True,
-                text=True,
-                capture_output=True,
-            )
-            self.assertNotIn("homeassistant/.ha-ops/areas/home/scripts.yaml", result.stdout)
-            self.assertIn("homeassistant/.ha-ops/areas/.unknown/scripts.yaml", result.stdout)
-            saved_scripts = self.remote_file(remote, "homeassistant/.ha-ops/areas/.unknown/scripts.yaml")
-            self.assertEqual(saved_scripts.count("battery_attention_scan:"), 1)
-            self.assertIn("Battery attention changed", saved_scripts)
-
-    def archived_save_preview_stale_service_branch_conflicted_organizer_index_does_not_crash(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = self.seed_remote(root, "base\n")
-
-            battery = "\n".join(
-                [
-                    "battery_attention_scan:",
-                    "  alias: Battery Attention Scan",
-                    "  sequence:",
-                    "  - service: notify.mobile_app",
-                    "    data:",
-                    "      message: Battery attention needed",
-                    "",
-                ]
-            )
-
-            updater = root / "updater"
-            self.git(["clone", str(remote), str(updater)], root)
-            self.git(["checkout", "main"], updater)
-            scripts = updater / "homeassistant" / ".ha-ops" / "areas" / "home" / "scripts.yaml"
-            scripts.parent.mkdir(parents=True)
-            scripts.write_text(battery)
-            index = updater / "homeassistant" / ".ha-ops" / "areas" / "organizer-index.json"
-            index.write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 0, "ids": []},
-                        "scripts": {"count": 1, "ids": ["battery_attention_scan"]},
-                        "scenes": {"count": 0, "ids": []},
-                    },
-                    indent=2,
-                    sort_keys=True,
-                )
-                + "\n"
-            )
-            self.git_commit_all(updater, "add battery attention")
-            self.git(["push", "origin", "main"], updater)
-
-            (server.CONFIG_DIR / "configuration.yaml").write_text("base\n")
-            (server.CONFIG_DIR / "automations.yaml").write_text("[]\n")
-            (server.CONFIG_DIR / "scripts.yaml").write_text("{}\n")
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "restart_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertNotEqual(state["last_status"], "error")
-            self.assertTrue(state["last_save_preview_conflicts"])
-            self.assertIn("homeassistant/.ha-ops/areas/organizer-index.json", state["last_save_preview_paths"])
-            self.assertIn("homeassistant/.ha-ops/areas/organizer-index.json", state["last_save_diff"])
-            self.assertIn("Save preview conflicts", state["last_save_preview"])
-            self.assertNotIn("JSONDecodeError", state["last_message"])
 
     def test_save_without_matching_preview_rebuilds_preview_and_warns(self):
         server = load_server()
@@ -9327,10 +7726,10 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             repo = server.ensure_repo(server.load_options())
-            area_file = repo / "homeassistant" / ".ha-ops" / "areas" / "kitchen" / "automations.yaml"
-            area_file.parent.mkdir(parents=True)
+            area_file = repo / "homeassistant" / "automations.yaml"
+            area_file.parent.mkdir(parents=True, exist_ok=True)
             area_file.write_text("- id: kitchen_original\n")
-            self.git_commit_all(repo, "add internal ids area")
+            self.git_commit_all(repo, "add internal ids heap")
             self.git(["push", "origin", "main"], repo)
             remote_before = self.remote_rev(remote, "main")
 
@@ -9338,7 +7737,7 @@ class ServerTests(unittest.TestCase):
             self.git_commit_all(repo, "manual unrelated local commit")
             unrelated_commit = server.git_head_or_unborn(repo)
             area_file.write_text("- id: kitchen_migrated\n  alias: Kitchen migrated\n")
-            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+            self.assertIn("homeassistant/automations.yaml", self.repo_status(repo))
             server.write_state(
                 {
                     "save_push_retry_pending": True,
@@ -9365,9 +7764,9 @@ class ServerTests(unittest.TestCase):
             self.assertFalse(state.get("save_push_retry_pending", False))
             self.assertIsNone(state.get("save_push_retry_commit"))
             self.assertEqual(server.git_head_or_unborn(repo), unrelated_commit)
-            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+            self.assertIn("homeassistant/automations.yaml", self.repo_status(repo))
             self.assertEqual(self.remote_rev(remote, "main"), remote_before)
-            self.assertEqual(self.remote_main_subject(remote), "add internal ids area")
+            self.assertEqual(self.remote_main_subject(remote), "add internal ids heap")
             self.assertNotIn("Confirm Save to Git", server.render_page())
 
     def test_valid_save_push_retry_blocks_dirty_internal_ids_without_pushing_migration(self):
@@ -9392,10 +7791,10 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             repo = server.ensure_repo(server.load_options())
-            area_file = repo / "homeassistant" / ".ha-ops" / "areas" / "kitchen" / "automations.yaml"
-            area_file.parent.mkdir(parents=True)
+            area_file = repo / "homeassistant" / "automations.yaml"
+            area_file.parent.mkdir(parents=True, exist_ok=True)
             area_file.write_text("- id: kitchen_original\n")
-            self.git_commit_all(repo, "add internal ids area")
+            self.git_commit_all(repo, "add internal ids heap")
             self.git(["push", "origin", "main"], repo)
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
@@ -9425,9 +7824,9 @@ class ServerTests(unittest.TestCase):
             self.assertTrue(state["save_push_retry_pending"])
             self.assertEqual(state["save_push_retry_commit"], pending_commit)
             self.assertIn("Internal IDs migration changes", state["last_message"])
-            self.assertEqual(self.remote_main_subject(remote), "add internal ids area")
+            self.assertEqual(self.remote_main_subject(remote), "add internal ids heap")
             self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertIn("homeassistant/.ha-ops/areas/kitchen/automations.yaml", self.repo_status(repo))
+            self.assertIn("homeassistant/automations.yaml", self.repo_status(repo))
 
     def test_save_retry_preserves_newer_commit_and_dirty_tracked_file(self):
         server = load_server()
@@ -10311,169 +8710,6 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_preview_commit"], main_commit)
             self.assertNotEqual(state["last_preview_commit"], live_commit)
 
-    def archived_partial_apply_organizer_paths_materializes_selected_heap_items_only(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            remote = root / "remote.git"
-            seed = root / "seed"
-            self.git(["init", "--bare", str(remote)], root)
-            self.git(["init", str(seed)], root)
-            self.git(["checkout", "-b", "main"], seed)
-            areas = seed / "homeassistant" / ".ha-ops" / "areas"
-            (areas / "home").mkdir(parents=True)
-            (areas / ".unknown").mkdir(parents=True)
-            (areas / "home" / "automations.yaml").write_text(
-                "- id: home_auto\n  alias: Git Home Auto\n  trigger: []\n  condition: []\n  action: []\n"
-            )
-            (areas / ".unknown" / "automations.yaml").write_text(
-                "- id: unknown_auto\n  alias: Git Unknown Auto\n  trigger: []\n  condition: []\n  action: []\n"
-            )
-            (areas / "home" / "scripts.yaml").write_text("home_script:\n  alias: Git Home Script\n  sequence: []\n")
-            (areas / ".unknown" / "scripts.yaml").write_text(
-                "unknown_script:\n  alias: Git Unknown Script\n  sequence: []\n"
-            )
-            (areas / "organizer-index.json").write_text(
-                json.dumps(
-                    {
-                        "version": 1,
-                        "automations": {"count": 2, "ids": ["home_auto", "unknown_auto"]},
-                        "scripts": {"count": 2, "ids": ["home_script", "unknown_script"]},
-                        "scenes": {"count": 0, "ids": []},
-                    }
-                )
-            )
-            (seed / "homeassistant" / ".storage").mkdir(parents=True)
-            (seed / "homeassistant" / ".storage" / "input_boolean").write_text("git-storage\n")
-            self.git_commit_all(seed, "base")
-            self.git(["remote", "add", "origin", str(remote)], seed)
-            self.git(["push", "-u", "origin", "main"], seed)
-            self.push_service_branches(seed)
-
-            (server.CONFIG_DIR / "automations.yaml").write_text(
-                "\n".join(
-                    [
-                        "- id: home_auto",
-                        "  alias: Live Home Auto",
-                        "  trigger: []",
-                        "  condition: []",
-                        "  action: []",
-                        "- id: unknown_auto",
-                        "  alias: Live Unknown Auto",
-                        "  trigger: []",
-                        "  condition: []",
-                        "  action: []",
-                        "",
-                    ]
-                )
-            )
-            (server.CONFIG_DIR / "scripts.yaml").write_text(
-                "\n".join(
-                    [
-                        "home_script:",
-                        "  alias: Live Home Script",
-                        "  sequence: []",
-                        "unknown_script:",
-                        "  alias: Live Unknown Script",
-                        "  sequence: []",
-                        "",
-                    ]
-                )
-            )
-            (server.CONFIG_DIR / "scenes.yaml").write_text("[]\n")
-            storage = server.CONFIG_DIR / ".storage"
-            storage.mkdir(parents=True)
-            (storage / "core.area_registry").write_text(json.dumps({"data": {"areas": [{"id": "home", "name": "Home"}]}}))
-            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": []}}))
-            (storage / "core.entity_registry").write_text(
-                json.dumps(
-                    {
-                        "data": {
-                            "entities": [
-                                {
-                                    "entity_id": "automation.home_auto",
-                                    "unique_id": "home_auto",
-                                    "area_id": "home",
-                                },
-                                {
-                                    "entity_id": "script.home_script",
-                                    "unique_id": "home_script",
-                                    "area_id": "home",
-                                },
-                            ]
-                        }
-                    }
-                )
-            )
-            (storage / "input_boolean").write_text("live-storage\n")
-            server.OPTIONS_PATH.write_text(
-                json.dumps(
-                    {
-                        "repo_url": str(remote),
-                        "repo_branch": "main",
-                        "repo_path": "ha-config",
-                        "apply_path": "homeassistant",
-                        "require_fresh_backup": False,
-                        "create_ha_backup": False,
-                        "create_release_snapshot": False,
-                        "reload_yaml_after_apply": False,
-                    }
-                )
-            )
-            server.get_installed_addons = lambda: []
-            server.do_core_check = lambda: None
-            server.latest_system_backup_status = lambda options: {"stale": False, "message": "Fresh backup"}
-            server.core_stop = lambda: None
-            server.core_start = lambda: None
-            server.set_homeassistant_organizer_enabled(True)
-
-            self.assertTrue(server.run_preview_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(
-                set(state["last_preview_paths"]),
-                {
-                    "homeassistant/.ha-ops/areas/.unknown/automations.yaml",
-                    "homeassistant/.ha-ops/areas/.unknown/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/home/automations.yaml",
-                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/organizer-index.json",
-                    "homeassistant/.storage/input_boolean",
-                },
-            )
-            server.write_state(
-                {
-                    "apply_preview_selected_paths": [
-                        "homeassistant/.ha-ops/areas/.unknown/scripts.yaml",
-                        "homeassistant/.ha-ops/areas/home/automations.yaml",
-                    ]
-                }
-            )
-
-            self.assertTrue(server.run_apply_job(), server.read_state()["last_message"])
-            state = server.read_state()
-            self.assertEqual(
-                set(state["last_preview_paths"]),
-                {
-                    "homeassistant/.ha-ops/areas/.unknown/automations.yaml",
-                    "homeassistant/.ha-ops/areas/home/scripts.yaml",
-                    "homeassistant/.ha-ops/areas/organizer-index.json",
-                    "homeassistant/.storage/input_boolean",
-                },
-            )
-            self.assertNotIn("Git Home Auto", state["last_diff"])
-            self.assertNotIn("Git Unknown Script", state["last_diff"])
-            self.assertIn("Git Unknown Auto", state["last_diff"])
-            self.assertIn("Git Home Script", state["last_diff"])
-            self.assertEqual((storage / "input_boolean").read_text(), "live-storage\n")
-            automations_text = (server.CONFIG_DIR / "automations.yaml").read_text()
-            scripts_text = (server.CONFIG_DIR / "scripts.yaml").read_text()
-            self.assertIn("Git Home Auto", automations_text)
-            self.assertIn("Live Unknown Auto", automations_text)
-            self.assertIn("Live Home Script", scripts_text)
-            self.assertIn("Git Unknown Script", scripts_text)
-            self.assertEqual(state["apply_preview_selected_paths"], [])
-            self.assertEqual(state["apply_preview_resolutions"], {})
 
     def test_apply_preview_conflict_uses_fresh_live_branch(self):
         server = load_server()
@@ -13002,10 +11238,9 @@ class ServerTests(unittest.TestCase):
             repo = server.DATA_DIR / "ha-config"
             config = repo / "homeassistant"
             storage = config / ".storage"
-            area = config / ".ha-ops" / "areas" / "office"
+            area = config
             z2m = config / "zigbee2mqtt"
             storage.mkdir(parents=True)
-            area.mkdir(parents=True)
             z2m.mkdir(parents=True)
             server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
             (storage / "core.entity_registry").write_text(
@@ -13074,14 +11309,14 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["last_internal_ids_rows"][0]["mqtt_triggers"], 1)
             self.assertEqual(state["last_internal_ids_rows"][0]["actions"], 1)
             self.assertIn(
-                "--- .ha-ops/areas/office/automations.yaml before internal id migration",
+                "--- automations.yaml before internal id migration",
                 state["last_internal_ids_rows"][0]["diff"],
             )
             self.assertIn("topic: z2m/office_remote_new", state["last_internal_ids_rows"][0]["diff"])
 
             projection = self.client_state(server)
             self.assertTrue(projection["last_internal_ids_preview_id"])
-            self.assertEqual(projection["last_internal_ids_rows"][0]["path"], ".ha-ops/areas/office/automations.yaml")
+            self.assertEqual(projection["last_internal_ids_rows"][0]["path"], "automations.yaml")
             self.assertEqual(projection["last_internal_ids_rows"][0]["changes"], 2)
             self.assertTrue(projection["last_internal_ids_rows"][0]["diff_sha256"])
             self.assertNotIn("diff", projection["last_internal_ids_rows"][0])
@@ -13114,10 +11349,9 @@ class ServerTests(unittest.TestCase):
             repo = server.DATA_DIR / "ha-config"
             config = repo / "homeassistant"
             storage = config / ".storage"
-            area = config / ".ha-ops" / "areas" / "office"
+            area = config
             addon = repo / "addons" / "local_zigbee2mqtt"
             storage.mkdir(parents=True)
-            area.mkdir(parents=True)
             addon.mkdir(parents=True)
             server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
             server.write_state({"managed_addons": ["local_zigbee2mqtt"]})
@@ -13177,10 +11411,9 @@ devices:
             repo = server.DATA_DIR / "ha-config"
             config = repo / "homeassistant"
             storage = config / ".storage"
-            area = config / ".ha-ops" / "areas" / "office"
+            area = config
             live_z2m = server.CONFIG_DIR / "zigbee2mqtt"
             storage.mkdir(parents=True)
-            area.mkdir(parents=True)
             live_z2m.mkdir(parents=True)
             server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
             (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
@@ -13241,10 +11474,9 @@ devices:
             repo = server.DATA_DIR / "ha-config"
             config = repo / "homeassistant"
             storage = config / ".storage"
-            area = config / ".ha-ops" / "areas" / "terrace"
+            area = config
             z2m = config / "zigbee2mqtt"
             storage.mkdir(parents=True)
-            area.mkdir(parents=True)
             z2m.mkdir(parents=True)
             server.OPTIONS_PATH.write_text(json.dumps({"repo_path": "ha-config", "apply_path": "homeassistant"}))
             (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": []}}))
@@ -13526,8 +11758,8 @@ devices:
             )
             options = ctx.load_options()
             repo = ctx.ensure_repo(options)
-            migrated = repo / "homeassistant" / ".ha-ops" / "areas" / "office" / "automations.yaml"
-            migrated.parent.mkdir(parents=True)
+            migrated = repo / "homeassistant" / "automations.yaml"
+            migrated.parent.mkdir(parents=True, exist_ok=True)
             migrated.write_text("- alias: Migrated\n")
             details = []
 
@@ -13536,7 +11768,7 @@ devices:
             self.assertIsNotNone(commit)
             self.assertEqual(self.repo_status(repo), "")
             self.assertIn("Committed pending Internal IDs migration changes to Git", details[0])
-            self.assertEqual(self.remote_file(remote, "homeassistant/.ha-ops/areas/office/automations.yaml"), "- alias: Migrated\n")
+            self.assertEqual(self.remote_file(remote, "homeassistant/automations.yaml"), "- alias: Migrated\n")
 
     def test_pending_root_internal_ids_migration_changes_are_committed_before_repo_actions(self):
         server = load_server()
@@ -13562,15 +11794,15 @@ devices:
             )
             options = ctx.load_options()
             repo = ctx.ensure_repo(options)
-            migrated = repo / ".ha-ops" / "areas" / "office" / "automations.yaml"
-            migrated.parent.mkdir(parents=True)
+            migrated = repo / "automations.yaml"
+            migrated.parent.mkdir(parents=True, exist_ok=True)
             migrated.write_text("- alias: Migrated\n")
 
             commit = server.app_context.job_logic.commit_pending_internal_ids_migration(ctx.job_deps(), options, [])
 
             self.assertIsNotNone(commit)
             self.assertEqual(self.repo_status(repo), "")
-            self.assertEqual(self.remote_file(remote, ".ha-ops/areas/office/automations.yaml"), "- alias: Migrated\n")
+            self.assertEqual(self.remote_file(remote, "automations.yaml"), "- alias: Migrated\n")
 
     def test_dirty_checkout_reports_paths_before_git_sync(self):
         server = load_server()
@@ -13745,8 +11977,7 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            area = config / ".ha-ops" / "areas" / "synthetic"
-            area.mkdir(parents=True)
+            area = config
             automation = area / "automations.yaml"
             automation.write_text(
                 """
@@ -13787,8 +12018,7 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            area = config / ".ha-ops" / "areas" / "synthetic"
-            area.mkdir(parents=True)
+            area = config
             (area / "automations.yaml").write_text(
                 """
 - id: '1'
@@ -13828,11 +12058,8 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            office = config / ".ha-ops" / "areas" / "office"
-            kitchen = config / ".ha-ops" / "areas" / "kitchen"
-            office.mkdir(parents=True)
-            kitchen.mkdir(parents=True)
-            (office / "automations.yaml").write_text(
+            automation = config / "automations.yaml"
+            automation.write_text(
                 """
 - id: '1'
   alias: Migratable
@@ -13846,7 +12073,7 @@ devices:
   actions: []
 """.lstrip()
             )
-            (kitchen / "automations.yaml").write_text(
+            automation.write_text(automation.read_text() +
                 """
 - id: '2'
   alias: Unsupported integration event
@@ -13862,9 +12089,9 @@ devices:
 
             self.assertTrue(server.run_internal_ids_preview_job())
             rows = server.read_state()["last_internal_ids_rows"]
-            office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
+            automation_index = next(index for index, row in enumerate(rows) if row["path"] == "automations.yaml")
 
-            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(office_index)])))
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(automation_index)])))
             state = server.read_state()
 
             self.assertEqual(state["last_message"], "Migrated 1 file. 1 unresolved item remains.")
@@ -13876,8 +12103,7 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            area = config / ".ha-ops" / "areas" / "synthetic"
-            area.mkdir(parents=True)
+            area = config
             automation = area / "automations.yaml"
             automation.write_text(
                 """
@@ -13900,50 +12126,34 @@ devices:
             self.assertFalse(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, ["0"])))
             self.assertIn("changed since preview", server.read_state()["last_message"])
 
-    def test_internal_ids_split_mode_applies_only_selected_file(self):
+    def test_internal_ids_migration_applies_only_selected_root_heap_file(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            kitchen = config / ".ha-ops" / "areas" / "kitchen"
-            office = config / ".ha-ops" / "areas" / "office"
-            kitchen.mkdir(parents=True)
-            office.mkdir(parents=True)
-            for path, alias in [
-                (kitchen / "automations.yaml", "Kitchen synthetic"),
-                (office / "automations.yaml", "Office synthetic"),
-            ]:
-                path.write_text(
-                    f"""
-- id: '{alias}'
-  alias: {alias}
-  triggers:
-  - domain: mqtt
-    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-    type: action
-    subtype: 1_single
-    trigger: device
-  conditions: []
-  actions: []
-""".lstrip()
-                )
+            automation = config / "automations.yaml"
+            script = config / "scripts.yaml"
+            automation.write_text(
+                "- id: synthetic\n  alias: Synthetic\n  triggers:\n"
+                "  - domain: mqtt\n    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+                "    type: action\n    subtype: 1_single\n    trigger: device\n"
+                "  conditions: []\n  actions: []\n"
+            )
+            script.write_text(
+                "synthetic:\n  alias: Synthetic\n  sequence:\n"
+                "  - type: turn_on\n    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+                "    entity_id: '11111111111111111111111111111111'\n    domain: switch\n"
+            )
 
             self.assertTrue(server.run_internal_ids_preview_job())
             rows = server.read_state()["last_internal_ids_rows"]
-            self.assertEqual(len([row for row in rows if row["changes"]]), 2)
-            office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
-
-            projection = self.client_state(server)
-            self.assertEqual(
-                {row["path"] for row in projection["last_internal_ids_rows"]},
-                {".ha-ops/areas/kitchen/automations.yaml", ".ha-ops/areas/office/automations.yaml"},
-            )
-            self.assertTrue(all(row["diff_sha256"] for row in projection["last_internal_ids_rows"]))
-
-            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(office_index)])))
-            self.assertIn("topic: z2m/synthetic_remote", (office / "automations.yaml").read_text())
-            self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", (kitchen / "automations.yaml").read_text())
+            self.assertEqual({row["path"] for row in rows}, {"automations.yaml", "scripts.yaml"})
+            self.assertTrue(all(row["changes"] for row in rows))
+            script_index = next(index for index, row in enumerate(rows) if row["path"] == "scripts.yaml")
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(script_index)])))
+            self.assertIn("action: switch.turn_on", script.read_text())
+            self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", automation.read_text())
 
     def test_internal_ids_no_changes_disables_migration(self):
         server = load_server()
@@ -13951,8 +12161,7 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             config = self.seed_internal_ids_repo(server, root)
-            area = config / ".ha-ops" / "areas" / "synthetic"
-            area.mkdir(parents=True)
+            area = config
             (area / "automations.yaml").write_text(
                 """
 - id: '1'
@@ -15982,18 +14191,6 @@ devices:
             self.assertIn("Old Button", state["last_deleted_devices_preview"])
             self.assertIn("start failed", state["last_message"])
 
-    def test_homeassistant_organizer_blocked_control_is_in_main_action_card(self):
-        server = load_server()
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            self.configure_paths(server, root)
-            server.get_installed_addons = lambda: []
-
-            projected = server.web._snapshot_payload(server.context())
-            self.assertEqual(projected["text"]["text.split_organizer_blocked"], "Area split organizer archived")
-            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
-            self.assertIn('t("text.split_organizer_blocked")', source)
-            self.assertNotIn("homeassistant-organizer", source)
 
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()

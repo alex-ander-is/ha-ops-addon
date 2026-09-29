@@ -3,10 +3,6 @@ from pathlib import Path
 import policies
 
 
-HOMEASSISTANT_ORGANIZER_STATE_KEY = "homeassistant_organizer_enabled"
-ORGANIZER_PROJECTION_AVAILABLE = False
-
-
 def selected_addon_slugs(read_state):
     state = read_state()
     return sorted(str(slug) for slug in state.get("managed_addons", []) if slug)
@@ -18,64 +14,7 @@ def set_selected_addon_slugs(slugs, write_state):
     return cleaned
 
 
-def homeassistant_organizer_preference(read_state):
-    value = read_state().get(HOMEASSISTANT_ORGANIZER_STATE_KEY)
-    return value if isinstance(value, bool) else None
-
-
-def set_homeassistant_organizer_enabled(enabled, write_state):
-    value = bool(enabled)
-    if value and not ORGANIZER_PROJECTION_AVAILABLE:
-        raise RuntimeError(
-            "Home Assistant organizer area split is archived and unsupported. "
-            "Keep it disabled."
-        )
-    write_state({HOMEASSISTANT_ORGANIZER_STATE_KEY: value})
-    return value
-
-
-def organizer_target_enabled(target):
-    value = target.get("organizer")
-    if value is True:
-        return True
-    if isinstance(value, dict):
-        return bool(value.get("enabled", False))
-    return False
-
-
-def with_homeassistant_organizer_preference(target, organizer_enabled):
-    if target.get("type") != "homeassistant" or organizer_enabled is None:
-        return target
-
-    updated = dict(target)
-    if not organizer_enabled:
-        updated["organizer"] = False
-        return updated
-
-    value = updated.get("organizer")
-    if isinstance(value, dict):
-        organizer = dict(value)
-        organizer["enabled"] = True
-    else:
-        organizer = {"enabled": True}
-    updated["organizer"] = organizer
-    return updated
-
-
-def apply_homeassistant_organizer_preference(manifest, organizer_enabled):
-    if organizer_enabled is None:
-        return manifest
-    if organizer_enabled and not ORGANIZER_PROJECTION_AVAILABLE:
-        return manifest
-    effective = dict(manifest)
-    effective["targets"] = [
-        with_homeassistant_organizer_preference(target, organizer_enabled)
-        for target in manifest.get("targets", [])
-    ]
-    return effective
-
-
-def default_homeassistant_manifest(options, organizer_enabled=None):
+def default_homeassistant_manifest(options):
     target = {
         "id": "homeassistant",
         "type": "homeassistant",
@@ -84,7 +23,6 @@ def default_homeassistant_manifest(options, organizer_enabled=None):
         "allow_protected_storage": False,
     }
     target.update(policies.default_homeassistant_lifecycle_policy(options))
-    target = with_homeassistant_organizer_preference(target, organizer_enabled)
     return {
         "version": 1,
         "targets": [target],
@@ -131,7 +69,7 @@ def selected_addon_target(slug, template=None):
     return target
 
 
-def manifest_with_selected_addons(manifest, selected, addons=None, organizer_enabled=None):
+def manifest_with_selected_addons(manifest, selected, addons=None):
     targets = []
     addon_templates = {}
 
@@ -148,18 +86,17 @@ def manifest_with_selected_addons(manifest, selected, addons=None, organizer_ena
 
     effective = dict(manifest)
     effective["targets"] = targets
-    return apply_homeassistant_organizer_preference(effective, organizer_enabled)
+    return effective
 
 
-def default_manifest(options, selected, organizer_enabled=None):
+def default_manifest(options, selected):
     return manifest_with_selected_addons(
         default_homeassistant_manifest(options),
         selected,
-        organizer_enabled=organizer_enabled,
     )
 
 
-def load_manifest(repo_dir, options, selected, load_json, addons=None, organizer_enabled=None):
+def load_manifest(repo_dir, options, selected, load_json, addons=None):
     manifest_path = repo_dir / options.get("manifest_path", "ha-ops.json")
     if not manifest_path.exists():
         return (
@@ -167,7 +104,6 @@ def load_manifest(repo_dir, options, selected, load_json, addons=None, organizer
                 default_homeassistant_manifest(options),
                 selected,
                 addons,
-                organizer_enabled,
             ),
             manifest_path,
         )
@@ -177,7 +113,6 @@ def load_manifest(repo_dir, options, selected, load_json, addons=None, organizer
             load_json(manifest_path, {}),
             selected,
             addons,
-            organizer_enabled,
         ),
         manifest_path,
     )
@@ -304,6 +239,11 @@ def resolve_targets(
         target_id = str(target.get("id") or "")
         validate_target_id(target_id)
         target_type = target.get("type")
+        if target_type == "homeassistant" and "organizer" in target:
+            raise RuntimeError(
+                "Unsupported Home Assistant target field 'organizer'. "
+                "Use normal automations.yaml, scripts.yaml, and scenes.yaml files."
+            )
         source = repo_source_path(repo_dir, target.get("source", ""), target_id)
         optional = bool(target.get("optional", False))
 

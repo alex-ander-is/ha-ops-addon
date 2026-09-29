@@ -31,7 +31,6 @@ class ClientContractTests(unittest.TestCase):
         self.assertIn('<vaadin-details @opened-changed=', source)
         self.assertIn('this.actionButton("resolve_conflict"', source)
         self.assertTrue('"approve_save_conflicts", t("action.use_ha_for_all_conflicts")' in source)
-        self.assertTrue('t("text.split_organizer_blocked")' in source)
         self.assertIn('class="unicode-escape"', source)
 
     def test_static_shell_has_ingress_relative_assets_and_no_request_data(self):
@@ -464,7 +463,7 @@ class ClientContractTests(unittest.TestCase):
                 zigbee2mqtt_paths=[], storage_allowlist=["core.entity_registry"],
             )
             target = {"id": "homeassistant", "type": "homeassistant", "source_path": str(source),
-                      "live_path": str(live), "organizer": {"enabled": True}}
+                      "live_path": str(live)}
             inventory = sync.apply_recovery_inventory([target], dependencies)["homeassistant"]
             self.assertIn("configuration.yaml", inventory["live"])
             self.assertIn("packages/room.yaml", inventory["live"])

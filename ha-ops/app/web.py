@@ -87,7 +87,6 @@ def current_manifest_preview(ctx):
                     "addon_slug_suffix": target.get("addon_slug_suffix"),
                     "resolved_slug": target.get("resolved_slug"),
                     "allow_protected_storage": target.get("allow_protected_storage", False),
-                    "organizer_enabled": manifest_logic.organizer_target_enabled(target),
                 }
             )
         return previews
@@ -827,7 +826,7 @@ def _snapshot_payload(ctx):
     except Exception:
         addons = []
     targets = [
-        {key: item.get(key) for key in ("id", "type", "source", "addon_slug", "resolved_slug", "organizer_enabled")}
+        {key: item.get(key) for key in ("id", "type", "source", "addon_slug", "resolved_slug")}
         for item in current_manifest_preview(ctx)
     ]
     releases = [
@@ -1182,7 +1181,6 @@ POST_ENDPOINTS = (
     "/deleted-devices-revert",
     "/approve-save-conflicts",
     "/addons",
-    "/homeassistant-organizer",
     "/include-redundant-data",
     "/resolve-conflict",
     "/rollback",
@@ -2030,26 +2028,6 @@ def create_handler(ctx):
                 ctx.set_selected_addon_slugs(selected)
                 if self.wants_json():
                     self.send_json({"ok": True, "message": _("message.addons_updated")})
-                else:
-                    self.send_html(render_page(ctx))
-                return
-
-            if route == "/homeassistant-organizer":
-                if self.save_retry_pending():
-                    self.send_save_retry_pending()
-                    return
-                enabled = "homeassistant_organizer" in body
-                if enabled and not manifest_logic.ORGANIZER_PROJECTION_AVAILABLE:
-                    message = _("message.homeassistant_organizer_blocked")
-                    if self.wants_json():
-                        self.send_json({"ok": False, "message": message}, status=400)
-                    else:
-                        self.send_html(render_page(ctx), status=400)
-                    return
-                ctx.set_homeassistant_organizer_enabled(enabled)
-                if self.wants_json():
-                    message = _("message.homeassistant_layout_updated")
-                    self.send_json({"ok": True, "message": message})
                 else:
                     self.send_html(render_page(ctx))
                 return
