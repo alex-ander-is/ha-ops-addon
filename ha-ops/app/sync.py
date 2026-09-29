@@ -1216,6 +1216,73 @@ def restore_homeassistant_apply_rollback(rollback_path, live_path, target, ctx, 
     restore_homeassistant_config(rollback_path, live_path, target, ctx)
 
 
+def _recovery_tree_inventory(root, relative_roots):
+    """Hash every entry under the named write roots without following symlinks."""
+    root = Path(root)
+    if root.is_symlink():
+        raise RuntimeError("Apply recovery target root is a symlink")
+    entries = {}
+    for relative_root in sorted({Path(item) for item in relative_roots}):
+        if relative_root.is_absolute() or ".." in relative_root.parts:
+            raise RuntimeError("Apply recovery write root escapes its target")
+        path = root / relative_root
+        descendants = [path]
+        if path.is_dir() and not path.is_symlink():
+            descendants.extend(sorted(path.rglob("*")))
+        for item in descendants:
+            relative = item.relative_to(root).as_posix()
+            if item.is_symlink():
+                raise RuntimeError(f"Apply recovery inventory contains a symlink: {relative}")
+            if item.is_file():
+                digest = hashlib.sha256()
+                with item.open("rb") as source:
+                    for block in iter(lambda: source.read(1024 * 1024), b""):
+                        digest.update(block)
+                entries[relative] = {"kind": "file", "sha256": digest.hexdigest()}
+            elif item.is_dir():
+                entries[relative] = {"kind": "directory"}
+            elif item.exists():
+                raise RuntimeError(f"Apply recovery inventory contains an unsupported entry: {relative}")
+            else:
+                entries[relative] = {"kind": "absent"}
+    return entries
+
+
+def apply_recovery_inventory(resolved_targets, ctx):
+    """Capture live and intended source content across all Apply write roots."""
+    inventory = {}
+    for target in resolved_targets:
+        target_id = str(target["id"])
+        source = Path(target["source_path"])
+        live = Path(target["live_path"])
+        if target["type"] == "homeassistant":
+            root_files = set()
+            for pattern in ctx.ha_root_patterns:
+                for root in (source, live):
+                    root_files.update(
+                        path.name for path in root.glob(pattern)
+                        if path.name not in ctx.ha_root_excludes
+                    )
+            roots = {Path(name) for name in root_files}
+            roots.update(Path(name) for name in ctx.ha_dirs)
+            if target.get("include_zigbee2mqtt_legacy"):
+                roots.update(Path(name) for name in ctx.zigbee2mqtt_paths)
+            roots.update(Path(".storage") / name for name in ctx.storage_allowlist)
+            roots.add(Path(".storage") / storage_managed.CORE_CONFIG_ENTRIES_RAW)
+            if not homeassistant_organizer_enabled(target):
+                roots.add(organizer.organized_root(live, organizer_cleanup_options(target)).relative_to(live))
+        else:
+            roots = {Path(".")}
+        inventory[target_id] = {
+            "source_path": str(source),
+            "live_path": str(live),
+            "roots": sorted(path.as_posix() for path in roots),
+            "live": _recovery_tree_inventory(live, roots),
+            "intended": _recovery_tree_inventory(source, roots),
+        }
+    return inventory
+
+
 def apply_targets(resolved_targets, details, ctx):
     homeassistant_target = None
     core_stopped = False
@@ -1556,9 +1623,7 @@ def git_checkout_branch_from_best_ref(repo_dir, branch, ctx):
 
 def git_reset_hard(repo_dir, ctx):
     if not git_has_head(repo_dir, ctx):
-        result = ctx.run_command(["git", "clean", "-ffdx"], cwd=repo_dir)
-        if result.returncode != 0:
-            raise RuntimeError(f"git clean failed:\n{result.stderr.strip() or result.stdout.strip()}")
+        git_ops.assert_no_untracked_files(repo_dir, ctx.run_command)
         return
     result = ctx.run_command(["git", "reset", "--hard", "HEAD"], cwd=repo_dir)
     if result.returncode != 0:

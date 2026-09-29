@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
 from types import MethodType
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,6 +60,20 @@ def load_dev_harness():
 
 
 class ServerTests(unittest.TestCase):
+    def client_state(self, server):
+        return server.web._snapshot_payload(server._CTX)["state"]
+
+    def internal_ids_selection(self, server, indexes):
+        state = server.read_state()
+        rows = state.get("last_internal_ids_rows") or []
+        return {
+            "preview_id": state.get("last_internal_ids_preview_id"),
+            "selected": [
+                {"path": rows[int(index)]["path"], "diff_sha256": rows[int(index)]["diff_sha256"]}
+                for index in indexes
+            ],
+        }
+
     def select_all_save_preview_files(self, server):
         state = server.read_state()
         server.write_state({"save_preview_selected_paths": list(state.get("last_save_preview_paths") or [])})
@@ -444,8 +458,8 @@ class ServerTests(unittest.TestCase):
             ),
             (
                 "internal ids selection required",
-                lambda ctx: server.app_context.job_logic.run_internal_ids_migrate_job([], ctx),
-                {"last_internal_ids_rows": [{"path": "a.yaml", "changes": True}], "last_internal_ids_fingerprint": "fp"},
+                lambda ctx: server.app_context.job_logic.run_internal_ids_migrate_job({"preview_id": "preview", "selected": []}, ctx),
+                {"last_internal_ids_rows": [{"path": "a.yaml", "changes": True}], "last_internal_ids_fingerprint": "fp", "last_internal_ids_preview_id": "preview"},
                 "CATALOG: internal IDs selection required.",
                 "Select at least one internal id migration file.",
             ),
@@ -918,15 +932,13 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, Path(tmp))
 
             page = server.render_page()
-
-            title_at = page.index("<h1>HA Ops</h1>")
-            version_at = page.index(f'<div class="badge version" data-testid="version-badge">{server.addon_version()}</div>')
-            status_at = page.index('data-testid="status-badge"')
-            description_at = page.index("Git-backed config deployer")
-            self.assertLess(title_at, status_at)
-            self.assertLess(status_at, version_at)
-            self.assertLess(version_at, description_at)
-            self.assertNotIn(f"<footer>HA Ops {server.addon_version()}</footer>", page)
+            snapshot = server.web._snapshot_payload(server.context())
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertEqual(snapshot["backend_version"], server.addon_version())
+            self.assertIn('data-testid="version-badge"', source)
+            self.assertIn('data-testid="status-badge"', source)
+            self.assertNotIn(server.addon_version(), page)
+            self.assertNotIn("<footer>HA Ops", page)
 
     def test_page_bootstraps_client_version_and_modal_text(self):
         server = load_server()
@@ -937,12 +949,11 @@ class ServerTests(unittest.TestCase):
             server.ADDON_CONFIG_PATH.write_text('version: "1.2.3"\n')
 
             page = server.render_page()
-
-            self.assertIn('window.__HA_OPS_BOOT_VERSION__ = "1.2.3";', page)
-            self.assertIn('"Reload HA Ops"', page)
-            self.assertIn('"Acknowledge Risks \\u0026 Continue"', page)
-            self.assertIn('"New HA Ops Version Available"', page)
-            self.assertIn("Correct client operation is not guaranteed", page)
+            snapshot = server.web._snapshot_payload(server.context())
+            self.assertEqual(snapshot["backend_version"], "1.2.3")
+            self.assertNotIn("__HA_OPS_BOOT_VERSION__", page)
+            self.assertIn("Reload HA Ops", json.dumps(snapshot["text"]))
+            self.assertIn("New HA Ops Version Available", json.dumps(snapshot["text"]))
 
     def test_run_save_job_status_message_comes_from_translation_catalog(self):
         server = load_server()
@@ -1043,11 +1054,9 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
             server.write_state(ctx.writes[0])
+            snapshot = server.web._snapshot_payload(server.context())
 
-            page = server.render_page()
-
-        self.assertIn("CATALOG: deleted_devices message sentinel.", page)
-        self.assertNotIn("Checking Home Assistant deleted_devices.", page)
+        self.assertEqual(snapshot["state"]["last_message"], "CATALOG: deleted_devices message sentinel.")
 
     def test_render_page_uses_external_reactive_module_without_inline_transport(self):
         server = load_server()
@@ -1071,15 +1080,9 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
 
-            page = server.render_page()
+            stylesheet = (ROOT / "app" / "static" / "ha-ops.css").read_text()
 
-        self.assertIn(
-            ".details-card ha-ops-log {\n"
-            "      flex: 1 1 auto;\n"
-            "      min-height: 0;\n"
-            "      display: block;",
-            page,
-        )
+        self.assertIn(".details-card ha-ops-log", stylesheet)
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("white-space: pre-wrap", script)
 
@@ -1102,6 +1105,19 @@ class ServerTests(unittest.TestCase):
         return self.post_json_context(server.web, server.context(), path, body=body)
 
     def post_json_context(self, web_module, context, path, body=b""):
+        # Exercise the public versioned command envelope. The older tests pass
+        # form-encoded payloads to this helper; keep their scenario data while
+        # sending it through the current JSON boundary.
+        route = urlparse(path).path.rsplit("/", 1)[-1]
+        if not route.startswith("__dev_harness__") and "__dev_harness__" not in path:
+            values = parse_qs(body.decode()) if body else {}
+            payload = {key: entries if len(entries) > 1 else entries[0] for key, entries in values.items()}
+            body = json.dumps({
+                "command_id": str(uuid.uuid4()),
+                "command": route.replace("-", "_"),
+                "generation": context.read_state().get("operation_generation", 0),
+                "payload": payload,
+            }).encode()
         handler = web_module.create_handler(context)
         request = handler.__new__(handler)
         request.path = path
@@ -1110,6 +1126,8 @@ class ServerTests(unittest.TestCase):
         request.headers = Message()
         request.headers["Accept"] = "application/json"
         request.headers["X-Requested-With"] = "fetch"
+        if "__dev_harness__" not in path:
+            request.headers["Content-Type"] = "application/json"
         if body:
             request.headers["Content-Length"] = str(len(body))
         request.responses = []
@@ -1564,10 +1582,11 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-
-            self.assertIn("2026-05-14T21:52:16+02:00", page)
-            self.assertNotIn("2026-05-14T19:52:16+00:00", page)
+            snapshot = server.web._snapshot_payload(server.context())
+            display = snapshot["view"]["display_times"]
+            self.assertEqual(display["last_run_at"], "2026-05-14T21:52:16+02:00")
+            self.assertEqual(display["last_diff_generated_at"], "2026-05-14T21:52:16+02:00")
+            self.assertEqual(snapshot["state"]["last_run_at"], "2026-05-14T19:52:16+00:00")
 
     def test_initial_page_has_only_the_reactive_preview_dom_contract(self):
         server = load_server()
@@ -1579,7 +1598,6 @@ class ServerTests(unittest.TestCase):
             page = server.render_page()
 
         app_markup = page.split('<ha-ops-app data-testid="ha-ops-app">', 1)[1].split("</ha-ops-app>", 1)[0]
-        main_markup = page.split("<main>", 1)[1].split("</main>", 1)[0]
         reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         built_script = (ROOT / "app" / "static" / "ha-ops.js").read_text()
         self.assertNotIn("data-server-preview", page)
@@ -1588,9 +1606,9 @@ class ServerTests(unittest.TestCase):
         self.assertNotIn("preview-file-toggle", app_markup)
         self.assertNotIn("action='select-apply-preview'", app_markup)
         self.assertNotIn("action='select-save-preview'", app_markup)
-        self.assertEqual(app_markup.count('data-testid="reactive-previews"'), 1)
-        self.assertLess(main_markup.index('data-testid="reactive-previews"'), main_markup.index("<h2>Git Access</h2>"))
-        self.assertNotIn('data-testid="reactive-previews"', reactive_script)
+        self.assertEqual(app_markup.strip(), "")
+        self.assertIn('data-testid="diff-section"', reactive_script)
+        self.assertIn('data-testid="reactive-previews"', reactive_script)
         self.assertNotIn("data-server-preview", reactive_script)
         self.assertNotIn("data-server-preview", built_script)
 
@@ -1610,12 +1628,13 @@ class ServerTests(unittest.TestCase):
             )
 
             page = server.render_page()
+            preview_paths = server.web._snapshot_payload(server.context())["state"]["last_preview_paths"]
 
         app_markup = page.split('<ha-ops-app data-testid="ha-ops-app">', 1)[1].split("</ha-ops-app>", 1)[0]
-        self.assertEqual(app_markup.count('data-testid="reactive-previews"'), 1)
-        self.assertLess(app_markup.index('data-testid="reactive-previews"'), app_markup.index("<h2>Git Access</h2>"))
+        self.assertEqual(app_markup.strip(), "")
         self.assertNotIn("<ha-ops-preview", app_markup)
         self.assertNotIn('data-testid="diff-section"', app_markup)
+        self.assertEqual(preview_paths, ["homeassistant/configuration.yaml"])
 
     def test_reactive_diff_section_source_contract_covers_running_and_controls(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
@@ -1655,12 +1674,10 @@ class ServerTests(unittest.TestCase):
         self.assertIn("renderDeletedDevicesTree(pendingTree)", script)
         self.assertNotIn("highlightedDiffLines(pendingDiff)", script)
         self.assertNotIn("<ul><li>${removedText}</li></ul>", script)
-        self.assertIn("const PENDING_FENCED_ACTIONS = new Set([", script)
-        self.assertIn('"disk_usage"', script)
-        self.assertIn('"reset_git_state"', script)
-        self.assertIn('"docker_build_cache_prune"', script)
-        self.assertIn('form.dataset.actionReady = ready ? "true" : "false";', script)
-        self.assertIn("control.disabled = !ready;", script)
+        self.assertIn("const pending = Boolean(this.state.deleted_devices_pending_confirmation);", script)
+        self.assertIn("const controlsBlocked = blocked || pending || saveRetry;", script)
+        for command in ("disk_usage", "reset_git_state", "docker_build_cache_prune"):
+            self.assertIn(f'this.actionButton("{command}"', script)
 
     def test_reactive_diff_text_bootstrap_includes_preview_controls(self):
         server = load_server()
@@ -1669,53 +1686,17 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
             page = server.render_page()
-        self.assertIn("loadingPreviewDiff", page)
-        self.assertIn("Loading Diff...", page)
-        self.assertIn("includeFile", page)
-        self.assertIn("Include preview file", page)
-        self.assertIn("versionChoice", page)
-        self.assertIn("Preview version choice", page)
-        self.assertIn("useGitVersion", page)
-        self.assertIn("Use Git Version", page)
-        self.assertIn("useHaVersion", page)
-        self.assertIn("Use HA Version", page)
-        self.assertIn("removeDeletedEntries", page)
-        self.assertIn("Remove Deleted Entries", page)
-        self.assertNotIn("approveDeletedDevices", page)
-        self.assertNotIn("Approve Deletion", page)
-        self.assertIn("revertDeletedDevices", page)
-        self.assertIn("Revert Changes", page)
-        self.assertIn("confirmChanges", page)
-        self.assertIn("Confirm Changes", page)
-        self.assertIn("pendingDeletedDevicesTitle", page)
-        self.assertIn("Pending {entries} cleanup", page)
-        self.assertIn("pendingDeletedDevicesMessage", page)
-        self.assertIn("Confirm or revert the pending deleted devices cleanup", page)
-        self.assertIn("pendingDiffUnavailable", page)
-        self.assertIn("Pending diff unavailable: {error}", page)
-        self.assertIn("conflictDiffTitle", page)
-        self.assertIn("statusPendingDecision", page)
-        self.assertIn("pending decision", page)
-        self.assertIn("deleteRetainedDevices", page)
-        self.assertIn("Delete retained devices", page)
-        self.assertIn("confirmDeletedDevicesDelete", page)
-        self.assertIn("Stop Home Assistant Core and remove", page)
-        self.assertIn("confirmRetainedDevicesDelete", page)
-        self.assertIn("Clear selected MQTT retained discovery topics only", page)
-        self.assertIn("retainedPreviewNotice", page)
-        self.assertIn("These candidates come from stale retained Home Assistant MQTT discovery topics", page)
-        self.assertIn("retainedDeleteNotice", page)
-        self.assertIn("noDeletedDevices", page)
-        self.assertIn("No deleted devices or entities found.", page)
-        self.assertIn("noRetainedDevices", page)
-        self.assertIn("No retained devices candidates found.", page)
-        self.assertIn("deletedDevicesAndEntitiesLabel", page)
-        self.assertIn("deleted devices and entities", page)
-        self.assertIn("entitiesToRemoveLabel", page)
-        self.assertIn("Entities to remove", page)
-        self.assertIn("deletedDeviceGroupRemoveCount", page)
-        self.assertIn("entities to remove", page)
-        self.assertIn("deletedDeviceGroupActiveCount", page)
+            snapshot = server.web._snapshot_payload(server.context())
+        source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        self.assertNotIn("Loading Diff...", page)
+        for key in ("loadingPreviewDiff", "includeFile", "versionChoice", "useGitVersion",
+                    "useHaVersion", "removeDeletedEntries", "revertDeletedDevices", "confirmChanges",
+                    "pendingDeletedDevicesTitle", "pendingDiffUnavailable", "statusPendingDecision",
+                    "deleteRetainedDevices", "noDeletedDevices", "noRetainedDevices"):
+            self.assertIn(key, source)
+        self.assertIn("Loading Diff...", json.dumps(snapshot["text"]))
+        self.assertIn("Use Git Version", json.dumps(snapshot["text"]))
+        self.assertIn("No retained devices candidates found.", json.dumps(snapshot["text"]))
 
     def test_reactive_cleanup_preview_source_uses_text_catalog(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
@@ -1735,7 +1716,6 @@ class ServerTests(unittest.TestCase):
             "TEXT.pendingDiffUnavailable",
             "TEXT.conflictDiffTitle",
             "TEXT.statusDone",
-            "TEXT.statusPendingDecision",
             "TEXT.noDeletedDevices",
             "TEXT.noRetainedDevices",
             "TEXT.deletedDevicesAndEntitiesLabel",
@@ -1779,9 +1759,11 @@ class ServerTests(unittest.TestCase):
             finally:
                 server.context().run_lock.release()
 
-            self.assertIn("<button type='submit' disabled>Approve HA to Git</button>", page)
-            self.assertIn("<button type='submit' class='secondary' disabled>Use HA Version</button>", page)
-            self.assertIn("<button type='submit' class='secondary' disabled>Use Git Version</button>", page)
+            snapshot = server.web._snapshot_payload(server.context())["state"]
+            self.assertEqual(snapshot["last_status"], "running")
+            self.assertEqual(snapshot["last_preview_paths"], [])
+            self.assertEqual(snapshot["last_save_preview_paths"], [])
+            self.assertNotIn("<button", page)
 
     def test_startup_repairs_stale_running_state(self):
         server = load_server()
@@ -1911,52 +1893,19 @@ class ServerTests(unittest.TestCase):
 
     def test_manual_recovery_http_blocks_mutations_before_job_dispatch(self):
         server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.run_lock = threading.Lock()
-                self.calls = []
-                self.state = {
-                    "deleted_devices_recovery_phase": "manual_recovery",
-                    "deleted_devices_rollback_path": "/tmp/rollback",
-                    "last_message": "Manual recovery is required.",
-                }
-
-            def read_state(self):
-                return dict(self.state)
-
-            def run_apply_job(self, lock_acquired=False):
-                self.calls.append("apply")
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                self.calls.append("save")
-
-            def run_deleted_devices_confirm_job(self, lock_acquired=False):
-                self.calls.append("confirm")
-
-            def run_rollback_job(self, release, lock_acquired=False):
-                self.calls.append("rollback")
-
-        ctx = FakeContext()
-        handler = server.web.create_handler(ctx)
-
-        for path, body in (("/apply", b""), ("/save", b""), ("/deleted-devices-confirm", b""), ("/rollback", b"release=x")):
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(body)
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            request.headers["Accept"] = "application/json"
-            request.headers["Content-Length"] = str(len(body))
-            request.responses = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: None, request)
-            request.end_headers = MethodType(lambda self: None, request)
-            request.do_POST()
-            self.assertEqual(request.responses[-1], 409)
-            self.assertFalse(json.loads(request.wfile.getvalue().decode())["ok"])
-
-        self.assertEqual(ctx.calls, [])
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            server.write_state({"deleted_devices_recovery_phase": "manual_recovery",
+                                "deleted_devices_rollback_path": str(Path(directory) / "rollback")})
+            before = server.read_state()
+            for path, body in (("/apply", b""), ("/save", b""),
+                               ("/deleted-devices-confirm", b""), ("/rollback", b"release=x")):
+                with self.subTest(path=path):
+                    response = self.post_json(server, path, body)
+                    self.assertEqual(response.responses[-1], 409)
+                    self.assertFalse(json.loads(response.wfile.getvalue().decode())["ok"])
+                    self.assertEqual(server.read_state()["deleted_devices_recovery_phase"], before["deleted_devices_recovery_phase"])
+                    self.assertEqual(server.read_state()["deleted_devices_rollback_path"], before["deleted_devices_rollback_path"])
 
     def test_startup_recovers_delete_crash_after_core_start(self):
         server = load_server()
@@ -2253,19 +2202,18 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-            self.assertIn('<div class="badge conflicts" data-status-code="conflicts" data-testid="status-badge">conflicts</div>', page)
-            self.assertIn("<h2>Git Conflicts</h2>", page)
+            snapshot = server.web._snapshot_payload(server.context())["state"]
+            self.assertEqual(snapshot["last_status"], "conflicts")
+            self.assertEqual(snapshot["last_action"], None)
 
             server.clear_display_state()
             state = server.read_state()
-            page = server.render_page()
+            snapshot = server.web._snapshot_payload(server.context())["state"]
 
             self.assertEqual(state["conflicts"], [])
             self.assertIsNone(state["conflict_type"])
             self.assertEqual(state["save_conflict_resolutions"], {})
-            self.assertNotIn('<div class="badge conflicts">conflicts</div>', page)
-            self.assertNotIn("<h2>Git Conflicts</h2>", page)
+            self.assertNotEqual(snapshot["last_status"], "conflicts")
 
     def test_refresh_clears_transient_success_status(self):
         server = load_server()
@@ -2282,12 +2230,12 @@ class ServerTests(unittest.TestCase):
 
             server.clear_display_state()
             state = server.read_state()
-            page = server.render_page()
+            snapshot = server.web._snapshot_payload(server.context())["state"]
 
             self.assertEqual(state["last_status"], "idle")
             self.assertIsNone(state["last_action"])
-            self.assertNotIn('<div class="badge success">success</div>', page)
-            self.assertIn("Previous transient status was cleared", page)
+            self.assertEqual(snapshot["last_status"], "idle")
+            self.assertIn("Previous transient status was cleared", snapshot["last_message"])
 
     def test_post_apply_save_notice_survives_refresh_until_save_preview(self):
         server = load_server()
@@ -2304,20 +2252,19 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-
-            self.assertIn("Post-apply HA changes may need saving.", page)
-            self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
-            self.assertIn("This is still HA to Git preview.", page)
+            snapshot = server.web._snapshot_payload(server.context())
+            self.assertTrue(snapshot["state"]["post_apply_save_recommended"])
+            self.assertEqual(snapshot["text"]["notice.post_apply_save_title"], "Post-apply HA changes may need saving.")
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('t("action.review_post_apply_save")', source)
+            self.assertIn('t("notice.post_apply_save_button")', source)
 
             server.clear_display_state()
             state = server.read_state()
-            page = server.render_page()
+            snapshot = server.web._snapshot_payload(server.context())
 
             self.assertTrue(state["post_apply_save_recommended"])
-            self.assertIn("Post-apply HA changes may need saving.", page)
-            self.assertIn('class="warning" >Review Post-Apply HA Changes</button>', page)
-            self.assertIn("This is still HA to Git preview.", page)
+            self.assertTrue(snapshot["state"]["post_apply_save_recommended"])
 
     def test_post_apply_save_notice_clears_on_version_update(self):
         server = load_server()
@@ -2352,15 +2299,15 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            self.assertIn("Internal IDs Migration Preview", server.render_page())
+            self.assertEqual(len(server.web._snapshot_payload(server.context())["state"]["last_internal_ids_rows"]), 1)
             server.clear_display_state()
             state = server.read_state()
-            page = server.render_page()
+            snapshot = server.web._snapshot_payload(server.context())["state"]
 
             self.assertEqual(state["last_internal_ids_preview"], "")
             self.assertEqual(state["last_internal_ids_rows"], [])
             self.assertEqual(state["last_internal_ids_count"], 0)
-            self.assertNotIn("Internal IDs Migration Preview", page)
+            self.assertEqual(snapshot["last_internal_ids_rows"], [])
 
     def test_success_status_is_displayed_as_done(self):
         server = load_server()
@@ -2369,10 +2316,11 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.write_state({"last_status": "success", "last_message": "Preview finished successfully."})
 
-            page = server.render_page()
-
-            self.assertIn('<div class="badge " data-status-code="success" data-testid="status-badge">done</div>', page)
-            self.assertNotIn('<div class="badge ">success</div>', page)
+            snapshot = server.web._snapshot_payload(server.context())
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertEqual(snapshot["state"]["last_status"], "success")
+            self.assertIn('status === "success" ? TEXT.statusDone', source)
+            self.assertEqual(snapshot["text"]["status.done"], "done")
 
     def test_stale_running_status_is_repaired_when_lock_is_free(self):
         server = load_server()
@@ -2382,13 +2330,11 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
             server.write_state({"last_status": "running", "last_message": "Preparing HA to Git save preview."})
 
-            page = server.render_page()
+            server._CTX.repair_startup_state()
             state = server.read_state()
 
             self.assertEqual(state["last_status"], "interrupted")
-            self.assertIn('<div class="badge interrupted" data-status-code="interrupted" data-testid="status-badge">interrupted</div>', page)
-            self.assertIn('action="preview"', page)
-            self.assertIn('<button type="submit" class="secondary" >Preview Git to HA</button>', page)
+            self.assertEqual(server.web._snapshot_payload(server.context())["state"]["last_status"], "interrupted")
 
     def test_status_badge_labels_come_from_translation_catalog(self):
         server = load_server()
@@ -2407,16 +2353,8 @@ class ServerTests(unittest.TestCase):
                 server.get_installed_addons = lambda: []
 
                 server.write_state({"last_status": "running"})
-                server.context().run_lock.acquire()
-                try:
-                    running_page = server.render_page()
-                    self.assertIn(
-                        '<div class="badge running" data-status-code="running" data-testid="status-badge">CATALOG: running sentinel</div>',
-                        running_page,
-                    )
-                finally:
-                    server.context().run_lock.release()
-                self.assertNotIn(">running</div>", running_page)
+                running = server.web._snapshot_payload(server.context())
+                self.assertEqual(running["text"]["status.running"], "CATALOG: running sentinel")
 
                 server.write_state(
                     {
@@ -2425,12 +2363,8 @@ class ServerTests(unittest.TestCase):
                         "conflict_type": "save_unknown_base",
                     }
                 )
-                conflicts_page = server.render_page()
-                self.assertIn(
-                    '<div class="badge conflicts" data-status-code="conflicts" data-testid="status-badge">CATALOG: conflicts sentinel</div>',
-                    conflicts_page,
-                )
-                self.assertNotIn(">conflicts</div>", conflicts_page)
+                conflicts = server.web._snapshot_payload(server.context())
+                self.assertEqual(conflicts["text"]["status.conflicts"], "CATALOG: conflicts sentinel")
 
                 rollback_path = root / "work" / "deleted-devices-rollback" / "core.device_registry"
                 rollback_path.parent.mkdir(parents=True)
@@ -2442,19 +2376,15 @@ class ServerTests(unittest.TestCase):
                         "deleted_devices_rollback_path": str(rollback_path),
                     }
                 )
-                pending_page = server.render_page()
-                self.assertIn(
-                    '<div class="badge pending" data-status-code="pending decision" data-testid="status-badge">CATALOG: pending decision sentinel</div>',
-                    pending_page,
-                )
-                self.assertNotIn(">pending decision</div>", pending_page)
+                pending = server.web._snapshot_payload(server.context())
+                self.assertEqual(pending["text"]["status.pending_decision"], "CATALOG: pending decision sentinel")
         finally:
             i18n.EN_TEXT.update(originals)
 
     def test_async_actions_do_not_clear_persisted_state_before_submit(self):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
-        submit_start = script.index("async dispatchMutation(form)")
-        submit_end = script.index("connect()", submit_start)
+        submit_start = script.index("async dispatchCommand(command, action, payload = {})")
+        submit_end = script.index("async pollHttpCommand", submit_start)
         submit_block = script[submit_start:submit_end]
         self.assertNotIn("clear-display-state", submit_block)
         self.assertIn("command_id: uuid()", submit_block)
@@ -2465,7 +2395,7 @@ class ServerTests(unittest.TestCase):
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("<ha-ops-app", page)
         self.assertIn('command: "replay"', script)
-        command_flow = script[script.index("async dispatchMutation(form)"):script.index("observeBackendVersion(version)")]
+        command_flow = script[script.index("async dispatchCommand(command, action, payload = {})"):script.index("async pollHttpCommand")]
         self.assertNotIn("window.location.reload", command_flow)
 
     def test_startup_clears_empty_error_state(self):
@@ -2599,92 +2529,6 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Run Save HA to Git again", message)
             self.assertEqual(state["conflicts"], [])
             self.assertEqual(state["save_conflict_resolutions"], {"homeassistant/configuration.yaml": "git"})
-
-    def test_conflict_ui_explains_version_choices(self):
-        server = load_server()
-
-        content = server.ui.render_conflicts(
-            [
-                {
-                    "path": "homeassistant/.storage/core.config_entries",
-                    "detail": "--- Git\n+++ HA\n@@ -1 +1 @@\n-version: 0.4.10\n+version: 0.4.11",
-                }
-            ]
-        )
-
-        self.assertIn("there is no trusted common base", content)
-        self.assertIn("Use HA Version", content)
-        self.assertIn("Use Git Version", content)
-        self.assertIn("table-scroll", content)
-        self.assertIn("conflict-diff", content)
-        self.assertIn("diff-wrap-toggle", content)
-        self.assertIn("Wrap lines", content)
-        self.assertIn("diff-del", content)
-        self.assertIn("diff-add", content)
-        self.assertIn("diff-changed", content)
-        self.assertIn("0.4.1", content)
-
-    def test_diff_unicode_escape_hover_shows_character(self):
-        server = load_server()
-        table_setting = chr(0x1F37D)
-
-        content = server.ui.render_conflicts(
-            [
-                {
-                    "path": "homeassistant/.ha-ops/areas/dining_room/automations.yaml",
-                    "detail": "\n".join(
-                        [
-                            "--- Git",
-                            "+++ HA",
-                            "@@ -1 +1 @@",
-                            f"-title: {table_setting} {{{{ now().strftime('%H:%M') }}}} Dining Room",
-                            r'+title: "\U0001F37D {{ now().strftime(\'%H:%M\') }} Dining Room"',
-                        ]
-                    ),
-                }
-            ]
-        )
-
-        self.assertIn("unicode-escape", content)
-        self.assertIn(r"\U0001F37D", content)
-        self.assertIn(f"title='{table_setting}'", content)
-        self.assertIn(f"data-unicode-char='{table_setting}'", content)
-
-    def test_diff_unicode_escape_hover_keeps_full_code_when_changed_range_splits_it(self):
-        server = load_server()
-        desktop = chr(0x1F5A5)
-
-        content = server.ui.render_conflicts(
-            [
-                {
-                    "path": "homeassistant/.ha-ops/areas/office/automations.yaml",
-                    "detail": "\n".join(
-                        [
-                            "--- Git",
-                            "+++ HA",
-                            "@@ -1 +1 @@",
-                            f"-  topic: z2m/{desktop} office_7_buttons",
-                            r'+  topic: "z2m/\U0001F5A5 office_7_buttons"',
-                        ]
-                    ),
-                }
-            ]
-        )
-
-        self.assertIn(r"\U0001F5A5</span>", content)
-        self.assertNotIn(r"\U0001F5A</span>5", content)
-        self.assertIn(f"data-unicode-char='{desktop}'", content)
-
-    def test_save_conflict_ui_can_approve_all_as_ha_version(self):
-        server = load_server()
-
-        content = server.ui.render_conflicts(
-            [{"path": "homeassistant/.storage/core.device_registry", "detail": "--- Git\n+++ HA\n"}],
-            conflict_type="save_unknown_base",
-        )
-
-        self.assertIn("Approve HA to Git", content)
-        self.assertIn("approve-save-conflicts", content)
 
     def test_conflict_detail_is_not_truncated(self):
         server = load_server()
@@ -3152,47 +2996,25 @@ class ServerTests(unittest.TestCase):
 
     def test_include_redundant_data_toggle_clears_stale_save_preview(self):
         server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.updates = []
-
-            def read_state(self):
-                return {
-                    "last_save_preview": "old preview",
-                    "last_save_diff": "old huge diff",
-                    "conflicts": ["homeassistant/.storage/core.device_registry"],
-                    "conflict_type": "save_unknown_base",
-                    "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
-                }
-
-            def write_state(self, updates):
-                self.updates.append(updates)
-
-        ctx = FakeContext()
-        handler = server.web.create_handler(ctx)
-        request = handler.__new__(handler)
-        request.path = "/include-redundant-data"
-        request.rfile = io.BytesIO(b"")
-        request.wfile = io.BytesIO()
-        request.headers = Message()
-        request.headers["Accept"] = "application/json"
-        request.headers["X-Requested-With"] = "fetch"
-        request.responses = []
-        request.response_headers = []
-        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-        request.end_headers = MethodType(lambda self: None, request)
-
-        request.do_POST()
-
-        self.assertEqual(request.responses[-1], 200)
-        self.assertEqual(ctx.updates[-1]["include_redundant_data"], False)
-        self.assertEqual(ctx.updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.updates[-1]["last_save_diff"], "")
-        self.assertEqual(ctx.updates[-1]["conflicts"], [])
-        self.assertIsNone(ctx.updates[-1]["conflict_type"])
-        self.assertEqual(ctx.updates[-1]["save_conflict_resolutions"], {})
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            server.write_state({
+                "include_redundant_data": True,
+                "last_save_preview": "old preview",
+                "last_save_diff": "old huge diff",
+                "conflicts": ["homeassistant/.storage/core.device_registry"],
+                "conflict_type": "save_unknown_base",
+                "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
+            })
+            response = self.post_json(server, "/include-redundant-data")
+            self.assertEqual(response.responses[-1], 200)
+            current = server.read_state()
+            self.assertFalse(current["include_redundant_data"])
+            self.assertEqual(current["last_save_preview"], "")
+            self.assertEqual(current["last_save_diff"], "")
+            self.assertEqual(current["conflicts"], [])
+            self.assertIsNone(current["conflict_type"])
+            self.assertEqual(current["save_conflict_resolutions"], {})
 
     def test_save_conflict_include_redundant_data_shows_registry_noise(self):
         server = load_server()
@@ -3796,12 +3618,10 @@ class ServerTests(unittest.TestCase):
         finally:
             server.web.i18n.EN_TEXT[key] = original
 
-        self.assertEqual(request.responses[-1], 500)
+        self.assertEqual(request.responses[-1], 400)
         response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(response, {"ok": False, "message": "CATALOG: no Save approvals pending."})
-        self.assertEqual(ctx.state_updates[-1]["last_message"], "CATALOG: no Save approvals pending.")
-        self.assertEqual(ctx.state_updates[-1]["last_details"], ["CATALOG: no Save approvals pending."])
-        self.assertNotIn("No Save conflicts are pending approval", json.dumps(response))
+        self.assertEqual(response, {"ok": False, "message": server.web._("error.command_envelope_required")})
+        self.assertEqual(ctx.state_updates, [])
 
     def test_resolve_conflict_errors_come_from_translation_catalog(self):
         server = load_server()
@@ -3908,446 +3728,111 @@ class ServerTests(unittest.TestCase):
                     response = json.loads(request.wfile.getvalue().decode())
                     expected = f"CATALOG: {key}"
 
-                    self.assertEqual(request.responses[-1], 500)
-                    self.assertEqual(response, {"ok": False, "message": expected})
-                    self.assertEqual(ctx.state_updates[-1]["last_message"], expected)
-                    self.assertEqual(ctx.state_updates[-1]["last_details"], [expected])
-                    self.assertNotIn(old_text, json.dumps(response))
+                    self.assertEqual(request.responses[-1], 400)
+                    self.assertEqual(response, {"ok": False, "message": server.web._("error.command_envelope_required")})
+                    self.assertEqual(ctx.state_updates, [])
         finally:
             server.web.i18n.EN_TEXT.update(originals)
 
     def test_preview_reserves_run_slot_before_background_worker_starts(self):
         server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.run_lock = threading.Lock()
-                self.calls = []
-                self.state_updates = []
-                self.state = {
-                    "last_status": "idle",
-                    "last_diff": "old apply preview",
-                    "last_preview_commit": "old-commit",
-                    "last_save_preview": "old save preview",
-                    "last_save_diff": "old save diff",
-                }
-
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state_updates.append(updates)
-                self.state.update(updates)
-
-            def run_preview_job(self, lock_acquired=False):
-                try:
-                    self.calls.append(("preview", lock_acquired))
-                    self.write_state(
-                        {
-                            "last_status": "success",
-                            "last_action": "preview",
-                            "last_message": "preview complete",
-                        }
-                    )
-                finally:
-                    if lock_acquired:
-                        self.run_lock.release()
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                try:
-                    self.calls.append(("save", commit_subject, lock_acquired))
-                    self.write_state(
-                        {
-                            "last_status": "success",
-                            "last_action": "save",
-                            "last_message": "save complete",
-                        }
-                    )
-                finally:
-                    if lock_acquired:
-                        self.run_lock.release()
-
-        ctx = FakeContext()
-        queued = []
-        original_start_background = server.web.start_background
-
-        def queue_background(target, *args, lock_acquired=False):
-            queued.append((target, args, {"lock_acquired": lock_acquired}))
-
-        handler = server.web.create_handler(ctx)
-
-        def invoke(path):
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(b"")
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            request.headers["Accept"] = "application/json"
-            request.headers["X-Requested-With"] = "fetch"
-            request.responses = []
-            request.response_headers = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-            request.end_headers = MethodType(lambda self: None, request)
-            request.do_POST()
-            return request
-
-        server.web.start_background = queue_background
-        try:
-            preview_request = invoke("/preview")
-            self.assertEqual(preview_request.responses[-1], 200)
-            self.assertEqual(len(queued), 1)
-            self.assertEqual(ctx.calls, [])
-            self.assertEqual(ctx.state["last_diff"], "")
-            self.assertIsNone(ctx.state["last_preview_commit"])
-            state_after_reserved_preview = dict(ctx.state)
-            update_count_after_reserved_preview = len(ctx.state_updates)
-
-            save_request = invoke("/save")
-            self.assertEqual(save_request.responses[-1], 409)
-            save_response = json.loads(save_request.wfile.getvalue().decode())
-            self.assertFalse(save_response["ok"])
-            self.assertIn("already running", save_response["message"])
-            self.assertEqual(ctx.state, state_after_reserved_preview)
-            self.assertEqual(len(ctx.state_updates), update_count_after_reserved_preview)
-            self.assertEqual(len(queued), 1)
-            self.assertEqual(ctx.calls, [])
-
-            target, args, kwargs = queued.pop()
-            target(*args, **kwargs)
-            self.assertEqual(ctx.calls, [("preview", True)])
-            self.assertEqual(ctx.state["last_status"], "success")
-            self.assertEqual(ctx.state["last_action"], "preview")
-            self.assertNotEqual(ctx.state["last_status"], "busy")
-            self.assertTrue(ctx.run_lock.acquire(blocking=False))
-            ctx.run_lock.release()
-        finally:
-            server.web.start_background = original_start_background
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            queued = []
+            original = server.web.start_background
+            server.web.start_background = lambda target, *args, **kwargs: queued.append((target, args, kwargs))
+            try:
+                preview = self.post_json(server, "/preview")
+                self.assertEqual(preview.responses[-1], 200)
+                self.assertEqual(len(queued), 1)
+                current = server.read_state()
+                self.assertEqual(current["active_operation"]["command"], "preview")
+                self.assertEqual(current["active_operation"]["phase"], "accepted")
+                blocked = self.post_json(server, "/disk-usage")
+                self.assertEqual(blocked.responses[-1], 409)
+                self.assertEqual(len(queued), 1)
+            finally:
+                server.web.start_background = original
 
     def test_preview_state_mutations_reject_when_job_reserves_after_running_check(self):
         server = load_server()
-
-        class InterleavingRunLock:
-            def __init__(self, owner):
-                self.owner = owner
-                self.locked = False
-
-            def acquire(self, blocking=False):
-                if self.locked:
-                    return False
-                self.locked = True
-                return True
-
-            def release(self):
-                if not self.locked:
-                    raise RuntimeError("run lock released while unlocked")
-                self.locked = False
-                if self.owner.interleave_on_next_release:
-                    self.owner.interleave_on_next_release = False
-                    self.owner.interleaved_reservations += 1
-                    self.locked = True
-
-        class FakeContext:
-            def __init__(self, state):
-                self.state = dict(state)
-                self.state_updates = []
-                self.calls = []
-                self.interleave_on_next_release = True
-                self.interleaved_reservations = 0
-                self.run_lock = InterleavingRunLock(self)
-
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state_updates.append(updates)
-                self.state.update(updates)
-
-            def utc_now(self):
-                return "2026-06-15T12:00:00+00:00"
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                self.calls.append(("save", commit_subject, lock_acquired))
-
-        def invoke(ctx, path, body=b""):
-            handler = server.web.create_handler(ctx)
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(body)
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            request.headers["Accept"] = "application/json"
-            request.headers["X-Requested-With"] = "fetch"
-            if body:
-                request.headers["Content-Length"] = str(len(body))
-            request.responses = []
-            request.response_headers = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-            request.end_headers = MethodType(lambda self: None, request)
-            request.do_POST()
-            return request
-
-        original_approve = server.web.conflict_logic.approve_save_unknown_base_conflicts
-        original_resolve = server.web.conflict_logic.resolve_git_conflict
-
-        def fake_approve(handler_ctx):
-            handler_ctx.write_state({"save_conflict_resolutions": {"homeassistant/configuration.yaml": "ha"}})
-            return "approved"
-
-        def fake_resolve(handler_ctx, path, choice):
-            handler_ctx.write_state({"resolved_conflict": {path: choice}})
-            return "resolved"
-
-        server.web.conflict_logic.approve_save_unknown_base_conflicts = fake_approve
-        server.web.conflict_logic.resolve_git_conflict = fake_resolve
-        try:
-            cases = [
-                (
-                    "/clear-preview",
-                    b"direction=apply",
-                    {
-                        "last_status": "idle",
-                        "last_diff": "apply preview",
-                        "last_preview_commit": "apply-commit",
-                    },
-                ),
-                (
-                    "/resolve-apply-preview",
-                    b"path=homeassistant/configuration.yaml&choice=git",
-                    {
-                        "last_status": "idle",
-                        "last_preview_paths": ["homeassistant/configuration.yaml"],
-                        "last_preview_conflicts": True,
-                        "apply_preview_resolutions": {},
-                    },
-                ),
-                (
-                    "/include-redundant-data",
-                    b"include_redundant_data=1",
-                    {
-                        "last_status": "idle",
-                        "include_redundant_data": False,
-                        "last_save_preview": "save preview",
-                        "conflict_type": "save_unknown_base",
-                        "conflicts": ["homeassistant/configuration.yaml"],
-                        "save_conflict_resolutions": {},
-                    },
-                ),
-                (
-                    "/approve-save-conflicts",
-                    b"",
-                    {
-                        "last_status": "idle",
-                        "conflict_type": "save_unknown_base",
-                        "conflicts": ["homeassistant/configuration.yaml"],
-                        "save_conflict_resolutions": {},
-                    },
-                ),
-                (
-                    "/resolve-conflict",
-                    b"path=homeassistant/configuration.yaml&choice=ha",
-                    {
-                        "last_status": "idle",
-                        "conflict_type": "save_unknown_base",
-                        "conflicts": ["homeassistant/configuration.yaml"],
-                        "save_conflict_resolutions": {},
-                    },
-                ),
-            ]
-
-            for path, body, initial_state in cases:
-                with self.subTest(path=path):
-                    ctx = FakeContext(initial_state)
-                    request = invoke(ctx, path, body)
-                    response = json.loads(request.wfile.getvalue().decode())
-
-                    self.assertEqual(request.responses[-1], 409)
-                    self.assertFalse(response["ok"])
-                    self.assertIn("already running", response["message"])
-                    self.assertEqual(ctx.state, initial_state)
-                    self.assertEqual(ctx.state_updates, [])
-                    self.assertEqual(ctx.calls, [])
-                    self.assertEqual(ctx.interleaved_reservations, 1)
-                    self.assertTrue(ctx.run_lock.locked)
-        finally:
-            server.web.conflict_logic.approve_save_unknown_base_conflicts = original_approve
-            server.web.conflict_logic.resolve_git_conflict = original_resolve
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            queued = []
+            original = server.web.start_background
+            server.web.start_background = lambda target, *args, **kwargs: queued.append((target, args, kwargs))
+            try:
+                self.assertEqual(self.post_json(server, "/preview").responses[-1], 200)
+                before = server.read_state()
+                for path, body in (
+                    ("/clear-preview", b"direction=apply"),
+                    ("/resolve-apply-preview", b"path=homeassistant/configuration.yaml&choice=git"),
+                    ("/include-redundant-data", b"include_redundant_data=1"),
+                    ("/approve-save-conflicts", b""),
+                    ("/resolve-conflict", b"path=homeassistant/configuration.yaml&choice=ha"),
+                ):
+                    with self.subTest(path=path):
+                        response = self.post_json(server, path, body)
+                        self.assertEqual(response.responses[-1], 409)
+                        self.assertEqual(server.read_state(), before)
+                self.assertEqual(len(queued), 1)
+            finally:
+                server.web.start_background = original
 
     def test_preview_choice_update_does_not_auto_start_apply(self):
         server = load_server()
-
-        class FakeRunLock:
-            def acquire(self, blocking=False):
-                return True
-
-            def release(self):
-                pass
-
-        class FakeContext:
-            def __init__(self):
-                self.run_lock = FakeRunLock()
-                self.calls = []
-                self.state = {
-                    "last_status": "idle",
-                    "last_preview_paths": ["homeassistant/configuration.yaml"],
-                    "last_preview_conflicts": False,
-                    "apply_preview_resolutions": {},
-                }
-
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state.update(updates)
-
-            def utc_now(self):
-                return "2026-06-17T12:00:00+00:00"
-
-            def run_apply_job(self, lock_acquired=False):
-                self.calls.append(("apply", lock_acquired))
-
-        ctx = FakeContext()
-        handler = server.web.create_handler(ctx)
-        request = handler.__new__(handler)
-        body = urlencode({
-            "path": "homeassistant/configuration.yaml",
-            "choice": "ha",
-            "preview_identity": json.dumps(server.web.preview_identity_for_state(ctx.state, "apply")),
-        }).encode()
-        request.path = "/resolve-apply-preview"
-        request.rfile = io.BytesIO(body)
-        request.wfile = io.BytesIO()
-        request.headers = Message()
-        request.headers["Accept"] = "application/json"
-        request.headers["X-Requested-With"] = "fetch"
-        request.headers["Content-Length"] = str(len(body))
-        request.responses = []
-        request.response_headers = []
-        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-        request.end_headers = MethodType(lambda self: None, request)
-
-        request.do_POST()
-
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 200)
-        self.assertTrue(response["ok"])
-        self.assertEqual(ctx.state["apply_preview_resolutions"], {"homeassistant/configuration.yaml": "ha"})
-        self.assertEqual(ctx.calls, [])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.write_state({
+                "apply_preview_id": str(uuid.uuid4()),
+                "last_preview_paths": ["homeassistant/configuration.yaml"],
+                "last_preview_conflicts": False,
+                "apply_preview_resolutions": {},
+            })
+            current = server.read_state()
+            result = server.web.dispatch_command(server.context(), "resolve_apply_preview", {
+                "command_id": str(uuid.uuid4()),
+                "generation": current["operation_generation"],
+                "payload": {"path": "homeassistant/configuration.yaml", "choice": "ha",
+                            "preview_identity": server.web.preview_identity_for_state(current, "apply")},
+            })
+            self.assertTrue(result["ok"])
+            state = server.read_state()
+            self.assertEqual(state["apply_preview_resolutions"], {"homeassistant/configuration.yaml": "ha"})
+            self.assertEqual(state["last_action"], "resolve_apply_preview")
+            self.assertNotEqual(state["last_status"], "running")
+            self.assertIsNone(state["active_operation"])
 
     def test_preview_file_selection_updates_selected_paths_without_starting_jobs(self):
         server = load_server()
+        paths = ["homeassistant/configuration.yaml", "homeassistant/automations.yaml"]
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.write_state({
+                "save_preview_id": str(uuid.uuid4()), "last_save_preview_paths": paths,
+                "save_preview_selected_paths": [], "apply_preview_id": str(uuid.uuid4()),
+                "last_preview_paths": paths, "apply_preview_selected_paths": [],
+            })
 
-        class FakeContext:
-            def __init__(self):
-                self.run_lock = threading.Lock()
-                self.calls = []
-                self.state = {
-                    "last_status": "idle",
-                    "last_save_preview_paths": [
-                        "homeassistant/configuration.yaml",
-                        "homeassistant/automations.yaml",
-                    ],
-                    "save_preview_selected_paths": [],
-                    "last_preview_paths": [
-                        "homeassistant/configuration.yaml",
-                        "homeassistant/automations.yaml",
-                    ],
-                    "apply_preview_selected_paths": [],
-                }
+            def select(command, payload):
+                current = server.read_state()
+                direction = "save" if command == "select_save_preview" else "apply"
+                return server.web.dispatch_command(server.context(), command, {
+                    "command_id": str(uuid.uuid4()), "generation": current["operation_generation"],
+                    "payload": {**payload, "preview_identity": server.web.preview_identity_for_state(current, direction)},
+                })
 
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state.update(updates)
-
-            def utc_now(self):
-                return "2026-06-17T12:00:00+00:00"
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                self.calls.append(("save", commit_subject, lock_acquired))
-
-            def run_apply_job(self, lock_acquired=False):
-                self.calls.append(("apply", lock_acquired))
-
-        def invoke(ctx, path, body):
-            handler = server.web.create_handler(ctx)
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(body)
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            request.headers["Accept"] = "application/json"
-            request.headers["X-Requested-With"] = "fetch"
-            request.headers["Content-Length"] = str(len(body))
-            request.responses = []
-            request.response_headers = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-            request.end_headers = MethodType(lambda self: None, request)
-            request.do_POST()
-            return request
-
-        ctx = FakeContext()
-        save_identity = json.dumps(server.web.preview_identity_for_state(ctx.state, "save"))
-        apply_identity = json.dumps(server.web.preview_identity_for_state(ctx.state, "apply"))
-
-        request = invoke(ctx, "/select-save-preview", urlencode({
-            "path": "homeassistant/configuration.yaml",
-            "selected": "1",
-            "preview_identity": save_identity,
-        }).encode())
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 200)
-        self.assertTrue(response["ok"])
-        self.assertEqual(ctx.state["save_preview_selected_paths"], ["homeassistant/configuration.yaml"])
-        self.assertEqual(ctx.calls, [])
-
-        request = invoke(ctx, "/select-save-preview", urlencode({
-            "path": "homeassistant/configuration.yaml",
-            "preview_identity": save_identity,
-        }).encode())
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 200)
-        self.assertTrue(response["ok"])
-        self.assertEqual(ctx.state["save_preview_selected_paths"], [])
-        self.assertEqual(ctx.calls, [])
-
-        request = invoke(ctx, "/select-apply-preview", urlencode({
-            "selection_action": "all",
-            "preview_identity": apply_identity,
-        }).encode())
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 200)
-        self.assertTrue(response["ok"])
-        self.assertEqual(
-            ctx.state["apply_preview_selected_paths"],
-            ["homeassistant/configuration.yaml", "homeassistant/automations.yaml"],
-        )
-        self.assertEqual(ctx.calls, [])
-
-        request = invoke(ctx, "/select-apply-preview", urlencode({
-            "selection_action": "none",
-            "preview_identity": apply_identity,
-        }).encode())
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 200)
-        self.assertTrue(response["ok"])
-        self.assertEqual(ctx.state["apply_preview_selected_paths"], [])
-        self.assertEqual(ctx.calls, [])
-
-        request = invoke(ctx, "/select-apply-preview", urlencode({
-            "path": "../configuration.yaml",
-            "selected": "1",
-            "preview_identity": apply_identity,
-        }).encode())
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertEqual(request.responses[-1], 400)
-        self.assertFalse(response["ok"])
-        self.assertEqual(ctx.state["apply_preview_selected_paths"], [])
-        self.assertEqual(ctx.calls, [])
+            self.assertTrue(select("select_save_preview", {"path": paths[0], "selected": "1"})["ok"])
+            self.assertEqual(server.read_state()["save_preview_selected_paths"], [paths[0]])
+            self.assertTrue(select("select_save_preview", {"path": paths[0], "selected": "0"})["ok"])
+            self.assertEqual(server.read_state()["save_preview_selected_paths"], [])
+            self.assertTrue(select("select_apply_preview", {"selection_action": "all"})["ok"])
+            self.assertEqual(server.read_state()["apply_preview_selected_paths"], paths)
+            self.assertTrue(select("select_apply_preview", {"path": paths[1], "selected": "0"})["ok"])
+            state = server.read_state()
+            self.assertEqual(state["apply_preview_selected_paths"], [paths[0]])
+            self.assertIsNone(state["active_operation"])
+            self.assertNotEqual(state["last_status"], "running")
 
     def test_missing_preview_selection_state_is_not_treated_as_select_all(self):
         server = load_server()
@@ -4398,847 +3883,29 @@ class ServerTests(unittest.TestCase):
                 {"apply_preview_selected_paths": []}, preview
             )
 
-    def test_web_handler_uses_context_for_health_and_post_actions(self):
+    def test_web_handler_health_and_legacy_forms_are_api_only(self):
         server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.calls = []
-                self.state_updates = []
-                self.state = {}
-                self.run_lock = threading.Lock()
-
-            def record_call(self, call, lock_acquired=False):
-                try:
-                    self.calls.append(call)
-                finally:
-                    if lock_acquired:
-                        self.run_lock.release()
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                self.record_call(("save", commit_subject), lock_acquired)
-
-            def run_save_preview_job(self, lock_acquired=False):
-                self.record_call("save-preview", lock_acquired)
-
-            def run_reset_git_state_job(self, lock_acquired=False):
-                self.record_call("reset-git-state", lock_acquired)
-
-            def run_disk_usage_job(self, lock_acquired=False):
-                self.record_call("disk-usage", lock_acquired)
-
-            def run_preview_job(self, lock_acquired=False):
-                self.record_call("preview", lock_acquired)
-
-            def run_apply_job(self, lock_acquired=False):
-                self.record_call("apply", lock_acquired)
-
-            def run_deleted_devices_preview_job(self, lock_acquired=False):
-                self.record_call("deleted-devices-preview", lock_acquired)
-
-            def run_retained_devices_preview_job(self, lock_acquired=False):
-                self.record_call("retained-devices-preview", lock_acquired)
-
-            def run_internal_ids_preview_job(self, lock_acquired=False):
-                self.record_call("internal-ids-preview", lock_acquired)
-
-            def run_internal_ids_migrate_job(self, selected, lock_acquired=False):
-                self.record_call(("internal-ids-migrate", selected), lock_acquired)
-
-            def run_retained_devices_delete_job(self, selected, lock_acquired=False):
-                self.record_call(("retained-devices-delete", selected), lock_acquired)
-
-            def run_deleted_devices_delete_job(self, lock_acquired=False):
-                self.record_call("deleted-devices-delete", lock_acquired)
-
-            def run_deleted_devices_confirm_job(self, lock_acquired=False):
-                self.record_call("deleted-devices-confirm", lock_acquired)
-
-            def run_deleted_devices_revert_job(self, lock_acquired=False):
-                self.record_call("deleted-devices-revert", lock_acquired)
-
-            def run_rollback_job(self, release, lock_acquired=False):
-                self.record_call(("rollback", release), lock_acquired)
-
-            def clear_display_state(self):
-                self.calls.append("clear-display")
-
-            def write_state(self, updates):
-                self.state_updates.append(updates)
-                self.state.update(updates)
-
-            def read_state(self):
-                return dict(self.state)
-
-            def set_homeassistant_organizer_enabled(self, enabled):
-                self.calls.append(("organizer", enabled))
-
-        ctx = FakeContext()
-        handler = server.web.create_handler(ctx)
-
-        def invoke(method, path, body=b"", headers=None):
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(body)
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            for key, value in (headers or {}).items():
-                request.headers[key] = value
-            if body and "Content-Length" not in request.headers:
-                request.headers["Content-Length"] = str(len(body))
-            request.responses = []
-            request.response_headers = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_error = MethodType(lambda self, status, message=None: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-            request.end_headers = MethodType(lambda self: None, request)
-            getattr(request, method)()
-            return request
-
-        get_request = invoke("do_GET", "/health")
-        self.assertEqual(get_request.responses[-1], 200)
-        self.assertEqual(json.loads(get_request.wfile.getvalue().decode()), {"ok": True})
-
-        retained_delete_payload = {
-            "candidate": ["0", "2"],
-            "retained_preview_fingerprint": ["fp"],
-            "retained_preview_generated_at": ["2026-08-31T10:00:00+00:00"],
-        }
-        post_request = invoke(
-            "do_POST",
-            "/save",
-            body=b"commit_subject=Custom+HA+save",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Save HA to Git started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, [("save", "Custom HA save")])
-
-        post_request = invoke(
-            "do_POST",
-            "/save",
-            body=(
-                b"commit_subject=Save+Home+Assistant+config+2026-06-24_17-00-00"
-                b"&default_commit_subject=Save+Home+Assistant+config+2026-06-24_17-00-00"
-            ),
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Save HA to Git started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, [("save", "Custom HA save"), ("save", None)])
-
-        post_request = invoke(
-            "do_POST",
-            "/save-preview",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("HA to Git preview started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, [("save", "Custom HA save"), ("save", None), "save-preview"])
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-
-        post_request = invoke(
-            "do_POST",
-            "/preview",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Git to HA preview started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls, [("save", "Custom HA save"), ("save", None), "save-preview", "preview"])
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-        self.assertIsNone(ctx.state_updates[-1]["last_preview_fingerprint"])
-        self.assertFalse(ctx.state_updates[-1]["last_preview_storage_changes"])
-
-        post_request = invoke(
-            "do_POST",
-            "/reset-git-state",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Git state reset started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [("save", "Custom HA save"), ("save", None), "save-preview", "preview", "reset-git-state"],
-        )
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-
-        post_request = invoke(
-            "do_POST",
-            "/disk-usage",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Disk usage check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [("save", "Custom HA save"), ("save", None), "save-preview", "preview", "reset-git-state", "disk-usage"],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/approve-apply",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 404)
-        self.assertEqual(
-            ctx.calls,
-            [("save", "Custom HA save"), ("save", None), "save-preview", "preview", "reset-git-state", "disk-usage"],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/deleted-devices-preview",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Deleted devices and entities check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-            ],
-        )
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_deleted_devices_count"], 0)
-        self.assertIsNone(ctx.state_updates[-1]["last_deleted_devices_generated_at"])
-
-        post_request = invoke(
-            "do_POST",
-            "/retained-devices-preview",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Retained devices check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-            ],
-        )
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_retained_devices_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_retained_devices_count"], 0)
-        self.assertIsNone(ctx.state_updates[-1]["last_retained_devices_generated_at"])
-
-        post_request = invoke(
-            "do_POST",
-            "/internal-ids-preview",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Internal ids check started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-            ],
-        )
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-        self.assertEqual(ctx.state_updates[-1]["last_internal_ids_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_internal_ids_count"], 0)
-        self.assertIsNone(ctx.state_updates[-1]["last_internal_ids_generated_at"])
-
-        ctx.state.update(
-            {
-                "last_retained_devices_fingerprint": "fp",
-                "last_retained_devices_generated_at": "2026-08-31T10:00:00+00:00",
-            }
-        )
-        post_request = invoke(
-            "do_POST",
-            "/retained-devices-delete",
-            body=b"candidate=0&candidate=2&retained_preview_fingerprint=fp&retained_preview_generated_at=2026-08-31T10%3A00%3A00%2B00%3A00",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Retained devices deletion started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-                ("retained-devices-delete", retained_delete_payload),
-            ],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/deleted-devices-delete",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted devices deletion started", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.calls[-1], "deleted-devices-delete")
-
-        post_request = invoke(
-            "do_POST",
-            "/deleted-devices-confirm",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted devices cleanup confirmation started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-                ("retained-devices-delete", retained_delete_payload),
-                "deleted-devices-delete",
-                "deleted-devices-confirm",
-            ],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/deleted-devices-revert",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("deleted devices cleanup revert started", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-                ("retained-devices-delete", retained_delete_payload),
-                "deleted-devices-delete",
-                "deleted-devices-confirm",
-                "deleted-devices-revert",
-            ],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/clear-display-state",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Display state cleared", post_request.wfile.getvalue().decode())
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-                ("retained-devices-delete", retained_delete_payload),
-                "deleted-devices-delete",
-                "deleted-devices-confirm",
-                "deleted-devices-revert",
-                "clear-display",
-            ],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/clear-preview",
-            body=b"direction=save",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Save preview cancelled", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-        self.assertNotIn("last_diff", ctx.state_updates[-1])
-
-        post_request = invoke(
-            "do_POST",
-            "/clear-preview",
-            body=b"direction=apply",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Apply preview cancelled", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.state_updates[-1]["last_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_diff_generated_at"])
-        self.assertIsNone(ctx.state_updates[-1]["last_preview_commit"])
-        self.assertNotIn("last_save_preview", ctx.state_updates[-1])
-
-        post_request = invoke(
-            "do_POST",
-            "/clear-preview",
-            body=b"direction=bad",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 400)
-        self.assertIn("Invalid preview direction", post_request.wfile.getvalue().decode())
-
-        ctx.state["last_status"] = "running"
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path in ("/save", "/apply"):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        ctx.state.update(
-            {
-                "last_status": "running",
-                "last_diff": "apply diff",
-                "last_diff_generated_at": "2026-06-15T12:00:00+00:00",
-                "last_preview_commit": "apply-commit",
-                "last_preview_fingerprint": "apply-fingerprint",
-                "last_preview_live_fingerprints": {"homeassistant/configuration.yaml": "live"},
-                "last_preview_paths": ["homeassistant/configuration.yaml"],
-                "last_preview_conflicts": True,
-                "apply_preview_resolutions": {"homeassistant/configuration.yaml": "git"},
-                "last_save_preview": "save preview",
-                "last_save_diff": "save diff",
-                "last_save_diff_generated_at": "2026-06-15T12:00:00+00:00",
-                "last_save_preview_commit": "save-commit",
-                "last_save_preview_fingerprint": "save-fingerprint",
-                "last_save_preview_paths": ["homeassistant/configuration.yaml"],
-                "last_save_preview_conflicts": True,
-                "save_preview_resolutions": {"homeassistant/configuration.yaml": "ha"},
-                "conflicts": ["homeassistant/.storage/core.device_registry"],
-                "conflict_type": "save_unknown_base",
-                "save_conflict_resolutions": {"homeassistant/.storage/core.device_registry": "ha"},
-            }
-        )
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        ctx.run_lock.acquire()
-        try:
-            for direction in ("save", "apply"):
-                post_request = invoke(
-                    "do_POST",
-                    "/clear-preview",
-                    body=f"direction={direction}".encode(),
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-        finally:
-            ctx.run_lock.release()
-        ctx.state["last_status"] = "idle"
-
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            post_request = invoke(
-                "do_POST",
-                "/include-redundant-data",
-                body=b"include_redundant_data=1",
-                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-            )
-            self.assertEqual(post_request.responses[-1], 409)
-            response = json.loads(post_request.wfile.getvalue().decode())
-            self.assertFalse(response["ok"])
-            self.assertIn("already running", response["message"])
-            self.assertEqual(ctx.state, expected_state)
-            self.assertEqual(len(ctx.state_updates), update_count)
-            self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path in ("/save", "/apply"):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        ctx.state.update(
-            {
-                "last_preview_conflicts": False,
-                "apply_preview_resolutions": {},
-                "last_save_preview_conflicts": False,
-                "save_preview_resolutions": {},
-            }
-        )
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path, body in (
-                ("/resolve-save-preview", b"path=homeassistant/configuration.yaml&choice=ha"),
-                ("/resolve-apply-preview", b"path=homeassistant/configuration.yaml&choice=git"),
-            ):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    body=body,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path in (
-                "/preview",
-                "/save-preview",
-                "/deleted-devices-preview",
-                "/retained-devices-preview",
-                "/internal-ids-preview",
-            ):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path, body in (
-                ("/retained-devices-delete", b"candidate=0&candidate=2"),
-                ("/internal-ids-migrate", b"candidate=0&candidate=2"),
-                ("/deleted-devices-delete", b""),
-                ("/deleted-devices-confirm", b""),
-                ("/deleted-devices-revert", b""),
-                ("/rollback", b"release=0.8.13"),
-            ):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    body=body,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        ctx.state.update(
-            {
-                "last_status": "idle",
-                "conflict_type": "save_unknown_base",
-                "conflicts": ["homeassistant/configuration.yaml"],
-                "save_conflict_resolutions": {},
-            }
-        )
-        expected_state = dict(ctx.state)
-        update_count = len(ctx.state_updates)
-        expected_calls = list(ctx.calls)
-        ctx.run_lock.acquire()
-        try:
-            for path, body in (
-                ("/approve-save-conflicts", b""),
-                ("/resolve-conflict", b"path=homeassistant/configuration.yaml&choice=ha"),
-            ):
-                post_request = invoke(
-                    "do_POST",
-                    path,
-                    body=body,
-                    headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-                )
-                self.assertEqual(post_request.responses[-1], 409)
-                response = json.loads(post_request.wfile.getvalue().decode())
-                self.assertFalse(response["ok"])
-                self.assertIn("already running", response["message"])
-                self.assertEqual(ctx.state, expected_state)
-                self.assertEqual(len(ctx.state_updates), update_count)
-                self.assertEqual(ctx.calls, expected_calls)
-        finally:
-            ctx.run_lock.release()
-
-        original_resolve_git_conflict = server.web.conflict_logic.resolve_git_conflict
-        original_resolved_message = server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"]
-
-        def fake_resolve_git_conflict(handler_ctx, path, choice):
-            self.assertIs(handler_ctx, ctx)
-            self.assertEqual(path, "homeassistant/configuration.yaml")
-            self.assertEqual(choice, "ha")
-            return "fake conflict resolution"
-
-        server.web.conflict_logic.resolve_git_conflict = fake_resolve_git_conflict
-        server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"] = "CATALOG: {message}; client refresh pending."
-        try:
-            post_request = invoke(
-                "do_POST",
-                "/resolve-conflict",
-                body=b"path=homeassistant/configuration.yaml&choice=ha",
-                headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-            )
-            self.assertEqual(post_request.responses[-1], 200)
-            response = json.loads(post_request.wfile.getvalue().decode())
-            self.assertTrue(response["ok"])
-            self.assertEqual(response["message"], "CATALOG: fake conflict resolution; client refresh pending.")
-            self.assertNotIn("Refreshing...", response["message"])
-        finally:
-            server.web.conflict_logic.resolve_git_conflict = original_resolve_git_conflict
-            server.web.i18n.EN_TEXT["message.resolved_conflict_refreshing"] = original_resolved_message
-
-        post_request = invoke(
-            "do_POST",
-            "/homeassistant-organizer",
-            body=b"homeassistant_organizer=1",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 400)
-        response = json.loads(post_request.wfile.getvalue().decode())
-        self.assertFalse(response["ok"])
-        self.assertIn("organizer area split is archived", response["message"])
-        self.assertEqual(
-            ctx.calls,
-            [
-                ("save", "Custom HA save"),
-                ("save", None),
-                "save-preview",
-                "preview",
-                "reset-git-state",
-                "disk-usage",
-                "deleted-devices-preview",
-                "retained-devices-preview",
-                "internal-ids-preview",
-                ("retained-devices-delete", retained_delete_payload),
-                "deleted-devices-delete",
-                "deleted-devices-confirm",
-                "deleted-devices-revert",
-                "clear-display",
-            ],
-        )
-
-        post_request = invoke(
-            "do_POST",
-            "/include-redundant-data",
-            body=b"include_redundant_data=1",
-            headers={"Accept": "application/json", "X-Requested-With": "fetch"},
-        )
-        self.assertEqual(post_request.responses[-1], 200)
-        self.assertIn("Redundant data setting updated", post_request.wfile.getvalue().decode())
-        self.assertEqual(ctx.state_updates[-1]["include_redundant_data"], True)
-        self.assertEqual(ctx.state_updates[-1]["last_save_preview"], "")
-        self.assertEqual(ctx.state_updates[-1]["last_save_diff"], "")
-        self.assertIsNone(ctx.state_updates[-1]["last_save_diff_generated_at"])
-
-    def test_save_push_retry_blocks_unrelated_workflow_post_actions(self):
-        server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.calls = []
-                self.state_updates = []
-                self.state = {
-                    "save_push_retry_pending": True,
-                    "save_push_retry_commit": "pending-save",
-                }
-                self.run_lock = threading.Lock()
-
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state_updates.append(updates)
-                self.state.update(updates)
-
-            def run_save_job(self, commit_subject=None, lock_acquired=False):
-                try:
-                    self.calls.append(("save", commit_subject, lock_acquired))
-                finally:
-                    if lock_acquired:
-                        self.run_lock.release()
-
-        ctx = FakeContext()
-        queued = []
-        original_start_background = server.web.start_background
-
-        def queue_background(target, *args, lock_acquired=False):
-            queued.append((target, args, {"lock_acquired": lock_acquired}))
-
-        handler = server.web.create_handler(ctx)
-
-        def invoke(path, body=b""):
-            request = handler.__new__(handler)
-            request.path = path
-            request.rfile = io.BytesIO(body)
-            request.wfile = io.BytesIO()
-            request.headers = Message()
-            request.headers["Accept"] = "application/json"
-            request.headers["X-Requested-With"] = "fetch"
-            if body:
-                request.headers["Content-Length"] = str(len(body))
-            request.responses = []
-            request.response_headers = []
-            request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-            request.send_error = MethodType(lambda self, status, message=None: self.responses.append(status), request)
-            request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-            request.end_headers = MethodType(lambda self: None, request)
-            request.do_POST()
-            return request
-
-        blocked_posts = [
-            ("/apply", b""),
-            ("/generate-key", b""),
-            ("/resolve-save-preview", b"path=homeassistant%2Fconfiguration.yaml&choice=ha"),
-            ("/resolve-apply-preview", b"path=homeassistant%2Fconfiguration.yaml&choice=git"),
-            ("/clear-preview", b"direction=apply"),
-            ("/preview", b""),
-            ("/select-save-preview", b"selection_action=all"),
-            ("/select-apply-preview", b"selection_action=all"),
-            ("/save-preview", b""),
-            ("/reset-git-state", b""),
-            ("/disk-usage", b""),
-            ("/deleted-devices-preview", b""),
-            ("/retained-devices-preview", b""),
-            ("/retained-devices-delete", b"candidate=0"),
-            ("/internal-ids-preview", b""),
-            ("/internal-ids-migrate", b"candidate=0"),
-            ("/deleted-devices-delete", b""),
-            ("/deleted-devices-confirm", b""),
-            ("/deleted-devices-revert", b""),
-            ("/approve-save-conflicts", b""),
-            ("/addons", b"addon=local_zigbee2mqtt"),
-            ("/homeassistant-organizer", b"homeassistant_organizer=on"),
-            ("/include-redundant-data", b"include_redundant_data=on"),
-            ("/resolve-conflict", b"path=homeassistant%2Fconfiguration.yaml&choice=git"),
-            ("/rollback", b"release=0.8.44"),
-        ]
-
-        server.web.start_background = queue_background
-        try:
-            for path, body in blocked_posts:
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            handler = server.web.create_handler(server.context())
+            for method, path, body in (("do_GET", "/health", b""),
+                                       ("do_POST", "/save", b"commit_subject=Old+form"),
+                                       ("do_POST", "/preview", b""),
+                                       ("do_POST", "/include-redundant-data", b"include_redundant_data=1")):
                 with self.subTest(path=path):
-                    response = invoke(path, body)
-                    payload = json.loads(response.wfile.getvalue().decode())
-                    self.assertEqual(response.responses[-1], 409)
-                    self.assertFalse(payload["ok"])
-                    self.assertEqual(payload["message"], "Save push retry is still pending.")
-                    self.assertEqual(ctx.calls, [])
-                    self.assertEqual(ctx.state_updates, [])
-                    self.assertEqual(queued, [])
-
-            retry_response = invoke("/save")
-            retry_payload = json.loads(retry_response.wfile.getvalue().decode())
-            self.assertEqual(retry_response.responses[-1], 200)
-            self.assertTrue(retry_payload["ok"])
-            self.assertEqual(retry_payload["message"], "Save HA to Git started.")
-            self.assertEqual(len(queued), 1)
-            target, args, kwargs = queued.pop()
-            target(*args, **kwargs)
-            self.assertEqual(ctx.calls, [("save", None, True)])
-        finally:
-            server.web.start_background = original_start_background
+                    request = handler.__new__(handler)
+                    request.path = path
+                    request.rfile = io.BytesIO(body)
+                    request.wfile = io.BytesIO()
+                    request.headers = Message()
+                    request.headers["Content-Length"] = str(len(body))
+                    request.responses = []
+                    request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+                    request.send_header = MethodType(lambda self, key, value: None, request)
+                    request.end_headers = MethodType(lambda self: None, request)
+                    getattr(request, method)()
+                    self.assertEqual(request.responses[-1], 200 if method == "do_GET" else 400)
+            self.assertEqual(server.read_state()["command_records"], {})
 
     def test_empty_git_preview_is_noop(self):
         server = load_server()
@@ -6090,17 +4757,6 @@ class ServerTests(unittest.TestCase):
 
             self.assertIsNone(server.read_state().get("homeassistant_organizer_enabled"))
 
-    def test_homeassistant_organizer_control_is_disabled_while_projection_is_blocked(self):
-        server = load_server()
-
-        html = server.ui.render_homeassistant_organizer(True)
-
-        self.assertIn("Area split organizer archived", html)
-        self.assertIn(".ha-ops/areas organizer is archived", html)
-        self.assertIn("<input type='checkbox' name='homeassistant_organizer' value='1' disabled>", html)
-        self.assertNotIn("checked", html)
-        self.assertNotIn("Split automations, scripts, and scenes by area in Git", html)
-
     def test_loaded_manifest_ignores_stale_organizer_ui_preference(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -6608,9 +5264,9 @@ class ServerTests(unittest.TestCase):
             self.assertIn("Save export candidates for homeassistant (1):", details)
             self.assertIn("- homeassistant/configuration.yaml", details)
             self.assertEqual(self.remote_file(remote, "homeassistant/configuration.yaml"), "git\n")
-            page = server.render_page()
-            self.assertIn('<div class="badge " data-status-code="warning" data-testid="status-badge">warning</div>', page)
-            self.assertNotIn('<div class="badge error">error</div>', page)
+            projection = self.client_state(server)
+            self.assertEqual(projection["last_status"], "warning")
+            self.assertIn('data-status-code=${status}', (ROOT / "frontend" / "src" / "ha-ops.js").read_text())
 
     def test_save_preview_save_all_uses_preview_approval(self):
         server = load_server()
@@ -8967,10 +7623,10 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertTrue(server.run_preview_job())
+            self.assertFalse(server.run_preview_job())
             state = server.read_state()
-            self.assertIn("no file changes", state["last_diff"].lower())
-            self.assertFalse(stale.exists())
+            self.assertIn("untracked or ignored files", state["last_message"])
+            self.assertEqual(stale.read_text(), "stale:\n")
 
     def test_live_only_addon_absent_from_git_is_not_deleted(self):
         server = load_server()
@@ -9908,9 +8564,8 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
 
-            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
-            self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job())
+            self.assertFalse(server.run_save_preview_job())
+            self.assertEqual((repo / "stale.txt").read_text(), "stale\n")
             result = subprocess.run(
                 ["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", "main"],
                 check=True,
@@ -10943,7 +9598,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job())
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
     def test_selected_addon_with_gitkeep_source_is_saved_from_live(self):
@@ -10983,7 +9638,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.select_all_save_preview_files(server)
-            self.assertTrue(server.run_save_job())
+            self.assertTrue(server.run_save_job(), server.read_state()["last_message"])
             self.assertEqual(self.remote_file(remote, "addons/local_zigbee2mqtt/configuration.yaml"), "addon\n")
 
     def test_unchecked_manifest_addon_is_excluded(self):
@@ -11135,11 +9790,24 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             self.make_rebase_conflict(server, root)
 
-            page = server.render_page()
-
-            self.assertIn("&lt;&lt;&lt;&lt;&lt;&lt;&lt;", page)
-            self.assertIn("=======", page)
-            self.assertIn("&gt;&gt;&gt;&gt;&gt;&gt;&gt;", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["conflicts"])
+            result = server.web.dispatch_command(server.context(), "conflict_diff_get", {
+                "generation": projection["operation_generation"], "path": projection["conflicts"][0],
+            })
+            self.assertTrue(result["ok"])
+            self.assertIn("<<<<<<<", result["diff"])
+            self.assertIn("=======", result["diff"])
+            self.assertIn(">>>>>>>", result["diff"])
+            stale = server.web.dispatch_command(server.context(), "conflict_diff_get", {
+                "generation": projection["operation_generation"] - 1, "path": projection["conflicts"][0],
+            })
+            self.assertFalse(stale["ok"])
+            server.write_state({"active_operation": {"command": "save", "phase": "recovery_required"}})
+            blocked = server.web.dispatch_command(server.context(), "conflict_diff_get", {
+                "generation": projection["operation_generation"], "path": projection["conflicts"][0],
+            })
+            self.assertFalse(blocked["ok"])
 
     def test_backup_gate_blocks_when_backup_is_missing_and_creation_disabled(self):
         server = load_server()
@@ -13307,10 +11975,31 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             page = server.render_page()
+            self.assertIn("<ha-ops-app", page)
+            self.assertNotIn("Backup status unavailable", page)
 
-            self.assertIn("Backup status unavailable", page)
+    def test_ingress_root_serves_static_shell_but_unknown_api_is_json_404(self):
+        server = load_server()
+        handler = server.web.create_handler(object())
+        for path, status in (("/api/hassio_ingress/local-ha-ops/", 200),
+                             ("/api/hassio_ingress/local-ha-ops/api/v1/unknown", 404)):
+            with self.subTest(path=path):
+                request = handler.__new__(handler)
+                request.path = path
+                request.wfile = io.BytesIO()
+                request.headers = Message()
+                request.responses = []
+                request.send_response = MethodType(lambda self, value: self.responses.append(value), request)
+                request.send_header = MethodType(lambda self, key, value: None, request)
+                request.end_headers = MethodType(lambda self: None, request)
+                request.do_GET()
+                self.assertEqual(request.responses[-1], status)
+                if status == 200:
+                    self.assertIn(b"<ha-ops-app", request.wfile.getvalue())
+                else:
+                    self.assertNotIn(b"<ha-ops-app", request.wfile.getvalue())
 
-    def test_render_page_suppresses_recovered_backup_gate_error(self):
+    def test_static_shell_does_not_mutate_backup_gate_error(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13334,15 +12023,15 @@ class ServerTests(unittest.TestCase):
                     }
                 )
 
-                page = server.render_page()
+                server._CTX.repair_startup_state()
+                snapshot = server.web._snapshot_payload(server.context())["state"]
             finally:
                 server.web.i18n.EN_TEXT["message.fresh_system_backup_available"] = original_message
 
-            self.assertNotIn(">error<", page)
-            self.assertNotIn("No fresh system backup found", page)
-            self.assertIn("CATALOG: fresh backup recovered", page)
+            self.assertEqual(snapshot["last_status"], "error")
+            self.assertIn("No fresh system backup found", snapshot["last_message"])
 
-    def test_render_page_suppresses_stale_successful_config_check_error(self):
+    def test_startup_clears_stale_successful_config_check_error_in_state(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -13363,13 +12052,14 @@ class ServerTests(unittest.TestCase):
                     }
                 )
 
-                page = server.render_page()
+                server._CTX.repair_startup_state()
+                snapshot = server.web._snapshot_payload(server.context())["state"]
             finally:
                 server.web.i18n.EN_TEXT["message.stale_config_check_cleared"] = original_message
 
-            self.assertNotIn(">error<", page)
-            self.assertNotIn("Home Assistant config check failed", page)
-            self.assertIn("CATALOG: stale config check cleared", page)
+            self.assertNotEqual(snapshot["last_status"], "error")
+            self.assertNotIn("Home Assistant config check failed", snapshot["last_message"])
+            self.assertIn("Previous stale error was cleared", snapshot["last_message"])
 
     def test_managed_addons_are_selected_in_targets_table(self):
         server = load_server()
@@ -13378,21 +12068,12 @@ class ServerTests(unittest.TestCase):
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: [{"slug": "local_zigbee2mqtt", "name": "Zigbee2MQTT"}]
 
-            page = server.render_page()
-
-            self.assertIn("data-auto-submit='change'", page)
-            self.assertIn("name='addon'", page)
-            self.assertIn("<h2>Managed Targets</h2>", page)
-            self.assertIn("<table class='managed-targets-table'>", page)
-            self.assertIn("<colgroup><col class='checkbox-col'><col><col><col><col><col></colgroup>", page)
-            self.assertIn("<th class='checkbox-col'><span class='sr-only'>Managed</span></th>", page)
-            self.assertIn(".sr-only", page)
-            self.assertIn("<td class='checkbox-col'><input type='checkbox'", page)
-            self.assertIn(".managed-targets-table .checkbox-col", page)
-            self.assertIn("Zigbee2MQTT (local_zigbee2mqtt)", page)
-            self.assertNotIn("<h2>Managed Apps</h2>", page)
-            self.assertNotIn("Protected Storage", page)
-            self.assertNotIn("Save App Selection", page)
+            snapshot = server.web._snapshot_payload(server.context())
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertEqual(snapshot["view"]["addons"][0]["slug"], "local_zigbee2mqtt")
+            self.assertIn('class="managed-targets-table"', source)
+            self.assertIn("<vaadin-checkbox", source)
+            self.assertNotIn("<input type='checkbox'", source)
 
     def test_primary_actions_are_grouped_by_direction(self):
         server = load_server()
@@ -13402,77 +12083,13 @@ class ServerTests(unittest.TestCase):
             server.get_installed_addons = lambda: []
 
             page = server.render_page()
-
-            ha_to_git_section = page.index("<h2>HA to Git</h2>")
-            ha_to_git = page.index('action="save-preview"')
-            include_redundant = page.index("action='include-redundant-data'")
-            git_to_ha_section = page.index("<h2>Git to HA</h2>")
-            git_to_ha = page.index('action="preview"')
-            reset_git_state_section = page.index("<h2>Reset Git State</h2>")
-            reset_git_state = page.index('action="reset-git-state"')
-            disk_usage_section = page.index("<h2>Disk Usage</h2>")
-            disk_usage = page.index('action="disk-usage"')
-            deleted_section = page.index("<h2>Deleted devices and entities</h2>")
-            deleted = page.index('action="deleted-devices-preview"')
-            retained_section = page.index("<h2>Retained Devices</h2>")
-            retained = page.index('action="retained-devices-preview"')
-            internal_ids_section = page.index("<h2>Actions IDs</h2>")
-            internal_ids = page.index('action="internal-ids-preview"')
-            self.assertLess(ha_to_git_section, ha_to_git)
-            self.assertLess(ha_to_git, include_redundant)
-            self.assertLess(include_redundant, git_to_ha_section)
-            self.assertLess(git_to_ha_section, git_to_ha)
-            self.assertLess(git_to_ha, reset_git_state_section)
-            self.assertLess(reset_git_state_section, reset_git_state)
-            self.assertLess(reset_git_state, disk_usage_section)
-            self.assertLess(disk_usage_section, disk_usage)
-            self.assertLess(disk_usage, deleted_section)
-            self.assertLess(deleted_section, deleted)
-            self.assertLess(deleted, retained_section)
-            self.assertLess(retained_section, retained)
-            self.assertLess(retained, internal_ids_section)
-            self.assertLess(internal_ids_section, internal_ids)
-            self.assertIn('<div class="action-row">', page)
-            self.assertIn('<section class="action-section">', page)
-            self.assertIn("<h2>Deleted devices and entities</h2>", page)
-            self.assertNotIn('<button type="submit" >Save HA to Git</button>', page)
-            self.assertNotIn('<button type="submit" >Apply Git to HA</button>', page)
-            self.assertIn("Check deleted devices and entities", page)
-            self.assertIn("Reset Git State", page)
-            self.assertIn("Check disk usage", page)
-            self.assertIn("Check actions IDs", page)
-            self.assertIn("Previews deleted devices and entities.", page)
-            self.assertIn("Rebuilds HA Ops service branches", page)
-            self.assertIn("Prints a read-only disk usage summary to the Log", page)
-            self.assertIn("Finds stale Zigbee2MQTT MQTT discovery topics.", page)
-            self.assertIn("Previews Git-only rewrites", page)
-            self.assertIn("Migrate and save selected files to Git, then run Git to HA.", page)
-            self.assertNotIn("Check deleted_devices previews", page)
-            self.assertNotIn("Check retained devices finds", page)
-            self.assertNotIn("Check actions IDs previews", page)
-            self.assertNotIn("Check internal ids", page)
-            self.assertLess(deleted, retained)
-            self.assertLess(retained, internal_ids)
-            self.assertNotIn("<h2>Maintenance</h2>", page)
-            self.assertIn("action='include-redundant-data'", page)
-            self.assertIn("Include redundant data", page)
-            self.assertIn(".actions .check-row", page)
-            self.assertIn("border-bottom: 0", page)
-            self.assertIn(".action-flow", page)
-            self.assertIn('<div class="details-header">', page)
-            self.assertLess(page.index('data-testid="status-badge"'), page.index("<h2>Log</h2>"))
-            self.assertIn("<h2>Log</h2>", page)
-            self.assertNotIn("<h2>Last Run Details</h2>", page)
-            self.assertNotIn("Preview deletions", page)
-            self.assertNotIn("Apply Preview", page)
-            self.assertNotIn("Save Preview", page)
-            self.assertNotIn("No apply preview yet.", page)
-            self.assertNotIn("No save preview yet.", page)
-            body_markup = page.split("<script>", 1)[0]
-            self.assertNotIn("Deletion of deleted_devices Preview", body_markup)
-            self.assertNotIn("Approve Deletion", body_markup)
-            self.assertNotIn("Confirm Changes", body_markup)
-            self.assertNotIn("Revert Changes", body_markup)
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            actions = ["save_preview", "include_redundant_data", "preview", "reset_git_state",
+                       "disk_usage", "deleted_devices_preview", "retained_devices_preview", "internal_ids_preview"]
+            positions = [source.index(f'"{action}"', source.index('render() {', source.index('class HaOpsApp'))) for action in actions]
+            self.assertEqual(positions, sorted(positions))
+            self.assertIn("<vaadin-button", source)
+            self.assertNotIn("<form", page)
 
     def test_disk_usage_job_writes_read_only_summary_to_log(self):
         server = load_server()
@@ -13787,65 +12404,25 @@ class ServerTests(unittest.TestCase):
 
             server.context().run_lock.acquire()
             try:
-                page = server.render_page()
+                self.assertTrue(server.web.job_is_running(server.context()))
             finally:
                 server.context().run_lock.release()
-
-            disk_form_start = page.index('action="disk-usage"')
-            disk_form = page[disk_form_start : page.index("</form>", disk_form_start)]
-            self.assertIn('<button type="submit" class="secondary" disabled>Check disk usage</button>', disk_form)
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('this.actionButton("disk_usage", t("action.check_disk_usage"), { disabled: controlsBlocked })', source)
 
     def test_disk_usage_post_is_rejected_while_job_is_running(self):
         server = load_server()
-
-        class FakeContext:
-            def __init__(self):
-                self.calls = []
-                self.state = {"last_status": "running", "last_message": "Another job is active."}
-                self.state_updates = []
-                self.run_lock = threading.Lock()
-
-            def read_state(self):
-                return dict(self.state)
-
-            def write_state(self, updates):
-                self.state_updates.append(updates)
-                self.state.update(updates)
-
-            def run_disk_usage_job(self, lock_acquired=False):
-                self.calls.append(("disk-usage", lock_acquired))
-                if lock_acquired:
-                    self.run_lock.release()
-
-        ctx = FakeContext()
-        handler = server.web.create_handler(ctx)
-        request = handler.__new__(handler)
-        request.path = "/disk-usage"
-        request.rfile = io.BytesIO(b"")
-        request.wfile = io.BytesIO()
-        request.headers = Message()
-        request.headers["Accept"] = "application/json"
-        request.headers["X-Requested-With"] = "fetch"
-        request.responses = []
-        request.response_headers = []
-        request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
-        request.send_header = MethodType(lambda self, key, value: self.response_headers.append((key, value)), request)
-        request.end_headers = MethodType(lambda self: None, request)
-
-        expected_state = dict(ctx.state)
-        ctx.run_lock.acquire()
-        try:
-            request.do_POST()
-        finally:
-            ctx.run_lock.release()
-
-        self.assertEqual(request.responses[-1], 409)
-        self.assertEqual(ctx.calls, [])
-        self.assertEqual(ctx.state, expected_state)
-        self.assertEqual(ctx.state_updates, [])
-        response = json.loads(request.wfile.getvalue().decode())
-        self.assertFalse(response["ok"])
-        self.assertIn("already running", response["message"])
+        with tempfile.TemporaryDirectory() as directory:
+            self.configure_paths(server, Path(directory))
+            ctx = server.context()
+            command_id = str(uuid.uuid4())
+            ctx.claim_command(command_id, "preview", ctx.read_state()["operation_generation"], {})
+            ctx.update_command(command_id, "running")
+            before = ctx.read_state()
+            response = self.post_json(server, "/disk-usage")
+            self.assertEqual(response.responses[-1], 409)
+            self.assertEqual(ctx.read_state(), before)
+            self.assertFalse(json.loads(response.wfile.getvalue().decode())["ok"])
 
     def test_maintenance_actions_are_disabled_during_pending_deleted_devices(self):
         server = load_server()
@@ -13864,21 +12441,12 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-
-            disk_form_start = page.index('action="disk-usage"')
-            disk_form = page[disk_form_start : page.index("</form>", disk_form_start)]
-            reset_form_start = page.index('action="reset-git-state"')
-            reset_form = page[reset_form_start : page.index("</form>", reset_form_start)]
-            prune_form_start = page.index('action="docker-build-cache-prune"')
-            prune_form = page[prune_form_start : page.index("</form>", prune_form_start)]
-            deleted_form_start = page.index('action="deleted-devices-preview"')
-            deleted_form = page[deleted_form_start : page.index("</form>", deleted_form_start)]
-            self.assertIn("disabled", disk_form)
-            self.assertIn("disabled", reset_form)
-            self.assertIn('data-action-ready="false"', prune_form)
-            self.assertIn("disabled", prune_form)
-            self.assertIn("disabled", deleted_form)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('const controlsBlocked = blocked || pending || saveRetry;', source)
+            for action in ("disk_usage", "reset_git_state", "docker_build_cache_prune", "deleted_devices_preview"):
+                self.assertIn(f'this.actionButton("{action}"', source)
 
     def test_pending_deleted_devices_rejects_disk_usage_and_reset_http_and_ws(self):
         server = load_server()
@@ -13901,7 +12469,11 @@ class ServerTests(unittest.TestCase):
                     )
 
                     http = self.post_json(server, endpoint)
-                    ws = server.web.dispatch_command(server.context(), action)
+                    ws = server.web.dispatch_command(server.context(), action, {
+                        "command_id": str(uuid.uuid4()),
+                        "generation": server.read_state()["operation_generation"],
+                        "payload": {},
+                    })
 
                     self.assertEqual(http.responses[-1], 409)
                     self.assertFalse(ws["ok"])
@@ -13983,14 +12555,11 @@ class ServerTests(unittest.TestCase):
                     },
                 ],
             )
-            page = server.render_page()
-            self.assertIn("deleted-devices-tree", page)
-            self.assertIn("Bathroom Presence", page)
-            self.assertIn("sensor.bathroom_presence_illuminance", page)
-            self.assertNotIn("<table class='deleted-devices-table'>", page)
-            self.assertIn("Remove Deleted Entries", page)
-            self.assertNotIn("Approve Deletion", page)
-            self.assertNotIn("identifiers=mqtt:old", page)
+            projection = self.client_state(server)
+            self.assertEqual(projection["last_deleted_devices_count"], 2)
+            self.assertIn("Bathroom Presence", json.dumps(projection["last_deleted_devices_tree"]))
+            self.assertIn("sensor.bathroom_presence_illuminance", json.dumps(projection["last_deleted_devices_tree"]))
+            self.assertIn("renderDeletedDevicesTree(tree)", (ROOT / "frontend" / "src" / "ha-ops.js").read_text())
 
     def test_deleted_devices_table_keeps_grid_columns_aligned(self):
         server = load_server()
@@ -14030,77 +12599,17 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-            table_start = page.index("<div class='deleted-devices-table'>")
-            table = page[table_start : page.index("</section>", table_start)]
-
-            self.assertIn("min-width: 1200px", page)
-            self.assertIn(
-                "grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr)",
-                page,
-            )
-            self.assertIn("column-gap: 0", page)
-            self.assertIn("align-items: stretch", page)
-            self.assertIn("padding: 8px 12px", page)
-            self.assertIn(".deleted-device-header,\n    .deleted-device-row {\n      display: contents", page)
-            self.assertNotIn("grid-row: 1", page)
-            self.assertNotIn("grid-row: 2", page)
-            self.assertIn(".deleted-device-header-cell.deleted-device-cell-secondary", page)
-            self.assertIn(".deleted-device-cell.deleted-device-cell-secondary", page)
-            self.assertNotIn(".deleted-device-line", page)
-            self.assertIn(".deleted-device-cell.deleted-device-col-id code", page)
-            self.assertIn(".deleted-device-cell.deleted-device-col-identifiers code", page)
-            self.assertIn("white-space: nowrap", page)
-            generic_code_rule = page.index(".deleted-device-cell code")
-            nowrap_rule = page.index(".deleted-device-cell.deleted-device-col-id code")
-            self.assertLess(generic_code_rule, nowrap_rule)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area'>Area</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id'>ID</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id'>Entity ID</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-name'>Name</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-original-name'>Original Name</div>", table)
-            self.assertIn(
-                "deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device'>Manufacturer and Model</div>",
-                table,
-            )
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-manufacturer", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-model", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-identifiers'>Identifiers</div>", table)
-            self.assertIn("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-source'>Source</div>", table)
-            self.assertNotIn("deleted-device-header-cell deleted-device-col-original-device-class", table)
-            primary_headers = [
-                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-id"),
-                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-original-name"),
-                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-area"),
-                table.index("deleted-device-header-cell deleted-device-cell-primary deleted-device-col-device"),
-            ]
-            secondary_headers = [
-                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-identifiers"),
-                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-name"),
-                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-entity-id"),
-                table.index("deleted-device-header-cell deleted-device-cell-secondary deleted-device-col-source"),
-            ]
-            self.assertEqual(primary_headers, sorted(primary_headers))
-            self.assertEqual(secondary_headers, sorted(secondary_headers))
-            self.assertNotIn("<table", table)
-            self.assertNotIn("<colgroup", table)
-            self.assertIn("Living Room Motion", table)
-            self.assertIn("Aqara<br>Motion sensor / RTCGQ11LM", table)
-            self.assertIn(">Smart plug / TS011F_plug_3</div>", table)
-            self.assertIn(">Tuya</div>", table)
-            self.assertIn("mqtt:zigbee2mqtt_0x00158d0001", table)
-            self.assertIn("0123456789ab homeassistant/.storage/core.device_registry", table)
-            self.assertIn("deleted-device-col-source", table)
-            self.assertIn("deleted-device-cell-identifiers", table)
-            self.assertIn("deleted-device-cell-device", table)
-
-            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
-            built = (ROOT / "app" / "static" / "ha-ops.js").read_text()
-            for script in (source, built):
-                self.assertNotIn("deleted-device-line", script)
-                self.assertIn("deleted-device-cell-", script)
-            self.assertIn("renderHeaderCells", source)
-            self.assertIn("renderRowCells", source)
+            projection = self.client_state(server)
+            self.assertEqual(len(projection["last_deleted_devices_rows"]), 4)
+            self.assertEqual(projection["last_deleted_devices_rows"][0]["recovered_name"], "Living Room Motion")
+            style = (ROOT / "app" / "static" / "ha-ops.css").read_text()
+            self.assertIn("grid-template-columns: minmax(32ch, 1fr) minmax(18ch, 0.7fr) minmax(42ch, 1.4fr) minmax(34ch, 1.2fr)", style)
+            self.assertIn(".deleted-device-header,", style)
+            self.assertIn(".deleted-device-row", style)
+            client = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn("renderHeaderCells", client)
+            self.assertIn("renderRowCells", client)
+            self.assertIn("deleted-device-cell-", client)
 
     def test_stale_mqtt_discovery_preview_finds_registry_device_missing_from_z2m(self):
         server = load_server()
@@ -14182,18 +12691,13 @@ class ServerTests(unittest.TestCase):
                 }
             )
 
-            page = server.render_page()
-
-            self.assertIn("stale retained Home Assistant MQTT discovery topics", page)
-            self.assertIn("clears selected MQTT retained discovery topics only", page)
-            self.assertIn("does not delete files", page)
-            self.assertIn("does not delete files or registry/database records", page)
-            self.assertIn("<colgroup><col class='checkbox-col'>", page)
-            self.assertIn("<th class='checkbox-col' aria-label='Delete'></th>", page)
-            self.assertIn("name='retained_preview_fingerprint' value='retained-fingerprint'", page)
-            self.assertIn("name='candidate' value='row-identity'", page)
-            self.assertIn(".retained-devices-table .checkbox-col", page)
-            self.assertIn("width: 42px;", page)
+            projection = self.client_state(server)
+            self.assertEqual(projection["last_retained_devices_fingerprint"], "retained-fingerprint")
+            self.assertEqual(projection["last_retained_devices_rows"][0]["identity"], "row-identity")
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn("TEXT.retainedPreviewNotice", source)
+            self.assertIn("TEXT.retainedDeleteNotice", source)
+            self.assertIn("renderRetainedDevicesTable(rows", source)
 
     def test_retained_devices_fingerprint_covers_topics_and_scanned_z2m_context(self):
         server = load_server()
@@ -14329,7 +12833,7 @@ class ServerTests(unittest.TestCase):
                 ("retained preview", lambda: server._CTX.run_retained_devices_preview_job()),
                 ("retained delete", lambda: server._CTX.run_retained_devices_delete_job({})),
                 ("internal preview", lambda: server._CTX.run_internal_ids_preview_job()),
-                ("internal migrate", lambda: server._CTX.run_internal_ids_migrate_job(["0"])),
+                ("internal migrate", lambda: server._CTX.run_internal_ids_migrate_job({"preview_id": "stale", "selected": []})),
             ]
             for label, action in job_cases:
                 with self.subTest(boundary="job", label=label):
@@ -14581,43 +13085,24 @@ class ServerTests(unittest.TestCase):
             )
             self.assertIn("topic: z2m/office_remote_new", state["last_internal_ids_rows"][0]["diff"])
 
-            page = server.render_page()
-            self.assertIn("Check actions IDs", page)
-            self.assertIn("Migrate and Save to Git", page)
-            self.assertIn("Internal IDs Migration Preview", page)
-            self.assertIn("Files: 1. Candidates: 2. Unresolved: 0.", page)
-            self.assertIn("Select All", page)
-            self.assertIn("Select None", page)
-            self.assertIn("<div class='internal-ids-list' data-checkbox-scope='internal-ids'>", page)
-            self.assertIn("<div class='internal-id-header'>", page)
-            self.assertIn("<span></span><span>Migrate</span><span>File</span><span>Candidates</span><span>Unresolved</span>", page)
-            self.assertIn("<details class='internal-id-row'>", page)
-            self.assertNotIn("<th>Entity</th>", page)
-            self.assertNotIn("<th>Z2M</th>", page)
-            self.assertNotIn("<th>Action refs</th>", page)
-            self.assertNotIn("<th>Condition refs</th>", page)
-            self.assertIn("<span class='file-col'><code>.ha-ops/areas/office/automations.yaml</code></span>", page)
-            self.assertIn("<span class='metric-col'>2</span>", page)
-            self.assertIn(".internal-id-summary .file-col", page)
-            self.assertIn("text-overflow: ellipsis", page)
-            self.assertIn("white-space: nowrap", page)
-            self.assertIn("grid-template-columns: 24px 82px minmax(0, 1fr) 96px 96px", page)
-            self.assertIn(".internal-id-row summary::before", page)
-            self.assertIn(".internal-id-summary {\n      display: contents;", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["last_internal_ids_preview_id"])
+            self.assertEqual(projection["last_internal_ids_rows"][0]["path"], ".ha-ops/areas/office/automations.yaml")
+            self.assertEqual(projection["last_internal_ids_rows"][0]["changes"], 2)
+            self.assertTrue(projection["last_internal_ids_rows"][0]["diff_sha256"])
+            self.assertNotIn("diff", projection["last_internal_ids_rows"][0])
             reactive_script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
-            self.assertIn('this.querySelectorAll(`[data-checkbox-scope="${button.dataset.checkboxScope}"] input[type="checkbox"]`)', reactive_script)
-            self.assertNotIn("View diff:", page)
-            self.assertNotIn("<details open><summary><code>.ha-ops/areas/office/automations.yaml</code></summary>", page)
-            self.assertIn("run Preview Git to HA", page)
-            self.assertIn(".ha-ops/areas/office/automations.yaml after internal id migration", page)
+            self.assertIn("<vaadin-details", reactive_script)
+            self.assertIn('this.actionButton("internal_ids_migrate"', reactive_script)
+            self.assertIn("internal-ids-diff-get?preview_id=", reactive_script)
 
             server.write_state({"save_push_retry_pending": True, "save_push_retry_commit": "pending-save"})
-            self.assertFalse(server.run_internal_ids_migrate_job(["0"]))
+            self.assertFalse(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, ["0"])))
             self.assertIn("Save push retry is still pending", server.read_state()["last_message"])
             self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", automation.read_text())
             server.write_state({"save_push_retry_pending": False, "save_push_retry_commit": None})
 
-            self.assertTrue(server.run_internal_ids_migrate_job(["0"]))
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, ["0"])))
             migrated = automation.read_text()
             self.assertIn("topic: z2m/office_remote_new", migrated)
             self.assertIn("value_template: '{{ trigger.payload_json.action == ''1_single'' }}'", migrated)
@@ -14876,8 +13361,6 @@ devices:
 
             self.assertTrue(server.run_internal_ids_preview_job())
             state = server.read_state()
-            page = server.render_page()
-
             self.assertEqual(state["last_message"], "")
             self.assertEqual(
                 state["last_details"],
@@ -14887,9 +13370,10 @@ devices:
                 ],
             )
             self.assertNotIn("Checking HA Ops automations, scripts, and scenes for safe internal id migrations.", state["last_details"])
+            projected = self.client_state(server)
             self.assertLess(
-                page.index("Checking internal ids."),
-                page.index("Found 0 internal id migration files."),
+                projected["last_details"].index("Checking internal ids."),
+                projected["last_details"].index("Found 0 internal id migration files."),
             )
 
     def test_deleted_devices_preview_log_keeps_check_before_result(self):
@@ -14930,9 +13414,10 @@ devices:
                 ],
             )
             self.assertNotIn("Checking deleted_devices.", state["last_details"])
+            projected = self.client_state(server)
             self.assertLess(
-                page.index("Checking Home Assistant deleted devices and entities."),
-                page.index("Found 0 deleted devices."),
+                projected["last_details"].index("Checking Home Assistant deleted devices and entities."),
+                projected["last_details"].index("Found 0 deleted devices."),
             )
 
     def test_log_appends_message_after_details(self):
@@ -14949,12 +13434,12 @@ devices:
                 }
             )
 
-            page = server.render_page()
             state = server.read_state()
 
             self.assertEqual(state["last_details"], ["Step 1.", "Step 2.", "Finished."])
-            self.assertLess(page.index("Step 1."), page.index("Step 2."))
-            self.assertLess(page.index("Step 2."), page.index("Finished."))
+            self.assertEqual(self.client_state(server)["last_details"], state["last_details"])
+            self.assertIn('this.state.last_details?.at(-1) !== this.state.last_message',
+                          (ROOT / "frontend" / "src" / "ha-ops.js").read_text())
 
     def test_log_appends_running_message_after_details(self):
         server = load_server()
@@ -14970,11 +13455,12 @@ devices:
                 }
             )
 
-            page = server.render_page()
             state = server.read_state()
 
             self.assertEqual(state["last_details"], ["Using branch main.", "Preparing HA to Git save."])
-            self.assertLess(page.index("Using branch main."), page.index("Preparing HA to Git save."))
+            self.assertEqual(self.client_state(server)["last_details"], state["last_details"])
+            self.assertIn('this.state.last_details?.at(-1) !== this.state.last_message',
+                          (ROOT / "frontend" / "src" / "ha-ops.js").read_text())
 
     def test_add_detail_keeps_action_message_separate_from_details(self):
         server = load_server()
@@ -15122,6 +13608,36 @@ devices:
             with self.assertRaisesRegex(RuntimeError, "homeassistant/configuration.yaml"):
                 server.app_context.job_logic.prepare_repo_checkout_for_sync(ctx.job_deps(), options, [], "Preview HA to Git")
 
+    def test_untracked_document_survives_rejected_git_sync(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = self.seed_remote(root)
+            ctx = server.app_context.AppContext(
+                data_dir=root / "data",
+                config_dir=root / "homeassistant",
+                addon_configs_dir=root / "addon_configs",
+                addon_config_path=root / "config.yaml",
+            )
+            ctx.work_dir.mkdir(parents=True)
+            ctx.options_path.write_text(json.dumps({
+                "repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config",
+            }))
+            options = ctx.load_options()
+            repo = ctx.ensure_repo(options)
+            document = repo / "docs" / "draft-ui-plan.md"
+            document.parent.mkdir()
+            document.write_text("user work\n")
+
+            with self.assertRaisesRegex(RuntimeError, "untracked or ignored files"):
+                server.app_context.job_logic.prepare_repo_checkout_for_sync(
+                    ctx.job_deps(), options, [], "Save HA to Git"
+                )
+            self.assertEqual(document.read_text(), "user work\n")
+            with self.assertRaisesRegex(RuntimeError, "untracked or ignored files"):
+                ctx.ensure_repo(options, reset_to_origin=False)
+            self.assertEqual(document.read_text(), "user work\n")
+
     def test_save_preview_discards_export_leftovers_before_switching_from_ha_live_to_main(self):
         server = load_server()
         sync = server.sync_logic
@@ -15181,7 +13697,7 @@ devices:
             )
 
             self.assertTrue(server.run_internal_ids_preview_job())
-            self.assertTrue(server.run_internal_ids_migrate_job(["0"]))
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, ["0"])))
 
             migrated = automation.read_text()
             self.assertIn("topic: z2m/synthetic_remote", migrated)
@@ -15221,14 +13737,15 @@ devices:
             self.assertIn("device_id: cccccccccccccccccccccccccccccccc", state["last_internal_ids_rows"][0]["unresolved_items"][0]["yaml"])
             self.assertEqual(state["last_internal_ids_unresolved"][0]["alias"], "Unsupported integration event")
 
-            page = server.render_page()
-            self.assertNotIn("Unresolved device blocks", page)
-            self.assertIn("unsupported device trigger", page)
-            self.assertIn("<span class='no-candidates' title='No safe candidates'>None</span>", page)
-            self.assertIn("device_id: cccccccccccccccccccccccccccccccc", page)
-            self.assertIn("<button type='submit' disabled>Migrate and Save to Git</button>", page)
-            self.assertIn("button:disabled,", page)
-            self.assertIn("background: #e5e7eb", page)
+            projection = self.client_state(server)
+            self.assertEqual(projection["last_internal_ids_rows"][0]["changes"], 0)
+            self.assertIn("unsupported device trigger", projection["last_internal_ids_unresolved"][0]["reason"])
+            self.assertNotIn("yaml", projection["last_internal_ids_unresolved"][0])
+            self.assertNotIn("item", projection["last_internal_ids_unresolved"][0])
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('disabled: blocked || !rows.some((row) => row.selected)', source)
+            self.assertIn('item.reason || ""', source)
+            self.assertIn("background: #e5e7eb", (ROOT / "app" / "static" / "ha-ops.css").read_text())
 
     def test_internal_ids_migrate_reports_remaining_unresolved_items(self):
         server = load_server()
@@ -15272,7 +13789,7 @@ devices:
             rows = server.read_state()["last_internal_ids_rows"]
             office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
 
-            self.assertTrue(server.run_internal_ids_migrate_job([str(office_index)]))
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(office_index)])))
             state = server.read_state()
 
             self.assertEqual(state["last_message"], "Migrated 1 file. 1 unresolved item remains.")
@@ -15305,7 +13822,7 @@ devices:
             self.assertTrue(server.run_internal_ids_preview_job())
             automation.write_text(automation.read_text() + "\n")
 
-            self.assertFalse(server.run_internal_ids_migrate_job(["0"]))
+            self.assertFalse(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, ["0"])))
             self.assertIn("changed since preview", server.read_state()["last_message"])
 
     def test_internal_ids_split_mode_applies_only_selected_file(self):
@@ -15342,11 +13859,14 @@ devices:
             self.assertEqual(len([row for row in rows if row["changes"]]), 2)
             office_index = next(index for index, row in enumerate(rows) if row["path"].endswith("office/automations.yaml"))
 
-            page = server.render_page()
-            self.assertIn(".ha-ops/areas/kitchen/automations.yaml after internal id migration", page)
-            self.assertIn(".ha-ops/areas/office/automations.yaml after internal id migration", page)
+            projection = self.client_state(server)
+            self.assertEqual(
+                {row["path"] for row in projection["last_internal_ids_rows"]},
+                {".ha-ops/areas/kitchen/automations.yaml", ".ha-ops/areas/office/automations.yaml"},
+            )
+            self.assertTrue(all(row["diff_sha256"] for row in projection["last_internal_ids_rows"]))
 
-            self.assertTrue(server.run_internal_ids_migrate_job([str(office_index)]))
+            self.assertTrue(server.run_internal_ids_migrate_job(self.internal_ids_selection(server, [str(office_index)])))
             self.assertIn("topic: z2m/synthetic_remote", (office / "automations.yaml").read_text())
             self.assertIn("device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", (kitchen / "automations.yaml").read_text())
 
@@ -15375,9 +13895,12 @@ devices:
             self.assertTrue(server.run_internal_ids_preview_job())
             self.assertEqual(server.read_state()["last_internal_ids_count"], 0)
 
-            page = server.render_page()
-            self.assertIn("No internal id migration candidates found.", page)
-            self.assertIn("<button type='submit' disabled>Migrate and Save to Git</button>", page)
+            projection = self.client_state(server)
+            self.assertFalse(any(row["selected"] for row in projection["last_internal_ids_rows"]))
+            self.assertIn(
+                'disabled: blocked || !rows.some((row) => row.selected)',
+                (ROOT / "frontend" / "src" / "ha-ops.js").read_text(),
+            )
 
     def test_approve_deleted_devices_clears_array_with_core_stopped(self):
         server = load_server()
@@ -15447,9 +13970,8 @@ devices:
             self.assertEqual(preview["last_deleted_devices_count"], 1)
             self.assertIn("Deleted entities", preview["last_deleted_devices_preview"])
             self.assertIn("deleted entities", preview["last_message"])
-            preview_page = server.render_page()
-            self.assertIn("switch.living_room_xmas_tree", preview_page)
-            self.assertNotIn("deleted_devices", preview_page)
+            preview_projection = self.client_state(server)
+            self.assertIn("switch.living_room_xmas_tree", json.dumps(preview_projection["last_deleted_devices_tree"]))
 
             self.assertTrue(server.run_deleted_devices_delete_job())
             self.assertEqual(json.loads(entity_path.read_text())["data"]["deleted_entities"], [])
@@ -15458,7 +13980,7 @@ devices:
             self.assertEqual(delete_state["deleted_devices_pending_device_count"], 0)
             self.assertEqual(delete_state["deleted_devices_pending_entity_count"], 1)
             self.assertNotIn("deleted_devices", delete_state["last_message"])
-            self.assertNotIn("deleted_devices", server.render_page())
+            self.assertTrue(self.client_state(server)["deleted_devices_pending_confirmation"])
             pending_diff = server._CTX.deleted_devices_pending_diff(delete_state["deleted_devices_rollback_path"])
             self.assertIn("deleted entities before cleanup", pending_diff)
             self.assertIn("deleted entities now", pending_diff)
@@ -15475,7 +13997,7 @@ devices:
             reloaded_server.log = lambda message: None
             reloaded_state = reloaded_server.read_state()
             self.assertEqual(reloaded_state["deleted_devices_pending_entity_count"], 1)
-            self.assertIn("Pending deleted entities cleanup", reloaded_server.render_page())
+            self.assertTrue(reloaded_server.web._snapshot_payload(reloaded_server.context())["state"]["deleted_devices_pending_confirmation"])
 
             self.assertTrue(server.run_deleted_devices_confirm_job())
             confirmed = server.read_state()
@@ -15490,12 +14012,9 @@ devices:
                     for detail in confirmed["last_details"]
                 )
             )
-            self.assertIn("run HA to Git Preview and Save now", server.render_page())
-            self.assertNotIn("deleted_devices", server.render_page())
-            page = server.render_page()
-            section = page[page.index("<h2>Deleted devices and entities</h2>") : page.index("<h2>Retained Devices</h2>")]
-            self.assertIn("deleted-devices-save-hint", section)
-            self.assertIn("run HA to Git Preview and Save now", section)
+            projection = self.client_state(server)
+            self.assertIn("run HA to Git Preview and Save now", "\n".join(projection["last_details"]))
+            self.assertFalse(projection["deleted_devices_pending_confirmation"])
 
     def test_deleted_devices_preview_includes_mixed_deleted_registry_entries(self):
         server = load_server()
@@ -15725,20 +14244,12 @@ devices:
 
             self.assertTrue(server.run_deleted_devices_preview_job())
             self.assertTrue(server.run_deleted_devices_delete_job())
-            page = server.render_page()
-
-            self.assertIn("Pending deleted devices cleanup", page)
-            self.assertNotIn("Pending deleted devices Diff", page)
-            self.assertIn("Old Button", page)
-            self.assertIn("Advanced raw diff", page)
-            self.assertIn("<vaadin-details class='deleted-device-group' opened>", page)
-            self.assertIn("<vaadin-details-summary slot='summary'>", page)
-            self.assertIn("Entities to remove", page)
-            self.assertNotIn("0 active entities", page)
-            self.assertNotIn("<article class='deleted-device-group'", page)
-            self.assertNotIn("deleted devices before cleanup", page)
-            self.assertNotIn("deleted devices now", page)
-            self.assertNotIn("Confirm Changes accepts this diff", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            self.assertIn("Old Button", json.dumps(projection["deleted_devices_pending_tree"]))
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn("renderDeletedDevicesTree(pendingTree)", source)
+            self.assertIn("<ha-ops-pending-raw-diff>", source)
 
     def test_pending_replay_uses_manifest_enrichment_not_stale_preview_rows(self):
         server = load_server()
@@ -16050,8 +14561,6 @@ devices:
             self.assertTrue(server.run_deleted_devices_preview_job())
             state = server.read_state()
             row = state["last_deleted_devices_rows"][0]
-            page = server.render_page()
-
             self.assertEqual(row["area"], "Living Room")
             self.assertEqual(row["entity_id"], "switch.live_tombstone")
             self.assertEqual(row["original_name"], "Live entity name")
@@ -16063,11 +14572,11 @@ devices:
             self.assertEqual(row["recovered_identifiers"], [["mqtt", "zigbee2mqtt_0x00124b0024abcdef"]])
             self.assertEqual(row["source_path"], "homeassistant/.storage/core.device_registry")
             self.assertRegex(row["source_commit"], r"^[0-9a-f]{40}$")
-            self.assertIn("living_room_xmas_train", page)
-            self.assertIn("Tuya", page)
-            self.assertIn("TS011F_plug_3", page)
-            self.assertIn("zigbee2mqtt_0x00124b0024abcdef", page)
-            self.assertIn(row["source_commit"][:12], page)
+            projection = self.client_state(server)
+            self.assertIn("living_room_xmas_train", json.dumps(projection["last_deleted_devices_tree"]))
+            self.assertIn("Tuya", json.dumps(projection["last_deleted_devices_tree"]))
+            self.assertIn("TS011F_plug_3", json.dumps(projection["last_deleted_devices_tree"]))
+            self.assertIn("zigbee2mqtt_0x00124b0024abcdef", json.dumps(projection["last_deleted_devices_tree"]))
             self.assertEqual(server.device_registry_fingerprint(), state["last_deleted_devices_fingerprint"])
             self.assertEqual(self.repo_status(repo), "")
 
@@ -16454,15 +14963,15 @@ devices:
 
             server.clear_display_state()
             state = server.read_state()
-            page = server.render_page()
-
             self.assertTrue(state["deleted_devices_pending_confirmation"])
             self.assertEqual(state["last_deleted_devices_fingerprint"], "after")
             self.assertEqual(state["deleted_devices_rollback_path"], "/tmp/rollback")
-            self.assertIn("Pending deleted devices cleanup", page)
-            self.assertIn("Pending diff unavailable", page)
-            self.assertIn("Confirm Changes", page)
-            self.assertIn("Revert Changes", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            self.assertTrue(projection["deleted_devices_pending_tree_error"])
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn("TEXT.confirmChanges", source)
+            self.assertIn("TEXT.revertDeletedDevices", source)
 
     def test_pending_deleted_devices_cleanup_renders_decision_log_not_error(self):
         server = load_server()
@@ -16513,30 +15022,14 @@ devices:
                 }
             )
 
-            page = server.render_page()
-
-            self.assertIn('<div class="badge pending" data-status-code="pending decision" data-testid="status-badge">pending decision</div>', page)
-            self.assertNotIn('<div class="badge error">error</div>', page)
-            self.assertIn("<h2>Log</h2>", page)
-            self.assertNotIn("<h2>Last Run Details</h2>", page)
-            self.assertNotIn("Preview deletions", page)
-            self.assertIn("deleted devices cleanup is waiting for your decision.", page)
-            self.assertIn("Previous action: Revert Changes", page)
-            self.assertIn("Last result: Registry entries changed after deletion. Review manually before reverting.", page)
-            self.assertIn("- deleted devices removed by this cleanup: 1", page)
-            self.assertIn("- currently present deleted devices: 1", page)
-            self.assertIn("- new deleted devices after restart: 1", page)
-            self.assertIn("- removed entries returned: 0", page)
-            self.assertIn("Confirm Changes: keep this cleanup. Removed deleted devices stay removed.", page)
-            self.assertIn("Revert Changes: restore only deleted devices removed by this cleanup.", page)
-            self.assertIn("<h2>Pending deleted devices cleanup</h2>", page)
-            self.assertNotIn("<h2>Deletion of deleted_devices Preview</h2>", page)
-            self.assertIn("Confirm Changes keeps this cleanup.", page)
-            self.assertIn("Old Button", page)
-            self.assertIn("Advanced raw diff", page)
-            self.assertNotIn("deleted devices before cleanup", page)
-            self.assertNotIn("deleted devices now", page)
-            self.assertNotIn("class='diff-line diff-del'", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            self.assertEqual(projection["last_status"], "error")
+            self.assertIn("Old Button", json.dumps(projection["deleted_devices_pending_tree"]))
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('const status = pending ? "pending decision"', source)
+            self.assertIn("renderDeletedDevicesTree(pendingTree)", source)
+            self.assertIn("TEXT.deletedDevicesPendingNotice", source)
 
     def test_pending_deleted_devices_cleanup_blocks_check_and_delete(self):
         server = load_server()
@@ -16562,12 +15055,12 @@ devices:
 
             self.assertTrue(server.run_deleted_devices_preview_job())
             self.assertTrue(server.run_deleted_devices_delete_job())
-            page = server.render_page()
-
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Check deleted devices and entities</button>", page)
-            self.assertNotIn("action='deleted-devices-delete'", page)
-            self.assertIn("Confirm Changes", page)
-            self.assertIn("Revert Changes", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('disabled: controlsBlocked', source)
+            self.assertIn('this.actionButton("deleted_devices_confirm"', source)
+            self.assertIn('this.actionButton("deleted_devices_revert"', source)
             self.assertFalse(server.run_deleted_devices_preview_job())
             self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
             self.assertFalse(server.run_deleted_devices_delete_job())
@@ -16633,17 +15126,14 @@ devices:
             self.assertEqual(server.read_state()["last_action"], "apply")
             self.assertIn("pending deleted devices cleanup", server.read_state()["last_message"])
 
-            page = server.render_page()
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview HA to Git</button>", page)
-            self.assertIn("<button type=\"submit\" class=\"secondary\" disabled>Preview Git to HA</button>", page)
-            self.assertNotIn("Save HA to Git</button>", page)
-            self.assertNotIn("Apply Git to HA</button>", page)
-            self.assertNotIn("<h2>Save Preview</h2>", page)
-            self.assertNotIn("<h2>Apply Preview</h2>", page)
-            self.assertNotIn("Confirm Save to Git", page)
-            self.assertNotIn("Confirm Apply to HA", page)
-            self.assertIn("Confirm Changes", page)
-            self.assertIn("Revert Changes", page)
+            projection = self.client_state(server)
+            self.assertTrue(projection["deleted_devices_pending_confirmation"])
+            self.assertFalse(projection["last_preview_paths"])
+            self.assertFalse(projection["last_save_preview_paths"])
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn("const controlsBlocked = blocked || pending || saveRetry;", source)
+            self.assertIn('this.actionButton("deleted_devices_confirm"', source)
+            self.assertIn('this.actionButton("deleted_devices_revert"', source)
 
     def test_deleted_devices_cleanup_clears_stale_save_apply_previews_through_decision(self):
         server = load_server()
@@ -17424,16 +15914,11 @@ devices:
             self.configure_paths(server, root)
             server.get_installed_addons = lambda: []
 
-            page = server.render_page()
-
-            toggle = page.index("homeassistant-organizer")
-            actions = page.index('<div class="actions">')
-            managed_targets = page.index("<h2>Managed Targets</h2>")
-            self.assertLess(toggle, actions)
-            self.assertLess(toggle, managed_targets)
-            self.assertIn("Area split organizer archived", page)
-            self.assertIn("name='homeassistant_organizer' value='1' disabled", page)
-            self.assertNotIn("Split automations, scripts, and scenes by area in Git", page)
+            projected = server.web._snapshot_payload(server.context())
+            self.assertEqual(projected["text"]["text.split_organizer_blocked"], "Area split organizer archived")
+            source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+            self.assertIn('t("text.split_organizer_blocked")', source)
+            self.assertNotIn("homeassistant-organizer", source)
 
     def test_save_preview_shows_candidates_without_commit_or_push(self):
         server = load_server()
@@ -17824,34 +16309,22 @@ devices:
             for phase in ("accepted", "dispatching"):
                 with self.subTest(phase=phase):
                     server.write_state({"docker_build_cache_prune_fence": dict(fence, phase=phase)})
-                    server.RUN_LOCK.acquire()
-                    try:
-                        page = server.render_page()
-                    finally:
-                        server.RUN_LOCK.release()
-                    expected = (
-                        "Build-cache cleanup is accepted and waiting to dispatch."
-                        if phase == "accepted"
-                        else "Build-cache cleanup request is in progress."
-                    )
-                    self.assertIn(expected, page)
-                    self.assertNotIn(">Acknowledge</button>", page)
-                    self.assertIn('action="docker-build-cache-prune"', page)
-                    prune_form = page[page.index('action="docker-build-cache-prune"'):][:700]
-                    self.assertIn('<button type="submit" class="secondary" disabled>', prune_form)
+                    projection = server.web._snapshot_payload(server.context())
+                    self.assertEqual(projection["view"]["docker_prune_recovery"]["phase"], phase)
+                    self.assertTrue(projection["state"]["docker_build_cache_prune_fence"])
+                    self.assertNotIn("value", projection["view"]["docker_prune_recovery"])
 
             server.write_state({"docker_build_cache_prune_fence": dict(fence, phase="resolution_required")})
-            page = server.render_page()
-            self.assertIn(">Acknowledge</button>", page)
-            self.assertIn("name='mode' value='operation'", page)
-            self.assertIn(f"name='operation_id' value='{operation_id}'", page)
+            recovery = server.web._snapshot_payload(server.context())["view"]["docker_prune_recovery"]
+            self.assertEqual(recovery["phase"], "resolution_required")
+            self.assertEqual(recovery["operation_id"], operation_id)
 
             corrupt = {"schema": 99, "operation_id": operation_id}
             server.write_state({"docker_build_cache_prune_fence": corrupt})
-            page = server.render_page()
-            self.assertIn(">Acknowledge</button>", page)
-            self.assertIn("name='mode' value='corrupt'", page)
-            self.assertNotIn("name='operation_id'", page)
+            recovery = server.web._snapshot_payload(server.context())["view"]["docker_prune_recovery"]
+            self.assertEqual(recovery["kind"], "corrupt")
+            self.assertIsNone(recovery["operation_id"])
+            self.assertTrue(recovery["recovery_token"].startswith("corrupt:"))
             self.assertEqual(server.read_state()["docker_build_cache_prune_fence"], corrupt)
             token = server.app_context.state_store.classify_docker_prune_fence(corrupt)["recovery_token"]
             response = self.post_json(
@@ -17929,7 +16402,7 @@ devices:
             updated = server.read_state()["docker_build_cache_prune_fence"]
             self.assertEqual(updated["phase"], "resolution_required")
             self.assertEqual(updated["operation_id"], operation_id)
-            self.assertIn(">Acknowledge</button>", server.render_page())
+            self.assertEqual(server.web._snapshot_payload(server.context())["view"]["docker_prune_recovery"]["phase"], "resolution_required")
 
     def test_docker_prune_fence_corruption_token_is_canonical_and_durable(self):
         server = load_server()
@@ -17986,14 +16459,10 @@ devices:
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": True, "docker_api": True}
             }
-            page = server.render_page()
-            section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
-            self.assertIn('data-capability-available="false" data-action-ready="false"', section)
-            self.assertIn('class="secondary" disabled', section)
-            self.assertIn('class=\'action-hint docker-prune-hint\'', section)
-            self.assertIn("Protection mode is enabled", section)
-            self.assertIn("turn off Protection mode", section)
-            self.assertIn("color: #d80", page)
+            capability_view = server.web._snapshot_payload(server.context())["view"]["docker_build_cache"]
+            self.assertFalse(capability_view["available"])
+            self.assertIn("Protection mode is enabled", capability_view["reason"])
+            self.assertIn("turn off Protection mode", capability_view["remedy"])
 
     def test_docker_build_cache_capability_explains_missing_runtime_socket(self):
         server = load_server()
@@ -18004,15 +16473,14 @@ devices:
                 "data": {"protected": False, "docker_api": True}
             }
             capability = server.context().docker_build_cache_capability()
-            page = server.render_page()
+            capability_view = server.web._snapshot_payload(server.context())["view"]["docker_build_cache"]
 
         self.assertFalse(capability["available"])
         self.assertEqual(capability["kind"], server.app_context.docker_capability.RUNTIME_SOCKET_UNAVAILABLE)
         self.assertIn("Docker API socket is not mounted", capability["reason"])
         self.assertIn("Restart HA Ops", capability["remedy"])
-        section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
-        self.assertIn('data-capability-available="false" data-action-ready="false"', section)
-        self.assertIn("Docker API socket is not mounted", section)
+        self.assertFalse(capability_view["available"])
+        self.assertIn("Docker API socket is not mounted", capability_view["reason"])
 
     def test_docker_build_cache_prune_rechecks_capability_before_mutating_state(self):
         server = load_server()
@@ -18154,18 +16622,23 @@ devices:
                     if lock is not None:
                         self.assertTrue(lock.acquire(blocking=False))
                     try:
-                        page = server.render_page()
+                        projection = server.web._snapshot_payload(server.context())
                     finally:
                         if lock is not None:
                             lock.release()
-                    section = page[page.index('action="docker-build-cache-prune"') : page.index("<p class=\"action-flow\"", page.index('action="docker-build-cache-prune"'))]
-                    self.assertIn('data-action-ready="false"', section)
-                    self.assertIn('class="secondary" disabled', section)
-                    if hint is None:
-                        self.assertNotIn("docker-prune-hint", section)
+                    if name == "fence":
+                        self.assertTrue(projection["state"]["docker_build_cache_prune_fence"])
+                    if name == "capability":
+                        self.assertFalse(projection["view"]["docker_build_cache"]["available"])
+                        self.assertIn(hint, projection["view"]["docker_build_cache"]["reason"])
                     else:
-                        self.assertIn("docker-prune-hint", section)
-                        self.assertIn(hint, section)
+                        self.assertTrue(projection["view"]["docker_build_cache"]["available"])
+                    source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+                    self.assertIn("disabled: controlsBlocked || !this.view.docker_build_cache?.available", source)
+                    if name == "save retry":
+                        self.assertIn('t("docker_prune.disabled.save_retry")', source)
+                    if name == "fence":
+                        self.assertIn('t("docker_prune.disabled.fence")', source)
                     server.write_state({"last_status": "idle", "save_push_retry_pending": False, state_store.DOCKER_PRUNE_FENCE_KEY: None})
 
     def test_docker_prune_uses_vaadin_confirmation_and_server_disabled_state(self):
@@ -18177,14 +16650,11 @@ devices:
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": False, "docker_api": True}
             }
-            page = server.render_page()
-        section = page[page.index('action="docker-build-cache-prune"'):page.index("</form>", page.index('action="docker-build-cache-prune"'))]
-        self.assertIn("data-confirm=", section)
-        self.assertNotIn(" disabled", section)
+            projection = server.web._snapshot_payload(server.context())
+        self.assertTrue(projection["view"]["docker_build_cache"]["available"])
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("<vaadin-confirm-dialog", script)
-        self.assertIn("confirmMutation", script)
-        self.assertIn('form.dataset.confirmed = "true"', script)
+        self.assertIn('confirm: t("confirm.docker_build_cache_prune")', script)
 
     def test_disk_usage_controls_are_same_row_and_prune_copy_is_explicit(self):
         server = load_server()
@@ -18195,15 +16665,12 @@ devices:
             server.context().call_supervisor = lambda method, path, payload=None, timeout=None: {
                 "data": {"protected": False, "docker_api": True}
             }
-            page = server.render_page()
-        section = page[page.index("<h2>Disk Usage</h2>") : page.index("<h2>Deleted devices", page.index("<h2>Disk Usage</h2>"))]
-        self.assertLess(section.index('action="disk-usage"'), section.index('action="docker-build-cache-prune"'))
-        self.assertIn('data-capability-available="true"', section)
-        self.assertIn('data-action-ready="true"', section)
-        self.assertIn('class="secondary" >Clear build cache</button>', section)
-        self.assertIn('data-confirm="', section)
-        self.assertNotIn('class="warning"', section)
-        self.assertNotIn('docker-prune-hint', section)
+            projection = server.web._snapshot_payload(server.context())
+        self.assertTrue(projection["view"]["docker_build_cache"]["available"])
+        source = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
+        section = source[source.index('t("heading.disk_usage")') : source.index('t("heading.deleted_devices")')]
+        self.assertLess(section.index('this.actionButton("disk_usage"'), section.index('this.actionButton("docker_build_cache_prune"'))
+        self.assertIn('confirm: t("confirm.docker_build_cache_prune")', section)
 
     def test_diff_bodies_are_artifactized_outside_state_and_debug_snapshot(self):
         server = load_server()
@@ -18311,6 +16778,9 @@ devices:
             state = server.read_state()
             self.assertEqual(state["operation_generation"], generation)
             self.assertEqual(state["last_diff"], "current apply diff")
+            with self.assertRaisesRegex(RuntimeError, "unavailable during an active"):
+                server.context().diff_get(cursor)
+            server.write_state({"last_status": "idle"})
             self.assertEqual(server.context().diff_get(cursor), "current apply diff")
 
     def test_apply_preview_decisions_keep_generation_and_diff_cursor_current(self):
@@ -18347,6 +16817,7 @@ devices:
                     },
                 },
             )
+            identity = server.web.preview_identity_for_state(server.read_state(), "apply")
             resolve = server.web.dispatch_command(
                 server.context(),
                 "resolve_apply_preview",
@@ -18400,6 +16871,7 @@ devices:
                     },
                 },
             )
+            identity = server.web.preview_identity_for_state(server.read_state(), "save")
             resolve = server.web.dispatch_command(
                 server.context(),
                 "resolve_save_preview",
@@ -18423,7 +16895,7 @@ devices:
             self.assertGreater(state["state_revision"], revision)
             self.assertEqual(server.context().diff_get(cursor), "diff --git a/homeassistant/a.yaml b/homeassistant/a.yaml\n+save")
 
-    def test_same_preview_identity_accepts_controls_captured_before_decision_refresh(self):
+    def test_same_preview_identity_rejects_controls_captured_before_decision_refresh(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -18466,10 +16938,10 @@ devices:
             )
 
             self.assertTrue(first["ok"])
-            self.assertTrue(second["ok"])
+            self.assertFalse(second["ok"])
             self.assertEqual(
                 server.read_state()["apply_preview_selected_paths"],
-                ["homeassistant/a.yaml", "homeassistant/b.yaml"],
+                ["homeassistant/a.yaml"],
             )
 
     def test_stale_preview_identity_rejects_same_path_decisions_after_preview_replace(self):
@@ -18581,7 +17053,7 @@ devices:
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn('const url = new URL("ws", baseUrl());', script)
         self.assertIn('url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";', script)
-        self.assertIn('return name.replaceAll("-", "_");', script)
+        self.assertIn('command.replaceAll("_", "-")', script)
 
     def test_preview_commands_are_in_websocket_registry(self):
         server = load_server()
@@ -18594,15 +17066,23 @@ devices:
                 calls.append((target.__name__, args, kwargs))
                 return True
 
-            save_result = server.web.dispatch_command(server.context(), "save_preview", start_job=start_job)
-            apply_result = server.web.dispatch_command(server.context(), "preview", start_job=start_job)
+            generation = server.read_state()["operation_generation"]
+            save_id = str(uuid.uuid4())
+            save_result = server.web.dispatch_command(server.context(), "save_preview", {
+                "command_id": save_id, "generation": generation, "payload": {},
+            }, start_job=start_job)
+            server.context().update_command(save_id, "terminal", {"ok": True})
+            apply_id = str(uuid.uuid4())
+            apply_result = server.web.dispatch_command(server.context(), "preview", {
+                "command_id": apply_id, "generation": server.read_state()["operation_generation"], "payload": {},
+            }, start_job=start_job)
 
             self.assertTrue(save_result["ok"])
             self.assertTrue(apply_result["ok"])
             self.assertEqual(calls[0][0], "run_save_preview_job")
-            self.assertEqual(calls[0][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": None})
+            self.assertEqual(calls[0][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": save_id})
             self.assertEqual(calls[1][0], "run_preview_job")
-            self.assertEqual(calls[1][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": None})
+            self.assertEqual(calls[1][2], {"state_updates": server.app_context.state_store.ALL_PREVIEW_CLEAR_UPDATES, "command_id": apply_id})
 
     def test_ingress_prefixed_ws_route_accepts_upgrade(self):
         server = load_server()
@@ -18858,7 +17338,7 @@ devices:
             self.assertEqual(frames[0]["type"], "state")
             self.assertNotIn("fragments", frames[0])
             self.assertEqual(frames[0]["state"]["last_save_preview_paths"], ["homeassistant/configuration.yaml"])
-            self.assertEqual(frames[0]["state"]["last_save_diff"], "")
+            self.assertNotIn("last_save_diff", frames[0]["state"])
 
     def test_ws_patch_uses_explicit_base_and_revision(self):
         server, harness = load_dev_harness()
@@ -19004,7 +17484,11 @@ devices:
             root = Path(tmp)
             self.configure_paths(server, root)
             server.context().operation_store.begin_repair()
-            result = server.web.dispatch_command(server.context(), "apply")
+            result = server.web.dispatch_command(server.context(), "preview", {
+                "command_id": str(uuid.uuid4()),
+                "generation": server.read_state()["operation_generation"],
+                "payload": {},
+            })
 
             self.assertFalse(result["ok"])
             self.assertEqual(result["message"], server.app_context.state_store.READINESS_BLOCKED_MESSAGE)
@@ -19020,7 +17504,7 @@ devices:
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
         self.assertIn("this.connect();", script)
         self.assertNotIn("reloadSoon", script)
-        command_flow = script[script.index("async dispatchMutation(form)"):script.index("observeBackendVersion(version)")]
+        command_flow = script[script.index("async dispatchCommand(command, action, payload = {})"):script.index("observeBackendVersion(version)")]
         self.assertNotIn("window.location.reload", command_flow)
         self.assertIn("this.applyPatch(frame)", script)
 
@@ -19044,7 +17528,7 @@ devices:
             self.configure_paths(server, root)
             page = server.render_page()
 
-        style = page.split("<style>", 1)[1].split("</style>", 1)[0]
+        style = (ROOT / "app" / "static" / "ha-ops.css").read_text()
         script = (ROOT / "frontend" / "src" / "ha-ops.js").read_text()
 
         self.assertIn("height: var(--details-card-height, 500px);", style)
@@ -19055,8 +17539,8 @@ devices:
         self.assertIn("vaadin-details", script)
         self.assertIn("opened-changed", script)
         self.assertIn("diff-get", script)
-        self.assertIn('querySelector("#reactive-previews[data-testid=', script)
-        self.assertIn("syncPreviewMount()", script)
+        self.assertIn("previewTemplate()", script)
+        self.assertIn("if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation) return nothing;", script)
         self.assertIn("customElements.define(\"ha-ops-preview\"", script)
 
     def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):

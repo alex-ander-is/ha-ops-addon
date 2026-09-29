@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 1.0.0
+
+- Move HA Ops controls to a static Lit/Vaadin client backed by a versioned JSON API.
+- Validate and serialize every accepted command on the server, reject stale preview decisions, and keep all tabs blocked while work runs.
+- Keep exact Check actions IDs diffs tied to the active preview and fence uncertain Save or Apply outcomes for reviewed recovery after restart.
+- Preserve the existing temporary Apply rollback on caught errors without creating a second durable copy.
+
 ## 0.11.1
 
 - Archive the retired `.ha-ops/areas` organizer experiment, remove its inactive implementation and skipped projection tests, and retain a guard that rejects legacy enabled settings before Save or Apply can change configuration.

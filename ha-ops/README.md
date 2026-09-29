@@ -26,6 +26,8 @@ normal Home Assistant heap files for automations, scripts, and scenes. A stale
 organizer setting is rejected and generated area metadata is removed; it must
 not be reactivated. Historical context is in
 `docs/archive/organizer-area-split.md` and Git history.
+The former enabled projection was blocked pending production-safe evidence;
+keep organizer disabled for existing Git targets.
 
 ## Stable Entity References
 
@@ -221,14 +223,19 @@ Automated browser smoke:
 PLAYWRIGHT_SHARED_ROOT=/Users/purportex/Applications/Playwright node ha-ops/tests/browser/run.mjs
 ```
 
-Covered locally: Lit/Vaadin page load, Preview Git to HA, Preview HA to Git,
-WebSocket connect/reconnect and revision replay, lazy per-file `diff-get`, debug
-snapshot redaction, disabled/running controls, mobile layout, and HTTP dispatch
-when WebSocket is known to be unavailable before a command is sent.
+Covered locally by the browser smoke: Lit/Vaadin page load, two tabs, Preview
+Git to HA, visible Change List, page errors, and desktop/phone layout. Python
+contract tests cover command fencing, stale decisions, replay, lazy diff access,
+redacted state, and HTTP/WS mutation parity.
 
 Not covered locally: real Supervisor ingress proxying, live backups, Core
 restart/reload, App lifecycle actions, Docker socket effects, and writes to the
 real HA config or user Git remotes.
+
+The UI shell is the static `app/static/index.html`; ingress-relative CSS and
+the compiled Lit/Vaadin module live in `app/static`. Display data and
+localization arrive through the versioned JSON state projection. The server
+does not build request-specific interface markup.
 
 The UI requires JavaScript. Its HTTP fallback is a JavaScript command-transport
 fallback used only when WebSocket is known to be unavailable; there is no

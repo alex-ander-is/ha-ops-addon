@@ -1,18 +1,105 @@
-import { LitElement, css, html, nothing, render } from "lit";
+import { LitElement, css, html, nothing } from "lit";
 import "@vaadin/button";
 import "@vaadin/checkbox";
 import "@vaadin/confirm-dialog";
 import "@vaadin/details";
 import "@vaadin/progress-bar";
 import "@vaadin/select";
+import "@vaadin/text-field";
 
-const MUTATING_METHOD = "post";
-const TEXT = window.__HA_OPS_TEXT__ || {};
+let TEXT = {};
+const TEXT_KEYS = {
+  "expand": "button.expand_diff",
+  "collapse": "button.collapse_diff",
+  "expandAll": "button.expand_all",
+  "collapseAll": "button.collapse_all",
+  "selectAll": "button.select_all",
+  "selectNone": "button.select_none",
+  "wrapLines": "button.wrap_lines",
+  "unwrapLines": "button.unwrap_lines",
+  "wrapAllLines": "button.wrap_all_lines",
+  "unwrapAllLines": "button.unwrap_all_lines",
+  "changeList": "heading.change_list",
+  "deletedDevicesPreview": "heading.deleted_devices_preview",
+  "retainedDevicesPreview": "heading.retained_devices_preview",
+  "gitAccess": "heading.git_access",
+  "applyPreview": "heading.git_to_ha",
+  "savePreview": "heading.ha_to_git",
+  "apply": "action.apply",
+  "deleteRetainedDevices": "action.delete_retained_devices",
+  "removeDeletedEntries": "action.remove_deleted_entries",
+  "revertDeletedDevices": "action.revert_changes",
+  "save": "action.save",
+  "useGitVersion": "action.use_git_version",
+  "useHaVersion": "action.use_ha_version",
+  "confirmDeletedDevicesDelete": "confirm.deleted_devices_delete",
+  "confirmRetainedDevicesDelete": "confirm.retained_devices_delete",
+  "reloadHaOps": "action.reload_ha_ops",
+  "acknowledgeRisksContinue": "action.acknowledge_risks_continue",
+  "versionMismatchTitle": "heading.version_mismatch",
+  "versionMismatchWarning": "warning.version_mismatch",
+  "includeFile": "label.include_preview_file",
+  "area": "label.area",
+  "id": "label.id",
+  "entityId": "label.entity_id",
+  "generatedAt": "label.generated_at",
+  "identifiers": "label.identifiers",
+  "name": "label.name",
+  "manufacturerModel": "label.manufacturer_model",
+  "originalName": "label.original_name",
+  "originalDeviceClass": "label.original_device_class",
+  "retainedDiscoveryTopics": "label.retained_discovery_topics",
+  "source": "label.source",
+  "deleteLabel": "label.delete",
+  "commitSubject": "label.commit_subject",
+  "versionChoice": "label.preview_version_choice",
+  "loadingDiff": "message.loading_diff",
+  "loadingPreviewDiff": "message.loading_preview_diff",
+  "unavailableDiff": "text.diff_detail_unavailable",
+  "noDeletedDevices": "text.no_deleted_devices",
+  "noRetainedDevices": "text.no_retained_devices",
+  "retainedPreviewNotice": "notice.retained_devices_preview",
+  "retainedDeleteNotice": "notice.retained_devices_delete",
+  "deletedDevicesLabel": "label.deleted_devices",
+  "deletedEntitiesLabel": "label.deleted_entities",
+  "deletedDevicesAndEntitiesLabel": "label.deleted_devices_and_entities",
+  "activeEntitiesLabel": "label.active_entities",
+  "entitiesToRemoveLabel": "label.entities_to_remove",
+  "deletedDevicesPendingNotice": "notice.deleted_devices_pending",
+  "pendingDeletedDevicesMessage": "message.pending_deleted_devices",
+  "pendingDeletedDevicesRemoved": "text.cleanup_removed",
+  "pendingDeletedDevicesTitle": "heading.pending_deleted_devices_diff",
+  "pendingDiffUnavailable": "error.pending_diff_unavailable",
+  "advancedRawDiff": "heading.advanced_raw_diff",
+  "registryChanges": "heading.registry_changes",
+  "registryAdded": "text.registry_added",
+  "registryRemoved": "text.registry_removed",
+  "registryChanged": "text.registry_changed",
+  "registryFields": "text.registry_fields",
+  "registryReview": "text.registry_review",
+  "rawDiffLoadsOnExpand": "text.raw_diff_loads_on_expand",
+  "deletedDeviceGroupActiveCount": "text.deleted_device_group_active_count",
+  "deletedDeviceGroupRemoveCount": "text.deleted_device_group_remove_count",
+  "deletedDevicePreviousZigbee2mqttApp": "text.deleted_device_previous_zigbee2mqtt_app",
+  "conflictDiffTitle": "title.conflict_diff",
+  "statusDone": "status.done",
+  "statusPendingDecision": "status.pending_decision",
+  "confirm": "action.confirm",
+  "confirmChanges": "action.confirm_changes"
+};
+const t = (key, values = {}) => {
+  let result = TEXT.catalog?.[key] || key;
+  for (const [name, value] of Object.entries(values)) result = result.replaceAll(`{${name}}`, String(value));
+  return result;
+};
 const WS_COMMANDS = new Set([
   "preview", "save_preview", "apply", "save", "select_save_preview", "select_apply_preview",
   "resolve_save_preview", "resolve_apply_preview", "reset_git_state", "disk_usage",
   "deleted_devices_preview", "retained_devices_preview", "retained_devices_delete",
-  "internal_ids_preview", "internal_ids_migrate", "deleted_devices_delete",
+  "select_retained_device",
+  "internal_ids_preview", "internal_ids_migrate", "select_internal_ids", "deleted_devices_delete",
+  "acknowledge_recovery",
+  "retry_interrupted_save",
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
 const TERMINAL_STATE_SYNC_COMMANDS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
@@ -47,6 +134,8 @@ function previewIdentity(state, direction) {
   if (direction === "save") {
     return {
       direction: "save",
+      preview_id: state.save_preview_id ?? null,
+      decision_revision: Number(state.save_decision_revision || 0),
       commit: state.last_save_preview_commit ?? null,
       fingerprint: state.last_save_preview_fingerprint ?? null,
       paths: sortedStrings(state.last_save_preview_paths),
@@ -56,6 +145,8 @@ function previewIdentity(state, direction) {
   }
   return {
     direction: "apply",
+    preview_id: state.apply_preview_id ?? null,
+    decision_revision: Number(state.apply_decision_revision || 0),
     commit: state.last_preview_commit ?? null,
     fingerprint: state.last_preview_fingerprint ?? null,
     live_fingerprints: sortedObject(state.last_preview_live_fingerprints),
@@ -63,12 +154,6 @@ function previewIdentity(state, direction) {
     conflict_paths: sortedStrings(state.last_preview_conflict_paths),
     diff_cursor: cursorIdentity(state.last_diff_cursor),
   };
-}
-
-function commandDirection(command) {
-  if (command === "select_save_preview" || command === "resolve_save_preview") return "save";
-  if (command === "select_apply_preview" || command === "resolve_apply_preview") return "apply";
-  return null;
 }
 
 function diffLineKind(line) {
@@ -229,23 +314,6 @@ function websocketUrl() {
   const url = new URL("ws", baseUrl());
   url.protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   return url.href;
-}
-
-function commandForAction(action) {
-  const name = new URL(action, window.location.href).pathname.split("/").filter(Boolean).pop() || "";
-  return name.replaceAll("-", "_");
-}
-
-function formPayload(form) {
-  const payload = {};
-  for (const [key, value] of new FormData(form).entries()) {
-    if (Object.hasOwn(payload, key)) {
-      payload[key] = Array.isArray(payload[key]) ? [...payload[key], value] : [payload[key], value];
-    } else {
-      payload[key] = value;
-    }
-  }
-  return payload;
 }
 
 class HaOpsLog extends LitElement {
@@ -447,10 +515,12 @@ class HaOpsPreviewFile extends LitElement {
     if (event.key === "Enter" || event.key === " ") event.stopPropagation();
   };
   onSelectChange = (event) => {
+    const requested = event.target.checked;
+    event.target.checked = this.selected;
     this.dispatchEvent(new CustomEvent("preview-select", {
       bubbles: true,
       composed: true,
-      detail: { path: this.path, selected: event.target.checked },
+      detail: { path: this.path, selected: requested },
     }));
   };
   onWrapToggle = (event) => {
@@ -477,6 +547,7 @@ class HaOpsPreview extends LitElement {
     state: { type: Object },
     direction: { type: String },
     running: { type: Boolean },
+    generatedAt: { type: String },
     wrapByPath: { state: true },
     previewIdentityKey: { state: true },
     commitSubject: { state: true },
@@ -489,11 +560,9 @@ class HaOpsPreview extends LitElement {
     .actions { display: flex; gap: .5rem; flex-wrap: wrap; }
     .files { display: grid; gap: .5rem; min-width: 0; max-width: 100%; }
     footer { display: block; min-width: 0; max-width: 100%; }
-    .footer-actions { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
+    .footer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
     .footer-actions.apply-only { display: flex; justify-content: flex-end; }
-    .commit-subject-label { color: var(--ha-ops-muted-text, #57606a); font-size: .95rem; white-space: nowrap; }
-    input.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 6px; padding: .45rem .55rem; font: inherit; color: var(--ha-ops-text, #24292f); background: var(--ha-ops-surface, #ffffff); }
-    input.commit-subject:disabled { color: var(--ha-ops-disabled-text, #8c959f); background: var(--ha-ops-disabled-bg, #f6f8fa); border-color: var(--ha-ops-disabled-border, #d8dee4); opacity: 1; }
+    vaadin-text-field.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
     @media (max-width: 700px) {
       header { align-items: stretch; }
       .actions { justify-content: flex-start; }
@@ -521,7 +590,7 @@ class HaOpsPreview extends LitElement {
   get selectCommand() { return this.direction === "save" ? "select_save_preview" : "select_apply_preview"; }
   get resolveCommand() { return this.direction === "save" ? "resolve_save_preview" : "resolve_apply_preview"; }
   willUpdate() {
-    const identityKey = JSON.stringify(previewIdentity(this.state, this.direction));
+    const identityKey = this.direction === "save" ? this.state.save_preview_id : this.state.apply_preview_id;
     if (identityKey !== this.previewIdentityKey) {
       this.previewIdentityKey = identityKey;
       this.wrapByPath = {};
@@ -555,7 +624,8 @@ class HaOpsPreview extends LitElement {
     if (!this.paths.length) return nothing;
     return html`
       <header>
-        <h3>${this.direction === "save" ? TEXT.savePreview : TEXT.applyPreview}</h3>
+        <div><h3>${this.direction === "save" ? TEXT.savePreview : TEXT.applyPreview}</h3>
+          ${this.generatedAt ? html`<small>${TEXT.generatedAt} ${this.generatedAt}</small>` : nothing}</div>
         <div class="actions">
           <vaadin-button theme="secondary" @click=${() => this.wrapAll(!this.allCurrentPathsWrapped())}>
             ${this.allCurrentPathsWrapped() ? TEXT.unwrapAllLines || "Unwrap All Lines" : TEXT.wrapAllLines || "Wrap All Lines"}
@@ -583,14 +653,13 @@ class HaOpsPreview extends LitElement {
       <footer>
         <div class=${`footer-actions ${this.direction === "save" ? "" : "apply-only"}`}>
           ${this.direction === "save" ? html`
-            <label class="commit-subject-label" for="save-commit-subject">${TEXT.commitSubject || "Commit Subject:"}</label>
-            <input
+            <vaadin-text-field
               id="save-commit-subject"
               class="commit-subject"
-              name="commit_subject"
+              .label=${TEXT.commitSubject || "Commit Subject:"}
               .value=${this.commitSubject}
               ?disabled=${this.running}
-              @input=${this.onCommitSubjectInput}>
+              @input=${this.onCommitSubjectInput}></vaadin-text-field>
           ` : nothing}
           <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
             ${this.finalLabel}
@@ -658,11 +727,23 @@ class HaOpsPreview extends LitElement {
   onCommitSubjectInput = (event) => {
     this.commitSubject = event.target.value;
   };
-  runFinalAction() {
+  async runFinalAction() {
     if (this.isFinalActionDisabled()) return;
+    const selected = new Set(this.selectedPaths);
+    const decisions = [...this.paths].sort().map((path) => ({
+      choice: selected.has(path) ? (this.resolutions[path] || (this.direction === "save" ? "ha" : "git"))
+        : (this.direction === "save" ? "git" : "ha"),
+      path,
+      selected: selected.has(path),
+    }));
+    const bytes = new TextEncoder().encode(JSON.stringify(decisions));
+    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+      .map((byte) => byte.toString(16).padStart(2, "0")).join("");
     const payload = this.direction === "save"
       ? { commit_subject: this.commitSubject, default_commit_subject: this.defaultCommitSubject }
       : {};
+    payload.preview_identity = previewIdentity(this.state, this.direction);
+    payload.decision_digest = digest;
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
       bubbles: true,
       composed: true,
@@ -679,14 +760,6 @@ function hasCommandInFlight(state, commands) {
 }
 
 const CLEANUP_RECOVERY_ACTIVE = new Set(["restore_required", "recovering", "manual_recovery"]);
-const PENDING_FENCED_ACTIONS = new Set([
-  "preview", "save_preview", "apply", "save", "reset_git_state", "disk_usage",
-  "deleted_devices_preview", "deleted_devices_delete", "retained_devices_preview",
-  "retained_devices_delete", "internal_ids_preview", "internal_ids_migrate",
-  "docker_build_cache_prune",
-]);
-const PENDING_ALLOWED_ACTIONS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
-
 function deletedEntriesLabel(state, prefix = "last_deleted_devices") {
   const devices = Number(state[`${prefix}_device_count`] || 0);
   const entities = Number(state[`${prefix}_entity_count`] || 0);
@@ -868,7 +941,7 @@ class HaOpsPendingRawDiff extends LitElement {
 }
 customElements.define("ha-ops-pending-raw-diff", HaOpsPendingRawDiff);
 
-function renderRetainedDevicesTable(rows, disabled) {
+function renderRetainedDevicesTable(rows, disabled, onToggle) {
   if (!rows?.length) return html`<p>${TEXT.noRetainedDevices}</p>`;
   return html`
     <div class="table-scroll">
@@ -884,7 +957,10 @@ function renderRetainedDevicesTable(rows, disabled) {
         <tbody>
           ${rows.map((row) => html`<tr>
             <td class="checkbox-col">
-              <input type="checkbox" name="candidate" value=${row.identity || ""} ?checked=${row.selected !== false} ?disabled=${disabled}>
+              <vaadin-checkbox aria-label=${`${TEXT.deleteLabel} ${row.name || row.identity || ""}`}
+                .checked=${Boolean(row.selected)} ?disabled=${disabled}
+                @change=${(event) => { const selected = event.target.checked; event.target.checked = Boolean(row.selected);
+                  onToggle(row.identity, selected); }}></vaadin-checkbox>
             </td>
             <td><code>${String(row.identifiers || "")}</code></td>
             <td>${row.name || ""}</td>
@@ -902,11 +978,15 @@ class HaOpsApp extends LitElement {
     connection: { type: String },
     revision: { type: Number },
     state: { type: Object },
+    view: { type: Object },
     confirmOpen: { type: Boolean },
     confirmMessage: { type: String },
     clientVersion: { type: String },
     backendVersion: { type: String },
     versionMismatchOpen: { type: Boolean },
+    acceptedCommandId: { type: String },
+    uncertainCommandId: { type: String },
+    clientError: { type: String },
   };
 
   static styles = css`
@@ -997,9 +1077,9 @@ class HaOpsApp extends LitElement {
     this.connection = "connecting";
     this.revision = 0;
     this.state = {};
+    this.view = {};
     this.confirmOpen = false;
     this.confirmMessage = "";
-    this.confirmForm = null;
     this.clientVersion = knownVersion(window.__HA_OPS_BOOT_VERSION__) ? String(window.__HA_OPS_BOOT_VERSION__) : null;
     this.backendVersion = this.clientVersion;
     this.acknowledgedBackendVersion = null;
@@ -1008,17 +1088,21 @@ class HaOpsApp extends LitElement {
     this.pending = new Map();
     this.nextRequestId = 1;
     this.reconnectTimer = null;
+    this.httpPollTimer = null;
     this.reconnectStableTimer = null;
     this.reconnectDelayMs = 1200;
     this.replayPending = true;
     this.queuedFrames = [];
+    this.internalDiffs = new Map();
+    this.conflictDiffs = new Map();
     this.shouldReconnect = false;
+    this.acceptedCommandId = null;
+    this.uncertainCommandId = null;
+    this.clientError = "";
   }
 
   connectedCallback() {
     super.connectedCallback();
-    this.addEventListener("submit", this.onSubmit);
-    this.upgradeControls();
     this.observeLayout();
     this.shouldReconnect = true;
     this.connect();
@@ -1026,24 +1110,305 @@ class HaOpsApp extends LitElement {
   }
 
   disconnectedCallback() {
-    this.removeEventListener("submit", this.onSubmit);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.httpPollTimer) clearTimeout(this.httpPollTimer);
     if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.shouldReconnect = false;
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
   }
 
+  createRenderRoot() { return this; }
+
+  actionButton(command, label, { disabled = false, confirm = "", payload = {}, theme = "secondary" } = {}) {
+    return html`<vaadin-button theme=${theme} ?disabled=${disabled}
+      @click=${() => this.issue(command, payload, confirm)}>${label}</vaadin-button>`;
+  }
+
+  issue(command, payload = {}, confirmation = "") {
+    if (confirmation) {
+      this.confirmCommand = { command, payload };
+      this.confirmMessage = confirmation;
+      this.confirmOpen = true;
+      return;
+    }
+    const action = new URL(command.replaceAll("_", "-"), baseUrl()).href;
+    this.dispatchCommand(command, action, payload).catch((error) => this.handleCommandError(error));
+  }
+
+  mutationBlocked() {
+    return Boolean(this.acceptedCommandId || this.uncertainCommandId) || this.replayPending || !["connected", "http"].includes(this.connection)
+      || this.isRunning() || Boolean(this.state.active_operation)
+      || Boolean(this.state.deleted_devices_recovery_phase && this.state.deleted_devices_recovery_phase !== "none")
+      || Boolean(this.state.docker_build_cache_prune_fence);
+  }
+
+  renderInternalIdsPreview(blocked) {
+    if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation || this.isRunning()) return nothing;
+    const rows = this.state.last_internal_ids_rows || [];
+    if (!this.state.last_internal_ids_generated_at && !rows.length) return nothing;
+    return html`<section class="card wide" data-testid="internal-ids-preview-section">
+      <h2>${t("heading.actions_ids")}</h2>
+      <p>${t("label.generated_at")} ${this.view.display_times?.last_internal_ids_generated_at || this.state.last_internal_ids_generated_at || ""}</p>
+      <p>${(this.state.last_internal_ids_unresolved || []).length} ${t("label.unresolved")}</p>
+      ${(this.state.last_internal_ids_unresolved || []).map((item) => html`
+        <vaadin-details>
+          <vaadin-details-summary slot="summary">${item.alias || item.path || t("label.unresolved")}</vaadin-details-summary>
+          <p>${item.path || ""}: ${item.reason || ""}</p>
+        </vaadin-details>`)}
+      ${rows.map((row) => html`<vaadin-details @opened-changed=${(event) => {
+        if (event.detail.value) this.loadInternalIdDiff(row).catch((error) => this.handleCommandError(error));
+      }}>
+        <vaadin-details-summary slot="summary">
+          <vaadin-checkbox aria-label=${`${t("label.migrate")} ${row.path || ""}`}
+            .checked=${Boolean(row.selected)}
+            ?disabled=${blocked || !row.changes || !this.internalDiffs?.has(row.path)}
+            @change=${(event) => { const selected = event.target.checked; event.target.checked = Boolean(row.selected);
+              this.issue("select_internal_ids", { preview_id: this.state.last_internal_ids_preview_id,
+                path: row.path, diff_sha256: row.diff_sha256, selected }); }}></vaadin-checkbox>
+          <code>${row.path || ""}</code>
+        </vaadin-details-summary>
+        <p>${row.changes || 0} ${t("label.candidates")}</p>
+        <p>${row.unresolved || 0} ${t("label.unresolved")}</p>
+        ${this.internalDiffs?.has(row.path) ? html`<pre>${this.internalDiffs.get(row.path)}</pre>` : html`<p>${t("notice.load_exact_diff")}</p>`}
+      </vaadin-details>`)}
+      ${this.actionButton("internal_ids_migrate", t("action.migrate_and_save"), {
+        disabled: blocked || !rows.some((row) => row.selected),
+        payload: { preview_id: this.state.last_internal_ids_preview_id,
+          selected: rows.filter((row) => row.selected).map((row) => ({ path: row.path, diff_sha256: row.diff_sha256 })) },
+        confirm: t("confirm.internal_ids_migrate"), theme: "primary",
+      })}
+    </section>`;
+  }
+
+  async loadInternalIdDiff(row) {
+    if (this.internalDiffs?.has(row.path) || !this.state.last_internal_ids_preview_id || this.mutationBlocked()) return;
+    const previewId = this.state.last_internal_ids_preview_id;
+    const response = await fetch(`internal-ids-diff-get?preview_id=${encodeURIComponent(previewId)}&path=${encodeURIComponent(row.path)}`);
+    const payload = await response.json();
+    if (!response.ok || !payload.ok || payload.diff_sha256 !== row.diff_sha256 || previewId !== this.state.last_internal_ids_preview_id) {
+      throw new Error(payload.message || "Internal IDs preview changed. Run Check actions IDs again.");
+    }
+    this.internalDiffs.set(row.path, payload.diff);
+    this.requestUpdate();
+  }
+
+  toggleAddon(slug, checked) {
+    const selected = new Set(this.view.selected_addons || []);
+    if (checked) selected.add(slug);
+    else selected.delete(slug);
+    this.issue("addons", { addon: [...selected] });
+  }
+
+  reconcileSelections() {
+    const internalKey = this.state.last_internal_ids_preview_id || "";
+    if (internalKey !== this.internalSelectionKey) {
+      this.internalSelectionKey = internalKey;
+      this.internalDiffs = new Map();
+    }
+    const conflictKey = `${this.state.operation_generation || 0}:${JSON.stringify(this.state.conflicts || [])}`;
+    if (conflictKey !== this.conflictSelectionKey) {
+      this.conflictSelectionKey = conflictKey;
+      this.conflictDiffs = new Map();
+    }
+  }
+
+  async loadConflictDiff(path) {
+    if (this.conflictDiffs.has(path) || this.mutationBlocked()) return;
+    const generation = Number(this.state.operation_generation || 0);
+    const response = await fetch(`conflict-diff-get?generation=${generation}&path=${encodeURIComponent(path)}`);
+    const payload = await response.json();
+    if (!response.ok || !payload.ok || payload.generation !== generation
+      || !this.state.conflicts?.includes(path) || this.mutationBlocked()) {
+      throw new Error(payload.message || t("error.git_conflict_path_not_pending"));
+    }
+    this.conflictDiffs.set(path, payload.diff);
+    this.requestUpdate();
+  }
+
   render() {
+    if (!Object.keys(this.view || {}).length) {
+      return html`<main><section class="card wide" role="status"><h1>HA Ops</h1><p>Loading…</p></section></main>`;
+    }
+    const blocked = this.mutationBlocked();
+    const pending = Boolean(this.state.deleted_devices_pending_confirmation);
+    const saveRetry = Boolean(this.state.save_push_retry_pending);
+    const controlsBlocked = blocked || pending || saveRetry;
+    const status = pending ? "pending decision" : this.state.last_status || "idle";
+    const displayedStatus = this.connection === "unknown" ? "unknown" : status === "success" ? TEXT.statusDone || "done" : status;
     return html`
-      <slot></slot>
+      <main>
+        <div class="top-grid">
+          <section class="card control-card">
+            <div class="title-row"><h1>${t("title.site")}</h1><div class="header-badges">
+              <div class=${`badge ${status}`} data-status-code=${status} data-connection-state=${this.connection} data-testid="status-badge">${displayedStatus}</div>
+              <div class="badge version" data-testid="version-badge">${this.backendVersion || ""}</div>
+            </div></div>
+            <p>${t("site.description")}</p>
+            <dl>
+              <dt>${t("field.branch")}</dt><dd><code>${this.view.branch || ""}</code></dd>
+              <dt>${t("field.manifest")}</dt><dd><code>${this.view.manifest || ""}</code></dd>
+              <dt>${t("field.auth_mode")}</dt><dd>${this.view.auth_mode || ""}</dd>
+              <dt>${t("field.last_run")}</dt><dd>${this.view.display_times?.last_run_at || this.state.last_run_at || ""}</dd>
+            </dl>
+            <p id="client-status" class="client-status" role="status">${this.clientError}</p>
+            ${this.state.post_apply_save_recommended ? html`<div class="post-apply-alert" role="status">
+              <strong>${t("notice.post_apply_save_title")}</strong>
+              <span>${t("notice.post_apply_save")}</span>
+            </div>` : nothing}
+            <div class="actions">
+              <section class="action-section"><h2>${t("heading.ha_to_git")}</h2><div class="action-row">
+                ${this.actionButton("save_preview", this.state.post_apply_save_recommended ? t("action.review_post_apply_save") : t("action.preview_save"),
+                  { disabled: controlsBlocked, theme: this.state.post_apply_save_recommended ? "warning" : "secondary" })}
+              </div>
+              ${this.state.post_apply_save_recommended ? html`<p class="muted">${t("notice.post_apply_save_button")}</p>` : nothing}
+              <vaadin-checkbox .label=${t("label.include_redundant_data")} .checked=${Boolean(this.state.include_redundant_data)} ?disabled=${controlsBlocked}
+                @change=${(event) => { const requested = event.target.checked; event.target.checked = Boolean(this.state.include_redundant_data);
+                  this.issue("include_redundant_data", requested ? { include_redundant_data: "on" } : {}); }}>
+              </vaadin-checkbox></section>
+              <section class="action-section"><h2>${t("heading.git_to_ha")}</h2><div class="action-row">
+                ${this.actionButton("preview", t("action.preview_apply"), { disabled: controlsBlocked })}
+              </div></section>
+              <section class="action-section"><h2>${t("heading.reset_git_state")}</h2><div class="action-row">
+                ${this.actionButton("reset_git_state", t("action.reset_git_state"), { disabled: controlsBlocked, confirm: t("confirm.reset_git_state") })}
+              </div></section>
+              <section class="action-section"><h2>${t("heading.disk_usage")}</h2><div class="action-row">
+                ${this.actionButton("disk_usage", t("action.check_disk_usage"), { disabled: controlsBlocked })}
+                ${this.actionButton("docker_build_cache_prune", t("action.clear_docker_build_cache"), {
+                  disabled: controlsBlocked || !this.view.docker_build_cache?.available,
+                  confirm: t("confirm.docker_build_cache_prune"),
+                })}
+              </div></section>
+              ${!this.view.docker_build_cache?.available ? html`<p class="muted" role="status">${this.view.docker_build_cache?.reason || ""} ${this.view.docker_build_cache?.remedy || ""}</p>`
+                : saveRetry ? html`<p class="muted" role="status">${t("docker_prune.disabled.save_retry")}</p>`
+                  : this.state.docker_build_cache_prune_fence ? html`<p class="muted" role="status">${t("docker_prune.disabled.fence")}</p>` : nothing}
+              <section class="action-section"><h2>${t("heading.deleted_devices")}</h2><div class="action-row">
+                ${this.actionButton("deleted_devices_preview", t("action.check_deleted_devices"), { disabled: controlsBlocked })}
+              </div></section>
+              <section class="action-section"><h2>${t("heading.retained_devices")}</h2><div class="action-row">
+                ${this.actionButton("retained_devices_preview", t("action.check_retained_devices"), { disabled: controlsBlocked })}
+              </div></section>
+              <section class="action-section"><h2>${t("heading.actions_ids")}</h2><div class="action-row">
+                ${this.actionButton("internal_ids_preview", t("action.check_actions_ids"), { disabled: controlsBlocked })}
+              </div></section>
+            </div>
+          </section>
+          <section class="card details-card"><div class="details-header"><h2>${t("heading.log")}</h2></div>
+            <ha-ops-log .lines=${[...(this.state.last_details || []),
+              ...((this.state.last_message && this.state.last_details?.at(-1) !== this.state.last_message)
+                ? [this.state.last_message] : [])]} .status=${this.state.last_status || "idle"}></ha-ops-log>
+          </section>
+        </div>
+        ${this.state.active_operation?.phase === "recovery_required" ? html`
+          <section class="card wide" role="alert" data-testid="operation-recovery">
+            <h2>${t("heading.manual_recovery")}</h2>
+            <p>${t("notice.operation_uncertain").replace("{command}", this.state.active_operation.command || "Operation")}</p>
+            <p>${this.state.active_operation.evidence?.guidance || this.state.active_operation.message || t("notice.inspect_affected_state")}</p>
+            ${this.state.active_operation.evidence?.kind ? html`<p>${t("recovery.observed_kind", { kind: this.state.active_operation.evidence.kind.replaceAll("_", " ") })}</p>` : nothing}
+            ${Number.isInteger(this.state.active_operation.evidence?.observed_path_count) ? html`
+              <p>${t("recovery.observed_paths", { count: this.state.active_operation.evidence.observed_path_count })}</p>` : nothing}
+            ${typeof this.state.active_operation.evidence?.refs_match_pre === "boolean" ? html`
+              <p>${t("recovery.pre_refs_match", { value: t(this.state.active_operation.evidence.refs_match_pre ? "text.yes" : "text.no") })}</p>` : nothing}
+            ${this.state.active_operation.evidence?.optional_snapshot_recorded ? html`
+              <p>${t("recovery.snapshot_available", { value: t(this.state.active_operation.evidence.optional_snapshot_available ? "text.yes" : "text.no") })}</p>` : nothing}
+            ${this.state.active_operation.evidence?.affected_targets?.length ? html`
+              <p>${t("label.affected_targets").replace("{targets}", this.state.active_operation.evidence.affected_targets.join(", "))}</p>` : nothing}
+            ${this.state.active_operation.ack_available ? this.actionButton(
+              "acknowledge_recovery", t("action.acknowledge_recovery"), {
+                payload: { operation_id: this.state.active_operation.command_id,
+                  evidence_token: this.state.active_operation.evidence_token },
+                confirm: t("confirm.acknowledge_recovery"),
+              },
+            ) : nothing}
+            ${this.state.active_operation.retry_available ? this.actionButton(
+              "retry_interrupted_save", t("action.retry_interrupted_save"), {
+                payload: { operation_id: this.state.active_operation.command_id,
+                  evidence_token: this.state.active_operation.evidence_token },
+                confirm: t("confirm.retry_interrupted_save"),
+              },
+            ) : nothing}
+          </section>` : nothing}
+        ${this.state.conflicts?.length && !this.state.active_operation ? html`
+          <section class="card wide" data-testid="git-conflicts" role="group" aria-label=${t("heading.git_conflicts")}>
+            <h2>${t("heading.git_conflicts")}</h2>
+            <p>${this.state.conflict_type === "save_unknown_base"
+              ? t("notice.conflict_resolution", { ha_choice: t("action.use_ha_version"), git_choice: t("action.use_git_version") })
+              : t("message.resolve_git_conflicts")}</p>
+            ${(this.state.conflicts || []).map((path) => html`
+              <vaadin-details @opened-changed=${(event) => {
+                if (event.detail.value) this.loadConflictDiff(path).catch((error) => this.handleCommandError(error));
+              }}>
+                <vaadin-details-summary slot="summary"><code>${path}</code></vaadin-details-summary>
+                ${this.conflictDiffs.has(path) ? html`<pre aria-label=${t("title.conflict_diff")}>${this.conflictDiffs.get(path)}</pre>`
+                  : html`<p>${t("message.loading_diff")}</p>`}
+                <div class="action-row">
+                  ${this.actionButton("resolve_conflict", t("action.use_git_version"), {
+                    disabled: controlsBlocked || !this.conflictDiffs.has(path), payload: { path, choice: "git" },
+                  })}
+                  ${this.actionButton("resolve_conflict", t("action.use_ha_version"), {
+                    disabled: controlsBlocked || !this.conflictDiffs.has(path), payload: { path, choice: "ha" },
+                  })}
+                </div>
+              </vaadin-details>`)}
+            ${this.state.conflict_type === "save_unknown_base" ? this.actionButton(
+              "approve_save_conflicts", t("action.use_ha_for_all_conflicts"), {
+                disabled: controlsBlocked || this.state.conflicts.some((path) => !this.conflictDiffs.has(path)),
+                confirm: t("action.use_ha_for_all_conflicts"),
+              },
+            ) : nothing}
+          </section>` : nothing}
+        ${this.view.docker_prune_recovery && this.view.docker_prune_recovery.kind !== "idle" ? html`
+          <section class="card wide" role="alert" data-testid="docker-prune-recovery">
+            <h2>${t("heading.disk_usage")}</h2>
+            <p>${this.view.docker_prune_recovery?.kind === "corrupt"
+              ? t("message.docker_prune_ambiguity_corrupt")
+              : this.view.docker_prune_recovery?.phase === "accepted"
+                ? t("message.docker_prune_phase_accepted")
+                : this.view.docker_prune_recovery?.phase === "dispatching"
+                  ? t("message.docker_prune_phase_dispatching")
+                  : t("message.docker_prune_ambiguity_valid")}</p>
+            ${this.view.docker_prune_recovery?.phase === "resolution_required" ? this.actionButton(
+              "docker_build_cache_prune_resolve", t("action.acknowledge_docker_prune"), {
+                disabled: Boolean(this.acceptedCommandId || this.uncertainCommandId || this.replayPending)
+                  || !["connected", "http"].includes(this.connection),
+                payload: this.view.docker_prune_recovery.kind === "corrupt"
+                  ? { mode: "corrupt", recovery_token: this.view.docker_prune_recovery.recovery_token }
+                  : { mode: "operation", operation_id: this.view.docker_prune_recovery.operation_id },
+              },
+            ) : nothing}
+          </section>` : nothing}
+        <div id="reactive-previews" data-testid="reactive-previews">${this.previewTemplate()}</div>
+        ${this.renderInternalIdsPreview(controlsBlocked)}
+        <section class="card wide"><h2>${t("heading.git_access")}</h2>
+          <p>${this.view.auth_mode || ""}</p>
+          ${this.actionButton("generate_key", t("action.generate_deploy_key"), { disabled: controlsBlocked })}
+        </section>
+        <section class="card wide"><h2>${t("heading.managed_targets")}</h2>
+          <p>${t("text.split_organizer_blocked")}</p>
+          <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${t("label.managed")}</th><th>${t("label.target")}</th><th>${t("label.type")}</th><th>${t("label.source")}</th></tr></thead><tbody>
+            ${(this.view.targets || []).map((target) => html`<tr><td></td><td><code>${target.id || ""}</code></td><td>${target.type || ""}</td><td>${target.source || ""}</td></tr>`)}
+            ${(this.view.addons || []).map((addon) => html`<tr><td><vaadin-checkbox aria-label=${`${t("label.managed")} ${addon.name}`}
+              .checked=${(this.view.selected_addons || []).includes(addon.slug)} ?disabled=${controlsBlocked}
+              @change=${(event) => { const requested = event.target.checked;
+                event.target.checked = (this.view.selected_addons || []).includes(addon.slug);
+                this.toggleAddon(addon.slug, requested); }}></vaadin-checkbox></td><td>${addon.name}</td><td>${t("label.addon")}</td><td>${addon.slug}</td></tr>`)}
+          </tbody></table></div>
+        </section>
+        <section class="card wide"><h2>${t("heading.release_snapshots")}</h2>
+          <p>${t("notice.release_snapshots")}</p>
+          ${(this.view.releases || []).map((release) => html`<div class="action-row">
+            <code>${release.name}</code><span>${release.created_at || ""}</span>
+            ${this.actionButton("rollback", t("action.rollback"), { disabled: controlsBlocked, payload: { release: release.name }, confirm: t("confirm.rollback") })}
+          </div>`)}
+        </section>
+      </main>
       <vaadin-confirm-dialog
         .opened=${this.confirmOpen}
         .message=${this.confirmMessage}
         .confirmText=${TEXT.confirm}
         cancel-button-visible
         @confirm=${this.confirmMutation}
-        @cancel=${() => { this.confirmOpen = false; this.confirmForm = null; }}
+        @cancel=${() => { this.confirmOpen = false; this.confirmCommand = null; }}
       ></vaadin-confirm-dialog>
       <vaadin-confirm-dialog
         class="version-mismatch"
@@ -1067,67 +1432,6 @@ class HaOpsApp extends LitElement {
     `;
   }
 
-  upgradeControls() {
-    for (const button of this.querySelectorAll("button:not([data-vaadin-upgraded])")) {
-      const replacement = document.createElement("vaadin-button");
-      replacement.textContent = button.textContent;
-      replacement.disabled = button.disabled;
-      replacement.className = button.className;
-      if (button.disabled) replacement.setAttribute("data-server-disabled", "true");
-      replacement.setAttribute("data-vaadin-upgraded", "true");
-      replacement.setAttribute("role", "button");
-      if (button.classList.contains("secondary")) replacement.setAttribute("theme", "secondary");
-      else replacement.setAttribute("theme", "primary");
-      for (const attribute of button.attributes) {
-        if (!["class", "type", "disabled"].includes(attribute.name)) replacement.setAttribute(attribute.name, attribute.value);
-      }
-      replacement.addEventListener("click", () => {
-        if (replacement.disabled) return;
-        if (button.type === "submit") replacement.closest("form")?.requestSubmit();
-        else this.handleButton(replacement);
-      });
-      button.replaceWith(replacement);
-    }
-    for (const input of this.querySelectorAll('input[type="checkbox"]:not([data-vaadin-upgraded])')) {
-      const checkbox = document.createElement("vaadin-checkbox");
-      checkbox.name = input.name;
-      checkbox.value = input.value;
-      checkbox.checked = input.checked;
-      checkbox.disabled = input.disabled;
-      checkbox.setAttribute("data-vaadin-upgraded", "true");
-      checkbox.setAttribute("aria-label", input.closest("label")?.innerText.trim() || input.name || "Selection");
-      if (input.disabled) checkbox.setAttribute("data-server-disabled", "true");
-      checkbox.addEventListener("change", () => {
-        input.checked = checkbox.checked;
-        const form = checkbox.closest("form[data-auto-submit='change']");
-        if (form) form.requestSubmit();
-      });
-      input.replaceWith(checkbox);
-    }
-    for (const select of this.querySelectorAll("select:not([data-vaadin-upgraded])")) {
-      const control = document.createElement("vaadin-select");
-      control.name = select.name;
-      control.value = select.value;
-      control.items = Array.from(select.options).map((option) => ({ label: option.textContent, value: option.value }));
-      control.disabled = select.disabled;
-      control.setAttribute("data-vaadin-upgraded", "true");
-      control.setAttribute("aria-label", select.closest("label")?.innerText.trim() || select.name || "Selection");
-      if (select.disabled) control.setAttribute("data-server-disabled", "true");
-      control.addEventListener("change", () => control.closest("form[data-auto-submit='change']")?.requestSubmit());
-      select.replaceWith(control);
-    }
-  }
-
-  handleButton(button) {
-    if (button.dataset.checkboxScope) {
-      const checked = button.dataset.checkboxAction === "all";
-      for (const input of this.querySelectorAll(`[data-checkbox-scope="${button.dataset.checkboxScope}"] input[type="checkbox"]`)) {
-        if (!input.disabled) input.checked = checked;
-      }
-      return;
-    }
-  }
-
   observeLayout() {
     const controls = this.querySelector(".control-card");
     const details = this.querySelector(".details-card");
@@ -1143,21 +1447,6 @@ class HaOpsApp extends LitElement {
     requestAnimationFrame(sync);
   }
 
-  onSubmit = (event) => {
-    const form = event.target;
-    if (!(form instanceof HTMLFormElement) || form.method.toLowerCase() !== MUTATING_METHOD) return;
-    event.preventDefault();
-    const confirmText = form.dataset.confirm;
-    if (confirmText && form.dataset.confirmed !== "true") {
-      this.confirmForm = form;
-      this.confirmMessage = confirmText;
-      this.confirmOpen = true;
-      return;
-    }
-    delete form.dataset.confirmed;
-    this.dispatchMutation(form).catch((error) => this.handleCommandError(error));
-  };
-
   onCommand = (event) => {
     event.stopPropagation();
     const { command, payload } = event.detail || {};
@@ -1166,22 +1455,11 @@ class HaOpsApp extends LitElement {
   };
 
   confirmMutation = () => {
-    const form = this.confirmForm;
+    const command = this.confirmCommand;
     this.confirmOpen = false;
-    this.confirmForm = null;
-    if (form) {
-      form.dataset.confirmed = "true";
-      form.requestSubmit();
-    }
+    this.confirmCommand = null;
+    if (command) this.issue(command.command, command.payload);
   };
-
-  async dispatchMutation(form) {
-    const command = commandForAction(form.action);
-    const payload = formPayload(form);
-    const direction = commandDirection(command);
-    if (direction) payload.preview_identity = previewIdentity(this.state, direction);
-    return this.dispatchCommand(command, form.action, payload);
-  }
 
   async dispatchCommand(command, action, payload = {}) {
     const envelope = {
@@ -1193,16 +1471,19 @@ class HaOpsApp extends LitElement {
     const socket = this.socket;
     if (WS_COMMANDS.has(command) && socket && socket.readyState === window.WebSocket.OPEN && !this.replayPending) {
       const id = String(this.nextRequestId++);
-      const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, sent: false }));
+      const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, sent: false, commandId: envelope.command_id }));
       const entry = this.pending.get(id);
       socket.send(JSON.stringify({ id, ...envelope }));
       entry.sent = true;
       const response = await result;
       if (!response.ok) throw new Error(response.message || "Command rejected");
+      this.acceptedCommandId = envelope.command_id;
+      this.reconcileAcceptedCommand();
+      this.requestUpdate();
       if (TERMINAL_STATE_SYNC_COMMANDS.has(command)) await this.pollCommandState(envelope.command_id);
       return response;
     }
-    if (socket && socket.readyState !== window.WebSocket?.CLOSED) {
+    if (WS_COMMANDS.has(command) && socket && socket.readyState !== window.WebSocket?.CLOSED) {
       throw new Error("Connection state is unknown; the command was not retried.");
     }
     const response = await fetch(action, {
@@ -1212,19 +1493,22 @@ class HaOpsApp extends LitElement {
     });
     const resultPayload = await response.json();
     if (!response.ok || !resultPayload.ok) throw new Error(resultPayload.message || "Command rejected");
+    this.acceptedCommandId = envelope.command_id;
+    this.reconcileAcceptedCommand();
+    this.requestUpdate();
     await this.pollHttpCommand(envelope.command_id);
     return resultPayload;
   }
 
   async pollHttpCommand(commandId) {
     await this.pollCommandState(commandId);
-    this.setConnection("http");
+    if (!this.socket || this.socket.readyState !== window.WebSocket.OPEN) this.setConnection("http");
   }
 
   async pollCommandState(commandId) {
     const deadline = Date.now() + 10000;
     while (Date.now() < deadline) {
-      const response = await fetch("debug-snapshot");
+      const response = await fetch("api/v1/state");
       if (!response.ok) throw new Error("Could not refresh HA Ops state.");
       this.applyBaseline(await response.json());
       const status = this.state.command_records?.[commandId]?.status;
@@ -1257,6 +1541,7 @@ class HaOpsApp extends LitElement {
       this.setConnection("reconnecting");
       if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
       for (const pending of this.pending.values()) {
+        if (pending.sent) this.uncertainCommandId = pending.commandId;
         pending.reject(new Error(pending.sent ? "Command outcome is unknown after disconnect." : "WebSocket unavailable."));
       }
       this.pending.clear();
@@ -1268,15 +1553,32 @@ class HaOpsApp extends LitElement {
 
   async loadHttpBaseline() {
     try {
-      const response = await fetch("debug-snapshot");
+      const response = await fetch("api/v1/state");
       const snapshot = await response.json();
       this.applyBaseline(snapshot);
       this.replayPending = false;
       this.setConnection("http");
+      this.scheduleHttpPoll();
     } catch (error) {
       this.setConnection("unknown");
       this.markUnknown(error);
     }
+  }
+
+  scheduleHttpPoll() {
+    if (this.httpPollTimer) clearTimeout(this.httpPollTimer);
+    if (!this.shouldReconnect || this.connection !== "http") return;
+    this.httpPollTimer = setTimeout(async () => {
+      this.httpPollTimer = null;
+      try {
+        const response = await fetch("api/v1/state", { cache: "no-store" });
+        if (!response.ok) throw new Error("Could not refresh HA Ops state.");
+        this.applyBaseline(await response.json());
+        if (this.connection !== "unknown") this.scheduleHttpPoll();
+      } catch (error) {
+        this.markUnknown(error);
+      }
+    }, 2000);
   }
 
   receive(frame) {
@@ -1307,13 +1609,27 @@ class HaOpsApp extends LitElement {
 
   applyBaseline(frame) {
     if (!frame.state) return;
+    if (frame.schema_version !== 1) {
+      this.markUnknown(new Error("Incompatible HA Ops response; reload the page."));
+      return;
+    }
+    TEXT = Object.fromEntries(Object.entries(TEXT_KEYS).map(([name, key]) => [name, frame.text?.[key] || key]));
+    TEXT.catalog = frame.text || {};
+    this.view = frame.view || {};
+    if (!this.clientVersion && knownVersion(frame.backend_version)) this.clientVersion = String(frame.backend_version);
     this.observeBackendVersion(frame.backend_version);
     this.state = normalizePendingDeletedDevicesState(structuredClone(frame.state));
+    this.clientError = "";
+    this.reconcileAcceptedCommand();
+    this.reconcileSelections();
     this.revision = Number(frame.revision ?? frame.state_revision ?? frame.state.state_revision ?? 0);
-    this.syncDom();
   }
 
   applyPatch(frame) {
+    if (frame.schema_version !== 1) {
+      this.markUnknown(new Error("Incompatible HA Ops response; reload the page."));
+      return;
+    }
     this.observeBackendVersion(frame.backend_version);
     const base = Number(frame.base_revision);
     const revision = Number(frame.revision);
@@ -1325,8 +1641,14 @@ class HaOpsApp extends LitElement {
       return;
     }
     this.state = normalizePendingDeletedDevicesState({ ...this.state, ...(frame.patch || {}) });
+    this.reconcileAcceptedCommand();
+    this.reconcileSelections();
+    if (frame.view) this.view = frame.view;
+    if (frame.text) {
+      TEXT = Object.fromEntries(Object.entries(TEXT_KEYS).map(([name, key]) => [name, frame.text[key] || key]));
+      TEXT.catalog = frame.text;
+    }
     this.revision = revision;
-    this.syncDom();
   }
 
   observeBackendVersion(version) {
@@ -1357,47 +1679,24 @@ class HaOpsApp extends LitElement {
     this.versionMismatchOpen = false;
   };
 
-  syncDom() {
-    const running = this.state.last_status === "running" || Object.values(this.state.command_records || {})
-      .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
-    const pending = Boolean(this.state.deleted_devices_pending_confirmation);
-    const recovery = deletedDevicesRecoveryActive(this.state);
-    const saveRetry = Boolean(this.state.save_push_retry_pending);
-    const dockerFenceActive = Boolean(this.state.docker_build_cache_prune_fence);
-    for (const control of this.querySelectorAll("vaadin-button, vaadin-checkbox, vaadin-details, vaadin-select")) {
-      if (control.matches("[data-read-only-control]")) continue;
-      const form = control.closest("form");
-      const action = form ? commandForAction(form.action) : "";
-      if (action === "docker_build_cache_prune") {
-        const capabilityAvailable = form?.dataset.capabilityAvailable === "true";
-        const ready = capabilityAvailable && !running && !saveRetry && !pending && !recovery && !dockerFenceActive;
-        if (form) form.dataset.actionReady = ready ? "true" : "false";
-        control.disabled = !ready;
-      } else if (PENDING_FENCED_ACTIONS.has(action) || PENDING_ALLOWED_ACTIONS.has(action)) {
-        control.disabled = recovery
-          ? action !== "deleted_devices_revert"
-          : running || saveRetry || (pending && !PENDING_ALLOWED_ACTIONS.has(action));
-      } else if (recovery) {
-        control.disabled = action ? action !== "deleted_devices_revert" : running || control.hasAttribute("data-server-disabled");
-      } else {
-        control.disabled = running || control.hasAttribute("data-server-disabled");
-      }
-    }
-    this.updateStatusBadge();
-    const log = this.querySelector("ha-ops-log");
-    if (log) {
-      const lines = Array.isArray(this.state.last_details) && this.state.last_details.length
-        ? this.state.last_details : [this.state.last_message || ""];
-      log.lines = lines;
-      log.status = this.state.last_status || "idle";
-    }
-    this.upgradeControls();
-    this.syncPreviewMount();
-  }
-
   isRunning() {
     return this.state.last_status === "running" || Object.values(this.state.command_records || {})
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
+  }
+
+  reconcileAcceptedCommand() {
+    if (this.uncertainCommandId) {
+      const record = this.state.command_records?.[this.uncertainCommandId];
+      if (record?.status === "terminal") {
+        this.uncertainCommandId = null;
+        this.clientError = "";
+      } else if (record?.status === "accepted" || record?.status === "running") {
+        this.acceptedCommandId = this.uncertainCommandId;
+      }
+    }
+    if (!this.acceptedCommandId) return;
+    const record = this.state.command_records?.[this.acceptedCommandId];
+    if (record?.status === "terminal") this.acceptedCommandId = null;
   }
 
   isPreviewGenerationRunning() {
@@ -1407,21 +1706,8 @@ class HaOpsApp extends LitElement {
       .some((record) => ["preview", "save_preview"].includes(record.command) && runningStatuses.has(record.status));
   }
 
-  previewHost() {
-    let host = this.querySelector("#reactive-previews[data-testid='reactive-previews']");
-    if (host) return host;
-    host = document.createElement("div");
-    host.id = "reactive-previews";
-    host.dataset.testid = "reactive-previews";
-    const sections = Array.from(this.querySelectorAll("section.card.wide"));
-    const gitAccess = sections.find((section) => section.querySelector("h2")?.textContent?.trim() === (TEXT.gitAccess || "Git Access"));
-    gitAccess?.parentNode?.insertBefore(host, gitAccess);
-    return host;
-  }
-
-  syncPreviewMount() {
-    const host = this.previewHost();
-    if (!host) return;
+  previewTemplate() {
+    if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation) return nothing;
     const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();
@@ -1430,13 +1716,9 @@ class HaOpsApp extends LitElement {
     const hasDeletedPreview = Boolean(this.state.last_deleted_devices_generated_at);
     const hasRetainedPreview = Boolean(this.state.last_retained_devices_generated_at);
     const visible = hasApplyPaths || hasSavePaths || previewRunning || hasDeletedPreview || hasRetainedPreview || cleanupRunning || pendingDeletedCleanup;
-    for (const element of this.querySelectorAll("[data-server-cleanup-preview]")) element.hidden = Boolean(hasDeletedPreview || hasRetainedPreview || cleanupRunning || pendingDeletedCleanup);
-    if (!visible) {
-      render(nothing, host);
-      return;
-    }
+    if (!visible) return nothing;
     const loading = previewRunning && !hasApplyPaths && !hasSavePaths;
-    render(html`
+    return html`
       ${this.renderDeletedPreview(cleanupRunning)}
       ${this.renderRetainedPreview(cleanupRunning)}
       <section class="card wide" data-testid="diff-section">
@@ -1444,13 +1726,13 @@ class HaOpsApp extends LitElement {
         ${loading
           ? html`<div role="status">${TEXT.loadingPreviewDiff || "Loading Diff..."}</div>`
           : html`
-              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="apply"
+              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
-              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} direction="save"
+              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
             `}
       </section>
-    `, host);
+    `;
   }
 
   renderDeletedPreview(cleanupRunning) {
@@ -1474,12 +1756,8 @@ class HaOpsApp extends LitElement {
           ${pendingTree ? renderDeletedDevicesTree(pendingTree) : html`<p>${unavailableTemplate.replace("{error}", pendingTreeError)}</p>`}
           <ha-ops-pending-raw-diff></ha-ops-pending-raw-diff>
           <div class="actions deletion-actions"><div class="action-row">
-            <form method="post" action="deleted-devices-confirm" data-async-form="true" data-preserve-display-state="true">
-              <button type="submit" ?disabled=${this.isRunning()}>${TEXT.confirmChanges || "Confirm Changes"}</button>
-            </form>
-            <form method="post" action="deleted-devices-revert" data-async-form="true" data-preserve-display-state="true">
-              <button type="submit" class="secondary" ?disabled=${this.isRunning()}>${TEXT.revertDeletedDevices || "Revert Changes"}</button>
-            </form>
+            ${this.actionButton("deleted_devices_confirm", TEXT.confirmChanges || "Confirm Changes", { disabled: this.mutationBlocked(), theme: "primary" })}
+            ${this.actionButton("deleted_devices_revert", TEXT.revertDeletedDevices || "Revert Changes", { disabled: this.isRunning() })}
           </div></div>
         </section>
       `;
@@ -1495,13 +1773,11 @@ class HaOpsApp extends LitElement {
     return html`
       <section class="card wide" data-testid="deleted-devices-preview-section">
         <h2>${TEXT.deletedDevicesPreview}</h2>
-        <p>${TEXT.generatedAt} <span data-transient="deleted-devices-generated">${this.state.last_deleted_devices_generated_at || ""}</span></p>
+        <p>${TEXT.generatedAt} <span data-transient="deleted-devices-generated">${this.view.display_times?.last_deleted_devices_generated_at || this.state.last_deleted_devices_generated_at || ""}</span></p>
         <div data-transient="deleted-devices-preview">${tree ? renderDeletedDevicesTree(tree) : renderDeletedDevicesTable(rows)}</div>
         ${count > 0 ? html`
           <div class="actions deletion-actions"><div class="action-row">
-            <form method="post" action="deleted-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${confirmMessage}>
-              <button type="submit" ?disabled=${disabled}>${TEXT.removeDeletedEntries}</button>
-            </form>
+            ${this.actionButton("deleted_devices_delete", TEXT.removeDeletedEntries, { disabled, confirm: confirmMessage, theme: "primary" })}
           </div></div>
         ` : nothing}
       </section>
@@ -1510,6 +1786,7 @@ class HaOpsApp extends LitElement {
 
   renderRetainedPreview(cleanupRunning) {
     const rows = this.state.last_retained_devices_rows || [];
+    const selected = rows.filter((row) => row.selected).map((row) => row.identity);
     const visible = Boolean(this.state.last_retained_devices_generated_at) || cleanupRunning && this.state.last_action === "retained_devices_preview";
     if (!visible) return nothing;
     const disabled = this.isRunning() || Boolean(this.state.deleted_devices_pending_confirmation) || !rows.length || !this.state.last_retained_devices_fingerprint;
@@ -1518,23 +1795,31 @@ class HaOpsApp extends LitElement {
         <h2>${TEXT.retainedDevicesPreview}</h2>
         <p class="muted">${TEXT.retainedPreviewNotice}</p>
         <p class="muted">${TEXT.retainedDeleteNotice}</p>
-        <p>${TEXT.generatedAt} <span data-transient="retained-devices-generated">${this.state.last_retained_devices_generated_at || ""}</span></p>
-        <form method="post" action="retained-devices-delete" data-async-form="true" data-preserve-display-state="true" data-confirm=${TEXT.confirmRetainedDevicesDelete}>
-          <input type="hidden" name="retained_preview_fingerprint" value=${this.state.last_retained_devices_fingerprint || ""}>
-          <input type="hidden" name="retained_preview_generated_at" value=${this.state.last_retained_devices_generated_at || ""}>
-          <div data-transient="retained-devices-preview">${renderRetainedDevicesTable(rows, disabled)}</div>
+        <p>${TEXT.generatedAt} <span data-transient="retained-devices-generated">${this.view.display_times?.last_retained_devices_generated_at || this.state.last_retained_devices_generated_at || ""}</span></p>
+          <div data-transient="retained-devices-preview">${renderRetainedDevicesTable(rows, disabled, (identity, checked) => this.issue("select_retained_device", {
+            retained_preview_fingerprint: this.state.last_retained_devices_fingerprint || "",
+            retained_preview_generated_at: this.state.last_retained_devices_generated_at || "",
+            identity, selected: checked,
+          }))}</div>
           ${rows.length ? html`<div class="actions deletion-actions"><div class="action-row">
-            <button type="submit" ?disabled=${disabled}>${TEXT.deleteRetainedDevices}</button>
+            ${this.actionButton("retained_devices_delete", TEXT.deleteRetainedDevices, {
+              disabled: disabled || !selected.length,
+              payload: {
+                retained_preview_fingerprint: this.state.last_retained_devices_fingerprint || "",
+                retained_preview_generated_at: this.state.last_retained_devices_generated_at || "",
+                candidate: selected,
+              },
+              confirm: TEXT.confirmRetainedDevicesDelete, theme: "primary",
+            })}
           </div></div>` : nothing}
-        </form>
       </section>
     `;
   }
 
   markUnknown(error) {
     this.setConnection("unknown");
-    const target = this.querySelector("#client-status");
-    if (target) target.textContent = error.message;
+    this.clientError = error.message;
+    this.requestUpdate();
   }
 
   handleCommandError(error) {
@@ -1548,12 +1833,15 @@ class HaOpsApp extends LitElement {
       this.markUnknown(new Error(message));
       return;
     }
-    const target = this.querySelector("#client-status");
-    if (target) target.textContent = message;
+    this.clientError = message;
     this.updateStatusBadge();
   }
 
   setConnection(connection) {
+    if (connection !== "http" && this.httpPollTimer) {
+      clearTimeout(this.httpPollTimer);
+      this.httpPollTimer = null;
+    }
     this.connection = connection;
     this.updateStatusBadge();
   }
@@ -1563,19 +1851,7 @@ class HaOpsApp extends LitElement {
   }
 
   updateStatusBadge() {
-    const badge = this.querySelector("[data-status-code]");
-    if (!badge) return;
-    const status = this.state.deleted_devices_pending_confirmation ? "pending decision" : this.state.last_status || "idle";
-    badge.dataset.connectionState = this.connection;
-    if (this.connection === "unknown" || (status === "idle" && this.isDegradedConnection())) {
-      badge.dataset.statusCode = "transport";
-      badge.textContent = this.connection;
-      badge.className = "badge transport";
-      return;
-    }
-    badge.dataset.statusCode = status;
-    badge.textContent = status === "success" ? TEXT.statusDone || "done" : status === "pending decision" ? TEXT.statusPendingDecision || "pending decision" : status;
-    badge.className = `badge ${status === "success" ? "" : status === "pending decision" ? "pending" : status}`.trim();
+    this.requestUpdate();
   }
 }
 customElements.define("ha-ops-app", HaOpsApp);

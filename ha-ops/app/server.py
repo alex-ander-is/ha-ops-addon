@@ -20,7 +20,6 @@ import state as state_store
 import supervisor
 import sync as sync_logic
 import targets as target_model
-import ui
 import web
 
 
@@ -104,17 +103,10 @@ _SYNC_EXPORTS = {
     "fingerprint_text",
     "count_preview_deletions",
 }
-_UI_EXPORTS = {
-    "render_conflicts",
-    "render_targets",
-    "render_releases",
-    "targets_allow_protected_storage",
-}
 _MODULE_EXPORTS = {
     **{name: (backup_policy, name) for name in _BACKUP_EXPORTS},
     **{name: (manifest_logic, name) for name in _MANIFEST_EXPORTS},
     **{name: (sync_logic, name) for name in _SYNC_EXPORTS},
-    **{name: (ui, name) for name in _UI_EXPORTS},
     "default_state": (state_store, "default_state"),
     "supervisor_ok": (supervisor, "supervisor_ok"),
     "safe_repo_relative_path": (git_ops, "safe_repo_relative_path"),
@@ -239,10 +231,6 @@ def _legacy_func(name):
         return web.addon_slug_value
     if name == "addon_display_name":
         return web.addon_display_name
-    if name == "render_addons":
-        return lambda: web.render_addons(_CTX)
-    if name == "render_git_auth":
-        return lambda options: ui.render_git_auth(options, _CTX.git_auth_mode, _CTX.load_generated_public_key)
     if name == "render_page":
         return lambda: web.render_page(_CTX)
     return None

@@ -125,8 +125,10 @@ class AppContext:
     def wait_for_state_change(self, after_sequence, timeout=None):
         return self.operation_store.wait_for_state_change(after_sequence, timeout=timeout)
 
-    def claim_command(self, command_id, command, generation, payload):
-        return self.operation_store.claim_command(command_id, command, generation, payload)
+    def claim_command(self, command_id, command, generation, payload, validate=None, immediate=False):
+        return self.operation_store.claim_command(
+            command_id, command, generation, payload, validate=validate, immediate=immediate,
+        )
 
     def update_command(self, command_id, status, result=None):
         return self.operation_store.update_command(command_id, status, result=result)
@@ -209,12 +211,216 @@ class AppContext:
     def repair_startup_state(self):
         self.operation_store.begin_repair()
         try:
-            result = self._repair_startup_state_locked()
+            fence = self.operation_store.reconcile_startup_fence()
+            if fence and fence.get("command") == "save":
+                self.inspect_interrupted_save()
+            if fence and fence.get("command") == "apply":
+                self.inspect_interrupted_apply()
+            result = self.read_state() if fence else self._repair_startup_state_locked()
             self.operation_store.mark_repaired()
             return result
         except Exception as exc:
             self.operation_store.mark_blocked(exc)
             raise
+
+    def inspect_interrupted_save(self):
+        """Read local and remote Git evidence without changing refs or retrying Save."""
+        current = self.read_state()
+        intent = current.get("save_intent")
+        operation = current.get(state_store.ACTIVE_OPERATION_KEY)
+        if not isinstance(operation, dict) or operation.get("phase") != "recovery_required":
+            return
+        if not isinstance(intent, dict) or intent.get("operation_id") != operation.get("command_id"):
+            evidence = {"kind": "missing_intent", "guidance": _("recovery.save_missing_intent")}
+        else:
+            try:
+                options = self.load_options()
+                repo = self.repo_checkout_path(options)
+                if not (repo / ".git").exists():
+                    raise RuntimeError("checkout is unavailable")
+                marker = f"HA-Ops-Operation: {intent['operation_id']}"
+                result = self.run_command(["git", "log", "--all", "--fixed-strings", f"--grep={marker}", "--format=%H"], cwd=repo)
+                if result.returncode != 0:
+                    raise RuntimeError("marked commit lookup failed")
+                commits = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                head = self.git_head_or_unborn(repo)
+                dirty = bool(self.git_status_porcelain(repo).strip())
+                remote_tip = git_ops.git_remote_head(
+                    repo, self.git_env(options), str(intent.get("branch") or "main"), self.run_command,
+                )
+                expected_remote = intent.get("expected_remote_tip")
+                marked_commit = commits[0] if len(commits) == 1 else None
+                parent_ok = False
+                if marked_commit:
+                    parents = self.run_command(
+                        ["git", "rev-list", "--parents", "-n", "1", marked_commit], cwd=repo,
+                    )
+                    if parents.returncode == 0:
+                        parts = parents.stdout.split()
+                        parent_ok = len(parts) >= 2 and parts[1] == intent.get("pre_user_tip")
+                remote_ancestor = False
+                if marked_commit and remote_tip:
+                    ancestor = self.run_command(
+                        ["git", "merge-base", "--is-ancestor", remote_tip, marked_commit], cwd=repo,
+                    )
+                    remote_ancestor = ancestor.returncode == 0
+                service_refs_match = True
+                for service_branch, pre_tip in (intent.get("pre_service_tips") or {}).items():
+                    if service_branch not in {"ha-ops/ha-live", "ha-ops/base"}:
+                        raise RuntimeError("Save service ref inventory is invalid")
+                    observed_ref = self.run_command(
+                        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{service_branch}"], cwd=repo,
+                    )
+                    observed_tip = observed_ref.stdout.strip() if observed_ref.returncode == 0 else None
+                    service_refs_match = service_refs_match and observed_tip == pre_tip
+                if not commits and head == intent.get("pre_user_tip") and remote_tip == expected_remote and service_refs_match:
+                    kind = "precommit_verified"
+                elif marked_commit and parent_ok and remote_ancestor and head == marked_commit and remote_tip == expected_remote and service_refs_match:
+                    kind = "exact_retry_available"
+                elif marked_commit and parent_ok and remote_tip == marked_commit:
+                    kind = "pushed_observed"
+                else:
+                    kind = "divergent_or_uncertain"
+                evidence = {
+                    "kind": kind, "marked_commits": commits[:3], "head": head,
+                    "dirty": dirty, "remote_verified": True, "remote_tip": remote_tip,
+                    "parent_verified": parent_ok, "remote_ancestor": remote_ancestor,
+                    "service_refs_match": service_refs_match,
+                    "guidance": _("recovery.save_review"),
+                }
+            except Exception as exc:
+                self.log(f"Interrupted Save evidence inspection failed: {exc}")
+                evidence = {"kind": "unreadable", "guidance": _("recovery.save_unreadable")}
+        self.write_state({state_store.ACTIVE_OPERATION_KEY: {**operation, "evidence": evidence}})
+
+    def inspect_interrupted_apply(self):
+        """Compare recorded Apply write roots and local refs without modifying them."""
+        current = self.read_state()
+        operation = current.get(state_store.ACTIVE_OPERATION_KEY)
+        if not isinstance(operation, dict) or operation.get("phase") != "recovery_required":
+            return
+        intent = current.get("apply_intent")
+        if not isinstance(intent, dict) or intent.get("operation_id") != operation.get("command_id"):
+            evidence = {"kind": "missing_intent", "guidance": _("recovery.apply_missing_intent")}
+        else:
+            try:
+                inventory = intent.get("live_path_inventory")
+                pre_refs = intent.get("pre_ref_tips")
+                if not isinstance(inventory, dict) or not inventory or not isinstance(pre_refs, dict):
+                    raise RuntimeError("Apply path or ref inventory is missing")
+                observed = {}
+                for target_id, recorded in inventory.items():
+                    if not isinstance(recorded, dict) or not recorded.get("live_path") or not isinstance(recorded.get("roots"), list):
+                        raise RuntimeError("Apply target inventory is incomplete")
+                    live_path = Path(recorded["live_path"])
+                    observed[target_id] = sync_logic._recovery_tree_inventory(live_path, recorded["roots"])
+                options = self.load_options()
+                repo = self.repo_checkout_path(options)
+                if not (repo / ".git").exists():
+                    raise RuntimeError("Apply checkout is unavailable")
+                observed_refs = {}
+                for ref in pre_refs:
+                    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+                        raise RuntimeError("Apply ref inventory is invalid")
+                    result = self.run_command(["git", "rev-parse", "--verify", "--quiet", ref], cwd=repo)
+                    observed_refs[ref] = result.stdout.strip() if result.returncode == 0 else None
+                paths_match_pre = all(observed[target_id] == recorded.get("live") for target_id, recorded in inventory.items())
+                paths_match_intended = all(observed[target_id] == recorded.get("intended") for target_id, recorded in inventory.items())
+                refs_match_pre = observed_refs == pre_refs
+                service_commit = intent.get("service_commit")
+                refs_match_intended = bool(service_commit) and observed_refs.get("refs/heads/ha-ops/ha-live") == service_commit
+                if paths_match_pre and refs_match_pre:
+                    kind = "prestate_observed"
+                elif paths_match_intended and refs_match_intended and intent.get("phase") == "before_service_push":
+                    kind = "intended_local_state_observed"
+                else:
+                    kind = "mixed_or_divergent"
+                release_name = intent.get("release_name")
+                release_available = bool(
+                    isinstance(release_name, str) and Path(release_name).name == release_name
+                    and (self.releases_dir / release_name / "release.json").is_file()
+                )
+                evidence = {
+                    "kind": kind, "phase": intent.get("phase"),
+                    "affected_targets": list(inventory)[:20],
+                    "selected_path_count": len(intent.get("selected_paths") or []),
+                    "observed_path_count": sum(len(entries) for entries in observed.values()),
+                    "refs_match_pre": refs_match_pre, "refs_match_intended": refs_match_intended,
+                    "optional_snapshot_recorded": bool(release_name),
+                    "optional_snapshot_available": release_available,
+                    "optional_backup_recorded": bool(intent.get("backup_slug")),
+                    "guidance": _("recovery.apply_review"),
+                }
+            except Exception as exc:
+                self.log(f"Interrupted Apply evidence inspection failed: {exc}")
+                evidence = {"kind": "unreadable", "guidance": _("recovery.apply_review")}
+        self.write_state({state_store.ACTIVE_OPERATION_KEY: {**operation, "evidence": evidence}})
+
+    def acknowledge_verified_recovery(self, acknowledgement_id, operation_id, generation, evidence_token):
+        self.assert_repaired_for_current_preview_read("recovery_acknowledgement")
+        state = self.read_state()
+        if str(acknowledgement_id) in (state.get("command_records") or {}):
+            return self.operation_store.acknowledge_verified_recovery(
+                acknowledgement_id, operation_id, generation, evidence_token,
+            )
+        operation = state.get(state_store.ACTIVE_OPERATION_KEY)
+        if not isinstance(operation, dict) or operation.get("command_id") != operation_id:
+            raise RuntimeError("Recovery operation changed; review current evidence again.")
+        if operation.get("command") == "save":
+            self.inspect_interrupted_save()
+        elif operation.get("command") == "apply":
+            self.inspect_interrupted_apply()
+        else:
+            raise RuntimeError("This operation needs manual recovery before it can be acknowledged.")
+        return self.operation_store.acknowledge_verified_recovery(
+            acknowledgement_id, operation_id, generation, evidence_token,
+        )
+
+    def retry_interrupted_save(self, retry_id, operation_id, generation, evidence_token):
+        """Push only the already marked commit after a reviewed exact-tip check."""
+        self.assert_repaired_for_current_preview_read("save_recovery_retry")
+        current = self.read_state()
+        if str(retry_id) in (current.get("command_records") or {}):
+            return self.operation_store.begin_reviewed_save_retry(
+                retry_id, operation_id, generation, evidence_token,
+            )
+        operation = current.get(state_store.ACTIVE_OPERATION_KEY)
+        if not isinstance(operation, dict) or operation.get("command_id") != operation_id:
+            raise RuntimeError("Recovery operation changed; review current evidence again.")
+        self.inspect_interrupted_save()
+        claimed, record = self.operation_store.begin_reviewed_save_retry(
+            retry_id, operation_id, generation, evidence_token,
+        )
+        if not claimed:
+            return False, record
+        self.operation_store.transition_reviewed_save_retry(retry_id, "running")
+        try:
+            current = self.read_state()
+            intent = current["save_intent"]
+            operation = current[state_store.ACTIVE_OPERATION_KEY]
+            commit = operation["retry"]["commit"]
+            options = self.load_options()
+            repo = self.repo_checkout_path(options)
+            branch = str(intent["branch"])
+            env = self.git_env(options)
+            remote_tip = git_ops.git_remote_head(repo, env, branch, self.run_command)
+            if remote_tip != intent.get("expected_remote_tip"):
+                raise RuntimeError("Remote tip changed before exact Save retry.")
+            ancestor = self.run_command(["git", "merge-base", "--is-ancestor", remote_tip, commit], cwd=repo)
+            if ancestor.returncode != 0:
+                raise RuntimeError("Remote tip is not an ancestor of the marked Save commit.")
+            git_ops.push_commit_to_branch(repo, env, commit, branch, self.run_command)
+            observed = git_ops.git_remote_head(repo, env, branch, self.run_command)
+            if observed != commit:
+                raise RuntimeError("Exact Save commit was not observed at the remote tip after push.")
+            result = {"ok": True, "message": _("recovery.save_retry_pushed")}
+            record = self.operation_store.transition_reviewed_save_retry(retry_id, "terminal", result)
+        except Exception as exc:
+            record = self.operation_store.transition_reviewed_save_retry(
+                retry_id, "terminal", {"ok": False, "message": str(exc)},
+            )
+        self.inspect_interrupted_save()
+        return True, record
 
     def _repair_startup_state_locked(self):
         state = self.read_state()
@@ -695,6 +901,9 @@ class AppContext:
     def apply_targets(self, resolved_targets, details):
         return sync_logic.apply_targets(resolved_targets, details, self.sync_deps())
 
+    def apply_recovery_inventory(self, resolved_targets):
+        return sync_logic.apply_recovery_inventory(resolved_targets, self.sync_deps())
+
     def selected_apply_targets_from_preview(self, resolved_targets, keep_ha_paths):
         return sync_logic.selected_apply_targets_from_preview(resolved_targets, keep_ha_paths, self.sync_deps())
 
@@ -906,12 +1115,13 @@ class AppContext:
             self.internal_ids_z2m_dirs(),
         )
 
-    def apply_internal_ids_migration(self, expected_fingerprint, selected_paths):
+    def apply_internal_ids_migration(self, expected_fingerprint, selected_paths, expected_diff_digests=None):
         return internal_id_migration.apply_internal_ids_migration(
             self.internal_ids_config_dir(),
             expected_fingerprint,
             selected_paths,
             self.internal_ids_z2m_dirs(),
+            expected_diff_digests,
         )
 
     def device_registry_fingerprint(self):
@@ -1064,8 +1274,10 @@ class AppContext:
     def job_deps(self):
         return job_logic.JobContext(
             add_detail=self.add_detail,
+            run_command=self.run_command,
             assert_repaired_for_current_preview_read=self.assert_repaired_for_current_preview_read,
             apply_targets=self.apply_targets,
+            apply_recovery_inventory=self.apply_recovery_inventory,
             build_apply_preview=self.build_apply_preview,
             build_disk_usage_summary=self.build_disk_usage_summary,
             classify_docker_prune_fence=self.classify_docker_prune_fence,

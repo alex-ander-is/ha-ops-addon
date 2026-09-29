@@ -457,13 +457,22 @@ def build_internal_ids_preview(config_dir, z2m_dirs=None):
     }
 
 
-def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_paths, z2m_dirs=None):
+def apply_internal_ids_migration(config_dir, expected_fingerprint, selected_paths, z2m_dirs=None, expected_diff_digests=None):
     preview = build_internal_ids_preview(config_dir, z2m_dirs)
     if expected_fingerprint and preview["fingerprint"] != expected_fingerprint:
         raise RuntimeError("Internal id migration candidates changed since preview. Run Check actions IDs again.")
     selected_paths = set(selected_paths or [])
     if not selected_paths:
         raise RuntimeError("Select at least one internal id migration file.")
+    if expected_diff_digests is not None:
+        current = {
+            row["path"]: fingerprint_text(row["diff"])
+            for row in preview["rows"] if row.get("changes") and row.get("diff")
+        }
+        if set(expected_diff_digests) != selected_paths or any(
+            current.get(path) != expected_diff_digests[path] for path in selected_paths
+        ):
+            raise RuntimeError("Internal id migration diff changed since preview. Run Check actions IDs again.")
     changed = []
     for row in preview["rows"]:
         if row["path"] not in selected_paths or not row["changes"]:

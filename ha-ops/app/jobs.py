@@ -1,8 +1,11 @@
 from dataclasses import dataclass
 from typing import Any
+import hashlib
+import uuid
 
 import i18n
 import disk_usage
+import git_ops
 import registry_cleanup
 import state as state_store
 
@@ -63,10 +66,16 @@ def assert_repaired_generation(ctx, action, expected_generation=None):
 
 
 def recovery_action_allowed(state, action):
-    return state_store.deleted_devices_recovery_allows(state, action)
+    return (
+        state_store.deleted_devices_recovery_allows(state, action)
+        and not state_store.active_operation_blocks(state, action)
+    )
 
 
 def cleanup_blocked_message(state, action):
+    operation = state.get(state_store.ACTIVE_OPERATION_KEY)
+    if operation and state_store.active_operation_blocks(state, action):
+        return _("error.active_operation")
     if state_store.deleted_devices_recovery_active(state):
         return state.get("last_message") or _("message.deleted_devices_cleanup_manual_recovery")
     if action == "deleted_devices_preview":
@@ -110,8 +119,10 @@ def record_service_branch_push_failure(ctx, details, branch, error):
 @dataclass(frozen=True)
 class JobContext:
     add_detail: Any
+    run_command: Any
     assert_repaired_for_current_preview_read: Any
     apply_targets: Any
+    apply_recovery_inventory: Any
     build_deleted_devices_preview: Any
     build_disk_usage_summary: Any
     classify_docker_prune_fence: Any
@@ -610,6 +621,8 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_diff_generated_at": utc_now(),
                     "last_save_preview_commit": retry_commit,
                     "last_save_preview_fingerprint": retry_preview["fingerprint"],
+                    "save_preview_id": str(uuid.uuid4()),
+                    "save_decision_revision": 0,
                     "last_save_preview_warnings": retry_preview.get("warnings", []),
                     "last_save_preview_paths": retry_preview.get("paths", []),
                     "last_save_preview_conflicts": bool(retry_preview.get("conflicts")),
@@ -652,6 +665,8 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                         "last_save_diff_generated_at": utc_now(),
                         "last_save_preview_commit": commit,
                         "last_save_preview_fingerprint": current_preview["fingerprint"],
+                        "save_preview_id": str(uuid.uuid4()),
+                        "save_decision_revision": 0,
                         "last_save_preview_warnings": current_preview.get("warnings", []),
                         "last_save_preview_paths": [],
                         "last_save_preview_conflicts": False,
@@ -678,6 +693,8 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_diff_generated_at": utc_now(),
                     "last_save_preview_commit": commit,
                     "last_save_preview_fingerprint": current_preview["fingerprint"],
+                    "save_preview_id": str(uuid.uuid4()),
+                    "save_decision_revision": 0,
                     "last_save_preview_warnings": current_preview.get("warnings", []),
                     "last_save_preview_paths": current_preview.get("paths", []),
                     "last_save_preview_conflicts": bool(current_preview.get("conflicts")),
@@ -704,6 +721,8 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                     "last_save_diff_generated_at": utc_now(),
                     "last_save_preview_commit": commit,
                     "last_save_preview_fingerprint": current_preview["fingerprint"],
+                    "save_preview_id": str(uuid.uuid4()),
+                    "save_decision_revision": 0,
                     "last_save_preview_warnings": current_preview.get("warnings", []),
                     "last_save_preview_paths": [],
                     "last_save_preview_conflicts": False,
@@ -719,14 +738,40 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
 
         ctx.add_detail(details, _("detail.merged_live_export"))
         checkout_dirty_for_save = True
+        operation = state.get(state_store.ACTIVE_OPERATION_KEY) or {}
+        operation_id = operation.get("command_id") or str(uuid.uuid4())
+        remote_tip = git_ops.git_remote_head(repo_dir, env, branch, ctx.run_command)
+        service_tips = {}
+        for service_branch in ("ha-ops/ha-live", "ha-ops/base"):
+            service_ref = ctx.run_command(
+                ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{service_branch}"], cwd=repo_dir,
+            )
+            service_tips[service_branch] = service_ref.stdout.strip() if service_ref.returncode == 0 else None
+        write_state({"save_intent": {
+            "operation_id": operation_id,
+            "preview_id": state.get("save_preview_id"),
+            "decision_revision": int(state.get("save_decision_revision") or 0),
+            "branch": branch,
+            "pre_user_tip": commit,
+            "pre_service_tips": service_tips,
+            "expected_remote_tip": remote_tip,
+            "subject": effective_save_commit_subject,
+            "phase": "precommit",
+            "commit": None,
+        }})
         new_commit = ctx.commit_save_merge(
             repo_dir,
             branch,
             resolved_targets,
             save_resolutions,
-            effective_save_commit_subject,
+            f"{effective_save_commit_subject}\n\nHA-Ops-Operation: {operation_id}",
             details,
         )
+        write_state({"save_intent": {
+            **ctx.read_state()["save_intent"],
+            "phase": "committed" if new_commit else "no_commit",
+            "commit": new_commit,
+        }})
         add_save_change_details(ctx, details, ctx.git_status_porcelain(repo_dir))
 
         if new_commit:
@@ -779,6 +824,8 @@ def run_save_job(ctx, commit_subject=None, lock_acquired=False):
                 "last_save_diff_generated_at": utc_now(),
                 "last_save_preview_commit": post_save_commit,
                 "last_save_preview_fingerprint": post_save_preview["fingerprint"],
+                "save_preview_id": str(uuid.uuid4()),
+                "save_decision_revision": 0,
                 "last_save_preview_warnings": post_save_preview.get("warnings", []),
                 "last_save_preview_paths": post_save_preview.get("paths", []),
                 "last_save_preview_conflicts": bool(post_save_preview.get("conflicts")),
@@ -916,6 +963,8 @@ def run_save_preview_job(ctx, lock_acquired=False):
                 "last_save_diff_generated_at": utc_now(),
                 "last_save_preview_commit": commit,
                 "last_save_preview_fingerprint": preview["fingerprint"],
+                "save_preview_id": str(uuid.uuid4()),
+                "save_decision_revision": 0,
                 "last_save_preview_warnings": preview.get("warnings", []),
                 "last_save_preview_paths": preview.get("paths", []),
                 "last_save_preview_conflicts": bool(preview.get("conflicts")),
@@ -1243,6 +1292,11 @@ def run_internal_ids_preview_job(ctx, lock_acquired=False):
         if state.get("deleted_devices_pending_confirmation"):
             raise i18n.error("error.deleted_devices_pending_before_internal_ids")
         preview = ctx.build_internal_ids_preview()
+        preview_id = str(uuid.uuid4())
+        preview_rows = [
+            {**row, "diff_sha256": hashlib.sha256(str(row.get("diff") or "").encode("utf-8")).hexdigest() if row.get("diff") else None}
+            for row in preview["rows"]
+        ]
         count = int(preview["count"])
         message = _("message.internal_ids_found", count=count, suffix="" if count == 1 else "s")
         details.append(message)
@@ -1254,7 +1308,8 @@ def run_internal_ids_preview_job(ctx, lock_acquired=False):
                 "last_message": "",
                 "last_details": details,
                 "last_internal_ids_preview": preview["summary"],
-                "last_internal_ids_rows": preview["rows"],
+                "last_internal_ids_preview_id": preview_id,
+                "last_internal_ids_rows": preview_rows,
                 "last_internal_ids_count": count,
                 "last_internal_ids_fingerprint": preview["fingerprint"],
                 "last_internal_ids_generated_at": utc_now(),
@@ -1281,7 +1336,7 @@ def run_internal_ids_preview_job(ctx, lock_acquired=False):
         release_run_lock(ctx)
 
 
-def run_internal_ids_migrate_job(selected, ctx, lock_acquired=False):
+def run_internal_ids_migrate_job(selection, ctx, lock_acquired=False):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
@@ -1307,16 +1362,23 @@ def run_internal_ids_migrate_job(selected, ctx, lock_acquired=False):
             raise RuntimeError(_("message.save_push_retry_still_pending"))
         rows = state.get("last_internal_ids_rows") or []
         fingerprint = state.get("last_internal_ids_fingerprint")
-        if not rows or not fingerprint:
+        if not rows or not fingerprint or not state.get("last_internal_ids_preview_id"):
             raise i18n.error("error.internal_ids_preview_required")
-        selected_indexes = {int(value) for value in selected}
-        if not selected_indexes:
+        if not isinstance(selection, dict) or selection.get("preview_id") != state["last_internal_ids_preview_id"]:
+            raise i18n.error("error.internal_ids_preview_required")
+        selected = selection.get("selected")
+        if not isinstance(selected, list) or not selected:
             raise i18n.error("error.internal_ids_selection_required")
-        selected_paths = []
-        for index, row in enumerate(rows):
-            if index in selected_indexes and row.get("changes"):
-                selected_paths.append(row.get("path"))
-        result = ctx.apply_internal_ids_migration(fingerprint, selected_paths)
+        available = {row.get("path"): row for row in rows if row.get("changes") and row.get("diff")}
+        selected_digests = {}
+        for item in selected:
+            if not isinstance(item, dict) or item.get("path") not in available or item.get("path") in selected_digests:
+                raise i18n.error("error.internal_ids_preview_required")
+            path = item["path"]
+            if item.get("diff_sha256") != available[path].get("diff_sha256"):
+                raise i18n.error("error.internal_ids_preview_required")
+            selected_digests[path] = item["diff_sha256"]
+        result = ctx.apply_internal_ids_migration(fingerprint, list(selected_digests), selected_digests)
         for row in result["changed"]:
             ctx.add_detail(details, _("detail.migrated_internal_ids_path", path=row["path"]))
         commit_pending_internal_ids_migration(ctx, options, details)
@@ -1346,7 +1408,11 @@ def run_internal_ids_migrate_job(selected, ctx, lock_acquired=False):
                 "last_message": message,
                 "last_details": details,
                 "last_internal_ids_preview": preview["summary"],
-                "last_internal_ids_rows": preview["rows"],
+                "last_internal_ids_preview_id": str(uuid.uuid4()),
+                "last_internal_ids_rows": [
+                    {**row, "diff_sha256": hashlib.sha256(str(row.get("diff") or "").encode("utf-8")).hexdigest() if row.get("diff") else None}
+                    for row in preview["rows"]
+                ],
                 "last_internal_ids_count": preview["count"],
                 "last_internal_ids_fingerprint": preview["fingerprint"],
                 "last_internal_ids_generated_at": utc_now(),
@@ -2092,6 +2158,8 @@ def run_apply_job(ctx, lock_acquired=False):
     backup_slug = None
     resolved_targets = []
     core_stopped_for_apply = False
+    apply_commit = None
+    apply_intent = None
 
     write_state(
         {
@@ -2149,6 +2217,8 @@ def run_apply_job(ctx, lock_acquired=False):
                     "last_diff_generated_at": utc_now(),
                     "last_preview_commit": commit,
                     "last_preview_fingerprint": preview["fingerprint"],
+                    "apply_preview_id": str(uuid.uuid4()),
+                    "apply_decision_revision": 0,
                     "last_preview_deletions": preview["deletions"],
                     "last_preview_storage_changes": preview.get("storage_changes", False),
                     "last_preview_storage_paths": preview.get("storage_change_paths", []),
@@ -2190,12 +2260,38 @@ def run_apply_job(ctx, lock_acquired=False):
             if preview.get("storage_changes"):
                 resolved_targets = ctx.approve_storage_apply_targets(resolved_targets)
 
+        operation = state.get(state_store.ACTIVE_OPERATION_KEY) or {}
+        pre_ref_tips = {}
+        for ref in (f"refs/heads/{branch}", "refs/heads/ha-ops/ha-live", "refs/heads/ha-ops/base"):
+            ref_result = ctx.run_command(["git", "rev-parse", "--verify", "--quiet", ref], cwd=repo_dir)
+            pre_ref_tips[ref] = ref_result.stdout.strip() if ref_result.returncode == 0 else None
+        apply_intent = {
+            "operation_id": operation.get("command_id") or str(uuid.uuid4()),
+            "preview_id": state.get("apply_preview_id"),
+            "decision_revision": int(state.get("apply_decision_revision") or 0),
+            "source_commit": commit,
+            "selected_paths": apply_selected_paths,
+            "choices": apply_resolutions,
+            "pre_live_fingerprints": preview.get("live_fingerprints", {}),
+            "live_path_inventory": ctx.apply_recovery_inventory(resolved_targets),
+            "pre_ref_tips": pre_ref_tips,
+            "affected_targets": [target.get("id") for target in resolved_targets],
+            "optional_snapshot_enabled": ctx.option_bool(options, "create_release_snapshot", True),
+            "backup_slug": None,
+            "release_name": None,
+            "phase": "before_backup",
+        }
+        write_state({"apply_intent": apply_intent})
         backup_slug = ctx.ensure_fresh_system_backup(options, details)
+        apply_intent = {**apply_intent, "backup_slug": backup_slug, "phase": "before_snapshot"}
+        write_state({"apply_intent": apply_intent})
 
         if ctx.option_bool(options, "create_release_snapshot", True):
             ctx.add_detail(details, _("detail.creating_release_snapshot"))
             release_name = ctx.create_release_snapshot(resolved_targets, commit, backup_slug)
             ctx.add_detail(details, _("detail.created_release_snapshot", release=release_name))
+        apply_intent = {**apply_intent, "release_name": release_name, "phase": "before_service_commit"}
+        write_state({"apply_intent": apply_intent})
 
         if conflict_preview:
             apply_commit = ctx.commit_apply_merge(
@@ -2209,8 +2305,14 @@ def run_apply_job(ctx, lock_acquired=False):
             if apply_commit:
                 ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
 
+        apply_intent = {**apply_intent, "service_commit": apply_commit}
+
+        apply_intent = {**apply_intent, "phase": "before_live_write"}
+        write_state({"apply_intent": apply_intent})
         apply_result = ctx.apply_targets(resolved_targets, details) or {}
         core_stopped_for_apply = bool(apply_result.get("core_stopped"))
+        apply_intent = {**apply_intent, "phase": "before_deletions"}
+        write_state({"apply_intent": apply_intent})
         if conflict_preview:
             ctx.delete_apply_conflict_live_deletions(
                 resolved_targets,
@@ -2232,6 +2334,8 @@ def run_apply_job(ctx, lock_acquired=False):
             )
             if apply_commit:
                 ctx.add_detail(details, _("detail.updated_ha_live", commit=apply_commit))
+        apply_intent = {**apply_intent, "service_commit": apply_commit, "phase": "before_service_push"}
+        write_state({"apply_intent": apply_intent})
         post_apply_preview = ctx.build_apply_preview(
             preview_targets,
             details,
@@ -2272,6 +2376,8 @@ def run_apply_job(ctx, lock_acquired=False):
                 "last_diff_generated_at": utc_now(),
                 "last_preview_commit": post_apply_commit,
                 "last_preview_fingerprint": post_apply_preview["fingerprint"],
+                "apply_preview_id": str(uuid.uuid4()),
+                "apply_decision_revision": 0,
                 "last_preview_deletions": post_apply_preview["deletions"],
                 "last_preview_storage_changes": post_apply_preview.get("storage_changes", False),
                 "last_preview_storage_paths": post_apply_preview.get("storage_change_paths", []),
@@ -2289,11 +2395,13 @@ def run_apply_job(ctx, lock_acquired=False):
     except Exception as exc:
         details.append(str(exc))
         core_stopped_for_apply = core_stopped_for_apply or bool(getattr(exc, "core_stopped", False))
+        rollback_completed = False
         if release_name:
             try:
                 ctx.add_detail(details, _("detail.restoring_release_snapshot_after_failure", release=release_name))
                 ctx.restore_release_snapshot(release_name, details, core_already_stopped=core_stopped_for_apply)
                 core_stopped_for_apply = False
+                rollback_completed = True
             except Exception as rollback_exc:
                 details.append(_("detail.rollback_from_release_failed", error=rollback_exc))
         if core_stopped_for_apply:
@@ -2303,6 +2411,12 @@ def run_apply_job(ctx, lock_acquired=False):
                 core_stopped_for_apply = False
             except Exception as start_exc:
                 details.append(_("detail.start_core_after_apply_failure_failed", error=start_exc))
+
+        # A completed optional snapshot restore can close the caught failure
+        # only when no service-branch commit was made and Core is back up.
+        # Other outcomes retain the generic recovery fence for review.
+        if rollback_completed and apply_commit is None and not core_stopped_for_apply and apply_intent:
+            write_state({"apply_intent": {**apply_intent, "phase": "caught_rollback_complete"}})
 
         write_state(
             {
@@ -2399,6 +2513,8 @@ def run_preview_job(ctx, lock_acquired=False):
                 "last_diff_generated_at": utc_now(),
                 "last_preview_commit": commit,
                 "last_preview_fingerprint": preview["fingerprint"],
+                "apply_preview_id": str(uuid.uuid4()),
+                "apply_decision_revision": 0,
                 "last_preview_deletions": preview["deletions"],
                 "last_preview_storage_changes": preview.get("storage_changes", False),
                 "last_preview_storage_paths": preview.get("storage_change_paths", []),

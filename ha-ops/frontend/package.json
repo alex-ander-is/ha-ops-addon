@@ -12,6 +12,7 @@
     "@vaadin/details": "25.2.8",
     "@vaadin/progress-bar": "25.2.8",
     "@vaadin/select": "25.2.8",
+    "@vaadin/text-field": "25.2.8",
     "lit": "3.3.3"
   },
   "devDependencies": {

@@ -3,8 +3,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import base64
 import hashlib
-import html
 import json
+import re
 import select
 import socket
 import struct
@@ -19,7 +19,7 @@ import manifest as manifest_logic
 import registry_diff
 import state as state_store
 import sync as sync_logic
-import ui
+import diff_split
 
 
 def _(key, **values):
@@ -209,16 +209,6 @@ def addon_display_name(addon):
     return f"{name} ({slug})" if slug and slug not in name else name
 
 
-def render_addons(ctx):
-    return ui.render_addons(
-        ctx.selected_addon_slugs(),
-        ctx.get_installed_addons,
-        addon_slug_value,
-        addon_display_name,
-        ctx.addon_is_zigbee2mqtt,
-    )
-
-
 def full_conflict_detail(text):
     return text
 
@@ -389,421 +379,8 @@ def log_text_for_state(ctx, state, last_status, pending_deleted_devices, rollbac
 
 
 def render_page(ctx):
-    options = ctx.load_options()
-    state, reconciled = reconcile_docker_prune_orphan(ctx)
-    backup_status = ctx.latest_system_backup_status(options)
-    if (
-        state.get("last_status") == "error"
-        and state.get("last_action") == "apply"
-        and str(state.get("last_message", "")).startswith("No fresh system backup found")
-        and not backup_status.get("stale", True)
-    ):
-        state = dict(state)
-        state.update(
-            {
-                "last_status": "idle",
-                "last_action": None,
-                "last_message": _("message.fresh_system_backup_available"),
-            }
-        )
-    elif (
-        state.get("last_status") == "error"
-        and state.get("last_action") == "apply"
-        and str(state.get("last_message", "")) == "Home Assistant config check failed: {'result': 'ok', 'data': {}}"
-    ):
-        state = dict(state)
-        state.update(
-            {
-                "last_status": "idle",
-                "last_action": None,
-                "last_message": _("message.stale_config_check_cleared"),
-            }
-        )
-    releases = ctx.list_releases()
-    manifest_preview = current_manifest_preview(ctx)
-    target_state = state.get("last_targets") or manifest_preview
-    homeassistant_organizer_enabled = any(
-        target.get("type") == "homeassistant" and target.get("organizer_enabled")
-        for target in manifest_preview
-    )
-    state = repair_stale_running_state(ctx, state)
-    classify_prune = getattr(ctx, "classify_docker_prune_fence", None)
-    docker_prune = (
-        classify_prune(state)
-        if classify_prune is not None
-        else state_store.classify_docker_prune_fence(state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
-    )
-    last_status = state.get("last_status", "idle")
-    last_action = state.get("last_action")
-    job_running = job_is_running(ctx, state)
-    has_conflicts = bool(state.get("conflicts"))
-    deleted_devices_recovery_active = state_store.deleted_devices_recovery_active(state)
-    deleted_devices_pending_confirmation = bool(state.get("deleted_devices_pending_confirmation"))
-    deleted_devices_rollback_path = state.get("deleted_devices_rollback_path")
-    pending_deleted_devices_decision = bool(deleted_devices_pending_confirmation and deleted_devices_rollback_path)
-    display_status = "conflicts" if has_conflicts else "pending decision" if pending_deleted_devices_decision else last_status
-    display_status_label = _(STATUS_LABEL_KEYS.get(display_status, display_status))
-    details = log_text_for_state(
-        ctx,
-        state,
-        last_status,
-        deleted_devices_pending_confirmation,
-        deleted_devices_rollback_path,
-    )
-    save_push_retry_pending = bool(state.get("save_push_retry_pending"))
-    deleted_devices_preview_text = state.get("last_deleted_devices_preview") or _("text.no_deleted_devices_preview")
-    deleted_devices_rows = state.get("last_deleted_devices_rows") or []
-    deleted_devices_tree = state.get("last_deleted_devices_tree")
-    retained_devices_rows = state.get("last_retained_devices_rows") or []
-    internal_ids_rows = state.get("last_internal_ids_rows") or []
-    run_disabled = "disabled" if job_running else ""
-    action_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
-    apply_action = "apply"
-    apply_button_text = _("action.apply")
-    post_apply_save_recommended = bool(state.get("post_apply_save_recommended"))
-    save_preview_button_class = "warning" if post_apply_save_recommended else "secondary"
-    save_preview_button_text = _("action.review_post_apply_save") if post_apply_save_recommended else _("action.preview_save")
-    save_preview_hint_html = ""
-    if post_apply_save_recommended:
-        save_preview_hint_html = f"<p class='action-hint'>{_('notice.post_apply_save_button')}</p>"
-    post_apply_notice_html = ""
-    if post_apply_save_recommended:
-        post_apply_notice_html = (
-            "<div class='post-apply-alert' role='alert'>"
-            f"<strong>{_('notice.post_apply_save_title')}</strong>"
-            f"<span>{_('notice.post_apply_save')}</span>"
-            "</div>"
-        )
-    deleted_devices_count = int(state.get("last_deleted_devices_count") or 0)
-    deletion_ready = bool(
-        deleted_devices_count > 0
-        and state.get("last_deleted_devices_preview")
-        and state.get("last_deleted_devices_generated_at")
-        and state.get("last_deleted_devices_fingerprint")
-    )
-    check_deleted_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active else ""
-    deleted_devices_save_hint_html = ""
-    if last_action == "deleted_devices_confirm" and last_status == "success":
-        deleted_devices_save_hint_html = (
-            "<p class='action-hint deleted-devices-save-hint' role='alert'>"
-            f"{_('detail.save_deleted_registry_cleanup')}"
-            "</p>"
-        )
-    if save_push_retry_pending:
-        action_disabled = "disabled"
-        check_deleted_devices_disabled = "disabled"
-    check_disk_usage_disabled = (
-        "disabled"
-        if run_disabled or save_push_retry_pending or deleted_devices_pending_confirmation or deleted_devices_recovery_active
-        else ""
-    )
-    docker_capability_status = ctx.docker_build_cache_capability()
-    docker_prune_ready = bool(
-        docker_capability_status["available"]
-        and not job_running
-        and not save_push_retry_pending
-        and not deleted_devices_pending_confirmation
-        and not deleted_devices_recovery_active
-        and docker_prune.get("kind") == "idle"
-    )
-    docker_prune_disabled = "" if docker_prune_ready else "disabled"
-    docker_prune_hint_html = ""
-    if not docker_capability_status["available"]:
-        docker_prune_hint_html = (
-            "<p class='action-hint docker-prune-hint'>"
-            f"{html.escape(docker_capability_status['reason'])} {html.escape(docker_capability_status['remedy'])}</p>"
-        )
-    elif save_push_retry_pending:
-        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.save_retry')}</p>"
-    elif docker_prune.get("kind") != "idle":
-        docker_prune_hint_html = f"<p class='action-hint docker-prune-hint'>{_('docker_prune.disabled.fence')}</p>"
-    if docker_prune.get("kind") == "valid" and docker_prune.get("phase") in state_store.DOCKER_PRUNE_ACTIVE_PHASES:
-        docker_prune_status_html = f"<p class='action-flow'>{_('message.docker_prune_phase_' + docker_prune['phase'])}</p>"
-    elif docker_prune.get("phase") == "resolution_required":
-        if docker_prune.get("kind") == "valid":
-            hidden = (
-                "<input type='hidden' name='mode' value='operation'>"
-                f"<input type='hidden' name='operation_id' value='{html.escape(docker_prune['operation_id'], quote=True)}'>"
-            )
-            copy = _("message.docker_prune_ambiguity_valid")
-        else:
-            hidden = (
-                "<input type='hidden' name='mode' value='corrupt'>"
-                f"<input type='hidden' name='recovery_token' value='{html.escape(docker_prune['recovery_token'], quote=True)}'>"
-            )
-            copy = _("message.docker_prune_ambiguity_corrupt")
-        docker_prune_status_html = (
-            f"<p class='action-flow'>{copy}</p>"
-            "<form method='post' action='docker-build-cache-prune-resolve' data-async-form='true'>"
-            f"{hidden}<button type='submit' class='secondary'>{_('action.acknowledge_docker_prune')}</button></form>"
-        )
-    else:
-        docker_prune_status_html = ""
-    check_retained_devices_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
-    check_internal_ids_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending else ""
-    deletion_disabled = "disabled" if run_disabled or deleted_devices_pending_confirmation or deleted_devices_recovery_active or save_push_retry_pending or not deletion_ready else ""
-    confirm_deletion_disabled = (
-        "disabled" if run_disabled or save_push_retry_pending or deleted_devices_recovery_active or not deleted_devices_pending_confirmation else ""
-    )
-    revert_deletion_disabled = (
-        "disabled"
-        if run_disabled or save_push_retry_pending or not deleted_devices_pending_confirmation or not deleted_devices_rollback_path
-        else ""
-    )
-    deleted_devices_actions_html = ""
-    preview_entries = deleted_entries_label(
-        int(state.get("last_deleted_devices_device_count") or 0),
-        int(state.get("last_deleted_devices_entity_count") or 0),
-    )
-    pending_entries = deleted_entries_label(
-        int(state.get("deleted_devices_pending_device_count") or 0),
-        int(state.get("deleted_devices_pending_entity_count") or 0),
-    )
-    if deleted_devices_pending_confirmation:
-        deleted_devices_actions_html = (
-            "<div class='actions deletion-actions'>"
-            "<div class='action-row'>"
-            "<form method='post' action='deleted-devices-confirm' data-async-form='true'>"
-            f"<button type='submit' class='secondary' {confirm_deletion_disabled}>{_('action.confirm_changes')}</button>"
-            "</form>"
-            "<form method='post' action='deleted-devices-revert' data-async-form='true' "
-            f"data-confirm='{html.escape(_('confirm.deleted_devices_revert', entries=pending_entries), quote=True)}'>"
-            f"<button type='submit' {revert_deletion_disabled}>{_('action.revert_changes')}</button>"
-            "</form>"
-            "</div>"
-            "</div>"
-        )
-    elif deletion_ready:
-        deleted_devices_actions_html = (
-            "<div class='actions deletion-actions'>"
-            "<div class='action-row'>"
-            "<form method='post' action='deleted-devices-delete' data-async-form='true' "
-            "data-preserve-display-state='true' "
-            f"data-confirm='{html.escape(_('confirm.deleted_devices_delete', entries=preview_entries), quote=True)}'>"
-            f"<button type='submit' {deletion_disabled}>{_('action.remove_deleted_entries')}</button>"
-            "</form>"
-            "</div>"
-            "</div>"
-        )
-    confirm_messages = []
-    if not ctx.option_bool(options, "require_fresh_backup", True):
-        confirm_messages.append(_("notice.apply_confirm_backup_disabled"))
-    if ui.targets_allow_protected_storage(target_state):
-        confirm_messages.append(_("notice.apply_confirm_protected_storage"))
-    apply_confirm = ""
-    if confirm_messages:
-        confirm_message = _("confirm.apply", message=" ".join(confirm_messages))
-        apply_confirm = f"data-confirm='{html.escape(confirm_message, quote=True)}'"
-    conflicts_section_html = ""
-    if has_conflicts:
-        conflicts_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{_('heading.git_conflicts')}</h2>"
-            f"{ui.render_conflicts(conflict_items(ctx, state, options), state.get('conflict_type'), job_running or save_push_retry_pending)}"
-            "</section>"
-        )
-    deleted_devices_section_html = ""
-    if state.get("last_deleted_devices_generated_at") or deleted_devices_pending_confirmation:
-        deleted_devices_heading = _("heading.deleted_devices_preview")
-        deleted_devices_generated_html = (
-            f"<p>{_('label.generated_at')} "
-            f"<span data-transient='deleted-devices-generated'>{html.escape(ctx.format_time(state.get('last_deleted_devices_generated_at'), options))}</span>"
-            "</p>"
-        )
-        if pending_deleted_devices_decision:
-            deleted_devices_heading = _(
-                "heading.pending_deleted_devices_diff",
-                entries=deleted_entries_label(
-                    int(state.get("deleted_devices_pending_device_count") or 0),
-                    int(state.get("deleted_devices_pending_entity_count") or 0),
-                ),
-            )
-            deleted_devices_generated_html = ""
-            tree = state.get("deleted_devices_pending_tree")
-            tree_error = state.get("deleted_devices_pending_tree_error") or ""
-            if not tree and not tree_error:
-                try:
-                    tree = ctx.deleted_devices_pending_tree(deleted_devices_rollback_path)
-                except Exception as exc:
-                    tree_error = str(exc)
-            deleted_devices_preview_html = (
-                f"<p class='muted'>{_('notice.deleted_devices_pending')}</p>"
-                + (ui.render_deleted_devices_tree(tree) if tree else f"<p>{html.escape(_('error.pending_diff_unavailable', error=tree_error))}</p>")
-                + ui.render_pending_deleted_devices_raw_fallback()
-            )
-        else:
-            deleted_devices_preview_html = (
-                ui.render_deleted_devices_tree(deleted_devices_tree)
-                if deleted_devices_tree
-                else ui.render_deleted_devices_table(deleted_devices_rows)
-                if state.get("last_deleted_devices_generated_at")
-                else html.escape(deleted_devices_preview_text)
-            )
-        deleted_devices_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{deleted_devices_heading}</h2>"
-            f"{deleted_devices_generated_html}"
-            f"<div data-transient='deleted-devices-preview'>{deleted_devices_preview_html}</div>"
-            f"{deleted_devices_actions_html}"
-            "</section>"
-        )
-    retained_devices_section_html = ""
-    if state.get("last_retained_devices_generated_at"):
-        retained_delete_disabled = (
-            "disabled"
-            if run_disabled
-            or save_push_retry_pending
-            or deleted_devices_pending_confirmation
-            or deleted_devices_recovery_active
-            or not retained_devices_rows
-            else ""
-        )
-        retained_controls_disabled = bool(retained_delete_disabled)
-        retained_identity_fields = (
-            f"<input type='hidden' name='retained_preview_fingerprint' value='{html.escape(str(state.get('last_retained_devices_fingerprint') or ''), quote=True)}'>"
-            f"<input type='hidden' name='retained_preview_generated_at' value='{html.escape(str(state.get('last_retained_devices_generated_at') or ''), quote=True)}'>"
-        )
-        retained_devices_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{_('heading.retained_devices_preview')}</h2>"
-            f"<p class='muted'>{_('notice.retained_devices_preview')}</p>"
-            f"<p class='muted'>{_('notice.retained_devices_delete')}</p>"
-            f"<p>{_('label.generated_at')} "
-            f"<span data-transient='retained-devices-generated'>{html.escape(ctx.format_time(state.get('last_retained_devices_generated_at'), options))}</span>"
-            "</p>"
-            "<form method='post' action='retained-devices-delete' data-async-form='true' "
-            "data-preserve-display-state='true' "
-            f"data-confirm='{html.escape(_('confirm.retained_devices_delete'), quote=True)}'>"
-            f"{retained_identity_fields}"
-            f"<div data-transient='retained-devices-preview'>{ui.render_retained_devices_table(retained_devices_rows, disabled=retained_controls_disabled)}</div>"
-            "<div class='actions deletion-actions'><div class='action-row'>"
-            f"<button type='submit' {retained_delete_disabled}>{_('action.delete_retained_devices')}</button>"
-            "</div></div>"
-            "</form>"
-            "</section>"
-        )
-
-    internal_ids_section_html = ""
-    if state.get("last_internal_ids_generated_at"):
-        internal_ids_migrate_disabled = (
-            "disabled"
-            if run_disabled
-            or save_push_retry_pending
-            or deleted_devices_pending_confirmation
-            or deleted_devices_recovery_active
-            or not any(row.get("changes") for row in internal_ids_rows)
-            else ""
-        )
-        internal_ids_changed_files = sum(1 for row in internal_ids_rows if row.get("changes"))
-        internal_ids_totals = {
-            "changes": sum(int(row.get("changes") or 0) for row in internal_ids_rows),
-            "unresolved": sum(int(row.get("unresolved") or 0) for row in internal_ids_rows),
-        }
-        internal_ids_summary_html = (
-            "<p>"
-            f"{_('label.files')}: {internal_ids_changed_files}. "
-            f"{_('label.candidates')}: {internal_ids_totals['changes']}. "
-            f"{_('label.unresolved')}: {internal_ids_totals['unresolved']}."
-            "</p>"
-        )
-        internal_ids_section_html = (
-            "<section class='card wide'>"
-            f"<h2>{_('heading.internal_ids_preview')}</h2>"
-            f"<p class='muted'>{_('notice.internal_ids_preview_scope')}</p>"
-            f"<p class='muted'>{_('notice.internal_ids_preview_apply')}</p>"
-            f"<p>{_('label.generated_at')} "
-            f"<span data-transient='internal-ids-generated'>{html.escape(ctx.format_time(state.get('last_internal_ids_generated_at'), options))}</span>"
-            "</p>"
-            f"{internal_ids_summary_html}"
-            "<form method='post' action='internal-ids-migrate' data-async-form='true' "
-            "data-preserve-display-state='true' "
-            f"data-confirm='{html.escape(_('confirm.internal_ids_migrate'), quote=True)}'>"
-            f"<div data-transient='internal-ids-preview'>{ui.render_internal_ids_table(internal_ids_rows, ui.render_conflict_detail)}</div>"
-            "<div class='actions deletion-actions'><div class='action-row'>"
-            f"<button type='submit' {internal_ids_migrate_disabled}>{_('action.migrate_and_save')}</button>"
-            "</div></div>"
-            "</form>"
-            "</section>"
-        )
-
-    return ui.render_page(
-        {
-            "status": html.escape(display_status_label),
-            "status_code": html.escape(display_status, quote=True),
-            "badge_class": (
-                "conflicts"
-                if has_conflicts
-                else "pending"
-                if pending_deleted_devices_decision
-                else "error"
-                if last_status == "error"
-                else "interrupted"
-                if last_status == "interrupted"
-                else "running"
-                if last_status == "running"
-                else ""
-            ),
-            "last_run": html.escape(ctx.format_time(state.get("last_run_at"), options)),
-            "last_release": html.escape(str(state.get("last_release"))),
-            "last_backup_slug": html.escape(str(state.get("last_backup_slug"))),
-            "latest_backup": html.escape(backup_status.get("message", _("text.backup_status_unavailable"))),
-            "repo_url": html.escape(options.get("repo_url", "")),
-            "branch": html.escape(options.get("repo_branch", "main")),
-            "manifest_path": html.escape(options.get("manifest_path", "ha-ops.json")),
-            "auth_mode": html.escape(ctx.git_auth_mode(options)),
-            "details_html": html.escape(details),
-            "deleted_devices_section_html": deleted_devices_section_html,
-            "retained_devices_section_html": retained_devices_section_html,
-            "internal_ids_section_html": internal_ids_section_html,
-            "action_disabled": action_disabled,
-            "job_running_json": "true" if job_running else "false",
-            "post_apply_notice_html": post_apply_notice_html,
-            "save_preview_button_class": save_preview_button_class,
-            "save_preview_button_text": save_preview_button_text,
-            "save_preview_hint_html": save_preview_hint_html,
-            "check_deleted_devices_disabled": check_deleted_devices_disabled,
-            "deleted_devices_save_hint_html": deleted_devices_save_hint_html,
-            "check_disk_usage_disabled": check_disk_usage_disabled,
-            "docker_prune_disabled": docker_prune_disabled,
-            "docker_prune_available": "true" if docker_capability_status["available"] else "false",
-            "docker_prune_ready": "true" if docker_prune_ready else "false",
-            "docker_prune_hint_html": docker_prune_hint_html,
-            "docker_prune_status_html": docker_prune_status_html,
-            "check_retained_devices_disabled": check_retained_devices_disabled,
-            "check_internal_ids_disabled": check_internal_ids_disabled,
-            "deletion_disabled": deletion_disabled,
-            "confirm_deletion_disabled": confirm_deletion_disabled,
-            "apply_action": apply_action,
-            "apply_button_text": apply_button_text,
-            "apply_confirm": apply_confirm,
-            "conflicts_section_html": conflicts_section_html,
-            "git_auth_html": ui.render_git_auth(
-                options,
-                ctx.git_auth_mode,
-                ctx.load_generated_public_key,
-                disabled=job_running or save_push_retry_pending,
-            ),
-            "targets_html": ui.render_targets(
-                target_state,
-                ctx.selected_addon_slugs(),
-                ctx.get_installed_addons,
-                addon_slug_value,
-                addon_display_name,
-                ctx.addon_is_zigbee2mqtt,
-                disabled=job_running or save_push_retry_pending,
-            ),
-            "organizer_html": ui.render_homeassistant_organizer(
-                homeassistant_organizer_enabled,
-                disabled=job_running or save_push_retry_pending,
-            ),
-            "include_redundant_data_html": ui.render_include_redundant_data(
-                bool(state.get("include_redundant_data")),
-                job_running or save_push_retry_pending,
-            ),
-            "releases_html": ui.render_releases(releases, disabled=job_running or save_push_retry_pending),
-            "version": html.escape(ctx.addon_version()),
-        }
-    )
+    """Serve the same inert client shell for every ingress request."""
+    return (Path(__file__).parent / "static" / "index.html").read_text(encoding="utf-8")
 
 
 def start_background(target, *args, lock_acquired=False):
@@ -833,8 +410,12 @@ WS_MUTATING_COMMANDS = {
     "deleted_devices_preview",
     "retained_devices_preview",
     "retained_devices_delete",
+    "select_retained_device",
     "internal_ids_preview",
     "internal_ids_migrate",
+    "select_internal_ids",
+    "acknowledge_recovery",
+    "retry_interrupted_save",
     "deleted_devices_delete",
     "deleted_devices_confirm",
     "deleted_devices_revert",
@@ -877,6 +458,8 @@ def preview_identity_for_state(state, direction):
     if direction == "save":
         return {
             "direction": "save",
+            "preview_id": state.get("save_preview_id"),
+            "decision_revision": int(state.get("save_decision_revision") or 0),
             "commit": state.get("last_save_preview_commit"),
             "fingerprint": state.get("last_save_preview_fingerprint"),
             "paths": _canonical_list(state.get("last_save_preview_paths")),
@@ -885,6 +468,8 @@ def preview_identity_for_state(state, direction):
         }
     return {
         "direction": "apply",
+        "preview_id": state.get("apply_preview_id"),
+        "decision_revision": int(state.get("apply_decision_revision") or 0),
         "commit": state.get("last_preview_commit"),
         "fingerprint": state.get("last_preview_fingerprint"),
         "live_fingerprints": _canonical_dict(state.get("last_preview_live_fingerprints")),
@@ -908,6 +493,8 @@ def _parse_preview_identity(value):
         return None
     identity = {
         "direction": value.get("direction"),
+        "preview_id": value.get("preview_id"),
+        "decision_revision": int(value.get("decision_revision") or 0),
         "commit": value.get("commit"),
         "fingerprint": value.get("fingerprint"),
         "paths": _canonical_list(value.get("paths")),
@@ -927,6 +514,19 @@ def assert_preview_decision_identity(state, direction, body):
         raise StalePreviewDecision(_("error.preview_stale_decision"))
 
 
+def preview_decision_digest(state, direction):
+    paths = sorted(state.get("last_save_preview_paths" if direction == "save" else "last_preview_paths") or [])
+    selected = set(state.get("save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths") or [])
+    resolutions = state.get("save_preview_resolutions" if direction == "save" else "apply_preview_resolutions") or {}
+    decisions = [
+        {"choice": (resolutions.get(path) or ("ha" if direction == "save" else "git")) if path in selected
+         else ("git" if direction == "save" else "ha"), "path": path, "selected": path in selected}
+        for path in paths
+    ]
+    canonical = json.dumps(decisions, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def retained_preview_identity_matches_state(state, body):
     if not state.get("last_retained_devices_fingerprint") or not state.get("last_retained_devices_generated_at"):
         return False
@@ -944,6 +544,7 @@ def mutate_preview_decision(ctx, direction, action, body):
         assert_preview_decision_identity(state, direction, body)
         paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
         selected_key = "save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths"
+        revision_key = "save_decision_revision" if direction == "save" else "apply_decision_revision"
         resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
         conflict_paths_key = "last_save_preview_conflict_paths" if direction == "save" else "last_preview_conflict_paths"
         paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
@@ -963,6 +564,7 @@ def mutate_preview_decision(ctx, direction, action, body):
             ctx.write_state(
                 {
                     resolutions_key: resolutions,
+                    revision_key: int(state.get(revision_key) or 0) + 1,
                     "last_run_at": ctx.utc_now(),
                     "last_status": "idle",
                     "last_action": f"resolve_{direction}_preview",
@@ -993,6 +595,7 @@ def mutate_preview_decision(ctx, direction, action, body):
             ctx.write_state(
                 {
                     selected_key: selected,
+                    revision_key: int(state.get(revision_key) or 0) + 1,
                     "last_run_at": ctx.utc_now(),
                     "last_status": "idle",
                     "last_action": f"select_{direction}_preview",
@@ -1080,6 +683,9 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                             "ok": final_state.get("last_status") not in {"error", "interrupted"},
                             "status": final_state.get("last_status"),
                             "message": final_state.get("last_message", ""),
+                            "safe_terminal": action == "apply" and (
+                                (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
+                            ),
                         },
                     )
                 except BaseException as exc:
@@ -1124,15 +730,136 @@ def _deleted_devices_transient_snapshot_fields(ctx, state):
     }
 
 
+UI_STATE_FIELDS = frozenset({
+    "last_seen_addon_version", "last_run_at", "last_status", "last_action", "last_message", "last_details",
+    "last_release", "last_backup_slug", "last_diff_cursor", "last_diff_generated_at", "last_preview_commit", "last_preview_fingerprint",
+    "last_preview_paths", "last_preview_conflicts", "last_preview_conflict_paths", "last_preview_live_fingerprints",
+    "last_save_diff_cursor", "last_save_diff_generated_at", "last_save_preview_commit", "last_save_preview_fingerprint", "last_save_preview_paths",
+    "last_save_preview_conflicts", "last_save_preview_conflict_paths", "last_save_commit_subject",
+    "apply_preview_resolutions", "apply_preview_selected_paths", "save_preview_resolutions", "save_preview_selected_paths",
+    "apply_preview_id", "apply_decision_revision", "save_preview_id", "save_decision_revision",
+    "last_deleted_devices_rows", "last_deleted_devices_tree", "last_deleted_devices_count",
+    "last_deleted_devices_device_count", "last_deleted_devices_entity_count", "last_deleted_devices_fingerprint",
+    "last_deleted_devices_generated_at", "deleted_devices_pending_confirmation", "deleted_devices_pending_device_count",
+    "deleted_devices_pending_entity_count", "deleted_devices_pending_tree", "deleted_devices_pending_tree_error",
+    "deleted_devices_recovery_phase", "last_retained_devices_rows", "last_retained_devices_fingerprint",
+    "last_retained_devices_generated_at", "last_internal_ids_rows", "last_internal_ids_preview_id", "last_internal_ids_fingerprint",
+    "last_internal_ids_generated_at", "last_internal_ids_unresolved", "include_redundant_data",
+    "conflicts", "conflict_type",
+    "post_apply_save_recommended", "save_push_retry_pending", "operation_generation", "state_revision", "command_records",
+})
+
+
 def _snapshot_payload(ctx):
     if hasattr(ctx, "debug_snapshot"):
         payload = ctx.debug_snapshot()
     else:
         payload = {"state": state_store.redacted_state_snapshot(ctx.read_state())}
-    state = dict(payload.get("state") or {})
-    state.update(_deleted_devices_transient_snapshot_fields(ctx, state))
+    raw_state = dict(payload.get("state") or {})
+    raw_state.update(_deleted_devices_transient_snapshot_fields(ctx, raw_state))
+    state = {key: raw_state.get(key) for key in UI_STATE_FIELDS}
+    state["last_internal_ids_rows"] = [
+        {key: row.get(key) for key in ("path", "changes", "unresolved", "selected", "diff_sha256")}
+        for row in (raw_state.get("last_internal_ids_rows") or []) if isinstance(row, dict)
+    ]
+    state["last_internal_ids_unresolved"] = [
+        {key: item.get(key) for key in ("path", "alias", "reason")}
+        for item in (raw_state.get("last_internal_ids_unresolved") or []) if isinstance(item, dict)
+    ]
+    operation = raw_state.get(state_store.ACTIVE_OPERATION_KEY)
+    authority_operation = ctx.read_state().get(state_store.ACTIVE_OPERATION_KEY) if isinstance(operation, dict) else None
+    authority_evidence = authority_operation.get("evidence") if isinstance(authority_operation, dict) else None
+    authority_evidence = authority_evidence if isinstance(authority_evidence, dict) else {}
+    state["active_operation"] = (
+        {"command": operation.get("command"), "command_id": operation.get("command_id"),
+         "phase": operation.get("phase"), "message": operation.get("message", ""),
+         "evidence_token": hashlib.sha256(json.dumps(authority_evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+         if authority_evidence else None,
+         "ack_available": isinstance(authority_operation, dict) and (
+             authority_operation.get("command") == "save" and authority_evidence.get("kind") == "precommit_verified"
+             or authority_operation.get("command") == "apply" and authority_evidence.get("kind") == "prestate_observed"
+             and authority_evidence.get("phase") in {
+                 "before_backup", "before_snapshot", "before_service_commit",
+             }
+         ),
+         "retry_available": isinstance(authority_operation, dict)
+         and authority_operation.get("command") == "save"
+         and authority_evidence.get("kind") == "exact_retry_available"
+         and not (isinstance(authority_operation.get("retry"), dict)
+                  and authority_operation["retry"].get("phase") in {"accepted", "dispatching"}),
+         "evidence": {key: operation.get("evidence", {}).get(key) for key in
+                      ("kind", "marked_commits", "head", "dirty", "remote_verified", "remote_tip", "parent_verified", "remote_ancestor", "service_refs_match", "guidance",
+                       "affected_targets", "selected_path_count", "observed_path_count",
+                       "refs_match_pre", "refs_match_intended", "optional_snapshot_recorded",
+                       "optional_snapshot_available", "optional_backup_recorded", "phase")}
+         if isinstance(operation.get("evidence"), dict) else None}
+        if isinstance(operation, dict) else None
+    )
+    state["docker_build_cache_prune_fence"] = bool(raw_state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
+    if state["active_operation"] or state.get("last_status") == "running":
+        for key in (
+            "last_diff_cursor", "last_preview_paths", "last_save_diff_cursor", "last_save_preview_paths",
+            "last_internal_ids_rows", "last_deleted_devices_rows", "last_retained_devices_rows",
+        ):
+            state[key] = None if key.endswith("_cursor") else []
     payload = {**payload, "state": state}
-    return {**payload, "backend_version": ctx.addon_version()}
+    options = ctx.load_options()
+    display_time_fields = (
+        "last_run_at", "last_diff_generated_at", "last_save_diff_generated_at",
+        "last_deleted_devices_generated_at", "last_retained_devices_generated_at", "last_internal_ids_generated_at",
+    )
+    display_times = {
+        key: ctx.format_time(raw_state.get(key), options) if hasattr(ctx, "format_time") else raw_state.get(key)
+        for key in display_time_fields
+    }
+    try:
+        addons = [
+            {"slug": addon_slug_value(addon), "name": addon.get("name") or addon_slug_value(addon)}
+            for addon in ctx.get_installed_addons()
+        ]
+    except Exception:
+        addons = []
+    targets = [
+        {key: item.get(key) for key in ("id", "type", "source", "addon_slug", "resolved_slug", "organizer_enabled")}
+        for item in current_manifest_preview(ctx)
+    ]
+    releases = [
+        {key: release.get(key) for key in ("name", "created_at", "backup_slug")}
+        for release in ctx.list_releases()[:12]
+    ]
+    docker_capability_status = ctx.docker_build_cache_capability() if hasattr(ctx, "docker_build_cache_capability") else {
+        "available": False, "reason": _("docker_capability.unknown.reason"),
+        "remedy": _("docker_capability.unknown.remedy"),
+    }
+    docker_fence = state_store.classify_docker_prune_fence(
+        ctx.read_state().get(state_store.DOCKER_PRUNE_FENCE_KEY)
+    )
+    docker_recovery = {
+        "kind": docker_fence.get("kind"),
+        "phase": docker_fence.get("phase"),
+        "operation_id": docker_fence.get("operation_id"),
+        "recovery_token": docker_fence.get("recovery_token"),
+    }
+    return {
+        **payload,
+        "schema_version": 1,
+        "backend_version": ctx.addon_version(),
+        "text": {key: i18n.t(key) for key in i18n.EN_TEXT},
+        "view": {
+            "branch": str(options.get("repo_branch") or "main"),
+            "manifest": str(options.get("manifest_path") or "ha-ops.json"),
+            "auth_mode": ctx.git_auth_mode(options),
+            "display_times": display_times,
+            "targets": targets,
+            "addons": addons,
+            "selected_addons": ctx.selected_addon_slugs(),
+            "releases": releases,
+            "docker_build_cache": {
+                key: docker_capability_status.get(key) for key in ("kind", "available", "reason", "remedy")
+            },
+            "docker_prune_recovery": docker_recovery,
+        },
+    }
 
 
 def dispatch_command(ctx, command, body=None, start_job=None):
@@ -1164,7 +891,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             if isinstance(path, list):
                 path = path[0] if path else ""
             if path:
-                by_path, _summary = ui.split_preview_diff_by_path(diff, [str(path)])
+                by_path, _summary = diff_split.split_preview_diff_by_path(diff, [str(path)])
                 diff = by_path.get(str(path), "")
                 if not diff:
                     raise RuntimeError(_("error.diff_file_missing"))
@@ -1172,9 +899,37 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             return command_result(True, "diff", diff=diff, semantic=semantic)
         except Exception as exc:
             return command_result(False, str(exc))
+    if command == "internal_ids_diff_get":
+        state = ctx.read_state()
+        if state.get("active_operation") or state.get("last_status") == "running":
+            return command_result(False, _("error.active_operation"), status=409)
+        preview_id = body.get("preview_id")
+        path = body.get("path")
+        if preview_id != state.get("last_internal_ids_preview_id") or not preview_id or not isinstance(path, str):
+            return command_result(False, _("error.internal_ids_preview_required"), status=409)
+        row = next((item for item in (state.get("last_internal_ids_rows") or []) if item.get("path") == path), None)
+        if not row or not row.get("diff") or not row.get("diff_sha256"):
+            return command_result(False, _("error.internal_ids_preview_required"), status=409)
+        return command_result(True, "diff", diff=row["diff"], diff_sha256=row["diff_sha256"])
+    if command == "conflict_diff_get":
+        state = ctx.read_state()
+        path = body.get("path")
+        if (state.get("active_operation") or state.get("last_status") == "running"
+            or not isinstance(path, str) or path not in (state.get("conflicts") or [])
+            or str(body.get("generation")) != str(state.get("operation_generation"))):
+            return command_result(False, _("error.git_conflict_path_not_pending"), status=409)
+        item = next((item for item in conflict_items(ctx, state, ctx.load_options()) if item["path"] == path), None)
+        latest = ctx.read_state()
+        if (item is None or latest.get("active_operation") or latest.get("last_status") == "running"
+            or latest.get("operation_generation") != state.get("operation_generation")
+            or path not in (latest.get("conflicts") or [])):
+            return command_result(False, _("error.git_conflict_path_not_pending"), status=409)
+        return command_result(True, "diff", path=path, generation=state.get("operation_generation"), diff=item["detail"])
     if command == "pending_deleted_devices_diff_get":
         try:
             state = ctx.read_state()
+            if state.get(state_store.ACTIVE_OPERATION_KEY) or state.get("last_status") == "running":
+                raise RuntimeError(_("error.active_operation"))
             if not state.get("deleted_devices_pending_confirmation") or not state.get("deleted_devices_rollback_path"):
                 raise RuntimeError(_("error.deleted_devices_cleanup_not_pending"))
             return command_result(
@@ -1184,25 +939,109 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             )
         except Exception as exc:
             return command_result(False, str(exc))
+    if command == "acknowledge_recovery":
+        payload = body.get("payload") if isinstance(body, dict) else None
+        if not isinstance(payload, dict) or not body.get("command_id"):
+            return command_result(False, _("error.command_envelope_required"), status=400)
+        try:
+            claimed, record = ctx.acknowledge_verified_recovery(
+                body["command_id"], payload.get("operation_id"), body.get("generation"), payload.get("evidence_token"),
+            )
+            return command_result(True, _("recovery.acknowledged_short"), duplicate=not claimed,
+                                  command_record=record, **_snapshot_payload(ctx))
+        except Exception as exc:
+            return command_result(False, str(exc), status=409, **_snapshot_payload(ctx))
+    if command == "retry_interrupted_save":
+        payload = body.get("payload") if isinstance(body, dict) else None
+        if not isinstance(payload, dict) or not body.get("command_id"):
+            return command_result(False, _("error.command_envelope_required"), status=400)
+        try:
+            claimed, record = ctx.retry_interrupted_save(
+                body["command_id"], payload.get("operation_id"), body.get("generation"), payload.get("evidence_token"),
+            )
+            recorded_result = record.get("result") if isinstance(record.get("result"), dict) else {}
+            ok = bool(recorded_result.get("ok"))
+            return command_result(ok, str(recorded_result.get("message") or ""), duplicate=not claimed,
+                                  command_record=record, status=200 if ok else 409, **_snapshot_payload(ctx))
+        except Exception as exc:
+            return command_result(False, str(exc), status=409, **_snapshot_payload(ctx))
     if command in WS_MUTATING_COMMANDS:
         envelope_payload = body.get("payload", {})
         command_id = body.get("command_id")
         generation = body.get("generation")
         if command_id is not None:
             try:
-                claimed, record = ctx.claim_command(command_id, command, generation, envelope_payload)
+                def validate_preview_at_claim(current):
+                    if command in {"save", "apply", "select_save_preview", "select_apply_preview", "resolve_save_preview", "resolve_apply_preview"}:
+                        direction = "save" if "save" in command else "apply"
+                        assert_preview_decision_identity(current, direction, envelope_payload)
+                        if command in {"save", "apply"} and envelope_payload.get("decision_digest") != preview_decision_digest(current, direction):
+                            raise StalePreviewDecision(_("error.preview_stale_decision"))
+                    if command == "internal_ids_migrate":
+                        selected = envelope_payload.get("selected")
+                        rows = {row.get("path"): row for row in current.get("last_internal_ids_rows") or []
+                                if row.get("changes") and row.get("diff") and row.get("selected")}
+                        paths = [item.get("path") for item in selected if isinstance(item, dict)] if isinstance(selected, list) else []
+                        if (not envelope_payload.get("preview_id")
+                            or envelope_payload.get("preview_id") != current.get("last_internal_ids_preview_id")
+                            or not selected or len(paths) != len(selected) or len(set(paths)) != len(paths)
+                            or any(path not in rows or item.get("diff_sha256") != rows[path].get("diff_sha256")
+                                   for path, item in zip(paths, selected))):
+                            raise StalePreviewDecision(_("error.internal_ids_preview_required"))
+                    if command == "select_internal_ids":
+                        preview_id = envelope_payload.get("preview_id")
+                        path = envelope_payload.get("path")
+                        digest = envelope_payload.get("diff_sha256")
+                        selected = envelope_payload.get("selected")
+                        rows = current.get("last_internal_ids_rows") or []
+                        if (not isinstance(preview_id, str) or preview_id != current.get("last_internal_ids_preview_id")
+                            or not isinstance(path, str) or not isinstance(digest, str)
+                            or not isinstance(selected, bool)):
+                            raise StalePreviewDecision(_("error.internal_ids_preview_required"))
+                        row = next((item for item in rows if item.get("path") == path), None)
+                        if not row or not row.get("changes") or not row.get("diff") or row.get("diff_sha256") != digest:
+                            raise StalePreviewDecision(_("error.internal_ids_preview_required"))
+                        return {"last_internal_ids_rows": [
+                            {**item, "selected": selected} if item.get("path") == path else item
+                            for item in rows
+                        ]}
+                    if command == "select_retained_device":
+                        if not retained_preview_identity_matches_state(current, envelope_payload):
+                            raise StalePreviewDecision(_("error.retained_devices_preview_changed"))
+                        identity = envelope_payload.get("identity")
+                        selected = envelope_payload.get("selected")
+                        rows = current.get("last_retained_devices_rows") or []
+                        row = next((item for item in rows if item.get("identity") == identity), None)
+                        if not isinstance(identity, str) or not identity or not isinstance(selected, bool) or not row or not row.get("retained_topics"):
+                            raise StalePreviewDecision(_("error.retained_devices_preview_changed"))
+                        return {"last_retained_devices_rows": [
+                            {**item, "selected": selected} if item.get("identity") == identity else item
+                            for item in rows
+                        ]}
+                    if command == "retained_devices_delete":
+                        if not retained_preview_identity_matches_state(current, envelope_payload):
+                            raise StalePreviewDecision(_("error.retained_devices_preview_changed"))
+                        submitted = envelope_payload.get("candidate")
+                        selected = [item.get("identity") for item in current.get("last_retained_devices_rows") or [] if item.get("selected")]
+                        if not isinstance(submitted, list) or len(set(submitted)) != len(submitted) or set(submitted) != set(selected) or not selected:
+                            raise StalePreviewDecision(_("error.retained_devices_preview_changed"))
+                claimed, record = ctx.claim_command(
+                    command_id, command, generation, envelope_payload,
+                    validate=validate_preview_at_claim, immediate=command in {"select_internal_ids", "select_retained_device"},
+                )
             except Exception as exc:
-                return command_result(False, str(exc))
+                record_duplicate_rejection(command)
+                return command_result(False, str(exc), status=409, **_snapshot_payload(ctx))
             if not claimed:
+                recorded_result = record.get("result") if isinstance(record.get("result"), dict) else None
                 return command_result(
-                    True,
-                    _("message.duplicate_command"),
+                    bool(recorded_result.get("ok")) if recorded_result else record.get("status") in {"accepted", "running"},
+                    str(recorded_result.get("message")) if recorded_result else _("message.duplicate_command"),
                     duplicate=True,
                     command_record=record,
                 )
         else:
-            command_id = None
-            envelope_payload = body
+            return command_result(False, "command_id is required", status=400)
     if command in {"resolve_save_preview", "resolve_apply_preview", "select_save_preview", "select_apply_preview"}:
         direction = "save" if command.endswith("save_preview") else "apply"
         action = "resolve" if command.startswith("resolve_") else "select"
@@ -1214,6 +1053,8 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                 {"ok": bool(result.get("ok")), "message": str(result.get("message", ""))},
             )
         return result
+    if command in {"select_internal_ids", "select_retained_device"}:
+        return command_result(True, "Selection updated.", **_snapshot_payload(ctx))
     if command == "preview":
         if start_job is None:
             ok = start_reserved_background(
@@ -1262,7 +1103,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         "retained_devices_preview": (ctx.run_retained_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.retained_devices_check_started"),
         "retained_devices_delete": (ctx.run_retained_devices_delete_job, [envelope_payload], None, "message.retained_devices_delete_started"),
         "internal_ids_preview": (ctx.run_internal_ids_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.internal_ids_check_started"),
-        "internal_ids_migrate": (ctx.run_internal_ids_migrate_job, [envelope_payload.get("candidate", [])], None, "message.internal_ids_migration_started"),
+        "internal_ids_migrate": (ctx.run_internal_ids_migrate_job, [envelope_payload], None, "message.internal_ids_migration_started"),
         "deleted_devices_delete": (ctx.run_deleted_devices_delete_job, [], None, "message.deleted_devices_delete_started"),
         "deleted_devices_confirm": (ctx.run_deleted_devices_confirm_job, [], None, "message.deleted_devices_cleanup_confirm_started"),
         "deleted_devices_revert": (ctx.run_deleted_devices_revert_job, [], None, "message.deleted_devices_cleanup_revert_started"),
@@ -1299,7 +1140,7 @@ def ingress_route(path, *endpoints):
     return path
 
 
-GET_ENDPOINTS = ("/health", "/debug-snapshot", "/diff-get", "/pending-deleted-devices-diff-get", "/ws", "/__dev_harness__/diagnostics")
+GET_ENDPOINTS = ("/health", "/api/v1/state", "/debug-snapshot", "/diff-get", "/internal-ids-diff-get", "/conflict-diff-get", "/pending-deleted-devices-diff-get", "/ws", "/__dev_harness__/diagnostics")
 
 POST_ENDPOINTS = (
     "/generate-key",
@@ -1320,8 +1161,12 @@ POST_ENDPOINTS = (
     "/deleted-devices-preview",
     "/retained-devices-preview",
     "/retained-devices-delete",
+    "/select-retained-device",
     "/internal-ids-preview",
     "/internal-ids-migrate",
+    "/select-internal-ids",
+    "/acknowledge-recovery",
+    "/retry-interrupted-save",
     "/deleted-devices-delete",
     "/deleted-devices-confirm",
     "/deleted-devices-revert",
@@ -1352,6 +1197,9 @@ def ws_state_frames(ctx, base_revision=None):
             "patch": state,
             "readiness": snapshot.get("readiness", {}),
             "backend_version": snapshot.get("backend_version"),
+            "schema_version": snapshot.get("schema_version"),
+            "view": snapshot.get("view"),
+            "text": snapshot.get("text"),
         }]
     return [{"type": "state", "revision": revision, **snapshot}]
 
@@ -1416,6 +1264,8 @@ def create_handler(ctx):
             self.wfile.write(json.dumps(payload).encode("utf-8"))
 
         def wants_json(self):
+            if getattr(self, "_force_json", False):
+                return True
             accept = self.headers.get("Accept", "")
             requested_with = self.headers.get("X-Requested-With", "")
             return "application/json" in accept or requested_with == "fetch"
@@ -1491,7 +1341,7 @@ def create_handler(ctx):
                     self.send_json(result, status=200 if result.get("ok", True) else int(result.get("status", 409)))
                     return
             if route.startswith("/__dev_harness__/"):
-                self.send_error(404)
+                self.send_json({"ok": False, "message": _("error.not_found")}, status=404)
                 return
             if route == "/health":
                 self.send_response(200)
@@ -1499,20 +1349,21 @@ def create_handler(ctx):
                 self.end_headers()
                 self.wfile.write(json.dumps({"ok": True}).encode())
                 return
-            if parsed.path.endswith("/assets/ha-ops.js") or parsed.path == "/assets/ha-ops.js":
-                asset = Path(__file__).parent / "static" / "ha-ops.js"
+            if parsed.path.endswith("/assets/ha-ops.js") or parsed.path.endswith("/assets/ha-ops.css"):
+                filename = "ha-ops.css" if parsed.path.endswith(".css") else "ha-ops.js"
+                asset = Path(__file__).parent / "static" / filename
                 try:
                     content = asset.read_bytes()
                 except OSError:
-                    self.send_error(404)
+                    self.send_json({"ok": False, "message": _("error.asset_not_found")}, status=404)
                     return
                 self.send_response(200)
-                self.send_header("Content-Type", "text/javascript; charset=utf-8")
+                self.send_header("Content-Type", "text/css; charset=utf-8" if filename.endswith(".css") else "text/javascript; charset=utf-8")
                 self.send_header("Cache-Control", "no-cache")
                 self.end_headers()
                 self.wfile.write(content)
                 return
-            if route == "/debug-snapshot":
+            if route in {"/api/v1/state", "/debug-snapshot"}:
                 self.send_json(dispatch_command(ctx, "debug_snapshot"))
                 return
             if route == "/diff-get":
@@ -1520,6 +1371,20 @@ def create_handler(ctx):
                 cursor = query.get("cursor", [""])[0]
                 path = query.get("path", [""])[0]
                 result = dispatch_command(ctx, "diff_get", {"cursor": cursor, "path": path})
+                self.send_json(result, status=200 if result.get("ok") else 409)
+                return
+            if route == "/internal-ids-diff-get":
+                query = parse_qs(parsed.query)
+                result = dispatch_command(ctx, "internal_ids_diff_get", {
+                    "preview_id": query.get("preview_id", [""])[0], "path": query.get("path", [""])[0],
+                })
+                self.send_json(result, status=200 if result.get("ok") else 409)
+                return
+            if route == "/conflict-diff-get":
+                query = parse_qs(parsed.query)
+                result = dispatch_command(ctx, "conflict_diff_get", {
+                    "generation": query.get("generation", [""])[0], "path": query.get("path", [""])[0],
+                })
                 self.send_json(result, status=200 if result.get("ok") else 409)
                 return
             if route == "/pending-deleted-devices-diff-get":
@@ -1545,7 +1410,7 @@ def create_handler(ctx):
                 while True:
                     try:
                         if getattr(self, "connection", None) is not None:
-                            readable, _, _ = select.select([self.connection], [], [], 0.5)
+                            readable, writable_ready, exceptional_ready = select.select([self.connection], [], [], 0.5)
                             if not readable:
                                 raise socket.timeout()
                         message = read_ws_frame(self.rfile)
@@ -1590,6 +1455,10 @@ def create_handler(ctx):
                         "resolve_apply_preview",
                         "select_save_preview",
                         "select_apply_preview",
+                        "select_internal_ids",
+                        "select_retained_device",
+                        "acknowledge_recovery",
+                        "retry_interrupted_save",
                         "deleted_devices_preview",
                         "retained_devices_preview",
                         "retained_devices_delete",
@@ -1604,9 +1473,14 @@ def create_handler(ctx):
                             last_revision = int(frame.get("revision") or last_revision)
                         last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence
 
+            ingress_shell = re.fullmatch(r"/api/hassio_ingress/[^/]+/?", parsed.path) is not None
+            if ("/api/" in parsed.path and not ingress_shell) or parsed.path.endswith(".json"):
+                self.send_json({"ok": False, "message": _("error.not_found")}, status=404)
+                return
             self.send_html(render_page(ctx))
 
         def do_POST(self):
+            self._force_json = True
             parsed = urlparse(self.path)
             route = ingress_route(parsed.path, *POST_ENDPOINTS)
             length = int(self.headers.get("Content-Length", "0"))
@@ -1619,7 +1493,26 @@ def create_handler(ctx):
                     return
             else:
                 body = parse_qs(raw_body.decode()) if raw_body else {}
-            envelope_commands = {"/preview", "/save-preview", "/apply", "/save"}
+            if not route.startswith("/__dev_harness__/") and (
+                not isinstance(body, dict)
+                or not body.get("command_id")
+                or not isinstance(body.get("payload"), dict)
+                or not isinstance(body.get("command"), str)
+                or body.get("command") != route.removeprefix("/").replace("-", "_")
+            ):
+                self.send_json({"ok": False, "message": _("error.command_envelope_required")}, status=400)
+                return
+            if route.removeprefix("/").replace("-", "_") in WS_MUTATING_COMMANDS:
+                result = dispatch_command(ctx, body["command"], body)
+                status = int(result.pop("status", 200 if result.get("ok") else 409))
+                self.send_json(result, status=status)
+                return
+            if route == "/docker-build-cache-prune":
+                capability = ctx.docker_build_cache_capability()
+                if not capability["available"]:
+                    self.send_json({"ok": False, "message": f"{capability['reason']} {capability['remedy']}".strip()}, status=409)
+                    return
+            envelope_commands = {"/apply", "/save"}
             if isinstance(body, dict) and "command_id" in body and route not in envelope_commands:
                 command = str(body.get("command") or route.removeprefix("/").replace("-", "_"))
                 payload = body.get("payload")
@@ -1639,6 +1532,8 @@ def create_handler(ctx):
                 self.active_command_id = body.get("command_id")
                 self.command_scheduled = False
                 body = {key: value if isinstance(value, list) else [value] for key, value in payload.items()}
+                if command in state_store.EFFECTFUL_COMMANDS:
+                    ctx.update_command(self.active_command_id, "running")
             dev_harness_post = getattr(ctx, "dev_harness_handle_post", None)
             if dev_harness_post is not None:
                 result = dev_harness_post(route, body)
@@ -1646,7 +1541,7 @@ def create_handler(ctx):
                     self.send_json(result, status=200 if result.get("ok", True) else int(result.get("status", 409)))
                     return
             if route.startswith("/__dev_harness__/"):
-                self.send_error(404)
+                self.send_json({"ok": False, "message": _("error.not_found")}, status=404)
                 return
 
             # The cleanup/recovery fence is authoritative at the HTTP boundary:
@@ -1718,7 +1613,7 @@ def create_handler(ctx):
                 if self.save_retry_pending() and direction != "save":
                     self.send_save_retry_pending()
                     return
-                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx, "clear_preview")
                 if not ok:
                     self.send_running_action()
                     return
@@ -1886,11 +1781,24 @@ def create_handler(ctx):
                         }
                     )
                     try:
-                        start_background(
-                            ctx.run_docker_build_cache_prune_job,
-                            operation_id,
-                            lock_acquired=True,
-                        )
+                        command_id = getattr(self, "active_command_id", None)
+                        def run_claimed_prune():
+                            if command_id:
+                                ctx.update_command(command_id, "running")
+                            try:
+                                ctx.run_docker_build_cache_prune_job(operation_id, lock_acquired=True)
+                                final_state = ctx.read_state()
+                                if command_id:
+                                    ctx.update_command(command_id, "terminal", {
+                                        "ok": final_state.get("last_status") == "success",
+                                        "message": final_state.get("last_message", ""),
+                                    })
+                            except BaseException as exc:
+                                if command_id:
+                                    ctx.update_command(command_id, "terminal", {"ok": False, "message": str(exc)})
+                                raise
+                        start_background(run_claimed_prune)
+                        self.command_scheduled = True
                         transferred = True
                     except Exception as exc:
                         ctx.transition_docker_prune_fence(
@@ -2069,7 +1977,7 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx, "approve_save_conflicts")
                 if not ok:
                     self.send_running_action()
                     return
@@ -2164,7 +2072,7 @@ def create_handler(ctx):
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
                     return
-                ok, _state, lock_acquired = reserve_mutation_slot(ctx)
+                ok, _state, lock_acquired = reserve_mutation_slot(ctx, "resolve_conflict")
                 if not ok:
                     self.send_running_action()
                     return
@@ -2214,7 +2122,7 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            self.send_error(404)
+            self.send_json({"ok": False, "message": _("error.not_found")}, status=404)
 
         def log_message(self, format, *args):
             return

@@ -223,7 +223,7 @@ context only, see `ha-ops/docs/archive/organizer-area-split.md`.
 
 Disabled button styling is global and intentional. New disabled buttons should
 inherit the pale gray background, muted text, muted border, and full opacity
-rule from `ui.py`.
+rule from `app/static/ha-ops.css`.
 
 The Save conflict preview Confirm button is disabled for missing choices. The
 Apply preview Confirm button is disabled until at least one path is selected;

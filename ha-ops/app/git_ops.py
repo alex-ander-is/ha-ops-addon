@@ -28,7 +28,9 @@ def ensure_repo(options, data_dir, git_env, run_command, reset_to_origin=True):
         if clone.returncode != 0:
             raise RuntimeError(f"git clone failed:\n{clone.stderr.strip()}")
 
-    clean_repo_untracked(repo_dir, run_command)
+    # A checkout can contain user documents (including ignored files). Inspect
+    # before any checkout/reset path is allowed to clean it.
+    assert_no_untracked_files(repo_dir, run_command)
 
     fetch = run_command(["git", "fetch", "origin"], env=env, cwd=repo_dir)
     if fetch.returncode != 0:
@@ -62,14 +64,37 @@ def ensure_repo(options, data_dir, git_env, run_command, reset_to_origin=True):
         if reset.returncode != 0:
             raise RuntimeError(f"git reset to origin/{branch} failed:\n{reset.stderr.strip()}")
 
-    clean_repo_untracked(repo_dir, run_command)
+    assert_no_untracked_files(repo_dir, run_command)
     return repo_dir
 
 
+def assert_no_untracked_files(repo_dir, run_command):
+    """Refuse destructive Git cleanup when the checkout contains user files."""
+    preview = run_command(["git", "clean", "-ndx"], cwd=repo_dir)
+    if preview.returncode != 0:
+        raise RuntimeError(f"git clean preview failed:\n{preview.stderr.strip()}")
+    candidates = []
+    for line in preview.stdout.splitlines():
+        if not line.startswith("Would remove "):
+            candidates.append(line)
+            continue
+        path = repo_dir / line[len("Would remove "):]
+        # Git reports directories left empty by a prior preview. They need no
+        # cleanup and should not make a later Save fail.
+        if path.is_dir() and not any(path.iterdir()):
+            continue
+        candidates.append(line)
+    if candidates:
+        raise RuntimeError(
+            "Git checkout contains untracked or ignored files. Move or commit "
+            "them before this operation; HA Ops will not delete them."
+        )
+
+
 def clean_repo_untracked(repo_dir, run_command):
-    clean = run_command(["git", "clean", "-ffdx"], cwd=repo_dir)
-    if clean.returncode != 0:
-        raise RuntimeError(f"git clean failed:\n{clean.stderr.strip()}")
+    assert_no_untracked_files(repo_dir, run_command)
+    # Once the preflight passes, only empty directories can remain. Leave
+    # those intact; a second clean would create a race with user files.
 
 
 def reset_repo_worktree(repo_dir, run_command):
@@ -155,6 +180,7 @@ def git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
 def discard_unpushed_head_commit(repo_dir, env, branch, commit, run_command):
     if not git_commit_is_pending_unpushed(repo_dir, branch, commit, run_command):
         return False
+    assert_no_untracked_files(repo_dir, run_command)
     dirty = git_status_porcelain(repo_dir, run_command)
     if dirty:
         raise RuntimeError(

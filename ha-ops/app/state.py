@@ -23,6 +23,25 @@ READINESS_RUNNING = "running"
 READINESS_REPAIRED = "repaired"
 READINESS_BLOCKED = "blocked"
 READINESS_BLOCKED_MESSAGE = "startup repair not complete; refresh/retry after HA Ops finishes recovery."
+ACTIVE_OPERATION_KEY = "active_operation"
+EFFECTFUL_COMMANDS = frozenset({
+    "preview", "save_preview", "apply", "save", "reset_git_state",
+    "retained_devices_delete", "internal_ids_migrate", "deleted_devices_delete",
+    "deleted_devices_confirm", "deleted_devices_revert", "rollback",
+    "docker_build_cache_prune", "generate_key", "resolve_conflict", "clear_preview", "approve_save_conflicts",
+    "retry_interrupted_save",
+})
+
+
+def active_operation_blocks(state, action=None):
+    operation = state.get(ACTIVE_OPERATION_KEY)
+    if not operation:
+        return False
+    if not isinstance(operation, dict) or operation.get("phase") == "recovery_required":
+        return True
+    return action != operation.get("command") and not (
+        operation.get("command") == "approve_save_conflicts" and action == "save"
+    )
 
 DIFF_FIELDS = {
     "last_diff": "apply",
@@ -33,6 +52,7 @@ DIFF_CURSOR_FIELDS = {
     "last_save_diff": "last_save_diff_cursor",
 }
 REDACTED_TEXT_FIELDS = {
+    ACTIVE_OPERATION_KEY,
     "last_message",
     "last_details",
     "last_preview_warnings",
@@ -186,8 +206,16 @@ def _replace_state(path, current):
     path.parent.mkdir(parents=True, exist_ok=True)
     current = sanitize_state_for_persistence(current)
     temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(json.dumps(current, indent=2, sort_keys=True))
+    with temp_path.open("w", encoding="utf-8") as stream:
+        json.dump(current, stream, indent=2, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
     os.replace(temp_path, path)
+    directory = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def deleted_devices_recovery_phase(state):
@@ -242,6 +270,8 @@ def deleted_devices_pending_cleanup_active(state):
 
 
 def cleanup_action_allowed(state, action):
+    if active_operation_blocks(state, action):
+        return False
     if deleted_devices_recovery_active(state):
         return action == "deleted_devices_revert"
     if deleted_devices_pending_cleanup_active(state) and action in CLEANUP_ACTIONS:
@@ -249,6 +279,8 @@ def cleanup_action_allowed(state, action):
     return True
 
 APPLY_PREVIEW_CLEAR_UPDATES = {
+    "apply_preview_id": None,
+    "apply_decision_revision": 0,
     "last_diff": "",
     "last_diff_cursor": None,
     "last_diff_generated_at": None,
@@ -266,6 +298,8 @@ APPLY_PREVIEW_CLEAR_UPDATES = {
     "apply_preview_selected_paths": [],
 }
 SAVE_PREVIEW_CLEAR_UPDATES = {
+    "save_preview_id": None,
+    "save_decision_revision": 0,
     "last_save_preview": "",
     "last_save_diff": "",
     "last_save_diff_cursor": None,
@@ -309,6 +343,7 @@ RETAINED_DEVICES_PREVIEW_CLEAR_UPDATES = {
 }
 INTERNAL_IDS_PREVIEW_CLEAR_UPDATES = {
     "last_internal_ids_preview": "",
+    "last_internal_ids_preview_id": None,
     "last_internal_ids_rows": [],
     "last_internal_ids_count": 0,
     "last_internal_ids_fingerprint": None,
@@ -453,11 +488,16 @@ def default_state():
         "last_retained_devices_device_registry_fingerprint": None,
         "last_retained_devices_scanned_paths": [],
         "last_internal_ids_preview": "",
+        "last_internal_ids_preview_id": None,
         "last_internal_ids_rows": [],
         "last_internal_ids_count": 0,
         "last_internal_ids_fingerprint": None,
         "last_internal_ids_generated_at": None,
         "last_internal_ids_unresolved": [],
+        "apply_preview_id": None,
+        "apply_decision_revision": 0,
+        "save_preview_id": None,
+        "save_decision_revision": 0,
         "deleted_devices_pending_confirmation": False,
         "deleted_devices_rollback_path": None,
         "deleted_devices_rollback_format": None,
@@ -474,6 +514,8 @@ def default_state():
         "post_apply_save_recommended": False,
         "save_push_retry_pending": False,
         "save_push_retry_commit": None,
+        "save_intent": None,
+        "apply_intent": None,
         DOCKER_PRUNE_FENCE_KEY: None,
         "conflicts": [],
         "conflict_type": None,
@@ -481,6 +523,7 @@ def default_state():
         "operation_generation": 0,
         "state_revision": 0,
         "command_records": {},
+        ACTIVE_OPERATION_KEY: None,
     }
 
 
@@ -505,8 +548,16 @@ def _write_diff_artifact(path, text, kind, generation):
     target.parent.mkdir(parents=True, exist_ok=True)
     if not target.exists():
         temp_path = target.with_name(f".{target.name}.tmp")
-        temp_path.write_bytes(payload)
+        with temp_path.open("wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temp_path, target)
+        directory = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     return {
         "schema": 1,
         "kind": kind,
@@ -658,13 +709,22 @@ class OperationStore:
             now = datetime.now(timezone.utc).isoformat()
             records = dict(current.get("command_records") or {})
             for command_id, record in records.items():
-                if record.get("status") in {"accepted", "running"}:
-                    records[command_id] = {
-                        **record,
-                        "status": "failed_unknown",
-                        "updated_at": now,
-                        "result": {"ok": False, "message": "Command outcome is unknown after HA Ops restart."},
-                    }
+                if record.get("status") in {"accepted", "running", "failed_unknown"}:
+                    if record.get("command") not in EFFECTFUL_COMMANDS:
+                        records[command_id] = {
+                            **record, "status": "terminal", "updated_at": now,
+                            "result": {"ok": False, "message": "Interrupted state-only command; refresh and retry."},
+                        }
+                    else:
+                        records[command_id] = {
+                            **record, "status": "failed_unknown", "updated_at": now,
+                            "result": {"ok": False, "message": "Command outcome is unknown after HA Ops restart."},
+                        }
+                        if current.get(ACTIVE_OPERATION_KEY) is None:
+                            current[ACTIVE_OPERATION_KEY] = {
+                                "command_id": command_id, "command": record.get("command"),
+                                "phase": "recovery_required", "message": "Effectful command has no recovery evidence; inspect manually.",
+                            }
             current["command_records"] = records
             current["state_revision"] = int(current.get("state_revision") or 0) + 1
             _replace_state(self.path, current)
@@ -674,6 +734,168 @@ class OperationStore:
             self._change_sequence += 1
             self._condition.notify_all()
             return self.readiness_snapshot()
+
+    def reconcile_startup_fence(self):
+        """Preserve uncertainty before any generic startup repair can clear it."""
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            operation = current.get(ACTIVE_OPERATION_KEY)
+            if operation is None:
+                return None
+            records = dict(current.get("command_records") or {})
+            if not isinstance(operation, dict) or operation.get("phase") not in {"accepted", "dispatching", "recovery_required"}:
+                current[ACTIVE_OPERATION_KEY] = {
+                    "command": "unknown", "command_id": None, "phase": "recovery_required",
+                    "message": "Operation evidence is invalid; review state manually before another mutation.",
+                }
+            elif operation["phase"] == "accepted":
+                command_id = operation.get("command_id")
+                record = records.get(command_id)
+                if record and record.get("status") == "accepted":
+                    records[command_id] = {
+                        **record, "status": "terminal",
+                        "result": {"ok": False, "message": "Interrupted before dispatch; run a fresh Preview."},
+                    }
+                    current["command_records"] = records
+                    current[ACTIVE_OPERATION_KEY] = None
+                    current.update(ALL_PREVIEW_CLEAR_UPDATES)
+                else:
+                    current[ACTIVE_OPERATION_KEY] = {**operation, "phase": "recovery_required"}
+            else:
+                current[ACTIVE_OPERATION_KEY] = {**operation, "phase": "recovery_required"}
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return current.get(ACTIVE_OPERATION_KEY)
+
+    def acknowledge_verified_recovery(self, acknowledgement_id, operation_id, generation, evidence_token):
+        """Atomically record a reviewed prewrite outcome and release its fence."""
+        try:
+            ack_id = str(uuid.UUID(str(acknowledgement_id)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("acknowledgement_id must be a UUID") from exc
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            records = dict(current.get("command_records") or {})
+            existing = records.get(ack_id)
+            if existing is not None:
+                if existing.get("command") != "acknowledge_recovery" or existing.get("operation_id") != operation_id or existing.get("evidence_token") != evidence_token:
+                    raise ValueError("acknowledgement_id was already used for a different recovery")
+                return False, dict(existing)
+            operation = current.get(ACTIVE_OPERATION_KEY)
+            evidence = operation.get("evidence") if isinstance(operation, dict) else None
+            if (not isinstance(operation, dict) or operation.get("phase") != "recovery_required"
+                or operation.get("command_id") != operation_id or not isinstance(evidence, dict)):
+                raise RuntimeError("Recovery operation changed; review current evidence again.")
+            if int(generation) != int(current.get("operation_generation") or 0):
+                raise RuntimeError("Recovery generation changed; review current evidence again.")
+            token = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if evidence_token != token:
+                raise RuntimeError("Recovery evidence changed; review current evidence again.")
+            command = operation.get("command")
+            safe_save = command == "save" and evidence.get("kind") == "precommit_verified"
+            safe_apply = command == "apply" and evidence.get("kind") == "prestate_observed" and evidence.get("phase") in {
+                "before_backup", "before_snapshot", "before_service_commit",
+            }
+            if not (safe_save or safe_apply):
+                raise RuntimeError("Recovery evidence does not prove a safe prewrite state.")
+            now = datetime.now(timezone.utc).isoformat()
+            original = records.get(operation_id)
+            if original is not None:
+                records[operation_id] = {**original, "status": "terminal", "updated_at": now,
+                                         "result": {"ok": False, "message": _("recovery.acknowledged")}}
+            record = {
+                "command_id": ack_id, "command": "acknowledge_recovery", "operation_id": operation_id,
+                "evidence_token": evidence_token, "generation": int(generation), "status": "terminal",
+                "accepted_at": now, "updated_at": now, "result": {"ok": True, "message": _("recovery.acknowledged_short")},
+            }
+            records[ack_id] = record
+            current["command_records"] = records
+            current[ACTIVE_OPERATION_KEY] = None
+            current.update(ALL_PREVIEW_CLEAR_UPDATES)
+            current["last_status"] = "warning"
+            current["last_action"] = "acknowledge_recovery"
+            current["last_message"] = _("recovery.acknowledged")
+            current["operation_generation"] = int(current.get("operation_generation") or 0) + 1
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._readiness_generation = current["operation_generation"]
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return True, dict(record)
+
+    def begin_reviewed_save_retry(self, retry_id, operation_id, generation, evidence_token):
+        """Reserve one exact-commit push attempt while preserving the original fence."""
+        try:
+            retry_id = str(uuid.UUID(str(retry_id)))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError("retry_id must be a UUID") from exc
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            records = dict(current.get("command_records") or {})
+            existing = records.get(retry_id)
+            if existing is not None:
+                if existing.get("command") != "retry_interrupted_save" or existing.get("operation_id") != operation_id or existing.get("evidence_token") != evidence_token:
+                    raise ValueError("retry_id was already used for a different recovery")
+                return False, dict(existing)
+            operation = current.get(ACTIVE_OPERATION_KEY)
+            evidence = operation.get("evidence") if isinstance(operation, dict) else None
+            if (not isinstance(operation, dict) or operation.get("phase") != "recovery_required"
+                or operation.get("command") != "save" or operation.get("command_id") != operation_id
+                or not isinstance(evidence, dict) or evidence.get("kind") != "exact_retry_available"):
+                raise RuntimeError("Exact Save retry is no longer available; review current evidence.")
+            if isinstance(operation.get("retry"), dict) and operation["retry"].get("phase") in {"accepted", "dispatching"}:
+                raise RuntimeError("Another exact Save retry is active or uncertain.")
+            if int(generation) != int(current.get("operation_generation") or 0):
+                raise RuntimeError("Recovery generation changed; review current evidence again.")
+            token = hashlib.sha256(json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            if evidence_token != token:
+                raise RuntimeError("Recovery evidence changed; review current evidence again.")
+            intent = current.get("save_intent")
+            if not isinstance(intent, dict) or intent.get("operation_id") != operation_id:
+                raise RuntimeError("Save intent is missing; exact retry is unavailable.")
+            commits = evidence.get("marked_commits") or []
+            if len(commits) != 1 or evidence.get("head") != commits[0] or not evidence.get("parent_verified") or not evidence.get("remote_ancestor"):
+                raise RuntimeError("Save commit identity or ancestry is not verified.")
+            now = datetime.now(timezone.utc).isoformat()
+            record = {"command_id": retry_id, "command": "retry_interrupted_save", "operation_id": operation_id,
+                      "evidence_token": evidence_token, "generation": int(generation), "status": "accepted",
+                      "accepted_at": now, "updated_at": now, "result": None}
+            records[retry_id] = record
+            current["command_records"] = records
+            current[ACTIVE_OPERATION_KEY] = {**operation, "retry": {"command_id": retry_id, "phase": "accepted", "commit": commits[0]}}
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return True, dict(record)
+
+    def transition_reviewed_save_retry(self, retry_id, status, result=None):
+        if status not in {"running", "terminal"}:
+            raise ValueError("invalid retry status")
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            records = dict(current.get("command_records") or {})
+            record = records.get(retry_id)
+            operation = current.get(ACTIVE_OPERATION_KEY)
+            retry = operation.get("retry") if isinstance(operation, dict) else None
+            if not isinstance(record, dict) or not isinstance(retry, dict) or retry.get("command_id") != retry_id:
+                raise RuntimeError("Save retry reservation is missing")
+            if status == "running" and record.get("status") != "accepted":
+                raise RuntimeError("Save retry is not accepted")
+            if status == "terminal" and record.get("status") != "running":
+                raise RuntimeError("Save retry was not dispatching")
+            record = {**record, "status": status, "updated_at": datetime.now(timezone.utc).isoformat(),
+                      "result": result if result is not None else record.get("result")}
+            records[retry_id] = record
+            current["command_records"] = records
+            current[ACTIVE_OPERATION_KEY] = {**operation, "retry": {**retry, "phase": "dispatching" if status == "running" else "terminal"}}
+            current["state_revision"] = int(current.get("state_revision") or 0) + 1
+            _replace_state(self.path, current)
+            self._change_sequence += 1
+            self._condition.notify_all()
+            return dict(record)
 
     def mark_blocked(self, message=None):
         with self._condition:
@@ -723,7 +945,7 @@ class OperationStore:
             self._condition.notify_all()
             return current
 
-    def claim_command(self, command_id, command, generation, payload):
+    def claim_command(self, command_id, command, generation, payload, validate=None, immediate=False):
         """Durably claim one browser mutation before any work is scheduled."""
         try:
             parsed = uuid.UUID(str(command_id))
@@ -746,23 +968,46 @@ class OperationStore:
                 if existing.get("command") != command or existing.get("payload_sha256") != payload_digest:
                     raise ValueError("command_id was already used for a different command")
                 return False, dict(existing)
+            if self._readiness != READINESS_REPAIRED:
+                raise RuntimeError(READINESS_BLOCKED_MESSAGE)
+            if current.get(ACTIVE_OPERATION_KEY):
+                raise RuntimeError("Another operation is active or requires recovery.")
+            if any(record.get("status") in {"accepted", "running", "failed_unknown"} for record in records.values()):
+                raise RuntimeError("Another command is active or has an uncertain outcome.")
+            cancelling_pending_save = command == "clear_preview" and payload.get("direction") == "save"
+            if current.get("save_push_retry_pending") and command not in {"save", "clear_display_state"} and not cancelling_pending_save:
+                raise RuntimeError(_("message.save_push_retry_still_pending"))
             current_generation = int(current.get("operation_generation") or 0)
             if int(generation) != current_generation:
                 raise RuntimeError("stale command generation; replay state and try again")
+            validated_updates = validate(hydrate_diff_fields(self.path, current)) if validate is not None else None
+            if validated_updates is not None:
+                if not isinstance(validated_updates, dict):
+                    raise ValueError("command validation returned invalid state updates")
+                current.update(validated_updates)
             now = datetime.now(timezone.utc).isoformat()
             record = {
                 "command_id": canonical_id,
                 "command": command,
                 "generation": current_generation,
                 "payload_sha256": payload_digest,
-                "status": "accepted",
+                "status": "terminal" if immediate else "accepted",
                 "accepted_at": now,
                 "updated_at": now,
                 "job_id": canonical_id,
-                "result": None,
+                "result": {"ok": True, "message": "Selection updated."} if immediate else None,
             }
             records[canonical_id] = record
             current["command_records"] = records
+            if command in EFFECTFUL_COMMANDS:
+                current[ACTIVE_OPERATION_KEY] = {
+                    "command_id": canonical_id,
+                    "command": command,
+                    "payload_sha256": payload_digest,
+                    "accepted_generation": current_generation,
+                    "phase": "accepted",
+                    "accepted_at": now,
+                }
             current["state_revision"] = int(current.get("state_revision") or 0) + 1
             _replace_state(self.path, current)
             self._change_sequence += 1
@@ -786,6 +1031,20 @@ class OperationStore:
             }
             records[str(command_id)] = record
             current["command_records"] = records
+            operation = current.get(ACTIVE_OPERATION_KEY)
+            if isinstance(operation, dict) and operation.get("command_id") == str(command_id):
+                if status == "running" and operation.get("phase") == "accepted":
+                    current[ACTIVE_OPERATION_KEY] = {**operation, "phase": "dispatching"}
+                elif status == "terminal":
+                    if operation.get("phase") == "accepted" or isinstance(result, dict) and (
+                        result.get("ok") is True or result.get("safe_terminal") is True
+                    ):
+                        current[ACTIVE_OPERATION_KEY] = None
+                    else:
+                        current[ACTIVE_OPERATION_KEY] = {
+                            **operation, "phase": "recovery_required",
+                            "message": "Operation outcome is uncertain; inspect affected state before acknowledgement.",
+                        }
             current["state_revision"] = int(current.get("state_revision") or 0) + 1
             _replace_state(self.path, current)
             self._change_sequence += 1
@@ -812,6 +1071,9 @@ class OperationStore:
     def diff_get(self, cursor):
         with self._lock:
             generation = self.assert_repaired_for_current_preview_read("diff_get")
+            current = self.read_state(hydrate_diffs=False)
+            if current.get(ACTIVE_OPERATION_KEY) or current.get("last_status") == "running":
+                raise RuntimeError("Preview diffs are unavailable during an active or uncertain operation.")
             if not isinstance(cursor, dict) or int(cursor.get("generation", -1)) != int(generation):
                 raise RuntimeError("stale preview diff cursor; run a fresh Preview.")
             text = _read_diff_artifact(self.path, cursor, expected_generation=generation)
