@@ -140,32 +140,33 @@ async function exerciseWorkflow(page, baseUrl, label) {
   assert(conflict.saveNeedsChoice && conflict.saveEnabled && conflict.applyGitDefault && conflict.applyEnabled
     && conflict.saveChoices >= 2, `${label} conflict controls: ${JSON.stringify(conflict)}`);
 
-  const ids = await page.locator("ha-ops-app").evaluate(async (app) => {
-    const path = "homeassistant/automations.yaml";
-    const row = { path, changes: 1, unresolved: 0, selected: false, diff_sha256: "fixture-digest" };
-    app.state = { ...app.state, last_save_preview_paths: [], last_preview_paths: [],
-      last_internal_ids_generated_at: "2026-09-29", last_internal_ids_preview_id: "browser-ids-preview",
-      last_internal_ids_rows: [row], last_internal_ids_unresolved: [] };
-    app.internalDiffs = new Map([[path, "diff --git a/automations.yaml b/automations.yaml"]]);
-    await app.updateComplete;
-    const section = app.querySelector('[data-testid="internal-ids-preview-section"]');
-    const checkbox = section.querySelector("vaadin-checkbox");
-    const button = [...section.querySelectorAll("vaadin-button")].find((item) => item.textContent.includes("Migrate"));
-    const initiallyDisabled = button?.disabled;
-    app.state = { ...app.state, last_internal_ids_rows: [{ ...row, selected: true }] };
-    await app.updateComplete;
-    const migrate = [...app.querySelectorAll('[data-testid="internal-ids-preview-section"] vaadin-button')]
-      .find((item) => item.textContent.includes("Migrate"));
-    const enabled = !migrate?.disabled;
-    migrate.click();
-    await app.updateComplete;
-    const confirmationOpen = app.confirmOpen && Boolean(app.querySelector("vaadin-confirm-dialog[opened]"));
-    app.confirmOpen = false;
-    app.confirmCommand = null;
-    return { checkbox: Boolean(checkbox), initiallyDisabled, enabled, confirmationOpen };
-  });
-  assert(ids.checkbox && ids.initiallyDisabled && ids.enabled && ids.confirmationOpen,
-    `${label} Internal IDs controls: ${JSON.stringify(ids)}`);
+  const seed = await fetch(`${baseUrl}__dev_harness__/seed-internal-ids`, { method: "POST" });
+  assert(seed.ok, `${label} Internal IDs fixture could not be seeded`);
+  await page.reload();
+  await page.getByRole("button", { name: "Check actions IDs" }).click();
+  const idsPreview = await waitForState(baseUrl, (state) => state.last_action === "internal_ids_preview" &&
+    state.last_status === "success" && state.last_internal_ids_rows?.some((row) => row.changes > 0), `${label} Internal IDs preview`);
+  const row = idsPreview.last_internal_ids_rows.find((item) => item.changes > 0);
+  assert(row.diff_sha256 && !row.diff, `${label} exact diff must be fetched separately`);
+  await page.reload();
+  const section = page.getByTestId("internal-ids-preview-section");
+  const migrate = section.getByRole("button", { name: "Migrate and Save" });
+  assert(await migrate.isDisabled(), `${label} migration enabled before exact diff review`);
+  await section.locator("vaadin-details").first().click();
+  await section.getByText("switch.fixture", { exact: false }).waitFor();
+  const loaded = await page.locator("ha-ops-app").evaluate((app, path) => app.internalDiffs.get(path), row.path);
+  assert(loaded?.includes("switch.fixture"), `${label} exact diff was not loaded from server`);
+  await page.screenshot({ path: path.join(artifactsDir, `${label}-internal-ids-diff.png`), fullPage: true });
+  const checkbox = section.locator(`vaadin-checkbox[aria-label="Migrate ${row.path}"]`);
+  if (row.selected) {
+    await checkbox.click();
+    await waitForState(baseUrl, (state) => state.last_internal_ids_rows?.some((item) => item.path === row.path && !item.selected), `${label} Internal IDs deselection`);
+  }
+  await checkbox.click();
+  await waitForState(baseUrl, (state) => state.last_internal_ids_rows?.some((item) => item.path === row.path && item.selected), `${label} Internal IDs selection`);
+  await migrate.click();
+  await page.locator("vaadin-confirm-dialog[opened]").getByRole("button", { name: "Confirm" }).click();
+  await waitForState(baseUrl, (state) => state.last_action === "internal_ids_migrate" && state.last_status === "success", `${label} Internal IDs migration`);
 
   const recovery = await page.locator("ha-ops-app").evaluate(async (app) => {
     app.state = { ...app.state, active_operation: { command: "apply", command_id: "fixture",
@@ -193,6 +194,16 @@ try {
   page.on("response", (response) => { if (response.status() >= 400) pageErrors.push(`${response.status()} ${response.url()}`); });
   await page.goto(baseUrl);
   await inspectPage(page, "initial-desktop");
+  const staleBaselineRejected = await page.locator("ha-ops-app").evaluate(async (app) => {
+    const response = await fetch("api/v1/state");
+    const old = await response.json();
+    const newer = { ...old, revision: Number(old.state.state_revision) + 1,
+      state: { ...old.state, last_message: "newer websocket state" } };
+    app.applyBaseline(newer);
+    const accepted = app.applyBaseline({ ...old, state: { ...old.state, last_message: "stale HTTP state" } });
+    return !accepted && app.state.last_message === "newer websocket state" && app.revision === newer.revision;
+  });
+  assert(staleBaselineRejected, "An older HTTP baseline replaced a newer state");
   assert((await stateAt(baseUrl)).last_status !== "error", "Initial state is in error");
 
   const secondTab = await desktop.newPage();

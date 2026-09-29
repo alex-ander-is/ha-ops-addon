@@ -1185,7 +1185,8 @@ class HaOpsApp extends LitElement {
         ${this.internalDiffs?.has(row.path) ? html`<pre>${this.internalDiffs.get(row.path)}</pre>` : html`<p>${t("notice.load_exact_diff")}</p>`}
       </vaadin-details>`)}
       ${this.actionButton("internal_ids_migrate", t("action.migrate_and_save"), {
-        disabled: blocked || !rows.some((row) => row.selected),
+        disabled: blocked || !rows.some((row) => row.selected) ||
+          rows.some((row) => row.selected && !this.internalDiffs?.has(row.path)),
         payload: { preview_id: this.state.last_internal_ids_preview_id,
           selected: rows.filter((row) => row.selected).map((row) => ({ path: row.path, diff_sha256: row.diff_sha256 })) },
         confirm: t("confirm.internal_ids_migrate"), theme: "primary",
@@ -1573,7 +1574,7 @@ class HaOpsApp extends LitElement {
     try {
       const response = await fetch("api/v1/state");
       const snapshot = await response.json();
-      this.applyBaseline(snapshot);
+      if (!this.applyBaseline(snapshot)) return;
       this.replayPending = false;
       this.setConnection("http");
       this.scheduleHttpPoll();
@@ -1626,11 +1627,17 @@ class HaOpsApp extends LitElement {
   }
 
   applyBaseline(frame) {
-    if (!frame.state) return;
+    if (!frame.state) return false;
     if (frame.schema_version !== 1) {
       this.markUnknown(new Error("Incompatible HA Ops response; reload the page."));
-      return;
+      return false;
     }
+    const incomingRevision = Number(frame.revision ?? frame.state_revision ?? frame.state.state_revision ?? 0);
+    if (!Number.isSafeInteger(incomingRevision) || incomingRevision < 0) {
+      this.markUnknown(new Error("Invalid HA Ops state revision; reload the page."));
+      return false;
+    }
+    if (incomingRevision < this.revision) return false;
     TEXT = Object.fromEntries(Object.entries(TEXT_KEYS).map(([name, key]) => [name, frame.text?.[key] || key]));
     TEXT.catalog = frame.text || {};
     this.view = frame.view || {};
@@ -1640,7 +1647,8 @@ class HaOpsApp extends LitElement {
     this.clientError = "";
     this.reconcileAcceptedCommand();
     this.reconcileSelections();
-    this.revision = Number(frame.revision ?? frame.state_revision ?? frame.state.state_revision ?? 0);
+    this.revision = incomingRevision;
+    return true;
   }
 
   applyPatch(frame) {
@@ -1725,7 +1733,7 @@ class HaOpsApp extends LitElement {
   }
 
   previewTemplate() {
-    if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation) return nothing;
+    if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation || this.isRunning()) return nothing;
     const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();

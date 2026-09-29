@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 1.0.3
+
+- Preserve unpublished local commits when cancelling a failed Save push.
+- Hide preview diffs as soon as a job is accepted and reject older HTTP state snapshots.
+- Require the exact server diff before Actions IDs migration and verify its full browser workflow.
+
 ## 1.0.2
 
 - Preserve newer local commits when retrying or cancelling a failed Save push.

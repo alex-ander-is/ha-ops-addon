@@ -858,6 +858,32 @@ class DevHarnessContext(app_context.AppContext):
         return None
 
     def dev_harness_handle_post(self, route, body):
+        if route == "/__dev_harness__/seed-internal-ids":
+            config = self.internal_ids_config_dir()
+            storage = config / ".storage"
+            z2m = config / "zigbee2mqtt"
+            storage.mkdir(parents=True, exist_ok=True)
+            z2m.mkdir(parents=True, exist_ok=True)
+            (storage / "core.entity_registry").write_text(json.dumps({"data": {"entities": [
+                {"id": "11111111111111111111111111111111", "entity_id": "switch.fixture", "device_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+            ]}}))
+            (storage / "core.device_registry").write_text(json.dumps({"data": {"devices": [
+                {"id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "identifiers": [["mqtt", "zigbee2mqtt_0x00124b00226b31f8"]], "name": "fixture_remote"}
+            ]}}))
+            (z2m / "state.json").write_text(json.dumps([{"ieee_address": "0x00124b00226b31f8", "friendly_name": "fixture_remote"}]))
+            area = config / ".ha-ops" / "areas" / "fixture"
+            area.mkdir(parents=True, exist_ok=True)
+            (area / "automations.yaml").write_text("""- id: 'fixture'
+  alias: Fixture action
+  triggers: []
+  conditions: []
+  actions:
+  - type: turn_on
+    device_id: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    entity_id: '11111111111111111111111111111111'
+    domain: switch
+""")
+            return {"ok": True}
         if route == "/__dev_harness__/arm":
             return self.harness_controller.arm(_first(body, "action"), _first(body, "gate") or "running")
         if route == "/__dev_harness__/release":

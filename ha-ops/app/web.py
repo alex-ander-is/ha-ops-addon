@@ -106,6 +106,12 @@ def job_is_running(ctx, state=None):
     return False
 
 
+def command_in_flight(state):
+    return any(record.get("status") in {"accepted", "running", "failed_unknown"}
+               for record in (state.get("command_records") or {}).values()
+               if isinstance(record, dict))
+
+
 def repair_stale_running_state(ctx, state):
     if state.get("last_status") != "running":
         return state
@@ -796,7 +802,8 @@ def _snapshot_payload(ctx):
         if isinstance(operation, dict) else None
     )
     state["docker_build_cache_prune_fence"] = bool(raw_state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
-    if state["active_operation"] or state.get("last_status") == "running":
+    accepted_job = command_in_flight(raw_state)
+    if state["active_operation"] or state.get("last_status") == "running" or accepted_job:
         for key in (
             "last_diff_cursor", "last_preview_paths", "last_save_diff_cursor", "last_save_preview_paths",
             "last_internal_ids_rows", "last_deleted_devices_rows", "last_retained_devices_rows",
@@ -883,6 +890,9 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         return command_result(True, "debug snapshot", **_snapshot_payload(ctx))
     if command == "diff_get":
         try:
+            state = ctx.read_state()
+            if state.get(state_store.ACTIVE_OPERATION_KEY) or state.get("last_status") == "running" or command_in_flight(state):
+                return command_result(False, _("error.active_operation"), status=409)
             cursor = body.get("cursor")
             if isinstance(cursor, str):
                 cursor = json.loads(cursor)
@@ -901,7 +911,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             return command_result(False, str(exc))
     if command == "internal_ids_diff_get":
         state = ctx.read_state()
-        if state.get("active_operation") or state.get("last_status") == "running":
+        if state.get("active_operation") or state.get("last_status") == "running" or command_in_flight(state):
             return command_result(False, _("error.active_operation"), status=409)
         preview_id = body.get("preview_id")
         path = body.get("path")
@@ -914,7 +924,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
     if command == "conflict_diff_get":
         state = ctx.read_state()
         path = body.get("path")
-        if (state.get("active_operation") or state.get("last_status") == "running"
+        if (state.get("active_operation") or state.get("last_status") == "running" or command_in_flight(state)
             or not isinstance(path, str) or path not in (state.get("conflicts") or [])
             or str(body.get("generation")) != str(state.get("operation_generation"))):
             return command_result(False, _("error.git_conflict_path_not_pending"), status=409)
@@ -928,7 +938,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
     if command == "pending_deleted_devices_diff_get":
         try:
             state = ctx.read_state()
-            if state.get(state_store.ACTIVE_OPERATION_KEY) or state.get("last_status") == "running":
+            if state.get(state_store.ACTIVE_OPERATION_KEY) or state.get("last_status") == "running" or command_in_flight(state):
                 raise RuntimeError(_("error.active_operation"))
             if not state.get("deleted_devices_pending_confirmation") or not state.get("deleted_devices_rollback_path"):
                 raise RuntimeError(_("error.deleted_devices_cleanup_not_pending"))
@@ -1180,6 +1190,7 @@ POST_ENDPOINTS = (
     "/__dev_harness__/release",
     "/__dev_harness__/clear-previews",
     "/__dev_harness__/seed-registry-preview",
+    "/__dev_harness__/seed-internal-ids",
     "/__dev_harness__/replace-retained-preview",
     "/__dev_harness__/backend-version",
 )

@@ -204,16 +204,9 @@ def discard_unpushed_head_commit(repo_dir, env, branch, commit, run_command):
         raise RuntimeError(
             "Cannot clear Save push retry because the Git checkout has uncommitted changes."
         )
-    remote_ref = f"refs/remotes/origin/{branch}"
     checkout = run_command(["git", "checkout", branch], env=env, cwd=repo_dir)
     if checkout.returncode != 0:
         raise RuntimeError(f"git checkout {branch} failed:\n{checkout.stderr.strip()}")
-    if git_ref_exists(repo_dir, remote_ref, run_command):
-        reset = run_command(["git", "reset", "--hard", remote_ref], env=env, cwd=repo_dir)
-        if reset.returncode != 0:
-            raise RuntimeError(f"git reset to origin/{branch} failed:\n{reset.stderr.strip()}")
-        return True
-
     parent = run_command(["git", "rev-parse", "--verify", "--quiet", f"{commit}^"], cwd=repo_dir)
     if parent.returncode == 0:
         reset = run_command(["git", "reset", "--hard", parent.stdout.strip()], env=env, cwd=repo_dir)

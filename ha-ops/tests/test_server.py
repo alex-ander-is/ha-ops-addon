@@ -60,6 +60,27 @@ def load_dev_harness():
 
 
 class ServerTests(unittest.TestCase):
+    def test_accepted_state_only_command_hides_preview_projection(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            server.write_state({
+                "last_status": "success",
+                "last_save_preview_paths": ["homeassistant/configuration.yaml"],
+                "last_save_diff_cursor": {"artifact": "old"},
+            })
+            ctx = server.context()
+            claimed, _record = ctx.claim_command(
+                str(uuid.uuid4()), "internal_ids_preview", ctx.read_state()["operation_generation"], {}
+            )
+            self.assertTrue(claimed)
+            projection = self.client_state(server)
+            self.assertEqual(projection["last_save_preview_paths"], [])
+            self.assertIsNone(projection["last_save_diff_cursor"])
+            response = server.web.dispatch_command(ctx, "diff_get", {"cursor": {"artifact": "old"}})
+            self.assertFalse(response["ok"])
+            self.assertEqual(response["status"], 409)
+
     def client_state(self, server):
         return server.web._snapshot_payload(server._CTX)["state"]
 
@@ -8869,6 +8890,11 @@ class ServerTests(unittest.TestCase):
             )
             server.get_installed_addons = lambda: []
             self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
+            repo = root / "data" / "ha-config"
+            (repo / "homeassistant" / "preexisting.yaml").write_text("kept: true\n")
+            self.git_commit_all(repo, "preexisting local commit")
+            preexisting_commit = server.git_head_or_unborn(repo)
+            self.assertTrue(server.run_save_preview_job(), server.read_state()["last_message"])
             self.select_all_save_preview_files(server)
             original_push_branch = server.push_branch
             calls = {"count": 0}
@@ -8900,7 +8926,8 @@ class ServerTests(unittest.TestCase):
             self.assertEqual(state["save_preview_selected_paths"], [])
             self.assertEqual(self.remote_main_subject(remote), "base")
             self.assertNotEqual(self.remote_rev(remote, "main"), pending_commit)
-            self.assertEqual(server.git_head_or_unborn(root / "data" / "ha-config"), self.remote_rev(remote, "main"))
+            self.assertEqual(server.git_head_or_unborn(repo), preexisting_commit)
+            self.assertEqual((repo / "homeassistant" / "preexisting.yaml").read_text(), "kept: true\n")
             self.assertNotIn("Confirm Save to Git", server.render_page())
 
             (server.CONFIG_DIR / "packages" / "second.yaml").write_text("second:\n")
@@ -17588,7 +17615,7 @@ devices:
         self.assertIn("opened-changed", script)
         self.assertIn("diff-get", script)
         self.assertIn("previewTemplate()", script)
-        self.assertIn("if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation) return nothing;", script)
+        self.assertIn("this.state.active_operation || this.isRunning()) return nothing;", script)
         self.assertIn("customElements.define(\"ha-ops-preview\"", script)
 
     def test_operation_store_blocks_direct_job_calls_when_repair_not_repaired(self):
