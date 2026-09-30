@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.1.1
+
+- Let the Log card grow to the height of the controls before its own scrollbar appears.
+
 ## 2.1.0
 
 - Keep Managed Targets guidance visible and collapse its table by default.

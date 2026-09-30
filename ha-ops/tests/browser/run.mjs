@@ -76,7 +76,44 @@ async function inspectPage(page, label) {
   assert(contour.vaadinButtons > 0, `${label}: Vaadin buttons missing`);
   assert(contour.log, `${label}: log missing`);
   assert(!contour.horizontalOverflow, `${label}: horizontal overflow`);
+  const layout = await page.locator("ha-ops-app").evaluate((app) => {
+    const root = app.renderRoot;
+    const controls = root.querySelector(".control-card");
+    const details = root.querySelector(".details-card");
+    const log = root.querySelector("ha-ops-log").renderRoot.querySelector("pre");
+    return {
+      sameRow: Math.abs(controls.getBoundingClientRect().top - details.getBoundingClientRect().top) < 2,
+      controlHeight: controls.getBoundingClientRect().height,
+      detailsHeight: details.getBoundingClientRect().height,
+      logHeight: log.clientHeight,
+      inlineHeight: details.style.getPropertyValue("--details-card-height"),
+      hasObserver: Boolean(app.resizeObserver),
+    };
+  });
+  if (layout.sameRow) {
+    assert(Math.abs(layout.controlHeight - layout.detailsHeight) < 2,
+      `${label}: log card does not fill control card: ${JSON.stringify(layout)}`);
+    assert(layout.logHeight > layout.detailsHeight - 100,
+      `${label}: log viewport is shorter than its card: ${JSON.stringify(layout)}`);
+  }
   await page.screenshot({ path: path.join(artifactsDir, `${label}.png`), fullPage: true });
+}
+
+async function assertLogUsesAvailableHeight(page) {
+  const metrics = await page.locator("ha-ops-app").evaluate(async (app) => {
+    const original = app.state;
+    const log = app.querySelector("ha-ops-log").renderRoot.querySelector("pre");
+    const lineHeight = Number.parseFloat(getComputedStyle(log).fontSize) * 1.2;
+    const count = Math.floor((log.clientHeight - 60) / lineHeight);
+    app.state = { ...original, last_details: Array.from({ length: count }, (_, index) => `Log line ${index}`), last_message: "" };
+    await app.updateComplete;
+    const result = { lineCount: count, clientHeight: log.clientHeight, scrollHeight: log.scrollHeight };
+    app.state = original;
+    await app.updateComplete;
+    return result;
+  });
+  assert(metrics.lineCount > 20 && metrics.scrollHeight <= metrics.clientHeight + 2,
+    `Log scrolls before filling its available space: ${JSON.stringify(metrics)}`);
 }
 
 async function exerciseManagedTargets(page, secondTab, baseUrl, label) {
@@ -250,6 +287,7 @@ try {
   page.on("response", (response) => { if (response.status() >= 400) pageErrors.push(`${response.status()} ${response.url()}`); });
   await page.goto(baseUrl);
   await inspectPage(page, "initial-desktop");
+  await assertLogUsesAvailableHeight(page);
   const staleBaselineRejected = await page.locator("ha-ops-app").evaluate(async (app) => {
     const response = await fetch("api/v1/state");
     const old = await response.json();

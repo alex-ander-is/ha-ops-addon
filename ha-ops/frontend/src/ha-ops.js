@@ -1117,7 +1117,6 @@ class HaOpsApp extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
-    this.observeLayout();
     this.shouldReconnect = true;
     this.connect();
     if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) window.__haOpsTestCloseWs = () => this.socket?.close();
@@ -1133,6 +1132,10 @@ class HaOpsApp extends LitElement {
   }
 
   createRenderRoot() { return this; }
+
+  updated() {
+    if (!this.resizeObserver) this.observeLayout();
+  }
 
   actionButton(command, label, { disabled = false, confirm = "", payload = {}, theme = "secondary" } = {}) {
     return html`<vaadin-button theme=${theme} ?disabled=${disabled}
@@ -1470,7 +1473,7 @@ class HaOpsApp extends LitElement {
     this.resizeObserver = new ResizeObserver(sync);
     this.resizeObserver.observe(controls);
     window.addEventListener("resize", sync);
-    requestAnimationFrame(sync);
+    sync();
   }
 
   onCommand = (event) => {
