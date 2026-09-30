@@ -2096,7 +2096,7 @@ var Te=globalThis,Ie=Te.ShadowRoot&&(Te.ShadyCSS===void 0||Te.ShadyCSS.nativeSha
         </tbody>
       </table>
     </div>
-  `:d`<p>${c.noRetainedDevices}</p>`}var Mi=class extends g{static properties={connection:{type:String},revision:{type:Number},state:{type:Object},view:{type:Object},confirmOpen:{type:Boolean},confirmMessage:{type:String},clientVersion:{type:String},backendVersion:{type:String},versionMismatchOpen:{type:Boolean},acceptedCommandId:{type:String},uncertainCommandId:{type:String},clientError:{type:String}};static styles=m`
+  `:d`<p>${c.noRetainedDevices}</p>`}var Mi=class extends g{static properties={connection:{type:String},revision:{type:Number},state:{type:Object},view:{type:Object},confirmOpen:{type:Boolean},confirmMessage:{type:String},clientVersion:{type:String},backendVersion:{type:String},versionMismatchOpen:{type:Boolean},acceptedCommandId:{type:String},uncertainCommandId:{type:String},clientError:{type:String},managedTargetsOpen:{type:Boolean}};static styles=m`
     :host { display: contents; }
     vaadin-confirm-dialog.version-mismatch {
       --vaadin-confirm-dialog-width: min(420px, calc(100vw - 32px));
@@ -2177,7 +2177,7 @@ var Te=globalThis,Ie=Te.ShadowRoot&&(Te.ShadyCSS===void 0||Te.ShadyCSS.nativeSha
         text-align: left;
       }
     }
-  `;constructor(){super(),this.connection="connecting",this.revision=0,this.state={},this.view={},this.confirmOpen=!1,this.confirmMessage="",this.clientVersion=_e(window.__HA_OPS_BOOT_VERSION__)?String(window.__HA_OPS_BOOT_VERSION__):null,this.backendVersion=this.clientVersion,this.acknowledgedBackendVersion=null,this.versionMismatchOpen=!1,this.socket=null,this.pending=new Map,this.nextRequestId=1,this.reconnectTimer=null,this.httpPollTimer=null,this.reconnectStableTimer=null,this.reconnectDelayMs=1200,this.replayPending=!0,this.queuedFrames=[],this.internalDiffs=new Map,this.conflictDiffs=new Map,this.shouldReconnect=!1,this.acceptedCommandId=null,this.uncertainCommandId=null,this.clientError=""}connectedCallback(){super.connectedCallback(),this.observeLayout(),this.shouldReconnect=!0,this.connect(),window.__HA_OPS_ENABLE_TEST_HOOKS__===!0&&(window.__haOpsTestCloseWs=()=>this.socket?.close())}disconnectedCallback(){this.reconnectTimer&&clearTimeout(this.reconnectTimer),this.httpPollTimer&&clearTimeout(this.httpPollTimer),this.reconnectStableTimer&&clearTimeout(this.reconnectStableTimer),this.shouldReconnect=!1,this.socket&&this.socket.close(),super.disconnectedCallback()}createRenderRoot(){return this}actionButton(t,e,{disabled:i=!1,confirm:n="",payload:r={},theme:o="secondary"}={}){return d`<vaadin-button theme=${o} ?disabled=${i}
+  `;constructor(){super(),this.connection="connecting",this.revision=0,this.state={},this.view={},this.confirmOpen=!1,this.confirmMessage="",this.clientVersion=_e(window.__HA_OPS_BOOT_VERSION__)?String(window.__HA_OPS_BOOT_VERSION__):null,this.backendVersion=this.clientVersion,this.acknowledgedBackendVersion=null,this.versionMismatchOpen=!1,this.socket=null,this.pending=new Map,this.nextRequestId=1,this.reconnectTimer=null,this.httpPollTimer=null,this.reconnectStableTimer=null,this.reconnectDelayMs=1200,this.replayPending=!0,this.queuedFrames=[],this.internalDiffs=new Map,this.conflictDiffs=new Map,this.shouldReconnect=!1,this.acceptedCommandId=null,this.uncertainCommandId=null,this.clientError="",this.managedTargetsOpen=!1}connectedCallback(){super.connectedCallback(),this.observeLayout(),this.shouldReconnect=!0,this.connect(),window.__HA_OPS_ENABLE_TEST_HOOKS__===!0&&(window.__haOpsTestCloseWs=()=>this.socket?.close())}disconnectedCallback(){this.reconnectTimer&&clearTimeout(this.reconnectTimer),this.httpPollTimer&&clearTimeout(this.httpPollTimer),this.reconnectStableTimer&&clearTimeout(this.reconnectStableTimer),this.shouldReconnect=!1,this.socket&&this.socket.close(),super.disconnectedCallback()}createRenderRoot(){return this}actionButton(t,e,{disabled:i=!1,confirm:n="",payload:r={},theme:o="secondary"}={}){return d`<vaadin-button theme=${o} ?disabled=${i}
       @click=${()=>this.issue(t,r,n)}>${e}</vaadin-button>`}issue(t,e={},i=""){if(i){this.confirmCommand={command:t,payload:e},this.confirmMessage=i,this.confirmOpen=!0;return}let n=new URL(t.replaceAll("_","-"),ki()).href;this.dispatchCommand(t,n,e).catch(r=>this.handleCommandError(r))}mutationBlocked(){return!!(this.acceptedCommandId||this.uncertainCommandId)||this.replayPending||!["connected","http"].includes(this.connection)||this.isRunning()||!!this.state.active_operation||!!(this.state.deleted_devices_recovery_phase&&this.state.deleted_devices_recovery_phase!=="none")||!!this.state.docker_build_cache_prune_fence}renderInternalIdsPreview(t){if(this.acceptedCommandId||this.uncertainCommandId||this.state.active_operation||this.isRunning())return p;let e=this.state.last_internal_ids_rows||[];return!this.state.last_internal_ids_generated_at&&!e.length?p:d`<section class="card wide" data-testid="internal-ids-preview-section">
       <h2>${h("heading.actions_ids")}</h2>
       <p>${h("label.generated_at")} ${this.view.display_times?.last_internal_ids_generated_at||this.state.last_internal_ids_generated_at||""}</p>
@@ -2299,13 +2299,18 @@ var Te=globalThis,Ie=Te.ShadowRoot&&(Te.ShadyCSS===void 0||Te.ShadyCSS.nativeSha
           <p>${this.view.auth_mode||""}</p>
           ${this.actionButton("generate_key",h("action.generate_deploy_key"),{disabled:n})}
         </section>
-        <section class="card wide"><h2>${h("heading.managed_targets")}</h2>
-          <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${h("label.managed")}</th><th>${h("label.target")}</th><th>${h("label.type")}</th><th>${h("label.source")}</th></tr></thead><tbody>
+        <section class="card wide" data-testid="managed-targets-section"><h2>${h("heading.managed_targets")}</h2>
+          <p>${h("notice.managed_targets")}</p>
+          <vaadin-details .opened=${this.managedTargetsOpen}
+            @opened-changed=${a=>{this.managedTargetsOpen=a.detail.value}}>
+            <vaadin-details-summary slot="summary">${h("label.show_managed_targets")}</vaadin-details-summary>
+            <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${h("label.managed")}</th><th>${h("label.target")}</th><th>${h("label.type")}</th><th>${h("label.source")}</th></tr></thead><tbody>
             ${(this.view.targets||[]).map(a=>d`<tr><td></td><td><code>${a.id||""}</code></td><td>${a.type||""}</td><td>${a.source||""}</td></tr>`)}
             ${(this.view.addons||[]).map(a=>d`<tr><td><vaadin-checkbox aria-label=${`${h("label.managed")} ${a.name}`}
               .checked=${(this.view.selected_addons||[]).includes(a.slug)} ?disabled=${n}
               @change=${l=>{let u=l.target.checked;l.target.checked=(this.view.selected_addons||[]).includes(a.slug),this.toggleAddon(a.slug,u)}}></vaadin-checkbox></td><td>${a.name}</td><td>${h("label.addon")}</td><td>${a.slug}</td></tr>`)}
-          </tbody></table></div>
+            </tbody></table></div>
+          </vaadin-details>
         </section>
         <section class="card wide"><h2>${h("heading.release_snapshots")}</h2>
           <p>${h("notice.release_snapshots")}</p>

@@ -295,6 +295,8 @@ EN_TEXT = {
     "confirm.acknowledge_recovery": "I reviewed the current paths and refs. Clear this recovery block and require a fresh Preview?",
     "confirm.retry_interrupted_save": "Push the marked Save commit only if the remote tip still matches the reviewed evidence?",
     "heading.managed_targets": "Managed Targets",
+    "notice.managed_targets": "Configured targets come from the manifest. Installed Apps are optional: selecting an App includes its configuration in both Save HA to Git and Apply Git to HA. Changing this selection does not immediately change live Home Assistant.",
+    "label.show_managed_targets": "Show managed targets",
     "heading.pending_deleted_devices_diff": "Pending {entries} cleanup",
     "heading.release_snapshots": "Release Snapshots",
     "heading.reset_git_state": "Reset Git State",

@@ -999,6 +999,7 @@ class HaOpsApp extends LitElement {
     acceptedCommandId: { type: String },
     uncertainCommandId: { type: String },
     clientError: { type: String },
+    managedTargetsOpen: { type: Boolean },
   };
 
   static styles = css`
@@ -1111,6 +1112,7 @@ class HaOpsApp extends LitElement {
     this.acceptedCommandId = null;
     this.uncertainCommandId = null;
     this.clientError = "";
+    this.managedTargetsOpen = false;
   }
 
   connectedCallback() {
@@ -1403,15 +1405,20 @@ class HaOpsApp extends LitElement {
           <p>${this.view.auth_mode || ""}</p>
           ${this.actionButton("generate_key", t("action.generate_deploy_key"), { disabled: controlsBlocked })}
         </section>
-        <section class="card wide"><h2>${t("heading.managed_targets")}</h2>
-          <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${t("label.managed")}</th><th>${t("label.target")}</th><th>${t("label.type")}</th><th>${t("label.source")}</th></tr></thead><tbody>
+        <section class="card wide" data-testid="managed-targets-section"><h2>${t("heading.managed_targets")}</h2>
+          <p>${t("notice.managed_targets")}</p>
+          <vaadin-details .opened=${this.managedTargetsOpen}
+            @opened-changed=${(event) => { this.managedTargetsOpen = event.detail.value; }}>
+            <vaadin-details-summary slot="summary">${t("label.show_managed_targets")}</vaadin-details-summary>
+            <div class="table-scroll"><table class="managed-targets-table"><thead><tr><th>${t("label.managed")}</th><th>${t("label.target")}</th><th>${t("label.type")}</th><th>${t("label.source")}</th></tr></thead><tbody>
             ${(this.view.targets || []).map((target) => html`<tr><td></td><td><code>${target.id || ""}</code></td><td>${target.type || ""}</td><td>${target.source || ""}</td></tr>`)}
             ${(this.view.addons || []).map((addon) => html`<tr><td><vaadin-checkbox aria-label=${`${t("label.managed")} ${addon.name}`}
               .checked=${(this.view.selected_addons || []).includes(addon.slug)} ?disabled=${controlsBlocked}
               @change=${(event) => { const requested = event.target.checked;
                 event.target.checked = (this.view.selected_addons || []).includes(addon.slug);
                 this.toggleAddon(addon.slug, requested); }}></vaadin-checkbox></td><td>${addon.name}</td><td>${t("label.addon")}</td><td>${addon.slug}</td></tr>`)}
-          </tbody></table></div>
+            </tbody></table></div>
+          </vaadin-details>
         </section>
         <section class="card wide"><h2>${t("heading.release_snapshots")}</h2>
           <p>${t("notice.release_snapshots")}</p>

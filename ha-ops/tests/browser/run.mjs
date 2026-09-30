@@ -79,6 +79,53 @@ async function inspectPage(page, label) {
   await page.screenshot({ path: path.join(artifactsDir, `${label}.png`), fullPage: true });
 }
 
+async function exerciseManagedTargets(page, secondTab, baseUrl, label) {
+  const section = page.getByTestId("managed-targets-section");
+  const details = section.locator("vaadin-details");
+  const table = section.locator(".managed-targets-table");
+  await section.getByRole("heading", { name: "Managed Targets" }).waitFor();
+  await section.getByText("Configured targets come from the manifest.", { exact: false }).waitFor();
+  assert((await section.textContent()).includes("both Save HA to Git and Apply Git to HA"), `${label}: selection effect not explained`);
+  assert((await section.textContent()).includes("does not immediately change live Home Assistant"), `${label}: live effect not explained`);
+  assert(!(await details.evaluate((node) => node.opened)) && !(await table.isVisible()), `${label}: table starts expanded`);
+  await details.locator("vaadin-details-summary").click();
+  assert((await details.evaluate((node) => node.opened)) && await table.isVisible(), `${label}: table did not open`);
+  const checkbox = section.locator('vaadin-checkbox[aria-label="Managed Local MQTT"]');
+  await checkbox.waitFor();
+  const before = await checkbox.evaluate((node) => node.checked);
+  const previousAction = (await stateAt(baseUrl)).last_action;
+  await checkbox.click();
+  await page.waitForFunction((wasChecked) =>
+    document.querySelector("ha-ops-app")?.view.selected_addons.includes("local_mqtt") !== wasChecked, before);
+  const selectedView = (await (await fetch(`${baseUrl}api/v1/state`)).json()).view;
+  assert(selectedView.selected_addons.includes("local_mqtt") !== before, `${label}: App selection was not saved`);
+  assert((await stateAt(baseUrl)).last_action === previousAction, `${label}: App selection started a live action`);
+  assert((await checkbox.evaluate((node) => node.checked)) !== before, `${label}: checkbox did not update`);
+  assert(await details.evaluate((node) => node.opened), `${label}: selection collapsed the table`);
+  await page.locator("ha-ops-app").evaluate(async (app) => { app.uncertainCommandId = "fixture"; await app.updateComplete; });
+  assert(await checkbox.evaluate((node) => node.disabled), `${label}: checkbox enabled while commands are blocked`);
+  await page.locator("ha-ops-app").evaluate(async (app) => { app.uncertainCommandId = null; await app.updateComplete; });
+  await details.locator("vaadin-details-summary").click();
+  assert(!(await details.evaluate((node) => node.opened)) && !(await table.isVisible()), `${label}: table did not collapse`);
+  await details.locator("vaadin-details-summary").click();
+  await page.reload();
+  await section.getByRole("heading", { name: "Managed Targets" }).waitFor();
+  assert(!(await details.evaluate((node) => node.opened)) && !(await table.isVisible()), `${label}: reload retained expansion`);
+  assert((await section.getByText("Configured targets come from the manifest.", { exact: false }).isVisible()), `${label}: explanation disappeared on reload`);
+  if (secondTab) {
+    const otherDetails = secondTab.getByTestId("managed-targets-section").locator("vaadin-details");
+    assert(!(await otherDetails.evaluate((node) => node.opened)), `${label}: second tab inherited expansion`);
+  }
+  await page.screenshot({ path: path.join(artifactsDir, `${label}-managed-targets-collapsed.png`), fullPage: true });
+  await details.locator("vaadin-details-summary").click();
+  await page.screenshot({ path: path.join(artifactsDir, `${label}-managed-targets-expanded.png`), fullPage: true });
+  if ((await checkbox.evaluate((node) => node.checked)) !== before) {
+    await checkbox.click();
+    await page.waitForFunction((wasChecked) =>
+      document.querySelector("ha-ops-app")?.view.selected_addons.includes("local_mqtt") === wasChecked, before);
+  }
+}
+
 async function exerciseWorkflow(page, baseUrl, label) {
   await page.reload();
   await page.locator("ha-ops-app").waitFor();
@@ -218,6 +265,7 @@ try {
   const secondTab = await desktop.newPage();
   await secondTab.goto(baseUrl);
   await inspectPage(secondTab, "second-tab-desktop");
+  await exerciseManagedTargets(page, secondTab, baseUrl, "desktop");
   await page.getByRole("button", { name: "Preview Git to HA" }).click();
   const previewState = await waitForState(baseUrl, (state) => state.last_action === "preview" && state.last_status === "success", "Git to HA preview");
   assert(previewState.last_preview_paths.length > 0, "Preview returned no reviewed paths");
@@ -293,6 +341,7 @@ try {
   phone.on("pageerror", (error) => pageErrors.push(error.message));
   await phone.goto(baseUrl);
   await inspectPage(phone, "apply-preview-mobile");
+  await exerciseManagedTargets(phone, null, baseUrl, "phone");
   await phone.getByText("Change List").waitFor();
   await exerciseWorkflow(page, baseUrl, "desktop");
   await exerciseWorkflow(phone, baseUrl, "phone");
