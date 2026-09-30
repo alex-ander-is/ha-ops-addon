@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.1.0
+
+- Keep Managed Targets guidance visible and collapse its table by default.
+- Explain how selecting Apps affects Save HA to Git and Apply Git to HA.
+- Reset the table disclosure on reload without sharing its state between tabs.
+
 ## 2.0.2
 
 - Ignore recursively empty Git checkout directories while still refusing untracked files.
