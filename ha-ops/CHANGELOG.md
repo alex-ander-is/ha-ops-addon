@@ -2,6 +2,10 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.2.2
+
+- Keep Acknowledge & Proceed before Retry Git to HA while Retry replaces the disabled Apply action.
+
 ## 2.2.1
 
 - Present the missing or stale backup notice as an ERROR badge.

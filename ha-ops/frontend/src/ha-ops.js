@@ -711,11 +711,11 @@ class HaOpsPreview extends LitElement {
               <span class="backup-warning-badge">ERROR</span>
               ${TEXT.backupRequired.replace("{hours}", String(this.state.apply_backup_refusal.max_age_hours))}
             </span>
-            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("retry")}>
-              ${TEXT.retryApply}
-            </vaadin-button>
             <vaadin-button theme="secondary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("acknowledge")}>
               ${TEXT.acknowledgeBackup}
+            </vaadin-button>
+            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("retry")}>
+              ${TEXT.retryApply}
             </vaadin-button>
           ` : html`
             <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>

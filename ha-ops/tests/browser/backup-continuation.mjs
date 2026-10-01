@@ -70,10 +70,12 @@ try {
     const dom = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
       return { text: footer.innerText, tags: [...footer.querySelectorAll("vaadin-button")].map(e => e.localName),
-        actions: [...footer.querySelectorAll("vaadin-button")].map(e => ({ text: e.textContent.trim(), theme: e.getAttribute("theme") })),
+        actions: [...footer.querySelectorAll("vaadin-button")].map(e => ({ text: e.textContent.trim(), theme: e.getAttribute("theme"), right: e.getBoundingClientRect().right })),
         rects: [...footer.querySelectorAll(".backup-warning, vaadin-button")].map(e => ({ text: e.textContent.trim(), top: e.getBoundingClientRect().top, bottom: e.getBoundingClientRect().bottom })) };
     });
     assert(dom.tags.length === 2, "continuations must be Vaadin controls");
+    assert(dom.actions[0].text === "Acknowledge & Proceed" && dom.actions[0].theme === "secondary", "Acknowledge must precede Retry as the secondary action");
+    assert(dom.actions[1].text === "Retry Git to HA" && dom.actions[1].theme === "primary" && dom.actions[0].right < dom.actions[1].right, "Retry must occupy the final Apply action position");
     assert(Math.max(...dom.rects.map(r => r.top)) < Math.min(...dom.rects.map(r => r.bottom)), "warning and buttons not on same desktop row");
     await page.screenshot({ path: `${artifacts}/${transport}-backup-warning.png`, fullPage: true });
     const reloadCounters = (await (await fetch(`${baseUrl}__dev_harness__/diagnostics`)).json()).counters;

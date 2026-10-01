@@ -119,10 +119,12 @@ a stale backup and automatic backup creation is disabled, Apply ends with a
 failed terminal command and releases its operation fence. The reviewed diff,
 preview identity, selections, and HA/Git choices remain available.
 
-The Apply footer shows the configured freshness limit, **Acknowledge & Proceed**,
-and **Retry Git to HA**. Retry uses normal backup policy, including configured
-backup creation. Acknowledge skips the system backup gate for one attempt only;
-it does not query freshness again. Both use the existing `apply` command and
+The Apply footer shows the configured freshness limit, then **Acknowledge & Proceed**,
+then **Retry Git to HA**. Retry occupies the original Apply action position at the
+end of the footer and keeps the primary style; Acknowledge is secondary. Retry
+uses normal backup policy, including configured backup creation. Acknowledge
+skips the system backup gate for one attempt only; it does not query freshness
+again. Both use the existing `apply` command and
 job, rerun all preview and limit checks, and retain optional local snapshots,
 protected storage approval, live execution, and rollback behavior.
 

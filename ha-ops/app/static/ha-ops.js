@@ -2035,11 +2035,11 @@ var Ie=globalThis,De=Ie.ShadowRoot&&(Ie.ShadyCSS===void 0||Ie.ShadyCSS.nativeSha
               <span class="backup-warning-badge">ERROR</span>
               ${c.backupRequired.replace("{hours}",String(this.state.apply_backup_refusal.max_age_hours))}
             </span>
-            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("retry")}>
-              ${c.retryApply}
-            </vaadin-button>
             <vaadin-button theme="secondary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("acknowledge")}>
               ${c.acknowledgeBackup}
+            </vaadin-button>
+            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("retry")}>
+              ${c.retryApply}
             </vaadin-button>
           `:d`
             <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction()}>
