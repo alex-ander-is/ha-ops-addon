@@ -10,6 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import pytest
+
 import test_server
 
 
@@ -72,6 +74,17 @@ def invalid_backup_responses():
     for result in ("error", "unknown", None, False, 0, []):
         yield {"result": result, "data": {"backups": []}}
         yield {"result": result, "backups": []}
+
+
+def invalid_apply_backup_inventories():
+    # Policy tests exhaust every ordering. Exercise every singleton family
+    # and the original six mixed-inventory counterexamples through real Apply.
+    mixed_cases = {f"{case} {order} old" for case in ("invalid date", "fresh without storage", "empty entry")
+                   for order in ("before", "after")}
+    for name, response in invalid_backup_inventories():
+        if (" after " in name or " before " in name) and name not in mixed_cases:
+            continue
+        yield name, response
 
 
 def ambiguous_created_backup_inventories():
@@ -257,29 +270,6 @@ class BackupContinuationTests(unittest.TestCase):
         self.assertIsNone(state.get("apply_backup_refusal"))
         self.assertEqual(state["active_operation"]["phase"], "recovery_required")
 
-    def test_invalid_inventory_families_retain_real_apply_fence_without_effects(self):
-        before = self.ctx.read_state()
-        for name, response in invalid_backup_inventories():
-            # Policy tests exhaust every ordering. Exercise every singleton
-            # family and the returned mixed-inventory counterexamples here.
-            if " after " in name or " before " in name:
-                if name not in {f"{case} {order} old" for case in ("invalid date", "fresh without storage", "empty entry") for order in ("before", "after")}:
-                    continue
-            with self.subTest(case=name):
-                self.ctx.write_state(copy.deepcopy(before))
-                self.server.backup_manager_info = Mock(return_value=response)
-                with patch.object(self.ctx, "create_release_snapshot") as snapshot, patch.object(self.ctx, "commit_apply_merge") as commit, patch.object(self.ctx, "apply_targets") as apply:
-                    envelope = self.envelope()
-                    result, state = self.send(envelope)
-                self.assertTrue(result["ok"], result)
-                self.assertIsNone(state.get("apply_backup_refusal"))
-                self.assertEqual(state["active_operation"]["phase"], "recovery_required")
-                self.assertEqual(state["active_operation"]["command_id"], envelope["command_id"])
-                self.assertFalse(state["command_records"][envelope["command_id"]]["result"]["ok"])
-                snapshot.assert_not_called(); commit.assert_not_called(); apply.assert_not_called()
-                self.assertIn("name: Live", (self.server.CONFIG_DIR / "configuration.yaml").read_text())
-                self.assertFalse(self.send(self.envelope("acknowledge"))[0]["ok"])
-
     def test_real_local_backup_stale_refusal_then_fresh_retry(self):
         # Supervisor's null list member denotes local /backup storage.
         self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(locations=[None])]})
@@ -354,38 +344,6 @@ class BackupContinuationTests(unittest.TestCase):
         self.assertIsNone(state["active_operation"])
         self.assertIn("Created fresh system backup:", "\n".join(state["last_details"]))
         self.assertIn("name: Git", (self.server.CONFIG_DIR / "configuration.yaml").read_text())
-
-    def test_real_retry_rejects_ambiguous_post_creation_inventory_in_either_order(self):
-        for name, inventory in ambiguous_created_backup_inventories():
-            with self.subTest(case=name):
-                # Each case gets its own real Git/config fixture, so an unsafe
-                # Apply cannot contaminate the next ordering's reproduction.
-                case = BackupContinuationTests()
-                try:
-                    case.setUp()
-                    envelope = case.prepare_retry_with_backup_creation(
-                        {"result": "ok", "data": {"slug": "created"}}, inventory=inventory,
-                    )
-                    case.assert_retry_creation_failure(envelope, "inventory is invalid")
-                    creation_calls = [call for call in case.ctx.call_supervisor.call_args_list
-                                      if call.args[:2] == ("POST", "/backups/new/full")]
-                    self.assertEqual(len(creation_calls), 1)
-                    self.assertEqual(case.server.backup_manager_info.call_count, 2)
-                finally:
-                    case.doCleanups()
-
-    def test_error_response_with_backup_data_cannot_publish_continuation(self):
-        import supervisor
-        before = self.ctx.read_state()
-        for response in invalid_backup_responses():
-            with self.subTest(response=response):
-                self.ctx.write_state(copy.deepcopy(before))
-                self.server.backup_manager_info = lambda: supervisor.backup_manager_info(Mock(return_value=response))
-                with patch.object(self.ctx, "create_release_snapshot") as snapshot, patch.object(self.ctx, "apply_targets") as apply:
-                    _, state = self.send()
-                self.assertIsNone(state.get("apply_backup_refusal"))
-                self.assertEqual(state["active_operation"]["phase"], "recovery_required")
-                snapshot.assert_not_called(); apply.assert_not_called()
 
     def test_real_apply_still_creates_configured_backup_before_writing(self):
         options = json.loads(self.server.OPTIONS_PATH.read_text())
@@ -689,6 +647,68 @@ class BackupContinuationTests(unittest.TestCase):
                 self.assertEqual(state["last_status"], "error")
                 self.assertIn("No fresh system backup", state["last_message"])
                 self.assertIsNone(state.get("apply_backup_refusal"))
+
+
+@pytest.fixture
+def continuation_case():
+    # Keep the existing real Git/config setup and its cleanup stack, including
+    # cleanup after a partial setup failure. Each parameter gets a fresh case.
+    case = BackupContinuationTests()
+    try:
+        case.setUp()
+        yield case
+    finally:
+        assert case.doCleanups(), "Backup continuation fixture cleanup failed"
+
+
+@pytest.mark.parametrize("case_name", [name for name, _ in ambiguous_created_backup_inventories()])
+def test_real_retry_rejects_ambiguous_post_creation_inventory_in_either_order(continuation_case, case_name):
+    # Names are deterministic across xdist workers; build timestamped payloads
+    # at execution time so a collection delay cannot age a fresh backup.
+    inventory = dict(ambiguous_created_backup_inventories())[case_name]
+    case = continuation_case
+    envelope = case.prepare_retry_with_backup_creation(
+        {"result": "ok", "data": {"slug": "created"}}, inventory=inventory,
+    )
+    case.assert_retry_creation_failure(envelope, "inventory is invalid")
+    creation_calls = [call for call in case.ctx.call_supervisor.call_args_list
+                      if call.args[:2] == ("POST", "/backups/new/full")]
+    case.assertEqual(len(creation_calls), 1)
+    case.assertEqual(case.server.backup_manager_info.call_count, 2)
+
+
+@pytest.mark.parametrize("case_name", [name for name, _ in invalid_apply_backup_inventories()])
+def test_invalid_inventory_families_retain_real_apply_fence_without_effects(continuation_case, case_name):
+    case = continuation_case
+    case.server.backup_manager_info = Mock(return_value=dict(invalid_apply_backup_inventories())[case_name])
+    with patch.object(case.ctx, "create_release_snapshot") as snapshot, patch.object(case.ctx, "commit_apply_merge") as commit, patch.object(case.ctx, "apply_targets") as apply:
+        envelope = case.envelope()
+        result, state = case.send(envelope)
+    case.assertTrue(result["ok"], result)
+    case.assertIsNone(state.get("apply_backup_refusal"))
+    case.assertEqual(state["active_operation"]["phase"], "recovery_required")
+    case.assertEqual(state["active_operation"]["command_id"], envelope["command_id"])
+    case.assertFalse(state["command_records"][envelope["command_id"]]["result"]["ok"])
+    snapshot.assert_not_called(); commit.assert_not_called(); apply.assert_not_called()
+    case.assertIn("name: Live", (case.server.CONFIG_DIR / "configuration.yaml").read_text())
+    case.assertFalse(case.send(case.envelope("acknowledge"))[0]["ok"])
+
+
+@pytest.mark.parametrize("response", [
+    pytest.param(response, id=f"{index:02d}-{'wrapped' if 'data' in response else 'flat'}")
+    for index, response in enumerate(invalid_backup_responses())
+])
+def test_error_response_with_backup_data_cannot_publish_continuation(continuation_case, response):
+    import supervisor
+    case = continuation_case
+    case.server.backup_manager_info = lambda: supervisor.backup_manager_info(Mock(return_value=response))
+    with patch.object(case.ctx, "create_release_snapshot") as snapshot, patch.object(case.ctx, "commit_apply_merge") as commit, patch.object(case.ctx, "apply_targets") as apply:
+        _, state = case.send()
+        case.assertFalse(case.send(case.envelope("acknowledge"))[0]["ok"])
+    case.assertIsNone(state.get("apply_backup_refusal"))
+    case.assertEqual(state["active_operation"]["phase"], "recovery_required")
+    snapshot.assert_not_called(); commit.assert_not_called(); apply.assert_not_called()
+    case.assertIn("name: Live", (case.server.CONFIG_DIR / "configuration.yaml").read_text())
 
 
 class BackupPolicyTests(unittest.TestCase):
