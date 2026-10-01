@@ -1970,7 +1970,20 @@ var Ie=globalThis,De=Ie.ShadowRoot&&(Ie.ShadyCSS===void 0||Ie.ShadyCSS.nativeSha
     footer { display: block; min-width: 0; max-width: 100%; }
     .footer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
     .footer-actions.apply-only { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-    .backup-warning { color: #b42318; margin-right: auto; }
+    .backup-warning { display: inline-flex; align-items: center; gap: .5rem; color: #b42318; margin-right: auto; }
+    .backup-warning-badge {
+      display: inline-flex;
+      align-items: center;
+      padding: .3rem .7rem;
+      border: 1px solid #fda29b;
+      border-radius: 999px;
+      background: #fef3f2;
+      color: #d92d20;
+      font-size: .75rem;
+      font-weight: 700;
+      line-height: 1.2;
+      text-transform: uppercase;
+    }
     ${Tn}
     vaadin-text-field.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
     @media (max-width: 700px) {
@@ -2018,12 +2031,15 @@ var Ie=globalThis,De=Ie.ShadowRoot&&(Ie.ShadyCSS===void 0||Ie.ShadyCSS.nativeSha
               @input=${this.onCommitSubjectInput}></vaadin-text-field>
           `:p}
           ${this.direction==="apply"&&this.state.apply_backup_refusal?d`
-            <span class="backup-warning" role="alert">${c.backupRequired.replace("{hours}",String(this.state.apply_backup_refusal.max_age_hours))}</span>
-            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("acknowledge")}>
-              ${c.acknowledgeBackup}
-            </vaadin-button>
+            <span class="backup-warning" role="alert">
+              <span class="backup-warning-badge">ERROR</span>
+              ${c.backupRequired.replace("{hours}",String(this.state.apply_backup_refusal.max_age_hours))}
+            </span>
             <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("retry")}>
               ${c.retryApply}
+            </vaadin-button>
+            <vaadin-button theme="secondary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction("acknowledge")}>
+              ${c.acknowledgeBackup}
             </vaadin-button>
           `:d`
             <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${()=>this.runFinalAction()}>

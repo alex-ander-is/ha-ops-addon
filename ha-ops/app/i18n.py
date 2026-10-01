@@ -22,7 +22,7 @@ EN_TEXT = {
     "action.check_retained_devices": "Check retained devices",
     "action.retry_apply": "Retry Git to HA",
     "action.acknowledge_backup": "Acknowledge & Proceed",
-    "message.backup_required": "[ERROR] No fresh system backup found within {hours} hour(s)",
+    "message.backup_required": "No fresh system backup found within {hours} hour(s)",
     "detail.backup_acknowledged_once": "Fresh system backup requirement acknowledged for this Apply attempt only.",
     "error.backup_continuation_stale": "Backup warning changed; review the current Apply preview again.",
     "action.confirm_apply": "Confirm Apply to HA",

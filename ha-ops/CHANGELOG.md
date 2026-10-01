@@ -2,6 +2,11 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.2.1
+
+- Present the missing or stale backup notice as an ERROR badge.
+- Style Retry as primary and Acknowledge & Proceed as secondary.
+
 ## 2.2.0
 
 - Allow a reviewed Git-to-HA Apply without a fresh system backup.

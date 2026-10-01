@@ -55,10 +55,13 @@ try {
     let component = await preview();
     const before = await state();
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
-    const ack = component.getByRole("button", { name: "Acknowledge & Proceed", exact: true });
     const retry = component.getByRole("button", { name: "Retry Git to HA", exact: true });
-    await ack.waitFor(); await settle();
-    assert(await component.getByRole("alert").textContent() === "[ERROR] No fresh system backup found within 24 hour(s)", "warning text mismatch");
+    const ack = component.getByRole("button", { name: "Acknowledge & Proceed", exact: true });
+    await retry.waitFor(); await settle();
+    assert((await component.getByRole("alert").innerText()).replace(/\s+/g, " ").trim() === "ERROR No fresh system backup found within 24 hour(s)", "warning text mismatch");
+    assert(await component.locator(".backup-warning-badge").textContent() === "ERROR", "backup warning badge missing");
+    assert(await retry.getAttribute("theme") === "primary", "Retry is not the primary action");
+    assert(await ack.getAttribute("theme") === "secondary", "Acknowledge is not the secondary action");
     assert(await component.getByRole("button", { name: "Cancel", exact: true }).count() === 0, "unrequested Cancel");
     assert(await component.getByRole("button", { name: "Apply Git to HA", exact: true }).count() === 0, "Apply not replaced");
     const rejected = await state();
@@ -67,6 +70,7 @@ try {
     const dom = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
       return { text: footer.innerText, tags: [...footer.querySelectorAll("vaadin-button")].map(e => e.localName),
+        actions: [...footer.querySelectorAll("vaadin-button")].map(e => ({ text: e.textContent.trim(), theme: e.getAttribute("theme") })),
         rects: [...footer.querySelectorAll(".backup-warning, vaadin-button")].map(e => ({ text: e.textContent.trim(), top: e.getBoundingClientRect().top, bottom: e.getBoundingClientRect().bottom })) };
     });
     assert(dom.tags.length === 2, "continuations must be Vaadin controls");
