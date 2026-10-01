@@ -3,6 +3,7 @@ from typing import Any
 import hashlib
 import uuid
 
+import backups
 import i18n
 import disk_usage
 import git_ops
@@ -2121,7 +2122,17 @@ def run_deleted_devices_revert_job(ctx, lock_acquired=False):
         release_run_lock(ctx)
 
 
-def run_apply_job(ctx, lock_acquired=False):
+@dataclass(frozen=True)
+class ApplyBackupRefusal:
+    operation_id: str
+    generation: int
+    max_age_hours: int
+
+    def __bool__(self):
+        return False
+
+
+def run_apply_job(ctx, lock_acquired=False, backup_mode="normal"):
     write_state = ctx.write_state
     utc_now = ctx.utc_now
 
@@ -2168,6 +2179,15 @@ def run_apply_job(ctx, lock_acquired=False):
 
     try:
         state = ctx.read_state()
+        operation = state.get(state_store.ACTIVE_OPERATION_KEY) or {}
+        if backup_mode not in {"normal", "acknowledge"} or (
+            backup_mode == "acknowledge" and (
+                operation.get("command") != "apply" or operation.get("phase") != "dispatching"
+                or operation.get("apply_backup_mode") != "acknowledge"
+                or operation.get("accepted_generation") != accepted_generation
+            )
+        ):
+            raise RuntimeError(_("error.backup_continuation_stale"))
         if state.get("deleted_devices_pending_confirmation"):
             write_pending_deleted_devices(ctx, "apply", details, resolved_targets)
             return False
@@ -2277,7 +2297,21 @@ def run_apply_job(ctx, lock_acquired=False):
             "phase": "before_backup",
         }
         write_state({"apply_intent": apply_intent})
-        backup_slug = ctx.ensure_fresh_system_backup(options, details)
+        if backup_mode == "acknowledge":
+            ctx.add_detail(details, _("detail.backup_acknowledged_once"))
+        else:
+            try:
+                backup_slug = ctx.ensure_fresh_system_backup(options, details)
+            except backups.FreshBackupRequired as exc:
+                # Return evidence only after the caught refusal has been recorded.
+                # The command finalizer atomically publishes it and releases the fence.
+                write_state({
+                    "last_run_at": utc_now(), "last_status": "error", "last_action": "apply",
+                    "last_message": str(exc), "last_details": [*details, str(exc)],
+                })
+                return ApplyBackupRefusal(
+                    apply_intent["operation_id"], accepted_generation, exc.max_age_hours,
+                )
         apply_intent = {**apply_intent, "backup_slug": backup_slug, "phase": "before_snapshot"}
         write_state({"apply_intent": apply_intent})
 

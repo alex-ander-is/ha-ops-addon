@@ -1347,8 +1347,8 @@ class AppContext:
     def run_save_job(self, commit_subject=None, lock_acquired=False):
         return job_logic.run_save_job(self.job_deps(), commit_subject=commit_subject, lock_acquired=lock_acquired)
 
-    def run_apply_job(self, lock_acquired=False):
-        return job_logic.run_apply_job(self.job_deps(), lock_acquired=lock_acquired)
+    def run_apply_job(self, backup_mode="normal", lock_acquired=False):
+        return job_logic.run_apply_job(self.job_deps(), lock_acquired=lock_acquired, backup_mode=backup_mode)
 
     def run_preview_job(self, lock_acquired=False):
         return job_logic.run_preview_job(self.job_deps(), lock_acquired=lock_acquired)

@@ -679,8 +679,20 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
             def run_claimed_command():
                 ctx.update_command(command_id, "running")
                 try:
-                    target(*args, lock_acquired=reserved_lock)
+                    outcome = target(*args, lock_acquired=reserved_lock)
                     final_state = ctx.read_state()
+                    refusal = None
+                    operation = final_state.get(state_store.ACTIVE_OPERATION_KEY) or {}
+                    if (action == "apply" and isinstance(outcome, job_logic.ApplyBackupRefusal)
+                        and outcome.operation_id == command_id == operation.get("command_id")
+                        and outcome.generation == operation.get("accepted_generation")
+                        and outcome.generation == final_state.get("operation_generation")):
+                        refusal = {
+                            "operation_id": command_id, "generation": outcome.generation,
+                            "max_age_hours": outcome.max_age_hours,
+                            "preview_identity": preview_identity_for_state(final_state, "apply"),
+                            "decision_digest": preview_decision_digest(final_state, "apply"),
+                        }
                     ctx.update_command(
                         command_id,
                         "terminal",
@@ -688,8 +700,10 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                             "ok": final_state.get("last_status") not in {"error", "interrupted"},
                             "status": final_state.get("last_status"),
                             "message": final_state.get("last_message", ""),
+                            "backup_refusal": refusal,
                             "safe_terminal": action in {"preview", "save_preview"} or (
                                 action == "apply" and
+                                (final_state.get("apply_intent") or {}).get("operation_id") == command_id and
                                 (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
                             ),
                         },
@@ -737,6 +751,7 @@ def _deleted_devices_transient_snapshot_fields(ctx, state):
 
 
 UI_STATE_FIELDS = frozenset({
+    "apply_backup_refusal",
     "last_seen_addon_version", "last_run_at", "last_status", "last_action", "last_message", "last_details",
     "last_release", "last_backup_slug", "last_diff_cursor", "last_diff_generated_at", "last_preview_commit", "last_preview_fingerprint",
     "last_preview_paths", "last_preview_conflicts", "last_preview_conflict_paths", "last_preview_live_fingerprints",
@@ -987,6 +1002,17 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                         assert_preview_decision_identity(current, direction, envelope_payload)
                         if command in {"save", "apply"} and envelope_payload.get("decision_digest") != preview_decision_digest(current, direction):
                             raise StalePreviewDecision(_("error.preview_stale_decision"))
+                    if command == "apply":
+                        mode = envelope_payload.get("backup_mode", "normal")
+                        if mode not in {"normal", "retry", "acknowledge"}:
+                            raise ValueError(_("error.backup_continuation_stale"))
+                        if mode != "normal":
+                            refusal = current.get("apply_backup_refusal") or {}
+                            if (not refusal or refusal.get("operation_id") != envelope_payload.get("backup_refusal_id")
+                                or refusal.get("generation") != current.get("operation_generation")
+                                or refusal.get("preview_identity") != preview_identity_for_state(current, "apply")
+                                or refusal.get("decision_digest") != preview_decision_digest(current, "apply")):
+                                raise StalePreviewDecision(_("error.backup_continuation_stale"))
                     if command == "internal_ids_migrate":
                         selected = envelope_payload.get("selected")
                         rows = {row.get("path"): row for row in current.get("last_internal_ids_rows") or []
@@ -1088,10 +1114,11 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         finalize_rejected(command_id, ok)
         return command_result(ok, _("message.save_preview_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "apply":
+        mode_args = ("acknowledge",) if envelope_payload.get("backup_mode") == "acknowledge" else ()
         if start_job is None:
-            ok = start_reserved_background(ctx, ctx.run_apply_job, command_id=command_id)
+            ok = start_reserved_background(ctx, ctx.run_apply_job, *mode_args, command_id=command_id)
         else:
-            ok = start_job(ctx.run_apply_job, command_id=command_id)
+            ok = start_job(ctx.run_apply_job, *mode_args, command_id=command_id)
         finalize_rejected(command_id, ok)
         return command_result(ok, _("message.apply_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     if command == "save":
@@ -1185,6 +1212,7 @@ POST_ENDPOINTS = (
     "/include-redundant-data",
     "/resolve-conflict",
     "/rollback",
+    "/__dev_harness__/backup-policy",
     "/__dev_harness__/arm",
     "/__dev_harness__/release",
     "/__dev_harness__/clear-previews",
@@ -1449,7 +1477,7 @@ def create_handler(ctx):
                         self.wfile,
                         {
                             "id": payload.get("id"),
-                            "type": "result",
+                            "type": "replay" if command == "replay" else "result",
                             **result,
                         },
                     )
@@ -1478,10 +1506,12 @@ def create_handler(ctx):
                         "deleted_devices_confirm",
                         "deleted_devices_revert",
                     }:
+                        # Sample before building the snapshot. A job may finish while
+                        # frames are sent; sampling afterward would lose its notification.
+                        last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence
                         for frame in ws_state_frames(ctx, base_revision=last_revision):
                             write_ws_frame(self.wfile, frame)
                             last_revision = int(frame.get("revision") or last_revision)
-                        last_sequence = ctx.state_change_sequence() if hasattr(ctx, "state_change_sequence") else last_sequence
 
             ingress_shell = re.fullmatch(r"/api/hassio_ingress/[^/]+/?", parsed.path) is not None
             if ("/api/" in parsed.path and not ingress_shell) or parsed.path.endswith(".json"):

@@ -32,6 +32,9 @@ const TEXT_KEYS = {
   "save": "action.save",
   "useGitVersion": "action.use_git_version",
   "useHaVersion": "action.use_ha_version",
+  "retryApply": "action.retry_apply",
+  "acknowledgeBackup": "action.acknowledge_backup",
+  "backupRequired": "message.backup_required",
   "confirmDeletedDevicesDelete": "confirm.deleted_devices_delete",
   "confirmRetainedDevicesDelete": "confirm.retained_devices_delete",
   "reloadHaOps": "action.reload_ha_ops",
@@ -351,6 +354,20 @@ class HaOpsLog extends LitElement {
 }
 customElements.define("ha-ops-log", HaOpsLog);
 
+const previewDisabledButtonStyles = css`
+    vaadin-button[disabled] {
+      background: #e5e7eb;
+      color: #6b7280;
+      border: 1px solid #d1d5db;
+      opacity: 1;
+      cursor: default;
+      --vaadin-button-background: #e5e7eb;
+      --vaadin-button-text-color: #6b7280;
+      --vaadin-button-border-color: #d1d5db;
+    }
+    vaadin-button[disabled]::part(label) { color: #6b7280; }
+`;
+
 class HaOpsPreviewFile extends LitElement {
   static properties = {
     path: { type: String }, cursor: { type: Object }, generation: { type: Number },
@@ -359,6 +376,7 @@ class HaOpsPreviewFile extends LitElement {
     direction: { type: String }, running: { type: Boolean }, wrapLines: { type: Boolean },
   };
   static styles = css`
+    ${previewDisabledButtonStyles}
     :host { display: block; min-width: 0; max-width: 100%; }
     vaadin-details { border: 1px solid var(--ha-ops-border, #d0d7de); border-radius: 8px; overflow: hidden; min-width: 0; max-width: 100%; }
     vaadin-details::part(content) { min-width: 0; max-width: 100%; overflow: hidden; }
@@ -573,7 +591,9 @@ class HaOpsPreview extends LitElement {
     .files { display: grid; gap: .5rem; min-width: 0; max-width: 100%; }
     footer { display: block; min-width: 0; max-width: 100%; }
     .footer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
-    .footer-actions.apply-only { display: flex; justify-content: flex-end; }
+    .footer-actions.apply-only { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
+    .backup-warning { color: #b42318; margin-right: auto; }
+    ${previewDisabledButtonStyles}
     vaadin-text-field.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
     @media (max-width: 700px) {
       header { align-items: stretch; }
@@ -673,9 +693,19 @@ class HaOpsPreview extends LitElement {
               ?disabled=${this.running}
               @input=${this.onCommitSubjectInput}></vaadin-text-field>
           ` : nothing}
-          <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
-            ${this.finalLabel}
-          </vaadin-button>
+          ${this.direction === "apply" && this.state.apply_backup_refusal ? html`
+            <span class="backup-warning" role="alert">${TEXT.backupRequired.replace("{hours}", String(this.state.apply_backup_refusal.max_age_hours))}</span>
+            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("acknowledge")}>
+              ${TEXT.acknowledgeBackup}
+            </vaadin-button>
+            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("retry")}>
+              ${TEXT.retryApply}
+            </vaadin-button>
+          ` : html`
+            <vaadin-button theme="primary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction()}>
+              ${this.finalLabel}
+            </vaadin-button>
+          `}
         </div>
       </footer>
     `;
@@ -739,8 +769,10 @@ class HaOpsPreview extends LitElement {
   onCommitSubjectInput = (event) => {
     this.commitSubject = event.target.value;
   };
-  async runFinalAction() {
+  async runFinalAction(backupMode = "normal") {
     if (this.isFinalActionDisabled()) return;
+    const identity = previewIdentity(this.state, this.direction);
+    const refusalId = this.state.apply_backup_refusal?.operation_id;
     const selected = new Set(this.selectedPaths);
     const decisions = [...this.paths].sort().map((path) => ({
       choice: selected.has(path) ? (this.resolutions[path] || (this.direction === "save" ? "ha" : "git"))
@@ -754,8 +786,15 @@ class HaOpsPreview extends LitElement {
     const payload = this.direction === "save"
       ? { commit_subject: this.commitSubject, default_commit_subject: this.defaultCommitSubject }
       : {};
-    payload.preview_identity = previewIdentity(this.state, this.direction);
+    // Hashing yields to the browser; never pair old decisions with a new preview.
+    if (this.isFinalActionDisabled() || JSON.stringify(identity) !== JSON.stringify(previewIdentity(this.state, this.direction))
+      || refusalId !== this.state.apply_backup_refusal?.operation_id) return;
+    payload.preview_identity = identity;
     payload.decision_digest = digest;
+    if (this.direction === "apply" && backupMode !== "normal") {
+      payload.backup_mode = backupMode;
+      payload.backup_refusal_id = refusalId;
+    }
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
       bubbles: true,
       composed: true,
@@ -1615,7 +1654,7 @@ class HaOpsApp extends LitElement {
 
   receive(frame) {
     if (frame.type === "ready" || frame.type === "replay") {
-      this.applyBaseline(frame);
+      if (!this.applyBaseline(frame)) return;
       this.replayPending = false;
       this.setConnection("connected");
       if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
@@ -1765,7 +1804,7 @@ class HaOpsApp extends LitElement {
         ${loading
           ? html`<div role="status">${TEXT.loadingPreviewDiff || "Loading Diff..."}</div>`
           : html`
-              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
+              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.mutationBlocked()} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
               ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}

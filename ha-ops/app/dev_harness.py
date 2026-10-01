@@ -184,6 +184,9 @@ class HarnessScenarioController:
         }
         self.events = []
         self.last_save_commit_subject = None
+        self.backup_policy = None
+        self.counters["backup_gate_calls"] = 0
+        self.counters["backup_acknowledgements"] = 0
 
     def arm(self, action, gate):
         action = self._normalize_action(action)
@@ -221,7 +224,7 @@ class HarnessScenarioController:
             self.counters["ws_replays_seen"] += 1
             self.events.append({"phase": "ws-replay"})
 
-    def run_job(self, ctx, action, lock_acquired=False, commit_subject=None):
+    def run_job(self, ctx, action, lock_acquired=False, commit_subject=None, backup_mode="normal"):
         action = self._normalize_action(action)
         if not job_logic.enter_run_lock(ctx, action, lock_acquired):
             return False
@@ -255,6 +258,17 @@ class HarnessScenarioController:
             elif action == "save_preview":
                 self._write_save_preview(ctx, details)
             elif action == "apply":
+                if self.backup_policy is not None:
+                    if backup_mode == "acknowledge":
+                        self.counters["backup_acknowledgements"] += 1
+                    else:
+                        self.counters["backup_gate_calls"] += 1
+                        if self.backup_policy == "missing":
+                            state = ctx.read_state()
+                            ctx.write_state({"last_status": "error", "last_message": "No fresh system backup found within 24 hour(s)"})
+                            return job_logic.ApplyBackupRefusal(
+                                state["active_operation"]["command_id"], state["operation_generation"], 24,
+                            )
                 self._write_apply_complete(ctx, details)
             elif action == "deleted_devices_preview":
                 self._write_deleted_devices_preview(ctx, details)
@@ -806,8 +820,8 @@ class DevHarnessContext(app_context.AppContext):
     def run_save_preview_job(self, lock_acquired=False):
         return self.harness_controller.run_job(self, "save_preview", lock_acquired=lock_acquired)
 
-    def run_apply_job(self, lock_acquired=False):
-        return self.harness_controller.run_job(self, "apply", lock_acquired=lock_acquired)
+    def run_apply_job(self, backup_mode="normal", lock_acquired=False):
+        return self.harness_controller.run_job(self, "apply", lock_acquired=lock_acquired, backup_mode=backup_mode)
 
     def run_save_job(self, commit_subject=None, lock_acquired=False):
         return self.harness_controller.run_job(self, "save", lock_acquired=lock_acquired, commit_subject=commit_subject)
@@ -858,6 +872,12 @@ class DevHarnessContext(app_context.AppContext):
         return None
 
     def dev_harness_handle_post(self, route, body):
+        if route == "/__dev_harness__/backup-policy":
+            policy = _first(body, "policy")
+            if policy not in {"missing", "fresh"}:
+                return {"ok": False, "status": 400}
+            self.harness_controller.backup_policy = policy
+            return {"ok": True}
         if route == "/__dev_harness__/seed-internal-ids":
             config = self.internal_ids_config_dir()
             storage = config / ".storage"

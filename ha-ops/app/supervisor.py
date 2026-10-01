@@ -132,14 +132,23 @@ def create_ha_backup(name_prefix, backup_location, call_supervisor, release_now)
     if backup_location:
         payload["location"] = backup_location
     result = call_supervisor("POST", "/backups/new/full", payload)
-    slug = result.get("data", {}).get("slug") or result.get("slug")
-    if not slug:
+    # As with the inventory endpoint, an explicit unsuccessful envelope must
+    # not become a success merely because it happens to include backup data.
+    if not isinstance(result, dict) or ("result" in result and result["result"] != "ok"):
+        raise RuntimeError("Backup creation failed: Supervisor response is unavailable or invalid.")
+    data = result.get("data", result)
+    if not isinstance(data, dict):
+        raise RuntimeError("Backup creation failed: Supervisor backup data is invalid.")
+    slug = data.get("slug") or result.get("slug")
+    if not isinstance(slug, str) or not slug.strip():
         raise RuntimeError(f"Backup creation did not return a slug: {result}")
     return slug
 
 
 def backup_manager_info(call_supervisor):
     payload = call_supervisor("GET", "/backups/info")
+    if not isinstance(payload, dict) or ("result" in payload and payload["result"] != "ok"):
+        raise RuntimeError("Backup manager response is unavailable or invalid.")
     return payload.get("data", payload)
 
 

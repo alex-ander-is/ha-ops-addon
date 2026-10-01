@@ -110,6 +110,40 @@ Overlay apply cannot delete a live file. For conflict previews where the user
 chooses a Git-side delete, `delete_apply_conflict_live_deletions(...)` performs
 the selected live deletion after the normal overlay apply.
 
+## Continuing After a Missing or Stale System Backup
+
+Apply checks the existing backup policy after rebuilding and validating the
+reviewed preview and before creating a local release snapshot or writing live
+configuration. When a completed check finds no eligible system backup or only
+a stale backup and automatic backup creation is disabled, Apply ends with a
+failed terminal command and releases its operation fence. The reviewed diff,
+preview identity, selections, and HA/Git choices remain available.
+
+The Apply footer shows the configured freshness limit, **Acknowledge & Proceed**,
+and **Retry Git to HA**. Retry uses normal backup policy, including configured
+backup creation. Acknowledge skips the system backup gate for one attempt only;
+it does not query freshness again. Both use the existing `apply` command and
+job, rerun all preview and limit checks, and retain optional local snapshots,
+protected storage approval, live execution, and rollback behavior.
+
+The warning is bound to the failed command, operation generation, full preview
+identity, and decision digest. Claim validates and consumes it atomically with
+reserving the next Apply operation. Duplicate delivery of the same command ID
+replays its result; another command ID cannot reuse consumed acknowledgement.
+No global backup option changes and no reusable consent is stored.
+
+Only a typed refusal returned by the caught pre-snapshot gate can publish this
+warning and release the matching operation fence. Status/query failures,
+invalid backup metadata or location, backup creation failures, and uncertain
+or downstream Apply failures retain the existing recovery behavior. A stale
+intent or similarly worded exception never grants continuation authority.
+
+Reload and reconnect can display an unconsumed current warning but do not
+submit an action. Decision edits, any newly claimed mutation, replacement or
+cleared previews, completion, startup repair, and version repair clear it.
+An interrupted continuation remains governed by the existing durable Apply
+fence; recovery never restores consumed acknowledgement.
+
 ## Preview State and Staleness
 
 Preview state is a safety gate, not UI cache.

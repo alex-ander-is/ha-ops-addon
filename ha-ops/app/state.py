@@ -280,6 +280,7 @@ def cleanup_action_allowed(state, action):
     return True
 
 APPLY_PREVIEW_CLEAR_UPDATES = {
+    "apply_backup_refusal": None,
     "apply_preview_id": None,
     "apply_decision_revision": 0,
     "last_diff": "",
@@ -653,6 +654,10 @@ def write_state(path, updates):
     with STATE_LOCK:
         current = read_state(path, hydrate_diffs=False)
         current.update(updates)
+        if any(key in PREVIEW_GENERATION_FIELDS or key in {
+            "apply_preview_id", "apply_decision_revision", "apply_preview_selected_paths", "apply_preview_resolutions",
+        } for key in updates):
+            current["apply_backup_refusal"] = None
         current["state_revision"] = int(current.get("state_revision") or 0) + 1
         current["operation_generation"] = int(current.get("operation_generation") or 0)
         advance_generation = any(key in PREVIEW_GENERATION_FIELDS for key in updates)
@@ -698,6 +703,8 @@ class OperationStore:
 
     def begin_repair(self):
         with self._condition:
+            # A restart expires the warning; no consent survives process recovery.
+            write_state(self.path, {"apply_backup_refusal": None})
             self._readiness_generation += 1
             self._readiness = READINESS_RUNNING
             self._blocked_message = ""
@@ -1003,6 +1010,8 @@ class OperationStore:
                 if not isinstance(validated_updates, dict):
                     raise ValueError("command validation returned invalid state updates")
                 current.update(validated_updates)
+            # Validation and consumption share the same durable claim/reservation.
+            current["apply_backup_refusal"] = None
             now = datetime.now(timezone.utc).isoformat()
             record = {
                 "command_id": canonical_id,
@@ -1023,6 +1032,7 @@ class OperationStore:
                     "command": command,
                     "payload_sha256": payload_digest,
                     "accepted_generation": current_generation,
+                    "apply_backup_mode": payload.get("backup_mode", "normal") if command == "apply" else None,
                     "phase": "accepted",
                     "accepted_at": now,
                 }
@@ -1054,7 +1064,14 @@ class OperationStore:
                 if status == "running" and operation.get("phase") == "accepted":
                     current[ACTIVE_OPERATION_KEY] = {**operation, "phase": "dispatching"}
                 elif status == "terminal":
-                    if operation.get("phase") == "accepted" or isinstance(result, dict) and (
+                    refusal = result.get("backup_refusal") if isinstance(result, dict) else None
+                    if (record.get("command") == "apply" and isinstance(refusal, dict)
+                        and refusal.get("operation_id") == str(command_id)
+                        and refusal.get("generation") == operation.get("accepted_generation")
+                        and refusal.get("generation") == current.get("operation_generation")):
+                        current["apply_backup_refusal"] = refusal
+                        current[ACTIVE_OPERATION_KEY] = None
+                    elif operation.get("phase") == "accepted" or isinstance(result, dict) and (
                         result.get("ok") is True or result.get("safe_terminal") is True
                     ):
                         current[ACTIVE_OPERATION_KEY] = None

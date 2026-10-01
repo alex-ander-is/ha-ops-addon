@@ -120,6 +120,8 @@ Skipped:
 - The preview decision plus `Confirm Apply to HA` is the explicit approval for selected `.storage` changes. Protected allowlisted `.storage` files are written from Git to HA only through this matching preview decision flow.
 - Unmanaged auth, session, token, secret, database, log, cache, downloaded integration, frontend, and runtime files are left intact.
 - Apply requires a fresh system backup visible in Home Assistant Backups and stored in a configured backup location by default.
+- If a completed check finds a missing or stale backup and automatic creation is disabled, the reviewed Change List stays available. **Retry Git to HA** checks normal backup policy again and proceeds when it passes. **Acknowledge & Proceed** skips that backup requirement for one attempt without checking freshness again. Local release snapshots, preview validation, deletion limits, protected storage approval, and rollback still apply.
+- Backup acknowledgement applies only to the current reviewed selection. Editing decisions, starting another action, clearing the preview, or restarting/updating HA Ops expires the warning. Reloading can show a current warning but never starts Apply automatically. Backup API, location, and creation errors use the usual recovery flow.
 - Apply must match the last `Preview Git to HA` commit and diff fingerprint.
 - Local release snapshots are pruned by configured count and age.
 - A change resolver classifies Home Assistant changes as YAML and/or `.storage`; lifecycle actions are controlled by explicit flags.

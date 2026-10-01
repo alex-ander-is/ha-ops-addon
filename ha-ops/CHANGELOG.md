@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.2.0
+
+- Allow a reviewed Git-to-HA Apply without a fresh system backup.
+- Offer Acknowledge & Proceed or Retry when the verified backup gate blocks Apply; bind acknowledgement to the exact preview decision and consume it once.
+- Validate backup inventories and successful backup creation responses before Apply or Retry, while preserving other preview, snapshot, and recovery safeguards.
+- Keep Apply follow-up actions available through WebSocket replay and completion updates.
+
 ## 2.1.1
 
 - Let the Log card grow to the height of the controls before its own scrollbar appears.
