@@ -133,7 +133,8 @@ class BackupContinuationTests(unittest.TestCase):
         state = self.ctx.read_state()
         payload = {
             "preview_identity": self.server.web.preview_identity_for_state(state, "apply"),
-            "decision_digest": self.server.web.preview_decision_digest(state, "apply"),
+            "selected_paths": list(state["apply_preview_selected_paths"]),
+            "resolutions": dict(state["apply_preview_resolutions"]),
         }
         if mode != "normal":
             payload.update(backup_mode=mode, backup_refusal_id=(state.get("apply_backup_refusal") or {}).get("operation_id"))
@@ -387,7 +388,8 @@ class BackupContinuationTests(unittest.TestCase):
         with patch.object(self.ctx, "create_release_snapshot") as snapshot, patch.object(self.ctx, "commit_apply_merge") as commit, patch.object(self.ctx, "apply_targets") as apply:
             after = self.refuse()
         snapshot.assert_not_called(); commit.assert_not_called(); apply.assert_not_called()
-        for key in ("apply_preview_id", "apply_decision_revision", "last_preview_commit", "last_preview_fingerprint", "apply_preview_selected_paths", "apply_preview_resolutions", "last_diff", "last_diff_cursor", "operation_generation"):
+        self.assertEqual(after["apply_decision_revision"], before["apply_decision_revision"] + 1)
+        for key in ("apply_preview_id", "last_preview_commit", "last_preview_fingerprint", "apply_preview_selected_paths", "apply_preview_resolutions", "last_diff", "last_diff_cursor", "operation_generation"):
             self.assertEqual(before.get(key), after.get(key), key)
         self.assertTrue(self.ctx.operation_store.diff_get(after["last_diff_cursor"]))
         self.assertFalse(after["command_records"][after["apply_backup_refusal"]["operation_id"]]["result"]["ok"])
@@ -422,7 +424,7 @@ class BackupContinuationTests(unittest.TestCase):
     def test_fabricated_and_stale_acknowledgement_rejected_at_claim(self):
         self.assertFalse(self.send(self.envelope("acknowledge"))[0]["ok"])
         self.refuse()
-        for field, value in (("backup_refusal_id", "fake"), ("decision_digest", "fake"), ("backup_mode", "skip")):
+        for field, value in (("backup_refusal_id", "fake"), ("resolutions", {"homeassistant/configuration.yaml": "ha"}), ("backup_mode", "skip")):
             with self.subTest(field=field):
                 envelope = self.envelope("acknowledge"); envelope["payload"][field] = value
                 self.assertFalse(self.send(envelope)[0]["ok"])
@@ -596,7 +598,8 @@ class BackupContinuationTests(unittest.TestCase):
                 def envelope(mode):
                     state = ctx.read_state()
                     payload = {"preview_identity": server.web.preview_identity_for_state(state, "apply"),
-                               "decision_digest": server.web.preview_decision_digest(state, "apply")}
+                               "selected_paths": list(state["apply_preview_selected_paths"]),
+                               "resolutions": dict(state["apply_preview_resolutions"])}
                     if mode == "acknowledge":
                         payload.update(backup_mode=mode, backup_refusal_id=state["apply_backup_refusal"]["operation_id"])
                     return {"command_id": str(uuid.uuid4()), "generation": state["operation_generation"], "payload": payload}

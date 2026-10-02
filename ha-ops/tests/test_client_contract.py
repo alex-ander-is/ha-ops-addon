@@ -199,6 +199,62 @@ class ClientContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "active|uncertain"):
                     restarted.claim_command(str(uuid.uuid4()), "disk_usage", current["operation_generation"], {})
 
+    def test_complete_preview_batch_replaces_and_replays_atomically(self):
+        from unittest.mock import patch
+        for direction in ("apply", "save"):
+            with self.subTest(direction=direction), tempfile.TemporaryDirectory() as tmp:
+                store = state.OperationStore(Path(tmp) / "state.json")
+                paths_key = "last_preview_paths" if direction == "apply" else "last_save_preview_paths"
+                store.write_state({paths_key: ["a.yaml", "b.yaml"],
+                                   f"{direction}_preview_selected_paths": ["b.yaml"],
+                                   f"{direction}_preview_resolutions": {"b.yaml": "git"}})
+                current = store.read_state()
+                payload = {"preview_identity": web.preview_identity_for_state(current, direction),
+                           "selected_paths": ["a.yaml"], "resolutions": {}}
+                ctx = SimpleNamespace(read_state=store.read_state, claim_command=store.claim_command,
+                                      update_command=store.update_command, run_apply_job=lambda: None,
+                                      run_save_job=lambda: None)
+                envelope = {"command_id": str(uuid.uuid4()), "generation": current["operation_generation"], "payload": payload}
+                jobs = []
+                with patch.object(web, "_snapshot_payload", return_value={}):
+                    result = web.dispatch_command(ctx, direction, envelope, start_job=lambda *a, **k: jobs.append(a) or True)
+                    self.assertTrue(result["ok"], result)
+                    after = store.read_state()
+                    self.assertEqual(after[f"{direction}_preview_selected_paths"], ["a.yaml"])
+                    self.assertEqual(after[f"{direction}_preview_resolutions"], {})
+                    self.assertEqual(after[f"{direction}_decision_revision"], 1)
+                    self.assertTrue(web.dispatch_command(ctx, direction, envelope)["duplicate"])
+                    self.assertEqual(store.read_state(), after)
+                    self.assertEqual(len(jobs), 1)
+                    changed = {**envelope, "payload": {**payload, "selected_paths": ["b.yaml"]}}
+                    self.assertFalse(web.dispatch_command(ctx, direction, changed)["ok"])
+                    self.assertEqual(store.read_state(), after)
+
+    def test_invalid_batch_claim_preserves_entire_state_and_refusal(self):
+        from unittest.mock import patch
+        for direction in ("apply", "save"):
+            with self.subTest(direction=direction), tempfile.TemporaryDirectory() as tmp:
+                store = state.OperationStore(Path(tmp) / "state.json")
+                paths_key = "last_preview_paths" if direction == "apply" else "last_save_preview_paths"
+                store.write_state({paths_key: ["a.yaml", "b.yaml"], "last_save_preview_conflict_paths": ["b.yaml"]})
+                store.write_state({"apply_backup_refusal": {"operation_id": "preserve"}})
+                before = store.read_state()
+                valid = {"preview_identity": web.preview_identity_for_state(before, direction),
+                         "selected_paths": ["a.yaml"], "resolutions": {}}
+                variants = [{k: v for k, v in valid.items() if k != missing} for missing in ("selected_paths", "resolutions")]
+                variants += [{**valid, "selected_paths": value} for value in (None, "a.yaml", [], ["a.yaml", "a.yaml"], [1], [True], ["unknown"], ["./a.yaml"], ["../a.yaml"], ["/a.yaml"])]
+                variants += [{**valid, "resolutions": value} for value in (None, [], {"unknown": "ha"}, {"a.yaml": "bad"}, {"a.yaml": []})]
+                variants += [{**valid, "preview_identity": {}}]
+                if direction == "save": variants.append({**valid, "selected_paths": ["b.yaml"]})
+                ctx = SimpleNamespace(read_state=store.read_state, claim_command=store.claim_command,
+                                      update_command=store.update_command)
+                with patch.object(web, "_snapshot_payload", return_value={}):
+                    for payload in variants:
+                        result = web.dispatch_command(ctx, direction, {"command_id": str(uuid.uuid4()),
+                            "generation": before["operation_generation"], "payload": payload})
+                        self.assertFalse(result["ok"], payload)
+                        self.assertEqual(store.read_state(), before, payload)
+
     def test_fresh_preview_identity_and_revision_reject_stale_tab(self):
         current = state.default_state()
         current.update({

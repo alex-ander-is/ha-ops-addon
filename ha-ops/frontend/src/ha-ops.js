@@ -96,8 +96,7 @@ const t = (key, values = {}) => {
   return result;
 };
 const WS_COMMANDS = new Set([
-  "preview", "save_preview", "apply", "save", "select_save_preview", "select_apply_preview",
-  "resolve_save_preview", "resolve_apply_preview", "reset_git_state", "disk_usage",
+  "preview", "save_preview", "apply", "save", "reset_git_state", "disk_usage",
   "deleted_devices_preview", "retained_devices_preview", "retained_devices_delete",
   "select_retained_device",
   "internal_ids_preview", "internal_ids_migrate", "select_internal_ids", "deleted_devices_delete",
@@ -106,9 +105,6 @@ const WS_COMMANDS = new Set([
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
 const TERMINAL_STATE_SYNC_COMMANDS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
-const PREVIEW_DECISION_COMMANDS = new Set([
-  "select_apply_preview", "select_save_preview", "resolve_apply_preview", "resolve_save_preview",
-]);
 
 function knownVersion(value) {
   const version = String(value || "").trim();
@@ -168,10 +164,6 @@ function previewContentKey(state, direction) {
   return JSON.stringify({ ...content, generation: Number(state.operation_generation || 0) });
 }
 
-function composedParent(element) {
-  return element?.parentElement || element?.getRootNode()?.host;
-}
-
 // Native change bubbles from Vaadin's light-DOM input after CheckedMixin
 // updates its host. Reset the host so Vaadin delegates to the input as well;
 // resetting event.target alone leaves host/native checked state inconsistent.
@@ -180,17 +172,6 @@ function checkboxRequest(event, authoritativeChecked) {
   const requested = checkbox.checked;
   checkbox.checked = Boolean(authoritativeChecked);
   return requested;
-}
-
-function containingPreview(element) {
-  for (let node = element; node; node = composedParent(node)) {
-    if (node.localName === "ha-ops-preview") return node;
-  }
-  return null;
-}
-
-function previewFileContentKey(row) {
-  return row ? JSON.stringify([row.path, cursorKey(row.cursor), row.generation, row.contentKey]) : null;
 }
 
 function diffLineKind(line) {
@@ -581,7 +562,7 @@ class HaOpsPreviewFile extends LitElement {
     if (event.key === "Enter" || event.key === " ") event.stopPropagation();
   };
   onSelectChange = (event) => {
-    const requested = checkboxRequest(event, this.selected);
+    const requested = Boolean(event.currentTarget.checked);
     this.dispatchEvent(new CustomEvent("preview-select", {
       bubbles: true,
       composed: true,
@@ -613,6 +594,12 @@ class HaOpsPreview extends LitElement {
     direction: { type: String },
     running: { type: Boolean },
     generatedAt: { type: String },
+    finalBlocked: { type: Boolean },
+    backendVersion: { type: String },
+    selectedPaths: { state: true },
+    resolutions: { state: true },
+    submitted: { state: true },
+    dismissedRefusalId: { state: true },
     wrapByPath: { state: true },
     previewIdentityKey: { state: true },
     commitSubject: { state: true },
@@ -654,6 +641,12 @@ class HaOpsPreview extends LitElement {
     this.state = {};
     this.direction = "apply";
     this.running = false;
+    this.finalBlocked = false;
+    this.backendVersion = "";
+    this.selectedPaths = [];
+    this.resolutions = {};
+    this.submitted = false;
+    this.dismissedRefusalId = null;
     this.wrapByPath = {};
     this.previewIdentityKey = "";
     this.commitSubject = "";
@@ -662,18 +655,18 @@ class HaOpsPreview extends LitElement {
   }
   get paths() { return this.direction === "save" ? this.state.last_save_preview_paths || [] : this.state.last_preview_paths || []; }
   get cursor() { return this.direction === "save" ? this.state.last_save_diff_cursor : this.state.last_diff_cursor; }
-  get selectedPaths() { return this.direction === "save" ? this.state.save_preview_selected_paths || [] : this.state.apply_preview_selected_paths || []; }
-  get resolutions() { return this.direction === "save" ? this.state.save_preview_resolutions || {} : this.state.apply_preview_resolutions || {}; }
   get conflictPaths() { return this.direction === "save" ? this.state.last_save_preview_conflict_paths || [] : this.state.last_preview_conflict_paths || []; }
   get finalCommand() { return this.direction === "save" ? "save" : "apply"; }
   get finalLabel() { return this.direction === "save" ? TEXT.save : TEXT.apply; }
-  get selectCommand() { return this.direction === "save" ? "select_save_preview" : "select_apply_preview"; }
-  get resolveCommand() { return this.direction === "save" ? "resolve_save_preview" : "resolve_apply_preview"; }
   willUpdate() {
-    const identityKey = previewContentKey(this.state, this.direction);
+    const identityKey = JSON.stringify([previewContentKey(this.state, this.direction), this.backendVersion]);
     if (identityKey !== this.previewIdentityKey) {
       this.previewIdentityKey = identityKey;
       this.wrapByPath = {};
+      this.selectedPaths = [];
+      this.resolutions = {};
+      this.submitted = false;
+      this.dismissedRefusalId = null;
     }
     if (this.direction === "save" && identityKey !== this.commitSubjectPreviewIdentityKey) {
       this.commitSubjectPreviewIdentityKey = identityKey;
@@ -698,7 +691,7 @@ class HaOpsPreview extends LitElement {
     return this.conflictPaths.some((path) => selected.has(path) && !this.resolutions[path]);
   }
   isFinalActionDisabled() {
-    return this.running || !this.selectedPaths.length || this.selectedConflictChoicesMissing();
+    return this.running || this.finalBlocked || !this.selectedPaths.length || this.selectedConflictChoicesMissing();
   }
   render() {
     if (!this.paths.length) return nothing;
@@ -742,7 +735,7 @@ class HaOpsPreview extends LitElement {
               ?disabled=${this.running}
               @input=${this.onCommitSubjectInput}></vaadin-text-field>
           ` : nothing}
-          ${this.direction === "apply" && this.state.apply_backup_refusal ? html`
+          ${this.direction === "apply" && this.backupRefusal ? html`
             <span class="backup-warning" role="alert">
               <span class="backup-warning-badge">ERROR</span>
               ${TEXT.backupRequired.replace("{hours}", String(this.state.apply_backup_refusal.max_age_hours))}
@@ -771,48 +764,34 @@ class HaOpsPreview extends LitElement {
     if (this.running) return;
     for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded);
   }
+  get backupRefusal() {
+    const refusal = this.state.apply_backup_refusal;
+    return this.submitted && refusal?.operation_id !== this.dismissedRefusalId ? refusal : null;
+  }
+  dismissContinuation() {
+    if (this.state.apply_backup_refusal) this.dismissedRefusalId = this.state.apply_backup_refusal.operation_id;
+    this.submitted = false;
+  }
   selectAll(selected) {
     if (this.running) return;
-    this.dispatchEvent(new CustomEvent("ha-ops-command", {
-      bubbles: true,
-      composed: true,
-      detail: {
-        command: this.selectCommand,
-        payload: { selection_action: selected ? "all" : "none", preview_identity: previewIdentity(this.state, this.direction) },
-      },
-    }));
+    this.dismissContinuation();
+    this.selectedPaths = selected ? [...this.paths] : [];
   }
   onPreviewSelect = (event) => {
     event.stopPropagation();
-    if (this.running) return;
-    this.dispatchEvent(new CustomEvent("ha-ops-command", {
-      bubbles: true,
-      composed: true,
-      detail: {
-        command: this.selectCommand,
-        payload: {
-          path: event.detail.path,
-          selected: event.detail.selected ? "1" : "",
-          preview_identity: previewIdentity(this.state, this.direction),
-        },
-      },
-    }));
+    if (this.running || !this.paths.includes(event.detail.path)) return;
+    this.dismissContinuation();
+    const selected = new Set(this.selectedPaths);
+    if (event.detail.selected) selected.add(event.detail.path);
+    else selected.delete(event.detail.path);
+    this.selectedPaths = this.paths.filter((path) => selected.has(path));
   };
   onPreviewResolve = (event) => {
     event.stopPropagation();
-    if (this.running) return;
-    this.dispatchEvent(new CustomEvent("ha-ops-command", {
-      bubbles: true,
-      composed: true,
-      detail: {
-        command: this.resolveCommand,
-        payload: {
-          path: event.detail.path,
-          choice: event.detail.choice,
-          preview_identity: previewIdentity(this.state, this.direction),
-        },
-      },
-    }));
+    const { path, choice } = event.detail;
+    if (this.running || !this.paths.includes(path) || !["ha", "git"].includes(choice)) return;
+    this.dismissContinuation();
+    this.resolutions = { ...this.resolutions, [path]: choice };
   };
   onPreviewWrapToggle = (event) => {
     event.stopPropagation();
@@ -821,38 +800,27 @@ class HaOpsPreview extends LitElement {
   onCommitSubjectInput = (event) => {
     this.commitSubject = event.target.value;
   };
-  async runFinalAction(backupMode = "normal") {
-    if (this.isFinalActionDisabled()) return;
-    const identity = previewIdentity(this.state, this.direction);
-    const refusalId = this.state.apply_backup_refusal?.operation_id;
-    const selected = new Set(this.selectedPaths);
-    const decisions = [...this.paths].sort().map((path) => ({
-      choice: selected.has(path) ? (this.resolutions[path] || (this.direction === "save" ? "ha" : "git"))
-        : (this.direction === "save" ? "git" : "ha"),
-      path,
-      selected: selected.has(path),
-    }));
-    const bytes = new TextEncoder().encode(JSON.stringify(decisions));
-    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
-      .map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  runFinalAction(backupMode = "normal") {
+    if (this.isFinalActionDisabled() || (backupMode !== "normal" && !this.backupRefusal)) return;
     const payload = this.direction === "save"
       ? { commit_subject: this.commitSubject, default_commit_subject: this.defaultCommitSubject }
       : {};
-    // Hashing yields to the browser; never pair old decisions with a new preview.
-    if (this.isFinalActionDisabled() || JSON.stringify(identity) !== JSON.stringify(previewIdentity(this.state, this.direction))
-      || refusalId !== this.state.apply_backup_refusal?.operation_id) return;
-    payload.preview_identity = identity;
-    payload.decision_digest = digest;
+    payload.preview_identity = previewIdentity(this.state, this.direction);
+    payload.selected_paths = [...this.selectedPaths];
+    payload.resolutions = { ...this.resolutions };
     if (this.direction === "apply" && backupMode !== "normal") {
       payload.backup_mode = backupMode;
-      payload.backup_refusal_id = refusalId;
+      payload.backup_refusal_id = this.backupRefusal.operation_id;
     }
+    this.submitted = true;
+    this.running = true;
     this.dispatchEvent(new CustomEvent("ha-ops-command", {
       bubbles: true,
       composed: true,
       detail: { command: this.finalCommand, payload },
     }));
   }
+
 }
 customElements.define("ha-ops-preview", HaOpsPreview);
 
@@ -1203,8 +1171,6 @@ class HaOpsApp extends LitElement {
     this.acceptedCommandId = null;
     this.uncertainCommandId = null;
     this.commandIntent = null;
-    this.decisionDisplay = null;
-    this.decisionFocus = null;
     this.clientError = "";
     this.managedTargetsOpen = false;
   }
@@ -1212,9 +1178,6 @@ class HaOpsApp extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this.shouldReconnect = true;
-    document.addEventListener("pointerdown", this.cancelDecisionFocus, true);
-    document.addEventListener("keydown", this.cancelDecisionFocus, true);
-    document.addEventListener("focusin", this.onDecisionFocusIn, true);
     this.connect();
     if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) window.__haOpsTestCloseWs = () => this.socket?.close();
   }
@@ -1225,9 +1188,6 @@ class HaOpsApp extends LitElement {
     if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.shouldReconnect = false;
     this.forgetCommandIntent();
-    document.removeEventListener("pointerdown", this.cancelDecisionFocus, true);
-    document.removeEventListener("keydown", this.cancelDecisionFocus, true);
-    document.removeEventListener("focusin", this.onDecisionFocusIn, true);
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
   }
@@ -1236,7 +1196,6 @@ class HaOpsApp extends LitElement {
 
   updated() {
     if (!this.resizeObserver) this.observeLayout();
-    this.restoreDecisionFocus();
   }
 
   actionButton(command, label, { disabled = false, confirm = "", payload = {}, theme = "secondary" } = {}) {
@@ -1593,18 +1552,14 @@ class HaOpsApp extends LitElement {
 
   async dispatchCommand(command, action, payload = {}) {
     // Fence synchronously, before a response or Lit's disabled rendering can arrive.
-    if (this.commandIntent || ((PREVIEW_DECISION_COMMANDS.has(command) || ["apply", "save"].includes(command)) && this.mutationBlocked())) return;
+    if (this.commandIntent || (["apply", "save"].includes(command) && this.mutationBlocked())) return;
     const envelope = {
       command_id: uuid(),
       command,
       generation: Number(this.state.operation_generation || 0),
-      payload,
+      payload: structuredClone(payload),
     };
-    const direction = command.includes("save") ? "save" : "apply";
-    const intent = { id: envelope.command_id, command, sent: false, recordSeen: false, direction,
-      contentKey: previewContentKey(this.state, direction) };
-    this.cancelDecisionFocus();
-    this.captureDecisionFocus(intent);
+    const intent = { id: envelope.command_id, command, sent: false, recordSeen: false };
     this.commandIntent = intent;
     this.requestUpdate();
     let rejected = false;
@@ -1652,16 +1607,10 @@ class HaOpsApp extends LitElement {
         if (ownsIntent) this.commandIntent = null;
         if (this.acceptedCommandId === intent.id) this.acceptedCommandId = null;
         if (this.uncertainCommandId === intent.id) this.uncertainCommandId = null;
-        if (this.decisionDisplay?.id === intent.id) this.decisionDisplay = null;
-        if (this.decisionFocus?.commandId === intent.id) {
-          if (ownsIntent) this.decisionFocus.settled = true;
-          else this.cancelDecisionFocus();
-        }
         this.reconcileAcceptedCommand();
         this.requestUpdate();
       } else if (ownsIntent) {
         this.uncertainCommandId = intent.id;
-        this.cancelDecisionFocus();
         this.reconcileAcceptedCommand();
         this.requestUpdate();
       }
@@ -1861,108 +1810,26 @@ class HaOpsApp extends LitElement {
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
   }
 
-  forgetCommandIntent({ retainDecisionDisplay = false } = {}) {
-    const intent = this.commandIntent;
-    if (intent?.sent) this.acceptedCommandId = intent.id;
-    if (!retainDecisionDisplay) this.decisionDisplay = null;
-    else if (intent?.sent && PREVIEW_DECISION_COMMANDS.has(intent.command)) {
-      // Display only: no payload, retry authority or focus intent survives disconnect.
-      const { id, command, direction, contentKey, recordSeen } = intent;
-      this.decisionDisplay = { id, command, direction, contentKey, recordSeen };
-    }
+  forgetCommandIntent() {
+    if (this.commandIntent?.sent) this.acceptedCommandId = this.commandIntent.id;
     this.commandIntent = null;
-    this.cancelDecisionFocus();
-    this.reconcileDecisionDisplay();
   }
 
-  reconcileDecisionDisplay() {
-    const display = this.decisionDisplay;
-    if (!display) return;
-    const record = this.state.command_records?.[display.id];
-    if (![this.acceptedCommandId, this.uncertainCommandId].includes(display.id)
-      || display.contentKey !== previewContentKey(this.state, display.direction)
-      || (record && (record.command !== display.command || record.status === "terminal"))
-      || (!record && display.recordSeen)) {
-      this.decisionDisplay = null;
-    } else if (record) display.recordSeen = true;
-  }
-
-  cancelDecisionFocus = () => { this.decisionFocus = null; };
-
-  onDecisionFocusIn = (event) => {
-    if (this.decisionFocus && !event.composedPath().includes(this.decisionFocus.control)
-      && event.target !== document.body) this.cancelDecisionFocus();
-  };
-
-  captureDecisionFocus(intent) {
-    if (!PREVIEW_DECISION_COMMANDS.has(intent.command)) return;
-    let active = document.activeElement;
-    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-    let control = active;
-    while (control && !["vaadin-button", "vaadin-checkbox"].includes(control.localName)) control = composedParent(control);
-    const preview = containingPreview(control);
-    if (preview && this.contains(preview)) {
-      let row = control;
-      while (row && row !== preview && row.localName !== "ha-ops-preview-file") row = composedParent(row);
-      if (row === preview) row = null;
-      this.decisionFocus = { commandId: intent.id, control, target: active, preview, row, rowKey: previewFileContentKey(row),
-        contentKey: previewContentKey(this.state, preview.direction), settled: false, restoring: false };
-    }
-  }
-
-  async restoreDecisionFocus() {
-    const focus = this.decisionFocus;
-    if (!focus) return;
-    if (!focus.control.isConnected || !focus.target.isConnected || !focus.preview.isConnected
-      || containingPreview(focus.control) !== focus.preview
-      || focus.rowKey !== previewFileContentKey(focus.row)
-      || focus.contentKey !== previewContentKey(this.state, focus.preview.direction)) {
-      this.cancelDecisionFocus();
-      return;
-    }
-    if (!focus.settled || focus.restoring || this.mutationBlocked()) return;
-    focus.restoring = true;
-    await focus.preview.updateComplete;
-    // Nested Lit rows apply disabled properties after the parent update.
-    await new Promise((resolve) => requestAnimationFrame(resolve));
-    if (this.decisionFocus !== focus) return;
-    this.cancelDecisionFocus();
-    if (this.mutationBlocked() || !focus.control.isConnected || !focus.target.isConnected || !focus.preview.isConnected
-      || containingPreview(focus.control) !== focus.preview || focus.control.disabled
-      || focus.rowKey !== previewFileContentKey(focus.row)
-      || focus.contentKey !== previewContentKey(this.state, focus.preview.direction)) return;
-    // Vaadin's delegate focus method omits preventScroll; use the captured native target.
-    focus.target.focus({ preventScroll: true });
-  }
-
-  previewOperationHidesContent() {
-    this.reconcileDecisionDisplay();
-    if (this.state.active_operation) return true;
-    const knownDecision = (id) => {
-      const record = this.state.command_records?.[id];
-      // Missing records need exact current local evidence, never a guessed command type.
-      const local = this.commandIntent?.id === id ? this.commandIntent
-        : this.decisionDisplay?.id === id ? this.decisionDisplay : null;
-      return PREVIEW_DECISION_COMMANDS.has(record ? record.command : local?.command);
-    };
-    if (this.commandIntent && !PREVIEW_DECISION_COMMANDS.has(this.commandIntent.command)) return true;
-    if ([this.acceptedCommandId, this.uncertainCommandId].some((id) => id && !knownDecision(id))) return true;
-    if (Object.values(this.state.command_records || {}).some((record) =>
-      ["accepted", "running", "failed_unknown"].includes(record.status) && !PREVIEW_DECISION_COMMANDS.has(record.command))) return true;
-    return this.state.last_status === "running" && !PREVIEW_DECISION_COMMANDS.has(this.state.last_action);
+  previewEditBlocked() {
+    return Boolean(this.commandIntent || this.acceptedCommandId || this.uncertainCommandId)
+      || this.isRunning() || Boolean(this.state.active_operation)
+      || Boolean(this.state.deleted_devices_recovery_phase && this.state.deleted_devices_recovery_phase !== "none")
+      || Boolean(this.state.docker_build_cache_prune_fence);
   }
 
   reconcileAcceptedCommand() {
-    this.reconcileDecisionDisplay();
     const intent = this.commandIntent;
     if (intent) {
       const record = this.state.command_records?.[intent.id];
-      if ((record && record.command !== intent.command) || (!record && intent.recordSeen)
-        || (PREVIEW_DECISION_COMMANDS.has(intent.command) && intent.contentKey !== previewContentKey(this.state, intent.direction))) {
+      if ((record && record.command !== intent.command) || (!record && intent.recordSeen)) {
         this.forgetCommandIntent();
       } else if (record?.status === "terminal") {
         this.commandIntent = null;
-        if (this.decisionFocus?.commandId === intent.id) this.decisionFocus.settled = true;
       } else if (record) intent.recordSeen = true;
     }
     if (this.uncertainCommandId) {
@@ -1987,7 +1854,6 @@ class HaOpsApp extends LitElement {
   }
 
   previewTemplate() {
-    if (this.previewOperationHidesContent()) { this.cancelDecisionFocus(); return nothing; }
     const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();
@@ -2006,9 +1872,9 @@ class HaOpsApp extends LitElement {
         ${loading
           ? html`<div role="status">${TEXT.loadingPreviewDiff || "Loading Diff..."}</div>`
           : html`
-              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.mutationBlocked()} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
+              ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.previewEditBlocked()} .finalBlocked=${this.mutationBlocked()} .backendVersion=${this.backendVersion} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
-              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.mutationBlocked()} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
+              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.previewEditBlocked()} .finalBlocked=${this.mutationBlocked()} .backendVersion=${this.backendVersion} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
             `}
       </section>
@@ -2118,7 +1984,7 @@ class HaOpsApp extends LitElement {
   }
 
   setConnection(connection) {
-    if (["connecting", "reconnecting", "unknown"].includes(connection)) this.forgetCommandIntent({ retainDecisionDisplay: true });
+    if (["connecting", "reconnecting", "unknown"].includes(connection)) this.forgetCommandIntent();
     if (connection !== "http" && this.httpPollTimer) {
       clearTimeout(this.httpPollTimer);
       this.httpPollTimer = null;

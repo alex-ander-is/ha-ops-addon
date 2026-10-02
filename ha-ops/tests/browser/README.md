@@ -62,67 +62,15 @@ unavailable and does not replace this rendered flow. Use
 `HA_OPS_FRONTEND_SOURCE` to select a disposable historical source for those
 logic regressions.
 
-The decision runner prepares a fresh real preview for each direction and
-transport. Its ordinary cases use the real local backend. Delayed cases pause
-transport and seed a direction/generation-specific preview ID before expanding
-loaded content; every decision envelope is captured, never sent to the backend.
-The fixture fences the actual production `receive` and `applyBaseline` entries,
-including already pending HTTP state responses, and pauses future polling.
-Simulated WebSocket acknowledgements use a saved production receiver directly.
-Same/new-revision late frames are delivered through actual socket MessageEvents
-and the HTTP baseline entry while loaded and while a command is pending; seeded
-state, intent, focus and loaded content must stay identical. This simulated
-authority fixture covers all 28 delayed actions and checks the
-actual `selected` wire values (`'1'`/`''`), unchanged authoritative selection and
-choices during nonterminal phases, and independently expected terminal choices.
-Semantic and raw templates must both overflow and retain nonzero two-axis scroll.
-Save subject preservation is mandatory in Save cases. Native keyboard focus,
-Tab/pointer cancellation, synchronous fences, detached refusal and intentional
-cursor/reload invalidation remain part of each direction/transport flow. The
-complete-module tests cover source-only mixed/unknown/recovery and lazy-fetch
-edges; the browser report does not claim those unexecuted scenarios.
+The decision runner uses fresh disposable previews and the shipped static bundle.
+It verifies local native checkbox and HA/Git controls, immediate Confirm state,
+zero edit dispatch or transport, retained expanded semantic/raw diff nodes,
+two-axis scroll, keyboard focus and Save subject, reload-empty decisions, and
+one complete final Apply/Save batch over WebSocket and HTTP. Real final commands
+are held by the local harness to inspect mounted disabled review content.
 
-For historical checkbox proof, use the same minimal named probe against the
-current shipped bundle and a disposable baseline override. It loads genuine
-Apply diffs, clicks the native Vaadin checkbox, and observes exact node/content
-continuity across frames and shadow-tree mutations, without synthetic review
-content or preview IDs:
-
-```bash
-HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 HA_OPS_BROWSER_PROBE=checkbox-baseline \
-  /Users/purportex/Applications/Playwright/bin/playwright-node ha-ops/tests/browser/preview-decisions.mjs
-(
-  set -eu
-  baseline_bundle=$(mktemp "${TMPDIR:-/tmp}/ha-ops-checkbox-baseline.XXXXXX")
-  trap 'rm -f -- "$baseline_bundle"' EXIT
-  git show 3907d12:ha-ops/app/static/ha-ops.js > "$baseline_bundle"
-  if baseline_output=$(HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 \
-    HA_OPS_BROWSER_PROBE=checkbox-baseline HA_OPS_BROWSER_BASELINE_REVISION=3907d12 \
-    HA_OPS_BROWSER_BUNDLE_OVERRIDE="$baseline_bundle" \
-    /Users/purportex/Applications/Playwright/bin/playwright-node \
-    ha-ops/tests/browser/preview-decisions.mjs 2>&1); then
-    printf '%s\n' "$baseline_output" 'Expected the historical checkbox probe to fail.' >&2
-    exit 1
-  fi
-  printf '%s\n' "$baseline_output"
-  case "$baseline_output" in
-    *'original checkbox collapsed or detached mounted diff'*) ;;
-    *) printf '%s\n' 'The baseline failed outside the expected continuity assertion.' >&2; exit 1 ;;
-  esac
-)
-
-```
-
-The current probe must exit zero. The baseline must exit nonzero specifically
-with `original checkbox collapsed or detached mounted diff`, with before/after
-screenshots and `checkbox-baseline.json` showing the collapse/removal. A setup
-failure or arbitrary nonzero exit is not regression proof.
-
-After verification, preserve the required screenshots and JSON evidence before
-cleaning up test resources. The example above removes its owned historical
-bundle on every exit, including the expected assertion failure. Before
-committing, stop only the harness or runner processes created for this test,
-after checking their exact identity and confirming no inspection is pending.
-Remove only their owned disposable fixtures; retain the recorded proof files.
-Keep the shared persistent browser profile and existing user pages or sessions.
-Never use broad process termination or delete browser profile data as cleanup.
+The backup runner verifies mounted local review through a typed refusal,
+local-edit dismissal, empty reload decisions with no actionable old continuation,
+normal Retry, fresh Retry and acknowledgement. Existing shared pages and profile
+are retained. Each runner records its exact harness PID/root and page ownership
+in `runtime.json`; preserve evidence before stopping only its recorded fixture.

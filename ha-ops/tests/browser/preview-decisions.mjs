@@ -15,11 +15,12 @@ const assert = (value, message) => { if (!value) throw new Error(message); };
 const child = spawn('python3', [path.join(appRoot, 'dev_harness.py'), '--port', '0', '--print-json'], {
   cwd: path.dirname(appRoot), stdio: ['ignore', 'pipe', 'inherit'],
 });
-const { baseUrl } = await new Promise((resolve, reject) => {
+const harness = await new Promise((resolve, reject) => {
   let output = '';
   child.stdout.on('data', data => { output += data; const line = output.split('\n').find(line => line.startsWith('{')); if (line) resolve(JSON.parse(line)); });
   child.once('exit', code => reject(new Error(`harness exited ${code}`)));
 });
+const { baseUrl } = harness;
 // Preserve the shared context and all existing user pages. No anonymous context.
 const existing = process.env.HA_OPS_BROWSER_CDP_URL ? await chromium.connectOverCDP(process.env.HA_OPS_BROWSER_CDP_URL) : null;
 const context = existing ? existing.contexts()[0] : await chromium.launchPersistentContext(path.join(sharedRoot, 'user-data/google-chrome'), {
@@ -28,6 +29,7 @@ const context = existing ? existing.contexts()[0] : await chromium.launchPersist
 });
 const pages = context.pages();
 const page = pages.find(page => page.url() === 'about:blank') || pages.find(page => page.url().startsWith(baseUrl)) || await context.newPage();
+writeFileSync(path.join(artifacts, 'runtime.json'), JSON.stringify({ harnessPid: child.pid, runnerPid: process.pid, harnessRoot: harness.root, baseUrl, existingPages: pages.map(p => p.url()), pageCreated: !pages.includes(page) }, null, 2));
 const bundleOverride = process.env.HA_OPS_BROWSER_BUNDLE_OVERRIDE;
 const probeMode = process.env.HA_OPS_BROWSER_PROBE || 'full';
 assert(['full', 'checkbox-baseline'].includes(probeMode), `unknown probe mode: ${probeMode}`);
@@ -39,11 +41,11 @@ page.on('request', request => { if (request.url().includes('/diff-get?')) diffRe
 page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigations++; });
 const results = [], realEnvelopes = [];
 page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
-  try { const e = JSON.parse(payload); if (/^(select|resolve)_(apply|save)_preview$/.test(e.command)) realEnvelopes.push(e); } catch {}
+  try { const e = JSON.parse(payload); if (/^(?:(?:select|resolve)_(?:apply|save)_preview|apply|save)$/.test(e.command)) realEnvelopes.push(e); } catch {}
 }));
 page.on('request', request => {
   if (request.method() === 'POST') {
-    try { const e = JSON.parse(request.postData()); if (/^(select|resolve)_(apply|save)_preview$/.test(e.command)) realEnvelopes.push(e); } catch {}
+    try { const e = JSON.parse(request.postData()); if (/^(?:(?:select|resolve)_(?:apply|save)_preview|apply|save)$/.test(e.command)) realEnvelopes.push(e); } catch {}
   }
 });
 const twoFrames = () => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
@@ -83,8 +85,8 @@ async function expandLoaded(direction) {
 const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 async function authority(direction) {
   return page.locator(`ha-ops-preview[direction="${direction}"]`).evaluate(p => ({
-    paths: [...p.paths], selected: [...(p.state[`${p.direction}_preview_selected_paths`] || [])],
-    choices: { ...(p.state[`${p.direction}_preview_resolutions`] || {}) },
+    paths: [...p.paths], selected: [...p.selectedPaths],
+    choices: { ...p.resolutions },
     rows: [...p.renderRoot.querySelectorAll('ha-ops-preview-file')].map(r => ({ path: r.path,
       selected: r.selected, checked: r.renderRoot.querySelector('vaadin-checkbox').checked, nativeChecked: r.renderRoot.querySelector('vaadin-checkbox').inputElement.checked, choice: r.choice })),
   }));
@@ -109,8 +111,9 @@ async function assertAuthority(direction, expected, label) {
 async function prepare(transport, direction, mode = 'ordinary') {
   assert(['ordinary', 'delayed'].includes(mode), 'explicit fixture mode required');
   if (transport === 'http') await page.addInitScript(() => { window.WebSocket = undefined; });
+  await fetch(`${baseUrl}__dev_harness__/clear-previews`, { method: 'POST' });
   await page.goto(baseUrl); await settle();
-  await page.getByRole('button', { name: direction === 'apply' ? 'Preview Git to HA' : 'Preview HA to Git', exact: true }).click();
+  await page.getByRole('button', { name: direction === 'apply' ? 'Preview Git to HA' : /^(Preview HA to Git|Review Post-Apply HA Changes)$/, exact: true }).click();
   await settle();
   await waitForRows(direction);
   let seededIdentity = null;
@@ -220,356 +223,64 @@ async function retained(label) {
   assert((evidence.requestedDirection !== 'save' && !evidence.hasSave) || evidence.subject === 'Keep my reviewed subject', `${label}: Save subject reset`);
   return evidence;
 }
-async function ordinary(transport, direction) {
+
+async function localFlow(transport, direction) {
   const preview = page.locator(`ha-ops-preview[direction="${direction}"]`), row = preview.locator('ha-ops-preview-file').first();
-  const requests = diffRequests, navigation = navigations;
+  const sends = realEnvelopes.length, requests = diffRequests;
+  await page.locator('ha-ops-app').evaluate(a => {
+    window.editDispatches = []; const dispatch = a.dispatchCommand.bind(a);
+    a.dispatchCommand = (...args) => { window.editDispatches.push(args[0]); return dispatch(...args); };
+  });
   for (const action of ['check', 'uncheck', 'all', 'none', 'all', 'ha', 'git']) {
-    const sendCount = realEnvelopes.length;
-    const before = await authority(direction), rowPath = before.rows[0].path;
-    const expected = expectedAfter(before, action, rowPath);
-    if (action === 'check' || action === 'uncheck') await row.locator('vaadin-checkbox').click();
-    else if (action === 'all' || action === 'none') await preview.getByRole('button', { name: action === 'all' ? 'Select All' : 'Select None', exact: true }).click();
-    else await row.getByRole('button', { name: action === 'ha' ? 'Use HA Version' : 'Use Git Version', exact: true }).click();
-    assert(realEnvelopes.length === sendCount + 1, `${action}: real decision did not send exactly once`);
-    await settle(); await retained(`${transport}/${direction}/${action}`);
-    await assertAuthority(direction, expected, `${transport}/${direction}/${action}/ordinary`);
-  }
-  assert(diffRequests === requests && navigations === navigation, 'decision refetched loaded diff or navigated');
-  await page.screenshot({ path: path.join(artifacts, `${transport}-${direction}-retained.png`), fullPage: true });
-  results.push({ transport, direction, ordinary: true, extraDiffRequests: diffRequests - requests, navigation: navigations - navigation });
-}
-async function installDelay(transport) {
-  await page.evaluate(transport => {
-    const a = document.querySelector('ha-ops-app');
-    if (window.held) throw new Error('delayed interception installed twice');
-    a.shouldReconnect = false;
-    // Production's anonymous addEventListener callback resolves this.receive
-    // when it fires. Fence that entry, not the unrelated onmessage attribute.
-    // Keep the bound production receiver exclusively for simulated result acks.
-    const receiveSimulated = a.receive.bind(a);
-    window.transportIsolation = { transport, blockedFrames: [], blockedBaselines: 0, blockedPolls: [], blockedFailures: 0, blockedConnections: [], blockedSocketLifecycle: [] };
-    // Late HTTP catch paths bypass baseline delivery. Only explicitly tagged
-    // synthetic lifecycle failures may call the real production handlers.
-    const markUnknownSimulated = a.markUnknown.bind(a), setConnectionSimulated = a.setConnection.bind(a);
-    const syntheticErrors = new WeakSet(); let syntheticLifecycle = false;
-    const simulateLifecycle = callback => {
-      const previous = syntheticLifecycle; syntheticLifecycle = true;
-      try { return callback(); } finally { syntheticLifecycle = previous; }
-    };
-    a.markUnknown = error => {
-      if (syntheticLifecycle || syntheticErrors.has(error)) return simulateLifecycle(() => markUnknownSimulated(error));
-      window.transportIsolation.blockedFailures++;
-    };
-    a.setConnection = connection => {
-      if (syntheticLifecycle) return setConnectionSimulated(connection);
-      window.transportIsolation.blockedConnections.push(connection);
-    };
-    window.simulateDisconnect = message => simulateLifecycle(() => markUnknownSimulated(new Error(message)));
-    if (a.socket) for (const type of ['open', 'close', 'error']) a.socket.addEventListener(type, event => {
-      event.stopImmediatePropagation(); window.transportIsolation.blockedSocketLifecycle.push(type);
-    }, { capture: true });
-    a.receive = frame => { window.transportIsolation.blockedFrames.push(frame.type); };
-    // A GET already awaiting JSON can still resume after timers are cleared.
-    // All HTTP state paths converge here; false also stops loadHttpBaseline.
-    a.applyBaseline = () => { window.transportIsolation.blockedBaselines++; return false; };
-    clearTimeout(a.httpPollTimer); a.httpPollTimer = null;
-    clearTimeout(a.reconnectTimer); a.reconnectTimer = null;
-    for (const method of ['connect', 'scheduleHttpPoll', 'loadHttpBaseline', 'pollCommandState', 'pollHttpCommand'])
-      a[method] = async () => { window.transportIsolation.blockedPolls.push(method); };
-    window.held = [];
-    window.deepFocus = () => { let n = document.activeElement; while (n?.shadowRoot?.activeElement) n = n.shadowRoot.activeElement; return n; };
-    const dispatch = a.dispatchCommand.bind(a);
-    a.dispatchCommand = (...args) => {
-      const first = !a.commandIntent && /^(select|resolve)_(apply|save)_preview$/.test(args[0]);
-      const result = dispatch(...args);
-      if (first) {
-        // The production method must install its fence in this same JS turn.
-        for (const command of ['select_apply_preview', 'resolve_apply_preview', 'select_save_preview', 'resolve_save_preview', 'apply', 'save'])
-          dispatch(command, 'unused-fenced-action', {});
-        for (const p of a.querySelectorAll('ha-ops-preview')) { p.selectAll(true); p.selectAll(false); p.runFinalAction(); }
-      }
-      return result;
-    };
-    if (transport === 'ws') {
-      a.socket.send = raw => {
-        const envelope = JSON.parse(raw);
-        // A queued open listener can run before our lifecycle observer and
-        // attempt replay. Keep real replay traffic outside captured decisions.
-        if (envelope.command === 'replay') { window.transportIsolation.blockedSocketLifecycle.push('replay-send'); return; }
-        window.held.push({ envelope });
-      };
-    } else {
-      const original = window.fetch;
-      window.fetch = (url, options) => options?.method === 'POST' ? new Promise((resolve, reject) => window.held.push({ envelope: JSON.parse(options.body), resolve, reject })) : original(url, options);
-    }
-    window.recordDecision = status => {
-      const e = window.held.at(-1).envelope;
-      a.state = { ...a.state, command_records: { ...a.state.command_records, [e.command_id]: { command: e.command, status } } };
-      a.reconcileAcceptedCommand(); a.requestUpdate();
-    };
-    window.completeDecision = (outcome, terminal = false) => {
-      const held = window.held.at(-1), e = held.envelope;
-      if (outcome) {
-        if (transport === 'ws') receiveSimulated({ type: 'result', id: e.id, ok: outcome === 'success', message: 'explicit refusal' });
-        else if (outcome === 'ambiguous') { const error = new Error('transport failure'); syntheticErrors.add(error); held.reject(error); }
-        else held.resolve({ ok: outcome === 'success', json: async () => ({ ok: outcome === 'success', message: 'explicit refusal' }) });
-      }
-      if (terminal) {
-        const d = e.command.includes('save') ? 'save' : 'apply', payload = e.payload;
-        const selected = new Set(a.state[`${d}_preview_selected_paths`] || []);
-        if (payload.selection_action) { selected.clear(); if (payload.selection_action === 'all') for (const path of a.state[d === 'save' ? 'last_save_preview_paths' : 'last_preview_paths']) selected.add(path); }
-        else if ('selected' in payload) { if (payload.selected === '1') selected.add(payload.path); else selected.delete(payload.path); }
-        a.state = { ...a.state, [`${d}_preview_selected_paths`]: [...selected],
-          [`${d}_preview_resolutions`]: payload.choice ? { ...a.state[`${d}_preview_resolutions`], [payload.path]: payload.choice } : a.state[`${d}_preview_resolutions`],
-          [`${d}_decision_revision`]: Number(a.state[`${d}_decision_revision`] || 0) + 1,
-          command_records: { ...a.state.command_records, [e.command_id]: { command: e.command, status: 'terminal' } } };
-        a.reconcileAcceptedCommand(); a.requestUpdate();
-      }
-    };
-  }, transport);
-}
-// Deliver late data through the actual production callback boundary while
-// seeded authority and (when pending) its intent/focus/content must survive.
-async function proveTransportIsolation(transport, direction, label) {
-  const proof = await page.evaluate(async ({ transport, direction }) => {
-    const a = document.querySelector('ha-ops-app'), boundary = window.transportIsolation;
-    const original = { state: a.state, view: a.view, revision: a.revision, intent: a.commandIntent,
-      focus: a.decisionFocus, display: a.decisionDisplay, connection: a.connection, replay: a.replayPending,
-      accepted: a.acceptedCommandId, uncertain: a.uncertainCommandId, pending: [...a.pending.keys()] };
-    const counts = { frames: boundary.blockedFrames.length, baselines: boundary.blockedBaselines };
-    for (const revision of [original.revision, original.revision + 1]) {
-      const frame = { type: 'state', schema_version: 1, revision,
-        state: { ...original.state, [`${direction}_preview_id`]: 'late-real-overwrite',
-          [`${direction}_preview_selected_paths`]: ['late-real-path'],
-          [`${direction}_preview_resolutions`]: { 'late-real-path': 'ha' },
-          operation_generation: Number(original.state.operation_generation) + 1 }, view: {} };
-      if (transport === 'ws') a.socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(frame) }));
-      else a.receive(frame);
-      if (a.applyBaseline(frame) !== false) throw new Error('late HTTP baseline was accepted');
-    }
-    // Timer and command-poll entry points must be paused, too. Previously
-    // started successful responses still hit the fenced applyBaseline above.
-    for (const method of ['scheduleHttpPoll', 'loadHttpBaseline', 'pollCommandState', 'pollHttpCommand']) await a[method]('late-real-command');
-    if (a.state !== original.state || a.view !== original.view || a.revision !== original.revision
-      || a.commandIntent !== original.intent || a.decisionFocus !== original.focus || a.decisionDisplay !== original.display
-      || a.connection !== original.connection || a.replayPending !== original.replay
-      || a.acceptedCommandId !== original.accepted || a.uncertainCommandId !== original.uncertain
-      || JSON.stringify([...a.pending.keys()]) !== JSON.stringify(original.pending)) throw new Error('late real transport crossed delayed authority boundary');
-    if (boundary.blockedFrames.length - counts.frames !== 2 || boundary.blockedBaselines - counts.baselines !== 2)
-      throw new Error('actual transport boundary did not intercept the late frames');
-    return { actualSocketMessageEvents: transport === 'ws' ? 2 : 0, sameAndNewRevisionBlocked: true,
-      lateBaselinesBlocked: 2, futurePollEntriesPaused: true, stateAndIntentIdentical: true,
-      seededIdentity: a.state[`${direction}_preview_id`], pendingCommand: a.commandIntent?.id || null };
-  }, { transport, direction });
-  await retained(`${transport}/${direction}/${label}/late-real-transport`);
-  results.push({ transport, direction, isolation: label, proof });
-}
-async function delayed(transport, direction) {
-  const preview = page.locator(`ha-ops-preview[direction="${direction}"]`), row = preview.locator('ha-ops-preview-file').first();
-  const requests = diffRequests, navigation = navigations;
-  await proveTransportIsolation(transport, direction, 'loaded-before-action');
-  let preAction;
-  const phase = async label => {
-    const continuity = await retained(`${transport}/${direction}/${label}`);
-    const evidence = await page.evaluate(() => {
-      const a = document.querySelector('ha-ops-app'), previews = [...a.querySelectorAll('ha-ops-preview')];
-      return { sends: window.held.length, blocked: a.mutationBlocked(),
-        sameFocus: window.deepFocus() === window.originalFocusTarget,
-        focusIntent: !!a.decisionFocus, focusRestorations: window.focusCalls.filter(call => call.preventScroll),
-        controlsDisabled: previews.every(p => p.running && p.isFinalActionDisabled()
-          && [...p.renderRoot.querySelectorAll('ha-ops-preview-file')].every(r => r.running)),
-        disabledStyles: previews.flatMap(p => [...p.renderRoot.querySelectorAll('vaadin-button[disabled]')]).map(b => {
-          const s = getComputedStyle(b); return [s.backgroundColor, s.color, s.borderColor]; }) };
-    });
-    assert(evidence.blocked && evidence.controlsDisabled && !evidence.focusRestorations.length, `${label}: early authority/focus ${JSON.stringify(evidence)}`);
-    assert(evidence.disabledStyles.length > 0 && evidence.disabledStyles.every(style => JSON.stringify(style)
-      === JSON.stringify(['rgb(229, 231, 235)', 'rgb(107, 114, 128)', 'rgb(209, 213, 219)'])), 'disabled button styles');
-    const authority = await assertAuthority(direction, preAction, label);
-    return { ...evidence, authority, frames: continuity.frames };
-  };
-  async function activate(action, enforceAction = false) {
-    preAction = await authority(direction);
-    const rowPath = preAction.rows[0].path;
-    const effectiveAction = ['check', 'uncheck'].includes(action)
-      ? (preAction.selected.includes(rowPath) ? 'uncheck' : 'check') : action;
-    assert(!enforceAction || effectiveAction === action, `${action}: invalid pre-action selection`);
-    const expected = expectedAfter(preAction, effectiveAction, rowPath);
-    const control = action === 'check' || action === 'uncheck' ? row.locator('vaadin-checkbox')
+    const before = await authority(direction), expected = expectedAfter(before, action, before.rows[0].path);
+    const control = action === 'check' || action === 'uncheck' ? row.locator('vaadin-checkbox').locator('input[type=checkbox]')
       : action === 'all' || action === 'none' ? preview.getByRole('button', { name: action === 'all' ? 'Select All' : 'Select None', exact: true })
       : row.getByRole('button', { name: action === 'ha' ? 'Use HA Version' : 'Use Git Version', exact: true });
-    const count = await page.evaluate(() => window.held.length);
-    await control.evaluate(control => {
-      window.restoreFocusMethod?.();
-      control.focus(); window.originalControl = control; window.originalFocusTarget = window.deepFocus();
-      window.focusCalls = []; window.nativeFocusLost = false;
-      const onBlur = () => { window.nativeFocusLost = true; };
-      window.originalFocusTarget.addEventListener('blur', onBlur);
-      const target = window.originalFocusTarget, original = target.focus;
-      target.focus = function(options) { window.focusCalls.push({ preventScroll: options?.preventScroll === true }); return original.call(this, options); };
-      window.restoreFocusMethod = () => { target.focus = original; target.removeEventListener('blur', onBlur); };
-    });
-    const focused = await control.evaluate(c => window.originalFocusTarget === (c.focusElement || c));
-    assert(focused, `${action}: did not capture actual Vaadin native/host focus target`);
-    // Actual keyboard events reach the shipped Vaadin component; its button
-    // host and checkbox native input have different mandatory blur behavior.
+    await control.focus();
+    await control.evaluate(c => { let n = document.activeElement; while (n?.shadowRoot?.activeElement) n = n.shadowRoot.activeElement; window.editFocus = n; });
     await control.press(action === 'check' || action === 'uncheck' ? 'Space' : 'Enter');
-    await page.waitForFunction(count => window.held.length === count + 1 && window.originalControl.disabled, count);
-    const pending = await phase(`${action}/pending`);
-    assert(pending.sends === count + 1, 'synchronous decisions or Confirm emitted a second UUID');
-    if (action === 'check' || action === 'uncheck') assert(!pending.sameFocus, 'disabled checkbox did not undergo native blur');
-    const envelope = await page.evaluate(() => window.held.at(-1).envelope);
-    const identity = envelope.payload.preview_identity;
-    if (['check', 'uncheck'].includes(effectiveAction)) assert(envelope.payload.selected === (effectiveAction === 'check' ? '1' : ''), 'wrong actual selected wire value');
-    else if (['all', 'none'].includes(action)) assert(envelope.payload.selection_action === action, 'wrong selection action');
-    else assert(envelope.payload.choice === action && envelope.payload.path === rowPath, 'wrong HA/Git choice');
-    assert(envelope.command === `${['ha', 'git'].includes(action) ? 'resolve' : 'select'}_${direction}_preview`, 'wrong direction/command');
-    assert(identity.direction === direction && Number.isInteger(identity.decision_revision) && identity.preview_id
-      && identity.commit && identity.fingerprint && identity.diff_cursor?.artifact && identity.diff_cursor.generation === Number(await page.locator('ha-ops-app').evaluate(a => a.state.operation_generation)) && sameSet(identity.paths, preAction.paths), 'authority identity was weakened');
-    return { control, count: count + 1, pending, expected, envelope };
-  }
-  for (const [index, action] of ['check', 'uncheck', 'all', 'none', 'all', 'ha', 'git'].entries()) {
-    const { count, pending, expected, envelope } = await activate(action, true);
-    if (index === 0) await proveTransportIsolation(transport, direction, 'pending-intent');
-    if (index === 0 || action === 'ha') await page.screenshot({ path: path.join(artifacts, `${transport}-${direction}-${action}-pending.png`), fullPage: true });
-    await page.evaluate(() => window.completeDecision('success'));
-    await page.waitForFunction(() => document.querySelector('ha-ops-app').acceptedCommandId);
-    const phases = { pending, gap: await phase(`${action}/acceptance-gap`) };
-    for (const status of ['accepted', 'running', 'failed_unknown']) {
-      await page.evaluate(status => window.recordDecision(status), status);
-      phases[status] = await phase(`${action}/${status}`);
-    }
-    await page.evaluate(() => window.completeDecision(null, true)); await settle();
-    await page.waitForFunction(() => !document.querySelector('ha-ops-app').decisionFocus);
-    const focus = await page.evaluate(() => ({ same: window.deepFocus() === window.originalFocusTarget,
-      connected: window.originalFocusTarget.isConnected, disabled: window.originalControl.disabled,
-      nativeFocusLost: window.nativeFocusLost, restorations: window.focusCalls.filter(call => call.preventScroll).length, sends: window.held.length }));
-    const continuouslyFocused = Object.values(phases).every(p => p.sameFocus) && !focus.nativeFocusLost;
-    // Native checkbox disabling blurs it. A Vaadin button can retain focus;
-    // a redundant focus() call is unnecessary when that exact target stayed active.
-    assert(focus.same && focus.connected && !focus.disabled
-      && (continuouslyFocused ? focus.restorations <= 1 : focus.restorations === 1) && focus.sends === count,
-      `${action}: same eligible focus not restored exactly at terminal ${JSON.stringify(focus)}`);
-    const terminalAuthority = await assertAuthority(direction, expected, `${action}/terminal`);
-    const continuity = await retained(`${transport}/${direction}/${action}/terminal`);
-    if (index === 0 || action === 'ha') await page.screenshot({ path: path.join(artifacts, `${transport}-${direction}-${action}-terminal.png`), fullPage: true });
-    results.push({ transport, direction, action, envelope, expected, terminalAuthority, phases, terminalFocus: { ...focus, continuouslyFocused }, continuity });
-  }
-  // Deliberate native keyboard/pointer movement cancels the exact target intent.
-  for (const cancel of ['tab', 'pointer']) {
-    const { count, expected } = await activate('check');
-    if (cancel === 'tab') await page.keyboard.press('Tab');
-    else await preview.locator('h3').click();
-    const chosen = await page.evaluate(() => { window.deliberateTarget = window.deepFocus(); return !document.querySelector('ha-ops-app').decisionFocus; });
-    assert(chosen, `${cancel}: native movement did not cancel focus intent`);
-    await page.evaluate(() => { window.completeDecision('success'); window.completeDecision(null, true); }); await settle(); await twoFrames();
-    assert(await page.evaluate(count => window.deepFocus() === window.deliberateTarget
-      && !window.focusCalls.some(call => call.preventScroll) && window.held.length === count, count), `${cancel}: deliberate focus stolen`);
-    await assertAuthority(direction, expected, `${cancel}/terminal`);
-    await retained(`${transport}/${direction}/${cancel}-cancelled`);
-  }
-  // DR001: disconnect before the first record keeps only display evidence.
-  const { count } = await activate('check');
-  await page.evaluate(() => window.simulateDisconnect('connection lost before first record'));
-  await retained(`${transport}/${direction}/disconnect-before-record`);
-  const disconnected = await page.evaluate(() => {
-    const a = document.querySelector('ha-ops-app');
-    return { blocked: a.mutationBlocked(), focus: !!a.decisionFocus, display: a.decisionDisplay,
-      extraPayload: a.decisionDisplay && ('payload' in a.decisionDisplay || 'target' in a.decisionDisplay) };
-  });
-  assert(disconnected.blocked && !disconnected.focus && disconnected.display && !disconnected.extraPayload, 'disconnect retained mutation/focus authority');
-  // DR003: an exact definitive refusal may settle this detached local ID.
-  await page.evaluate(() => { window.completeDecision('rejected'); const a = document.querySelector('ha-ops-app'); a.connection = 'http'; a.replayPending = false; a.requestUpdate(); });
-  await settle(); await twoFrames();
-  assert(await page.evaluate(count => {
-    const a = document.querySelector('ha-ops-app'); return !a.acceptedCommandId && !a.uncertainCommandId && !a.decisionFocus && !a.decisionDisplay
-      && !window.focusCalls.some(call => call.preventScroll) && window.held.length === count;
-  }, count), 'detached refusal restored focus, retained its local fence or retried');
-  await assertAuthority(direction, preAction, 'detached-refusal');
-  await retained(`${transport}/${direction}/detached-refusal`);
-  assert(diffRequests === requests && navigations === navigation, 'delayed decision refetched loaded diff or navigated');
-  results.push({ transport, direction, deliberateTabAndPointerCancellation: true, disconnectBeforeRecord: true,
-    detachedRefusal: true, extraDiffRequests: diffRequests - requests, navigation: navigations - navigation });
-}
-async function invalidation(direction) {
-  await page.evaluate(() => { window.continuity.observing = false; window.continuity.observer.disconnect(); window.restoreFocusMethod?.(); });
-  const row = page.locator(`ha-ops-preview[direction="${direction}"] ha-ops-preview-file`).first();
-  const reset = await row.evaluate(async row => {
-    row.cursor = { ...row.cursor, artifact: 'replacement' }; await row.updateComplete;
-    return !row.expanded && row.diff === '' && row.semantic === null && row.diffState === 'idle';
-  });
-  assert(reset, 'real cursor replacement retained old content');
-  await page.reload(); await settle();
-  assert(await page.locator('ha-ops-preview-file').evaluateAll(rows => rows.every(row => !row.expanded && row.diffState === 'idle')), 'reload restored expansion');
-  assert(await page.locator('ha-ops-app').evaluate(a => !a.commandIntent && !a.decisionFocus && !a.decisionDisplay), 'reload restored transient intent');
-  results.push({ direction, cursorReset: true, reloadCollapsed: true, reloadIntentCleared: true });
-}
-// Historical regression uses only real preview content and the real checkbox.
-// Modern synthetic review/identity fixtures are intentionally unnecessary here.
-async function checkboxBaseline() {
-  await page.goto(baseUrl); await settle();
-  await page.getByRole('button', { name: 'Preview Git to HA', exact: true }).click(); await settle();
-  await expandLoaded('apply');
-  const preview = page.locator('ha-ops-preview[direction="apply"]'), row = preview.locator('ha-ops-preview-file').first();
-  const before = await row.evaluate(row => {
-    const preview = row.getRootNode().host, pre = row.renderRoot.querySelector('pre');
-    const detail = row.renderRoot.querySelector('vaadin-details');
-    const tracked = [preview, row, pre, detail], roots = new Set([preview.parentNode]);
-    function shadows(n) { if (n.shadowRoot) { roots.add(n.shadowRoot); n.shadowRoot.querySelectorAll('*').forEach(shadows); } }
-    tracked.forEach(shadows);
-    for (const root of roots) if (root.host?.localName === 'vaadin-details') tracked.push(...root.querySelectorAll('[part="content"], [part="summary"], slot'));
-    const c = window.baselineProof = { preview, row, pre, detail, tracked, diff: row.diff, removals: [], frames: 0, frameFailures: [], observing: true };
-    c.observer = new MutationObserver(records => {
-      for (const r of records) for (const n of r.removedNodes) for (const target of tracked)
-        if (n === target || n.contains?.(target)) c.removals.push(target.localName);
+    await assertAuthority(direction, expected, `${transport}/${direction}/${action}`);
+    const immediate = await preview.evaluate(p => {
+      const a = document.querySelector('ha-ops-app'); let n = document.activeElement; while (n?.shadowRoot?.activeElement) n = n.shadowRoot.activeElement;
+      return { dispatches: window.editDispatches, running: p.running, blocked: a.mutationBlocked(), intent: a.commandIntent,
+        focusSame: n === window.editFocus, finalDisabled: p.renderRoot.querySelector('footer vaadin-button').disabled };
     });
-    for (const root of roots) c.observer.observe(root, { childList: true, subtree: true });
-    function sample() {
-      if (!c.observing) return;
-      c.frames++;
-      if (tracked.some(n => !n.isConnected) || !row.expanded || row.diffState !== 'loaded'
-        || row.renderRoot.querySelector('pre') !== pre || row.diff !== c.diff || !detail.opened) c.frameFailures.push(c.frames);
-      requestAnimationFrame(sample);
-    }
-    requestAnimationFrame(sample);
-    return { path: row.path, expanded: row.expanded, loaded: row.diffState === 'loaded', nonemptyDiff: row.diff.length > 0, observedRoots: roots.size };
-  });
-  await page.screenshot({ path: path.join(artifacts, 'before-check.png'), fullPage: true });
-  await row.locator('vaadin-checkbox').click(); await settle(); await twoFrames();
-  const after = await page.evaluate(() => {
-    const c = window.baselineProof, p = document.querySelector('ha-ops-preview[direction="apply"]');
-    const r = p?.renderRoot.querySelector('ha-ops-preview-file');
-    return { samePreview: p === c.preview, sameRow: r === c.row, originalRowConnected: c.row.isConnected,
-      expanded: r?.expanded, loaded: r?.diffState === 'loaded', samePre: r?.renderRoot.querySelector('pre') === c.pre,
-      sameDiff: r?.diff === c.diff, selected: r?.selected, checked: r?.renderRoot.querySelector('vaadin-checkbox')?.checked, nativeChecked: r?.renderRoot.querySelector('vaadin-checkbox')?.inputElement.checked,
-      removals: c.removals, frames: c.frames, frameFailures: c.frameFailures };
-  });
-  await page.screenshot({ path: path.join(artifacts, 'after-check.png'), fullPage: true });
-  const evidence = { probeMode, baselineRevision: process.env.HA_OPS_BROWSER_BASELINE_REVISION || null, bundleOverride: bundleOverride || null, before, after };
-  writeFileSync(path.join(artifacts, 'checkbox-baseline.json'), JSON.stringify(evidence, null, 2));
-  results.push(evidence);
-  assert(after.samePreview && after.sameRow && after.originalRowConnected && after.expanded && after.loaded && after.samePre
-    && after.sameDiff && !after.removals.length && after.frames > 0 && !after.frameFailures.length,
-    `original checkbox collapsed or detached mounted diff: ${JSON.stringify(after)}`);
-  assert(after.selected && after.checked, 'checkbox baseline did not finish the actual selection');
+    assert(!immediate.dispatches.length && !immediate.running && !immediate.blocked && !immediate.intent && immediate.focusSame
+      && immediate.finalDisabled === !expected.selected.length && realEnvelopes.length === sends, `preview edit emitted transport or dispatch: ${JSON.stringify(immediate)}`);
+    await retained(`${transport}/${direction}/${action}`);
+  }
+  assert(diffRequests === requests, 'local edits fetched another diff');
+  await page.screenshot({ path: path.join(artifacts, `${transport}-${direction}-local.png`), fullPage: true });
+  // A second component mounting from the same server baseline starts empty.
+  await page.reload(); await settle(); await waitForRows(direction);
+  assert((await authority(direction)).selected.length === 0, 'reload hydrated submitted decisions');
+  await expandLoaded(direction);
+  await preview.getByRole('button', { name: 'Select All', exact: true }).click();
+  const expected = await authority(direction), count = realEnvelopes.length;
+  await fetch(`${baseUrl}__dev_harness__/arm`, { method: 'POST', body: new URLSearchParams({ action: direction, gate: 'running' }) });
+  await preview.getByRole('button', { name: direction === 'save' ? 'Save HA to Git' : 'Apply Git to HA', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('ha-ops-app').state.last_status === 'running');
+  const pending = await preview.evaluate(p => ({ connected: p.isConnected, selected: [...p.selectedPaths], rows: [...p.renderRoot.querySelectorAll('ha-ops-preview-file')].map(r => ({ connected: r.isConnected, loaded: r.diffState === 'loaded', expanded: r.expanded })), disabled: [...p.renderRoot.querySelectorAll('footer vaadin-button')].every(b => b.disabled) }));
+  assert(pending.connected && sameSet(pending.selected, expected.selected) && pending.disabled && pending.rows.every(r => r.connected && r.loaded && r.expanded), `final action lost mounted draft: ${JSON.stringify(pending)}`);
+  assert(realEnvelopes.length === count + 1, 'final action must send exactly one batch');
+  const envelope = realEnvelopes.at(-1);
+  assert(envelope.command === direction && sameSet(envelope.payload.selected_paths, expected.selected)
+    && JSON.stringify(envelope.payload.resolutions) === JSON.stringify(expected.choices) && envelope.payload.preview_identity.direction === direction, 'incomplete final decision batch');
+  await fetch(`${baseUrl}__dev_harness__/release`, { method: 'POST', body: new URLSearchParams({ action: direction, gate: 'running' }) });
+  await settle();
+  results.push({ transport, direction, localEdits: 7, zeroEditTraffic: true, reloadEmpty: true, pending, envelope });
 }
 try {
-  if (probeMode === 'checkbox-baseline') await checkboxBaseline();
-  else for (const transport of ['ws', 'http']) {
-    for (const direction of ['apply', 'save']) {
-      await prepare(transport, direction, 'ordinary'); await ordinary(transport, direction);
-    }
-    for (const direction of ['apply', 'save']) {
-      await prepare(transport, direction, 'delayed'); await delayed(transport, direction);
-      await invalidation(direction);
-    }
+  for (const transport of ['ws', 'http']) for (const direction of ['apply', 'save']) {
+    await prepare(transport, direction, 'ordinary'); await localFlow(transport, direction);
   }
   assert(!errors.length, `page errors: ${errors.join('; ')}`);
-  writeFileSync(path.join(artifacts, 'evidence.json'), JSON.stringify({ rendered: true, probeMode, bundleOverride: bundleOverride || null, results, errors }, null, 2));
-  console.log(JSON.stringify({ ok: true, rendered: true, artifacts, results }));
+  writeFileSync(path.join(artifacts, 'evidence.json'), JSON.stringify({ rendered: true, results, errors }, null, 2));
+  console.log(JSON.stringify({ ok: true, artifacts, baseUrl, harnessPid: child.pid, harnessRoot: harness.root }));
 } catch (error) {
   await page.screenshot({ path: path.join(artifacts, 'failure.png'), fullPage: true }).catch(() => {});
   writeFileSync(path.join(artifacts, 'failure.json'), JSON.stringify({ message: error.message, results, errors, realEnvelopes }, null, 2));
-  throw error;
+  console.error(error.stack); process.exitCode = 1;
 }
-// Retain browser and disposable harness for inspection; never close user pages.
-process.exit(0);
+// Shared profile, existing pages and disposable fixture remain for inspection.
+process.exit(process.exitCode || 0);

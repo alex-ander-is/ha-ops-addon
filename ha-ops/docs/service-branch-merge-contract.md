@@ -140,9 +140,11 @@ invalid backup metadata or location, backup creation failures, and uncertain
 or downstream Apply failures retain the existing recovery behavior. A stale
 intent or similarly worded exception never grants continuation authority.
 
-Reload and reconnect can display an unconsumed current warning but do not
-submit an action. Decision edits, any newly claimed mutation, replacement or
-cleared previews, completion, startup repair, and version repair clear it.
+The same mounted page retains its submitted choices after a typed refusal.
+Local edits dismiss that warning permanently for this page without transport.
+Reload starts empty and cannot offer continuation of old server decisions.
+Any newly claimed mutation, replacement or cleared preview, completion, startup
+repair, and version repair clear the server warning.
 An interrupted continuation remains governed by the existing durable Apply
 fence; recovery never restores consumed acknowledgement.
 
@@ -171,6 +173,13 @@ Both directions also track the preview paths selected for processing:
 
 - `save_preview_selected_paths`
 - `apply_preview_selected_paths`
+
+Selection and HA/Git choices are ephemeral local state for each mounted page.
+Edits send no commands. Apply/Save submits a complete selected-path list and
+explicit choice map, validated and replaced atomically during durable claim.
+Server decision fields describe the submitted operation and never hydrate a
+page draft. Reload, content/cursor/generation/version changes reset the draft.
+Same-content state updates and decision revision changes retain it.
 
 Fresh previews must initialize these selected-path lists to empty. Missing
 selected-path state must also behave as empty, not as select-all. This makes the

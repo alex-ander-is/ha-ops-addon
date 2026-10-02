@@ -22,6 +22,7 @@ const { baseUrl } = ready;
 const existingPages = context.pages();
 const page = existingPages.find(page => page.url() === "about:blank")
   || existingPages.find(page => page.url().startsWith(baseUrl)) || await context.newPage();
+writeFileSync(`${artifacts}/runtime.json`, JSON.stringify({ harnessPid: child.pid, runnerPid: process.pid, harnessRoot: ready.root, baseUrl, existingPages: existingPages.map(p => p.url()), pageCreated: !existingPages.includes(page) }, null, 2));
 const seed = async policy => {
   const response = await fetch(`${baseUrl}__dev_harness__/backup-policy`, { method: "POST", body: new URLSearchParams({ policy }) });
   assert((await response.json()).ok, "seed policy failed");
@@ -53,7 +54,10 @@ try {
     }
     await seed("missing");
     let component = await preview();
-    const before = await state();
+    const before = await component.evaluate(p => ({ selected: [...p.selectedPaths], choices: { ...p.resolutions } }));
+    await component.getByRole("button", { name: "Expand All", exact: true }).click();
+    await page.waitForFunction(() => [...document.querySelector('ha-ops-preview[direction="apply"]').shadowRoot.querySelectorAll('ha-ops-preview-file')].every(r => r.diffState === 'loaded'));
+    await component.evaluate(p => { window.backupDraft = { p, rows: [...p.shadowRoot.querySelectorAll('ha-ops-preview-file')] }; });
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
     const retry = component.getByRole("button", { name: "Retry Git to HA", exact: true });
     const ack = component.getByRole("button", { name: "Acknowledge & Proceed", exact: true });
@@ -65,8 +69,8 @@ try {
     assert(await component.getByRole("button", { name: "Cancel", exact: true }).count() === 0, "unrequested Cancel");
     assert(await component.getByRole("button", { name: "Apply Git to HA", exact: true }).count() === 0, "Apply not replaced");
     const rejected = await state();
-    assert(before.apply_preview_id === rejected.apply_preview_id, "preview replaced");
-    assert(JSON.stringify(before.apply_preview_selected_paths) === JSON.stringify(rejected.apply_preview_selected_paths), "selection lost");
+    assert(await component.evaluate(p => p === window.backupDraft.p && window.backupDraft.rows.every(r => r.isConnected && r.expanded && r.diffState === 'loaded') && JSON.stringify(p.selectedPaths) === JSON.stringify(window.backupDraft.p.selectedPaths)), "backup refusal lost mounted review");
+    assert(JSON.stringify(before.selected) === JSON.stringify(rejected.apply_preview_selected_paths), "submitted selection lost");
     const dom = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
       return { text: footer.innerText, tags: [...footer.querySelectorAll("vaadin-button")].map(e => e.localName),
@@ -87,11 +91,24 @@ try {
     assert(disabled.every(b => b.disabled && b.background === "rgb(229, 231, 235)" && b.color === "rgb(107, 114, 128)" && b.border === "rgb(209, 213, 219)"), `disabled styling mismatch: ${JSON.stringify(disabled)}`);
     await page.screenshot({ path: `${artifacts}/${transport}-backup-disabled.png`, fullPage: true });
     await page.reload(); await settle();
-    await ack.waitFor();
-    assert((await state()).apply_backup_refusal.operation_id === rejected.apply_backup_refusal.operation_id, "reload lost current warning");
+    assert(await ack.count() === 0 && await retry.count() === 0, "reload revived actionable continuation");
+    assert(await component.evaluate(p => p.selectedPaths.length === 0), "reload hydrated decisions");
+    assert((await state()).apply_backup_refusal.operation_id === rejected.apply_backup_refusal.operation_id, "reload lost refusal evidence");
     const afterReloadCounters = (await (await fetch(`${baseUrl}__dev_harness__/diagnostics`)).json()).counters;
     assert(afterReloadCounters.backup_gate_calls === reloadCounters.backup_gate_calls, "reload automatically retried Apply");
     assert(afterReloadCounters.backup_acknowledgements === reloadCounters.backup_acknowledgements, "reload automatically acknowledged backup refusal");
+    await component.getByRole("button", { name: "Select All", exact: true }).click();
+    await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
+    await ack.waitFor(); await settle();
+    const freshRefusal = (await state()).apply_backup_refusal.operation_id;
+    const editCounters = (await (await fetch(`${baseUrl}__dev_harness__/diagnostics`)).json()).counters;
+    const checkbox = component.locator('ha-ops-preview-file').first().locator('vaadin-checkbox');
+    await checkbox.click(); await checkbox.click();
+    assert(await ack.count() === 0 && await retry.count() === 0, "local edit failed to dismiss continuation");
+    assert((await state()).apply_backup_refusal.operation_id === freshRefusal, "local edit sent server mutation");
+    assert((await (await fetch(`${baseUrl}__dev_harness__/diagnostics`)).json()).counters.backup_gate_calls === editCounters.backup_gate_calls, "edit reran backup gate");
+    await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
+    await ack.waitFor(); await settle();
     await page.setViewportSize({ width: 390, height: 844 });
     const mobile = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
@@ -126,9 +143,9 @@ try {
   }
   console.log(JSON.stringify({ ok: true, artifacts, baseUrl, retainedBrowser: true }));
 } catch (error) {
-  console.error(error.stack);
+  console.error(error.stack); process.exitCode = 1;
   console.log(JSON.stringify({ ok: false, artifacts, baseUrl, retainedBrowser: true }));
 }
 // Keep the shared profile and the local fixture available for inspection.
 // The operator owns teardown; this runner never closes existing shared pages.
-setInterval(() => {}, 60000);
+process.exit(process.exitCode || 0);

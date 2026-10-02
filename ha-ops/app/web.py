@@ -406,10 +406,6 @@ WS_MUTATING_COMMANDS = {
     "save_preview",
     "apply",
     "save",
-    "resolve_save_preview",
-    "resolve_apply_preview",
-    "select_save_preview",
-    "select_apply_preview",
     "reset_git_state",
     "disk_usage",
     "deleted_devices_preview",
@@ -541,89 +537,32 @@ def retained_preview_identity_matches_state(state, body):
     )
 
 
-def mutate_preview_decision(ctx, direction, action, body):
-    ok, state, lock_acquired = reserve_mutation_slot(ctx)
-    if not ok:
-        return command_result(False, _("error.running_action"), status=409)
-    try:
-        assert_preview_decision_identity(state, direction, body)
-        paths_key = "last_save_preview_paths" if direction == "save" else "last_preview_paths"
-        selected_key = "save_preview_selected_paths" if direction == "save" else "apply_preview_selected_paths"
-        revision_key = "save_decision_revision" if direction == "save" else "apply_decision_revision"
-        resolutions_key = "save_preview_resolutions" if direction == "save" else "apply_preview_resolutions"
-        conflict_paths_key = "last_save_preview_conflict_paths" if direction == "save" else "last_preview_conflict_paths"
-        paths = [str(item) for item in (state.get(paths_key) or []) if str(item)]
-        path_set = set(paths)
-        if action == "resolve":
-            raw_path = body_first(body, "path")
-            choice = body_first(body, "choice")
-            safe_path = git_ops.safe_repo_relative_path(raw_path)
-            if choice not in {"ha", "git"}:
-                raise RuntimeError(_("error.invalid_preview_choice"))
-            if safe_path not in paths:
-                raise RuntimeError(_("error.preview_path_not_pending"))
-            resolutions = dict(state.get(resolutions_key) or {})
-            resolutions[safe_path] = choice
-            conflict_paths = [str(item) for item in (state.get(conflict_paths_key) or paths) if str(item)]
-            remaining = [path for path in conflict_paths if path not in resolutions]
-            ctx.write_state(
-                {
-                    resolutions_key: resolutions,
-                    revision_key: int(state.get(revision_key) or 0) + 1,
-                    "last_run_at": ctx.utc_now(),
-                    "last_status": "idle",
-                    "last_action": f"resolve_{direction}_preview",
-                    "last_message": (
-                        _("message.resolved_preview_file", path=safe_path, remaining=len(remaining))
-                        if remaining
-                        else _("message.resolved_all_preview_files", direction=direction)
-                    ),
-                }
-            )
-        else:
-            selection_action = body_first(body, "selection_action")
-            if selection_action == "all":
-                selected = paths
-            elif selection_action == "none":
-                selected = []
-            else:
-                raw_path = body_first(body, "path")
-                safe_path = git_ops.safe_repo_relative_path(raw_path)
-                if safe_path not in path_set:
-                    raise RuntimeError(_("error.preview_path_not_pending"))
-                selected_set = {str(item) for item in (state.get(selected_key) or []) if str(item) in path_set}
-                if body_first(body, "selected") == "1":
-                    selected_set.add(safe_path)
-                else:
-                    selected_set.discard(safe_path)
-                selected = [path for path in paths if path in selected_set]
-            ctx.write_state(
-                {
-                    selected_key: selected,
-                    revision_key: int(state.get(revision_key) or 0) + 1,
-                    "last_run_at": ctx.utc_now(),
-                    "last_status": "idle",
-                    "last_action": f"select_{direction}_preview",
-                    "last_message": _("message.selected_preview_files", count=len(selected)),
-                }
-            )
-        return command_result(True, ctx.read_state().get("last_message", ""))
-    except StalePreviewDecision as exc:
-        return command_result(False, str(exc), status=409)
-    except Exception as exc:
-        if action == "resolve":
-            ctx.write_state(
-                {
-                    "last_run_at": ctx.utc_now(),
-                    "last_status": "error",
-                    "last_action": f"resolve_{direction}_preview",
-                    "last_message": str(exc),
-                    "last_details": [str(exc)],
-                }
-            )
-        return command_result(False, str(exc), status=400)
-    finally:
-        release_action_slot(ctx, lock_acquired)
+def preview_batch_updates(state, direction, payload):
+    """Validate a complete draft without writing; claim applies it atomically."""
+    paths = state.get("last_save_preview_paths" if direction == "save" else "last_preview_paths") or []
+    if not paths:
+        return {}
+    assert_preview_decision_identity(state, direction, payload)
+    selected = payload.get("selected_paths")
+    resolutions = payload.get("resolutions")
+    if not isinstance(selected, list) or not isinstance(resolutions, dict):
+        raise StalePreviewDecision(_("error.preview_stale_decision"))
+    def valid_path(path):
+        return (isinstance(path, str) and path in paths and "\x00" not in path
+                and git_ops.safe_repo_relative_path(path) == path)
+    if (not selected or any(not valid_path(path) for path in selected)
+        or len(set(selected)) != len(selected)
+        or any(not valid_path(path) or choice not in {"ha", "git"}
+               for path, choice in resolutions.items())):
+        raise StalePreviewDecision(_("error.preview_stale_decision"))
+    if direction == "save" and any(path in selected and path not in resolutions
+                                  for path in state.get("last_save_preview_conflict_paths") or []):
+        raise StalePreviewDecision(_("error.preview_stale_decision"))
+    return {
+        f"{direction}_preview_selected_paths": list(selected),
+        f"{direction}_preview_resolutions": dict(resolutions),
+        f"{direction}_decision_revision": int(state.get(f"{direction}_decision_revision") or 0) + 1,
+    }
 
 
 def assert_command_readiness(ctx, action, expected_generation=None):
@@ -819,11 +758,28 @@ def _snapshot_payload(ctx):
     state["docker_build_cache_prune_fence"] = bool(raw_state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
     accepted_job = command_in_flight(raw_state)
     if state["active_operation"] or state.get("last_status") == "running" or accepted_job:
+        pending_commands = {
+            record.get("command") for record in (raw_state.get("command_records") or {}).values()
+            if isinstance(record, dict) and record.get("status") in {"accepted", "running", "failed_unknown"}
+        }
+        if isinstance(operation, dict):
+            pending_commands.add(operation.get("command"))
+        if state.get("last_status") == "running":
+            pending_commands.add(state.get("last_action"))
+        # Final commands consume the same reviewed content. Keep its identity
+        # mounted while controls and diff endpoints remain independently fenced.
+        retained = set()
+        if pending_commands and pending_commands <= {"apply", "save"}:
+            if "apply" in pending_commands:
+                retained.update({"last_diff_cursor", "last_preview_paths"})
+            if "save" in pending_commands:
+                retained.update({"last_save_diff_cursor", "last_save_preview_paths"})
         for key in (
             "last_diff_cursor", "last_preview_paths", "last_save_diff_cursor", "last_save_preview_paths",
             "last_internal_ids_rows", "last_deleted_devices_rows", "last_retained_devices_rows",
         ):
-            state[key] = None if key.endswith("_cursor") else []
+            if key not in retained:
+                state[key] = None if key.endswith("_cursor") else []
     payload = {**payload, "state": state}
     options = ctx.load_options()
     display_time_fields = (
@@ -990,6 +946,8 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                                   command_record=record, status=200 if ok else 409, **_snapshot_payload(ctx))
         except Exception as exc:
             return command_result(False, str(exc), status=409, **_snapshot_payload(ctx))
+    if command not in WS_MUTATING_COMMANDS:
+        return command_result(False, "unknown command", status=404)
     if command in WS_MUTATING_COMMANDS:
         envelope_payload = body.get("payload", {})
         command_id = body.get("command_id")
@@ -997,21 +955,20 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         if command_id is not None:
             try:
                 def validate_preview_at_claim(current):
-                    if command in {"save", "apply", "select_save_preview", "select_apply_preview", "resolve_save_preview", "resolve_apply_preview"}:
-                        direction = "save" if "save" in command else "apply"
-                        assert_preview_decision_identity(current, direction, envelope_payload)
-                        if command in {"save", "apply"} and envelope_payload.get("decision_digest") != preview_decision_digest(current, direction):
-                            raise StalePreviewDecision(_("error.preview_stale_decision"))
+                    updates = {}
+                    if command in {"save", "apply"}:
+                        updates = preview_batch_updates(current, command, envelope_payload)
                     if command == "apply":
                         mode = envelope_payload.get("backup_mode", "normal")
                         if mode not in {"normal", "retry", "acknowledge"}:
                             raise ValueError(_("error.backup_continuation_stale"))
                         if mode != "normal":
                             refusal = current.get("apply_backup_refusal") or {}
+                            candidate = {**current, **updates}
                             if (not refusal or refusal.get("operation_id") != envelope_payload.get("backup_refusal_id")
                                 or refusal.get("generation") != current.get("operation_generation")
                                 or refusal.get("preview_identity") != preview_identity_for_state(current, "apply")
-                                or refusal.get("decision_digest") != preview_decision_digest(current, "apply")):
+                                or refusal.get("decision_digest") != preview_decision_digest(candidate, "apply")):
                                 raise StalePreviewDecision(_("error.backup_continuation_stale"))
                     if command == "internal_ids_migrate":
                         selected = envelope_payload.get("selected")
@@ -1061,6 +1018,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                         selected = [item.get("identity") for item in current.get("last_retained_devices_rows") or [] if item.get("selected")]
                         if not isinstance(submitted, list) or len(set(submitted)) != len(submitted) or set(submitted) != set(selected) or not selected:
                             raise StalePreviewDecision(_("error.retained_devices_preview_changed"))
+                    return updates
                 claimed, record = ctx.claim_command(
                     command_id, command, generation, envelope_payload,
                     validate=validate_preview_at_claim, immediate=command in {"select_internal_ids", "select_retained_device"},
@@ -1078,17 +1036,6 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                 )
         else:
             return command_result(False, "command_id is required", status=400)
-    if command in {"resolve_save_preview", "resolve_apply_preview", "select_save_preview", "select_apply_preview"}:
-        direction = "save" if command.endswith("save_preview") else "apply"
-        action = "resolve" if command.startswith("resolve_") else "select"
-        result = mutate_preview_decision(ctx, direction, action, envelope_payload)
-        if command_id:
-            ctx.update_command(
-                command_id,
-                "terminal",
-                {"ok": bool(result.get("ok")), "message": str(result.get("message", ""))},
-            )
-        return result
     if command in {"select_internal_ids", "select_retained_device"}:
         return command_result(True, "Selection updated.", **_snapshot_payload(ctx))
     if command == "preview":
@@ -1165,7 +1112,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
             ok = start_job(target, *args, state_updates=state_updates, command_id=command_id)
         finalize_rejected(command_id, ok)
         return command_result(ok, _("message.command_accepted") if ok else state_store.READINESS_BLOCKED_MESSAGE)
-    return command_result(False, "unknown command")
+    return command_result(False, "unknown command", status=404)
 
 
 def ingress_route(path, *endpoints):
@@ -1187,10 +1134,6 @@ POST_ENDPOINTS = (
     "/save",
     "/preview",
     "/save-preview",
-    "/resolve-save-preview",
-    "/resolve-apply-preview",
-    "/select-save-preview",
-    "/select-apply-preview",
     "/reset-git-state",
     "/disk-usage",
     "/docker-build-cache-prune",
@@ -1489,11 +1432,7 @@ def create_handler(ctx):
                         "save",
                         "apply",
                         "diff_get",
-                        "resolve_save_preview",
-                        "resolve_apply_preview",
-                        "select_save_preview",
-                        "select_apply_preview",
-                        "select_internal_ids",
+                                                                                                        "select_internal_ids",
                         "select_retained_device",
                         "acknowledge_recovery",
                         "retry_interrupted_save",
@@ -1523,6 +1462,9 @@ def create_handler(ctx):
             self._force_json = True
             parsed = urlparse(self.path)
             route = ingress_route(parsed.path, *POST_ENDPOINTS)
+            if route not in POST_ENDPOINTS:
+                self.send_json({"ok": False, "message": _("error.not_found")}, status=404)
+                return
             length = int(self.headers.get("Content-Length", "0"))
             raw_body = self.rfile.read(length) if length else b""
             if "application/json" in self.headers.get("Content-Type", ""):
@@ -1708,19 +1650,6 @@ def create_handler(ctx):
                     self.send_html(render_page(ctx))
                 return
 
-            if route in {"/resolve-save-preview", "/resolve-apply-preview"}:
-                if self.save_retry_pending():
-                    self.send_save_retry_pending()
-                    return
-                direction = "save" if route == "/resolve-save-preview" else "apply"
-                result = mutate_preview_decision(ctx, direction, "resolve", body)
-                status = int(result.pop("status", 200 if result.get("ok") else 400))
-                if self.wants_json():
-                    self.send_json(result, status=status)
-                else:
-                    self.send_html(render_page(ctx), status=status)
-                return
-
             if route == "/preview":
                 if self.save_retry_pending():
                     self.send_save_retry_pending()
@@ -1733,19 +1662,6 @@ def create_handler(ctx):
                 else:
                     self.send_html(render_page(ctx))
                     return
-
-            if route in {"/select-save-preview", "/select-apply-preview"}:
-                if self.save_retry_pending():
-                    self.send_save_retry_pending()
-                    return
-                direction = "save" if route == "/select-save-preview" else "apply"
-                result = mutate_preview_decision(ctx, direction, "select", body)
-                status = int(result.pop("status", 200 if result.get("ok") else 400))
-                if self.wants_json():
-                    self.send_json(result, status=status)
-                else:
-                    self.send_html(render_page(ctx), status=status)
-                return
 
             if route == "/save-preview":
                 if self.save_retry_pending():

@@ -18,7 +18,7 @@ HELPER = Path(__file__).parent / "browser" / "preview-decisions-source.cjs"
 
 
 @pytest.mark.parametrize("scenario", [
-    "continuity", "fences", "detachedRejection", "uncertain", "content", "authority", "focus",
+    "local", "lifetime", "final", "backup", "fences", "native", "lazyDiff", "transport",
 ])
 def test_complete_frontend_preview_decision_contract(scenario):
     node = shutil.which("node")

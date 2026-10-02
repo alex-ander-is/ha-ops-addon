@@ -2,6 +2,15 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.3.0
+
+Keep preview selections local until Apply or Save
+
+- Update checkbox, Select All/None, and HA/Git choices instantly on the current page, with no reload or tab memory.
+- Validate and replace the full Apply/Save decision batch atomically at command claim.
+- Remove obsolete per-click selection and resolution commands.
+- Update preview and backup continuation regressions for local drafts.
+
 ## 2.2.3
 
 - Preserve expanded Apply and Save diffs, wrapping, scroll positions, and review state through file selection and HA/Git choices.
