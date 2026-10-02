@@ -91,14 +91,38 @@ content or preview IDs:
 ```bash
 HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 HA_OPS_BROWSER_PROBE=checkbox-baseline \
   /Users/purportex/Applications/Playwright/bin/playwright-node ha-ops/tests/browser/preview-decisions.mjs
-git show 3907d12:ha-ops/app/static/ha-ops.js > /private/tmp/ha-ops-checkbox-baseline-3907d12.js
-HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 HA_OPS_BROWSER_PROBE=checkbox-baseline \
-  HA_OPS_BROWSER_BASELINE_REVISION=3907d12 \
-  HA_OPS_BROWSER_BUNDLE_OVERRIDE=/private/tmp/ha-ops-checkbox-baseline-3907d12.js \
-  /Users/purportex/Applications/Playwright/bin/playwright-node ha-ops/tests/browser/preview-decisions.mjs
+(
+  set -eu
+  baseline_bundle=$(mktemp "${TMPDIR:-/tmp}/ha-ops-checkbox-baseline.XXXXXX")
+  trap 'rm -f -- "$baseline_bundle"' EXIT
+  git show 3907d12:ha-ops/app/static/ha-ops.js > "$baseline_bundle"
+  if baseline_output=$(HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 \
+    HA_OPS_BROWSER_PROBE=checkbox-baseline HA_OPS_BROWSER_BASELINE_REVISION=3907d12 \
+    HA_OPS_BROWSER_BUNDLE_OVERRIDE="$baseline_bundle" \
+    /Users/purportex/Applications/Playwright/bin/playwright-node \
+    ha-ops/tests/browser/preview-decisions.mjs 2>&1); then
+    printf '%s\n' "$baseline_output" 'Expected the historical checkbox probe to fail.' >&2
+    exit 1
+  fi
+  printf '%s\n' "$baseline_output"
+  case "$baseline_output" in
+    *'original checkbox collapsed or detached mounted diff'*) ;;
+    *) printf '%s\n' 'The baseline failed outside the expected continuity assertion.' >&2; exit 1 ;;
+  esac
+)
+
 ```
 
 The current probe must exit zero. The baseline must exit nonzero specifically
 with `original checkbox collapsed or detached mounted diff`, with before/after
 screenshots and `checkbox-baseline.json` showing the collapse/removal. A setup
 failure or arbitrary nonzero exit is not regression proof.
+
+After verification, preserve the required screenshots and JSON evidence before
+cleaning up test resources. The example above removes its owned historical
+bundle on every exit, including the expected assertion failure. Before
+committing, stop only the harness or runner processes created for this test,
+after checking their exact identity and confirming no inspection is pending.
+Remove only their owned disposable fixtures; retain the recorded proof files.
+Keep the shared persistent browser profile and existing user pages or sessions.
+Never use broad process termination or delete browser profile data as cleanup.

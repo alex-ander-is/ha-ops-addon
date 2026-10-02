@@ -18,3 +18,21 @@ Before changing or reviewing the HA Ops 0.8 service-branch preview/save/apply
 flow, read `ha-ops/docs/service-branch-merge-contract.md`. It documents the
 parts of the branch, preview, conflict, `.storage`, and UI behavior that are
 intentional versus unsafe shortcuts.
+
+## Cleanup before commit approval
+
+After verification and review, before requesting commit approval or creating an
+already-authorized commit, preserve required reports/screenshots in durable task
+artifacts and clean the exact inventory of verified task-owned temporary files,
+fixtures and local servers. Recheck ownership and contents before removal. Never
+use broad deletion/process killing, remove user TODOs, discard unrelated changes,
+or clear/close the shared persistent browser profile or user-owned pages. Report
+any retained session or uncertain ownership rather than silently deleting it.
+Inspect the final staged file list/diff, run `git diff --cached --check` and
+`python3 -m pytest ha-ops/tests/test_release_readiness.py` before the commit step.
+Keep local fixture paths, scratch outputs and current run IDs out of release
+inputs, including documentation examples; prefer `mktemp` with guaranteed cleanup.
+Repeat relevant review/checks if cleanup changes tracked content. The unchanged
+pre-push hook remains the full-suite gate; do not repeat that suite immediately
+before publishing. Restore any targeted stash of user changes exactly after
+publication and clean any new task scratch created by delivery checks.
