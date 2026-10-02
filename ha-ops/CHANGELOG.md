@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.2.3
+
+- Preserve expanded Apply and Save diffs, wrapping, scroll positions, and review state through file selection and HA/Git choices.
+- Block repeated decisions until authoritative settlement and restore eligible control focus after native disabled blur.
+- Keep Vaadin checkbox hosts and native inputs synchronized with authoritative state so checking and unchecking both work.
+
 ## 2.2.2
 
 - Keep Acknowledge & Proceed before Retry Git to HA while Retry replaces the disabled Apply action.

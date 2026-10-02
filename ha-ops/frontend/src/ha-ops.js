@@ -106,6 +106,9 @@ const WS_COMMANDS = new Set([
   "deleted_devices_confirm", "deleted_devices_revert", "rollback",
 ]);
 const TERMINAL_STATE_SYNC_COMMANDS = new Set(["deleted_devices_confirm", "deleted_devices_revert"]);
+const PREVIEW_DECISION_COMMANDS = new Set([
+  "select_apply_preview", "select_save_preview", "resolve_apply_preview", "resolve_save_preview",
+]);
 
 function knownVersion(value) {
   const version = String(value || "").trim();
@@ -157,6 +160,37 @@ function previewIdentity(state, direction) {
     conflict_paths: sortedStrings(state.last_preview_conflict_paths),
     diff_cursor: cursorIdentity(state.last_diff_cursor),
   };
+}
+
+// Display lifetime excludes decisions; requests still use the full authority identity.
+function previewContentKey(state, direction) {
+  const { decision_revision, ...content } = previewIdentity(state, direction);
+  return JSON.stringify({ ...content, generation: Number(state.operation_generation || 0) });
+}
+
+function composedParent(element) {
+  return element?.parentElement || element?.getRootNode()?.host;
+}
+
+// Native change bubbles from Vaadin's light-DOM input after CheckedMixin
+// updates its host. Reset the host so Vaadin delegates to the input as well;
+// resetting event.target alone leaves host/native checked state inconsistent.
+function checkboxRequest(event, authoritativeChecked) {
+  const checkbox = event.currentTarget;
+  const requested = checkbox.checked;
+  checkbox.checked = Boolean(authoritativeChecked);
+  return requested;
+}
+
+function containingPreview(element) {
+  for (let node = element; node; node = composedParent(node)) {
+    if (node.localName === "ha-ops-preview") return node;
+  }
+  return null;
+}
+
+function previewFileContentKey(row) {
+  return row ? JSON.stringify([row.path, cursorKey(row.cursor), row.generation, row.contentKey]) : null;
 }
 
 function diffLineKind(line) {
@@ -370,7 +404,7 @@ const previewDisabledButtonStyles = css`
 
 class HaOpsPreviewFile extends LitElement {
   static properties = {
-    path: { type: String }, cursor: { type: Object }, generation: { type: Number },
+    path: { type: String }, cursor: { type: Object }, generation: { type: Number }, contentKey: { type: String },
     expanded: { type: Boolean }, diff: { type: String }, semantic: { type: Object }, diffState: { type: String },
     selected: { type: Boolean }, choice: { type: String }, conflict: { type: Boolean },
     direction: { type: String }, running: { type: Boolean }, wrapLines: { type: Boolean },
@@ -420,6 +454,7 @@ class HaOpsPreviewFile extends LitElement {
     super();
     this.path = "";
     this.cursor = null;
+    this.contentKey = "";
     this.generation = 0;
     this.expanded = false;
     this.diff = "";
@@ -436,7 +471,7 @@ class HaOpsPreviewFile extends LitElement {
   willUpdate(changed) {
     const cursorChanged = changed.has("cursor") && cursorKey(changed.get("cursor")) !== cursorKey(this.cursor);
     const pathChanged = changed.has("path") && changed.get("path") !== this.path;
-    if (cursorChanged || changed.has("generation") || pathChanged) {
+    if (cursorChanged || changed.has("generation") || pathChanged || changed.has("contentKey")) {
       this.diffRequestId += 1;
       this.expanded = false; this.diff = ""; this.semantic = null; this.diffState = "idle";
     }
@@ -517,19 +552,20 @@ class HaOpsPreviewFile extends LitElement {
     const cursor = JSON.stringify(this.cursor);
     const path = this.path;
     const generation = this.generation;
+    const contentKey = this.contentKey;
     this.diffState = "loading";
     try {
       const response = await fetch(`diff-get?cursor=${encodeURIComponent(cursor)}&path=${encodeURIComponent(path)}`);
       const payload = await response.json();
-      if (requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
-        || generation !== this.generation) return;
+      if (!this.isConnected || requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
+        || generation !== this.generation || contentKey !== this.contentKey) return;
       if (!payload.ok || Number(this.cursor?.generation) !== Number(this.generation)) throw new Error("stale");
       this.diff = payload.diff;
       this.semantic = payload.semantic || null;
       this.diffState = "loaded";
     } catch (_error) {
-      if (requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
-        || generation !== this.generation) return;
+      if (!this.isConnected || requestId !== this.diffRequestId || !this.expanded || cursor !== JSON.stringify(this.cursor) || path !== this.path
+        || generation !== this.generation || contentKey !== this.contentKey) return;
       this.diff = "";
       this.semantic = null;
       this.diffState = "stale";
@@ -545,8 +581,7 @@ class HaOpsPreviewFile extends LitElement {
     if (event.key === "Enter" || event.key === " ") event.stopPropagation();
   };
   onSelectChange = (event) => {
-    const requested = event.target.checked;
-    event.target.checked = this.selected;
+    const requested = checkboxRequest(event, this.selected);
     this.dispatchEvent(new CustomEvent("preview-select", {
       bubbles: true,
       composed: true,
@@ -635,7 +670,7 @@ class HaOpsPreview extends LitElement {
   get selectCommand() { return this.direction === "save" ? "select_save_preview" : "select_apply_preview"; }
   get resolveCommand() { return this.direction === "save" ? "resolve_save_preview" : "resolve_apply_preview"; }
   willUpdate() {
-    const identityKey = this.direction === "save" ? this.state.save_preview_id : this.state.apply_preview_id;
+    const identityKey = previewContentKey(this.state, this.direction);
     if (identityKey !== this.previewIdentityKey) {
       this.previewIdentityKey = identityKey;
       this.wrapByPath = {};
@@ -684,6 +719,7 @@ class HaOpsPreview extends LitElement {
       <div class="files">
         ${this.paths.map((path) => html`<ha-ops-preview-file
           data-testid="preview-file" .path=${path} .cursor=${this.cursor}
+          .contentKey=${this.previewIdentityKey}
           .generation=${Number(this.state.operation_generation || 0)}
           .direction=${this.direction}
           .running=${this.running}
@@ -1026,7 +1062,7 @@ function renderRetainedDevicesTable(rows, disabled, onToggle) {
             <td class="checkbox-col">
               <vaadin-checkbox aria-label=${`${TEXT.deleteLabel} ${row.name || row.identity || ""}`}
                 .checked=${Boolean(row.selected)} ?disabled=${disabled}
-                @change=${(event) => { const selected = event.target.checked; event.target.checked = Boolean(row.selected);
+                @change=${(event) => { const selected = checkboxRequest(event, row.selected);
                   onToggle(row.identity, selected); }}></vaadin-checkbox>
             </td>
             <td><code>${String(row.identifiers || "")}</code></td>
@@ -1166,6 +1202,9 @@ class HaOpsApp extends LitElement {
     this.shouldReconnect = false;
     this.acceptedCommandId = null;
     this.uncertainCommandId = null;
+    this.commandIntent = null;
+    this.decisionDisplay = null;
+    this.decisionFocus = null;
     this.clientError = "";
     this.managedTargetsOpen = false;
   }
@@ -1173,6 +1212,9 @@ class HaOpsApp extends LitElement {
   connectedCallback() {
     super.connectedCallback();
     this.shouldReconnect = true;
+    document.addEventListener("pointerdown", this.cancelDecisionFocus, true);
+    document.addEventListener("keydown", this.cancelDecisionFocus, true);
+    document.addEventListener("focusin", this.onDecisionFocusIn, true);
     this.connect();
     if (window.__HA_OPS_ENABLE_TEST_HOOKS__ === true) window.__haOpsTestCloseWs = () => this.socket?.close();
   }
@@ -1182,6 +1224,10 @@ class HaOpsApp extends LitElement {
     if (this.httpPollTimer) clearTimeout(this.httpPollTimer);
     if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.shouldReconnect = false;
+    this.forgetCommandIntent();
+    document.removeEventListener("pointerdown", this.cancelDecisionFocus, true);
+    document.removeEventListener("keydown", this.cancelDecisionFocus, true);
+    document.removeEventListener("focusin", this.onDecisionFocusIn, true);
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
   }
@@ -1190,6 +1236,7 @@ class HaOpsApp extends LitElement {
 
   updated() {
     if (!this.resizeObserver) this.observeLayout();
+    this.restoreDecisionFocus();
   }
 
   actionButton(command, label, { disabled = false, confirm = "", payload = {}, theme = "secondary" } = {}) {
@@ -1209,7 +1256,7 @@ class HaOpsApp extends LitElement {
   }
 
   mutationBlocked() {
-    return Boolean(this.acceptedCommandId || this.uncertainCommandId) || this.replayPending || !["connected", "http"].includes(this.connection)
+    return Boolean(this.commandIntent || this.acceptedCommandId || this.uncertainCommandId) || this.replayPending || !["connected", "http"].includes(this.connection)
       || this.isRunning() || Boolean(this.state.active_operation)
       || Boolean(this.state.deleted_devices_recovery_phase && this.state.deleted_devices_recovery_phase !== "none")
       || Boolean(this.state.docker_build_cache_prune_fence);
@@ -1235,7 +1282,7 @@ class HaOpsApp extends LitElement {
           <vaadin-checkbox aria-label=${`${t("label.migrate")} ${row.path || ""}`}
             .checked=${Boolean(row.selected)}
             ?disabled=${blocked || !row.changes || !this.internalDiffs?.has(row.path)}
-            @change=${(event) => { const selected = event.target.checked; event.target.checked = Boolean(row.selected);
+            @change=${(event) => { const selected = checkboxRequest(event, row.selected);
               this.issue("select_internal_ids", { preview_id: this.state.last_internal_ids_preview_id,
                 path: row.path, diff_sha256: row.diff_sha256, selected }); }}></vaadin-checkbox>
           <code>${row.path || ""}</code>
@@ -1342,7 +1389,7 @@ class HaOpsApp extends LitElement {
               </div>
               ${this.state.post_apply_save_recommended ? html`<p class="muted">${t("notice.post_apply_save_button")}</p>` : nothing}
               <vaadin-checkbox .label=${t("label.include_redundant_data")} .checked=${Boolean(this.state.include_redundant_data)} ?disabled=${controlsBlocked}
-                @change=${(event) => { const requested = event.target.checked; event.target.checked = Boolean(this.state.include_redundant_data);
+                @change=${(event) => { const requested = checkboxRequest(event, this.state.include_redundant_data);
                   this.issue("include_redundant_data", requested ? { include_redundant_data: "on" } : {}); }}>
               </vaadin-checkbox></section>
               <section class="action-section"><h2>${t("heading.git_to_ha")}</h2><div class="action-row">
@@ -1472,8 +1519,7 @@ class HaOpsApp extends LitElement {
             ${(this.view.targets || []).map((target) => html`<tr><td></td><td><code>${target.id || ""}</code></td><td>${target.type || ""}</td><td>${target.source || ""}</td></tr>`)}
             ${(this.view.addons || []).map((addon) => html`<tr><td><vaadin-checkbox aria-label=${`${t("label.managed")} ${addon.name}`}
               .checked=${(this.view.selected_addons || []).includes(addon.slug)} ?disabled=${controlsBlocked}
-              @change=${(event) => { const requested = event.target.checked;
-                event.target.checked = (this.view.selected_addons || []).includes(addon.slug);
+              @change=${(event) => { const requested = checkboxRequest(event, (this.view.selected_addons || []).includes(addon.slug));
                 this.toggleAddon(addon.slug, requested); }}></vaadin-checkbox></td><td>${addon.name}</td><td>${t("label.addon")}</td><td>${addon.slug}</td></tr>`)}
             </tbody></table></div>
           </vaadin-details>
@@ -1546,45 +1592,81 @@ class HaOpsApp extends LitElement {
   };
 
   async dispatchCommand(command, action, payload = {}) {
+    // Fence synchronously, before a response or Lit's disabled rendering can arrive.
+    if (this.commandIntent || ((PREVIEW_DECISION_COMMANDS.has(command) || ["apply", "save"].includes(command)) && this.mutationBlocked())) return;
     const envelope = {
       command_id: uuid(),
       command,
       generation: Number(this.state.operation_generation || 0),
       payload,
     };
-    const socket = this.socket;
-    if (WS_COMMANDS.has(command) && socket && socket.readyState === window.WebSocket.OPEN && !this.replayPending) {
-      const id = String(this.nextRequestId++);
-      const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, sent: false, commandId: envelope.command_id }));
-      const entry = this.pending.get(id);
-      socket.send(JSON.stringify({ id, ...envelope }));
-      entry.sent = true;
-      const response = await result;
-      if (!response.ok) throw new Error(response.message || "Command rejected");
-      this.acceptedCommandId = envelope.command_id;
+    const direction = command.includes("save") ? "save" : "apply";
+    const intent = { id: envelope.command_id, command, sent: false, recordSeen: false, direction,
+      contentKey: previewContentKey(this.state, direction) };
+    this.cancelDecisionFocus();
+    this.captureDecisionFocus(intent);
+    this.commandIntent = intent;
+    this.requestUpdate();
+    let rejected = false;
+    try {
+      const socket = this.socket;
+      if (WS_COMMANDS.has(command) && socket && socket.readyState === window.WebSocket.OPEN && !this.replayPending) {
+        const id = String(this.nextRequestId++);
+        const result = new Promise((resolve, reject) => this.pending.set(id, { resolve, reject, sent: false, commandId: envelope.command_id }));
+        const entry = this.pending.get(id);
+        socket.send(JSON.stringify({ id, ...envelope }));
+        intent.sent = true;
+        entry.sent = true;
+        const response = await result;
+        if (!response.ok) { rejected = true; throw new Error(response.message || "Command rejected"); }
+        if (this.commandIntent === intent) this.acceptedCommandId = envelope.command_id;
+        this.reconcileAcceptedCommand();
+        this.requestUpdate();
+        if (TERMINAL_STATE_SYNC_COMMANDS.has(command)) await this.pollCommandState(envelope.command_id);
+        if (["preview", "save_preview"].includes(command)) {
+          await this.pollCommandState(envelope.command_id, 120000, 1000);
+        }
+        return response;
+      }
+      if (WS_COMMANDS.has(command) && socket && socket.readyState !== window.WebSocket?.CLOSED) {
+        throw new Error("Connection state is unknown; the command was not retried.");
+      }
+      intent.sent = true;
+      const response = await fetch(action, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "fetch" },
+        body: JSON.stringify(envelope),
+      });
+      const resultPayload = await response.json();
+      if (!response.ok || !resultPayload.ok) { rejected = true; throw new Error(resultPayload.message || "Command rejected"); }
+      if (this.commandIntent === intent) this.acceptedCommandId = envelope.command_id;
       this.reconcileAcceptedCommand();
       this.requestUpdate();
-      if (TERMINAL_STATE_SYNC_COMMANDS.has(command)) await this.pollCommandState(envelope.command_id);
-      if (["preview", "save_preview"].includes(command)) {
-        await this.pollCommandState(envelope.command_id, 120000, 1000);
+      await this.pollHttpCommand(envelope.command_id);
+      return resultPayload;
+    } catch (error) {
+      const ownsIntent = this.commandIntent === intent;
+      if (!intent.sent || rejected) {
+        // A definitive refusal also settles exact fences retained after lifecycle cleanup.
+        // The response cannot settle a newer intent or any authoritative operation gate.
+        if (ownsIntent) this.commandIntent = null;
+        if (this.acceptedCommandId === intent.id) this.acceptedCommandId = null;
+        if (this.uncertainCommandId === intent.id) this.uncertainCommandId = null;
+        if (this.decisionDisplay?.id === intent.id) this.decisionDisplay = null;
+        if (this.decisionFocus?.commandId === intent.id) {
+          if (ownsIntent) this.decisionFocus.settled = true;
+          else this.cancelDecisionFocus();
+        }
+        this.reconcileAcceptedCommand();
+        this.requestUpdate();
+      } else if (ownsIntent) {
+        this.uncertainCommandId = intent.id;
+        this.cancelDecisionFocus();
+        this.reconcileAcceptedCommand();
+        this.requestUpdate();
       }
-      return response;
+      throw error;
     }
-    if (WS_COMMANDS.has(command) && socket && socket.readyState !== window.WebSocket?.CLOSED) {
-      throw new Error("Connection state is unknown; the command was not retried.");
-    }
-    const response = await fetch(action, {
-      method: "POST",
-      headers: { Accept: "application/json", "Content-Type": "application/json", "X-Requested-With": "fetch" },
-      body: JSON.stringify(envelope),
-    });
-    const resultPayload = await response.json();
-    if (!response.ok || !resultPayload.ok) throw new Error(resultPayload.message || "Command rejected");
-    this.acceptedCommandId = envelope.command_id;
-    this.reconcileAcceptedCommand();
-    this.requestUpdate();
-    await this.pollHttpCommand(envelope.command_id);
-    return resultPayload;
   }
 
   async pollHttpCommand(commandId) {
@@ -1746,6 +1828,7 @@ class HaOpsApp extends LitElement {
   }
 
   observeBackendVersion(version) {
+    if (knownVersion(version) && knownVersion(this.backendVersion) && String(version) !== this.backendVersion) this.forgetCommandIntent();
     if (!knownVersion(version) || !knownVersion(this.clientVersion)) {
       this.backendVersion = knownVersion(version) ? String(version) : this.backendVersion;
       this.versionMismatchOpen = false;
@@ -1778,7 +1861,110 @@ class HaOpsApp extends LitElement {
       .some((record) => ["accepted", "running", "failed_unknown"].includes(record.status));
   }
 
+  forgetCommandIntent({ retainDecisionDisplay = false } = {}) {
+    const intent = this.commandIntent;
+    if (intent?.sent) this.acceptedCommandId = intent.id;
+    if (!retainDecisionDisplay) this.decisionDisplay = null;
+    else if (intent?.sent && PREVIEW_DECISION_COMMANDS.has(intent.command)) {
+      // Display only: no payload, retry authority or focus intent survives disconnect.
+      const { id, command, direction, contentKey, recordSeen } = intent;
+      this.decisionDisplay = { id, command, direction, contentKey, recordSeen };
+    }
+    this.commandIntent = null;
+    this.cancelDecisionFocus();
+    this.reconcileDecisionDisplay();
+  }
+
+  reconcileDecisionDisplay() {
+    const display = this.decisionDisplay;
+    if (!display) return;
+    const record = this.state.command_records?.[display.id];
+    if (![this.acceptedCommandId, this.uncertainCommandId].includes(display.id)
+      || display.contentKey !== previewContentKey(this.state, display.direction)
+      || (record && (record.command !== display.command || record.status === "terminal"))
+      || (!record && display.recordSeen)) {
+      this.decisionDisplay = null;
+    } else if (record) display.recordSeen = true;
+  }
+
+  cancelDecisionFocus = () => { this.decisionFocus = null; };
+
+  onDecisionFocusIn = (event) => {
+    if (this.decisionFocus && !event.composedPath().includes(this.decisionFocus.control)
+      && event.target !== document.body) this.cancelDecisionFocus();
+  };
+
+  captureDecisionFocus(intent) {
+    if (!PREVIEW_DECISION_COMMANDS.has(intent.command)) return;
+    let active = document.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    let control = active;
+    while (control && !["vaadin-button", "vaadin-checkbox"].includes(control.localName)) control = composedParent(control);
+    const preview = containingPreview(control);
+    if (preview && this.contains(preview)) {
+      let row = control;
+      while (row && row !== preview && row.localName !== "ha-ops-preview-file") row = composedParent(row);
+      if (row === preview) row = null;
+      this.decisionFocus = { commandId: intent.id, control, target: active, preview, row, rowKey: previewFileContentKey(row),
+        contentKey: previewContentKey(this.state, preview.direction), settled: false, restoring: false };
+    }
+  }
+
+  async restoreDecisionFocus() {
+    const focus = this.decisionFocus;
+    if (!focus) return;
+    if (!focus.control.isConnected || !focus.target.isConnected || !focus.preview.isConnected
+      || containingPreview(focus.control) !== focus.preview
+      || focus.rowKey !== previewFileContentKey(focus.row)
+      || focus.contentKey !== previewContentKey(this.state, focus.preview.direction)) {
+      this.cancelDecisionFocus();
+      return;
+    }
+    if (!focus.settled || focus.restoring || this.mutationBlocked()) return;
+    focus.restoring = true;
+    await focus.preview.updateComplete;
+    // Nested Lit rows apply disabled properties after the parent update.
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    if (this.decisionFocus !== focus) return;
+    this.cancelDecisionFocus();
+    if (this.mutationBlocked() || !focus.control.isConnected || !focus.target.isConnected || !focus.preview.isConnected
+      || containingPreview(focus.control) !== focus.preview || focus.control.disabled
+      || focus.rowKey !== previewFileContentKey(focus.row)
+      || focus.contentKey !== previewContentKey(this.state, focus.preview.direction)) return;
+    // Vaadin's delegate focus method omits preventScroll; use the captured native target.
+    focus.target.focus({ preventScroll: true });
+  }
+
+  previewOperationHidesContent() {
+    this.reconcileDecisionDisplay();
+    if (this.state.active_operation) return true;
+    const knownDecision = (id) => {
+      const record = this.state.command_records?.[id];
+      // Missing records need exact current local evidence, never a guessed command type.
+      const local = this.commandIntent?.id === id ? this.commandIntent
+        : this.decisionDisplay?.id === id ? this.decisionDisplay : null;
+      return PREVIEW_DECISION_COMMANDS.has(record ? record.command : local?.command);
+    };
+    if (this.commandIntent && !PREVIEW_DECISION_COMMANDS.has(this.commandIntent.command)) return true;
+    if ([this.acceptedCommandId, this.uncertainCommandId].some((id) => id && !knownDecision(id))) return true;
+    if (Object.values(this.state.command_records || {}).some((record) =>
+      ["accepted", "running", "failed_unknown"].includes(record.status) && !PREVIEW_DECISION_COMMANDS.has(record.command))) return true;
+    return this.state.last_status === "running" && !PREVIEW_DECISION_COMMANDS.has(this.state.last_action);
+  }
+
   reconcileAcceptedCommand() {
+    this.reconcileDecisionDisplay();
+    const intent = this.commandIntent;
+    if (intent) {
+      const record = this.state.command_records?.[intent.id];
+      if ((record && record.command !== intent.command) || (!record && intent.recordSeen)
+        || (PREVIEW_DECISION_COMMANDS.has(intent.command) && intent.contentKey !== previewContentKey(this.state, intent.direction))) {
+        this.forgetCommandIntent();
+      } else if (record?.status === "terminal") {
+        this.commandIntent = null;
+        if (this.decisionFocus?.commandId === intent.id) this.decisionFocus.settled = true;
+      } else if (record) intent.recordSeen = true;
+    }
     if (this.uncertainCommandId) {
       const record = this.state.command_records?.[this.uncertainCommandId];
       if (record?.status === "terminal") {
@@ -1801,7 +1987,7 @@ class HaOpsApp extends LitElement {
   }
 
   previewTemplate() {
-    if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation || this.isRunning()) return nothing;
+    if (this.previewOperationHidesContent()) { this.cancelDecisionFocus(); return nothing; }
     const hasApplyPaths = Boolean(this.state.last_preview_paths?.length);
     const hasSavePaths = Boolean(this.state.last_save_preview_paths?.length);
     const previewRunning = this.isPreviewGenerationRunning();
@@ -1822,7 +2008,7 @@ class HaOpsApp extends LitElement {
           : html`
               ${hasApplyPaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.mutationBlocked()} .generatedAt=${this.view.display_times?.last_diff_generated_at || ""} direction="apply"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
-              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.isRunning()} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
+              ${hasSavePaths ? html`<ha-ops-preview data-testid="preview" .state=${this.state} .running=${this.mutationBlocked()} .generatedAt=${this.view.display_times?.last_save_diff_generated_at || ""} direction="save"
                 @ha-ops-command=${this.onCommand}></ha-ops-preview>` : nothing}
             `}
       </section>
@@ -1932,6 +2118,7 @@ class HaOpsApp extends LitElement {
   }
 
   setConnection(connection) {
+    if (["connecting", "reconnecting", "unknown"].includes(connection)) this.forgetCommandIntent({ retainDecisionDisplay: true });
     if (connection !== "http" && this.httpPollTimer) {
       clearTimeout(this.httpPollTimer);
       this.httpPollTimer = null;

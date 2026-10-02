@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items after splitting the backup matrices (612 total); remaining
+pytest items including the preview decision guards (619 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -26,6 +26,7 @@ pytest items after splitting the backup matrices (612 total); remaining
 | Server and workflows | `test_server.py` | 425 | Save/Apply previews, Git branches, conflicts, protected storage, rollback, cleanup, migration, state, transport, UI source contracts, diagnostics, and local harness safety |
 | Backups | `test_backup_continuation.py` | 135 | Backup classification and creation policy, real Apply refusal/retry/acknowledgement, crash recovery, and HTTP/WebSocket replay |
 | Client commands | `test_client_contract.py` | 20 | Durable command claims, concurrency, preview identities, stale selections, recovery, and client/server boundaries |
+| Preview decisions | `test_preview_decisions.py` | 7 | Complete frontend module with inert Lit/Vaadin imports: continuity, fences, detached refusal, uncertainty, content lifetime, authority, and focus guards |
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
@@ -36,6 +37,8 @@ python3 -m pytest -n auto ha-ops/tests/test_server.py
 python3 -m pytest -n auto ha-ops/tests/test_backup_continuation.py
 # Client commands
 python3 -m pytest ha-ops/tests/test_client_contract.py
+# Preview decisions (requires Node)
+python3 -m pytest ha-ops/tests/test_preview_decisions.py
 # Registry and layout
 python3 -m pytest ha-ops/tests/test_registry_diff.py ha-ops/tests/test_heap_layout.py
 # Release safeguards
@@ -54,9 +57,16 @@ python3 -m pytest -n auto ha-ops/tests/test_server.py -k 'save or apply'
 python3 -m pytest 'ha-ops/tests/test_backup_continuation.py::test_real_retry_rejects_ambiguous_post_creation_inventory_in_either_order[duplicate slug before]'
 ```
 
+The seven preview decision items run the complete production frontend module
+through Node. When Node is unavailable, they explicitly skip; those skips do
+not verify frontend behavior. `HA_OPS_FRONTEND_SOURCE` selects a disposable
+historical source for regression proof. Inert Lit/Vaadin imports test logic,
+so these items do not establish DOM continuity, native focus, or appearance.
+
 Browser smoke tests are a separate visual layer and are not collected by
-pytest. `ha-ops/tests/browser/run.mjs` covers the local client/harness, and
-`ha-ops/tests/browser/backup-continuation.mjs` covers the backup footer flow.
+pytest. `ha-ops/tests/browser/run.mjs` covers the local client/harness,
+`ha-ops/tests/browser/backup-continuation.mjs` covers the backup footer flow,
+and `ha-ops/tests/browser/preview-decisions.mjs` covers preview decisions.
 See [browser instructions](ha-ops/tests/browser/README.md) for commands and
 session behavior. Run the affected browser flow for visual changes; source
 contract assertions alone cannot establish rendered behavior.
