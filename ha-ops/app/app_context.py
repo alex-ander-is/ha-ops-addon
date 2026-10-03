@@ -1,3 +1,4 @@
+import io
 import os
 import subprocess
 import threading
@@ -613,15 +614,23 @@ class AppContext:
         return self.recover_deleted_devices_cleanup(state)
 
     def run_command(self, command, env=None, cwd=None, timeout=None):
-        return subprocess.run(
+        # Diff hunk carriage returns must survive command output decoding.
+        preserve_diff_newlines = bool(command) and Path(command[0]).name == "diff"
+        result = subprocess.run(
             command,
             cwd=str(cwd) if cwd else None,
             env=env,
-            text=True,
+            text=not preserve_diff_newlines,
             capture_output=True,
             check=False,
             timeout=timeout,
         )
+        if preserve_diff_newlines:
+            with io.TextIOWrapper(io.BytesIO(result.stdout), newline="") as stdout:
+                result.stdout = stdout.read()
+            with io.TextIOWrapper(io.BytesIO(result.stderr)) as stderr:
+                result.stderr = stderr.read()
+        return result
 
     def log(self, message):
         print(f"[ha-ops] {message}", flush=True)

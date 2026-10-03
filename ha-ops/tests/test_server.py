@@ -15060,6 +15060,282 @@ devices:
             self.assertIn("new-b", result["diff"])
             self.assertNotIn("new-a", result["diff"])
 
+    def test_diff_split_routes_target_statuses_to_summary_in_any_order(self):
+        server = load_server()
+        paths = ["homeassistant/configuration.yaml", "homeassistant/scripts.yaml"]
+        chunks = ["\n".join([
+            f"diff --git a/{path} b/{path}",
+            f"--- a/{path}",
+            f"+++ b/{path}",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ]) for path in paths]
+        statuses = [
+            sys.modules["sync"].target_diff({"id": target_id}, "baseline", "preview", lambda _args:
+                subprocess.CompletedProcess([], 0, stdout="", stderr="")).rstrip("\n")
+            for target_id in ("addon-mqtt", "App Čas: [beta] / тест", "addon-awtrix")
+        ]
+        for before, between, after in (
+            (statuses, [], []), ([], statuses, []), ([], [], statuses),
+            (statuses[:1], statuses[1:2], statuses[2:]), ([], [], []),
+        ):
+            with self.subTest(before=before, between=between, after=after):
+                detail = "\n".join(before + [chunks[0]] + between + [chunks[1]] + after)
+                by_path, summary = server.web.diff_split.split_preview_diff_by_path(detail, paths)
+                self.assertEqual(by_path, dict(zip(paths, chunks)))
+                self.assertEqual(summary, "\n".join(before + between + after))
+        by_path, summary = server.web.diff_split.split_preview_diff_by_path("\n".join(statuses), paths)
+        self.assertEqual(by_path, {})
+        self.assertEqual(summary, "\n".join(statuses))
+
+    def test_diff_split_preserves_hunk_content_that_resembles_target_status(self):
+        server = load_server()
+        path = "homeassistant/scripts.yaml"
+        status = "Target addon-mqtt: no file changes."
+        chunk = "\n".join([
+            f"diff --git a/{path} b/{path}",
+            f"--- a/{path}",
+            f"+++ b/{path}",
+            "@@ -1,3 +1,3 @@",
+            f" {status}",
+            f"-{status}",
+            f"+{status}",
+            "@@ -8 +8 @@",
+            "-old",
+            "+new",
+            "Target addon-mqtt: no file changes. extra",
+            "Target addon-mqtt: no file changes",
+            "target addon-mqtt: no file changes.",
+            "Target addon-mqtt: no file changes. ",
+        ])
+        by_path, summary = server.web.diff_split.split_preview_diff_by_path(f"{chunk}\n{status}", [path])
+        self.assertEqual(by_path, {path: chunk})
+        self.assertEqual(summary, status)
+
+    def test_diff_split_preserves_non_lf_separators_inside_hunks(self):
+        server = load_server()
+        path = "homeassistant/scripts.yaml"
+        status = "Target addon-mqtt: no file changes."
+        for separator in ("\u2028", "\u2029", "\x85", "\v", "\f", "\x1c", "\x1d", "\x1e", "\r"):
+            with self.subTest(separator=repr(separator)):
+                chunk = "\n".join([
+                    f"diff --git a/{path} b/{path}",
+                    f"--- a/{path}",
+                    f"+++ b/{path}",
+                    "@@ -1,2 +1,2 @@",
+                    f" context{separator}{status}",
+                    f"-old{separator}{status}",
+                    f"+new{separator}{status}",
+                ])
+                by_path, summary = server.web.diff_split.split_preview_diff_by_path(
+                    f"{chunk}\n{status}\n", [path]
+                )
+                self.assertEqual(by_path, {path: chunk})
+                self.assertEqual(summary, status)
+
+    def test_diff_split_normalizes_crlf_without_adding_a_trailing_line(self):
+        server = load_server()
+        path = "homeassistant/scripts.yaml"
+        chunk = "\n".join([
+            f"diff --git a/{path} b/{path}",
+            f"--- a/{path}",
+            f"+++ b/{path}",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ])
+        for newline in ("\n", "\r\n"):
+            for trailing_lines in (0, 1, 2):
+                with self.subTest(newline=repr(newline), trailing_lines=trailing_lines):
+                    detail = chunk.replace("\n", newline) + newline * trailing_lines
+                    by_path, summary = server.web.diff_split.split_preview_diff_by_path(detail, [path])
+                    self.assertEqual(by_path, {path: chunk + "\n" * max(0, trailing_lines - 1)})
+                    self.assertEqual(summary, "")
+        self.assertEqual(server.web.diff_split.split_preview_diff_by_path("", [path]), ({}, ""))
+
+    def test_diff_get_preserves_non_lf_separators_from_real_command_in_both_directions(self):
+        path = "homeassistant/scripts.yaml"
+        status = "Target addon-mqtt: no file changes."
+        for separator in ("\u2028", "\u2029", "\x85", "\r", "\r\n"):
+            for direction in ("apply", "save"):
+                with self.subTest(separator=repr(separator), direction=direction), tempfile.TemporaryDirectory() as tmp:
+                    server = load_server()
+                    root = Path(tmp)
+                    self.configure_paths(server, root)
+                    baseline = root / "baseline"
+                    preview = root / "preview"
+                    baseline.mkdir()
+                    preview.mkdir()
+                    (baseline / "scripts.yaml").write_text(
+                        f"context{separator}{status}{separator}suffix\nold{separator}{status}{separator}suffix\n",
+                        encoding="utf-8",
+                    )
+                    (preview / "scripts.yaml").write_text(
+                        f"context{separator}{status}{separator}suffix\nnew{separator}{status}{separator}suffix\n",
+                        encoding="utf-8",
+                    )
+                    local_results = []
+
+                    def run_local_diff(args):
+                        result = server.context().run_command(args)
+                        local_results.append(result)
+                        return result
+
+                    producer = sys.modules["sync"].target_diff
+                    detail = producer({"id": "homeassistant"}, baseline, preview, run_local_diff)
+                    detail += producer({"id": "addon-mqtt"}, baseline, baseline, run_local_diff)
+                    raw_result = subprocess.run(local_results[0].args, capture_output=True)
+                    raw_chunk = raw_result.stdout.decode("utf-8").rstrip("\n")
+                    chunk = raw_chunk.replace("\r\n", "\n")
+                    self.assertEqual(local_results[0].returncode, 1)
+                    self.assertIn(f"+new{separator}", raw_chunk)
+                    diff_key = "last_diff" if direction == "apply" else "last_save_diff"
+                    paths_key = "last_preview_paths" if direction == "apply" else "last_save_preview_paths"
+                    server.write_state({diff_key: detail, paths_key: [path]})
+                    cursor = server.read_state()[f"{diff_key}_cursor"]
+                    result = server.web.dispatch_command(
+                        server.context(), "diff_get", {"cursor": cursor, "path": path}
+                    )
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["diff"], chunk)
+                    raw = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor})
+                    self.assertTrue(raw["ok"], raw)
+                    self.assertEqual(raw["diff"], detail)
+                    self.assertEqual(server.read_state()[diff_key], detail)
+                    self.assertEqual(detail, f"## homeassistant\n{raw_chunk}\n{status}\n")
+
+    def test_run_command_keeps_normal_newline_decoding_outside_diff(self):
+        server = load_server()
+        result = server.context().run_command([
+            sys.executable, "-c",
+            "import os; os.write(1, b'first\\rsecond\\r\\nthird\\n'); os.write(2, b'error\\rnext\\r\\n')",
+        ])
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "first\nsecond\nthird\n")
+        self.assertEqual(result.stderr, "error\nnext\n")
+
+    def test_diff_split_target_status_resets_target_and_old_header_context(self):
+        server = load_server()
+        status = "Target addon-mqtt: no file changes."
+        for before, after, paths in (
+            ("## homeassistant", "--- a/scripts.yaml\n+++ b/scripts.yaml\n+unscoped",
+             ["homeassistant/scripts.yaml"]),
+            ("--- a/homeassistant/deleted.yaml", "+++ /dev/null\n-deleted",
+             ["homeassistant/deleted.yaml"]),
+        ):
+            with self.subTest(before=before):
+                detail = f"{before}\n{status}\n{after}"
+                by_path, summary = server.web.diff_split.split_preview_diff_by_path(detail, paths)
+                self.assertEqual(by_path, {})
+                self.assertEqual(summary, detail)
+
+    def test_diff_split_keeps_deleted_file_and_next_target_separate_from_status(self):
+        server = load_server()
+        deleted_path = "homeassistant/deleted.yaml"
+        changed_path = "addon-awtrix/options.json"
+        deleted_chunk = "\n".join([
+            "--- /work/baseline/deleted.yaml\told timestamp",
+            "+++ /dev/null\tnew timestamp",
+            "@@ -1 +0,0 @@",
+            "-old",
+            "\\ No newline at end of file",
+        ])
+        changed_chunk = "\n".join([
+            "diff -ruN /work/baseline/options.json /work/preview/options.json",
+            "--- /work/baseline/options.json\told timestamp",
+            "+++ /work/preview/options.json\tnew timestamp",
+            "@@ -1 +1 @@",
+            '-{"enabled":false}',
+            '+{"enabled":true}',
+        ])
+        status = "Target addon-mqtt: no file changes."
+        detail = "\n".join([
+            "## homeassistant", deleted_chunk, status, "## addon-awtrix", changed_chunk,
+        ])
+        by_path, summary = server.web.diff_split.split_preview_diff_by_path(
+            detail, [deleted_path, changed_path]
+        )
+        self.assertEqual(by_path, {deleted_path: deleted_chunk, changed_path: changed_chunk})
+        self.assertEqual(summary, "\n".join(["## homeassistant", status, "## addon-awtrix"]))
+
+    def test_diff_get_excludes_target_statuses_for_apply_and_save_but_preserves_raw_preview(self):
+        paths = ["homeassistant/configuration.yaml", "homeassistant/scripts.yaml"]
+        chunks = ["\n".join([
+            f"diff -ruN /work/baseline/{path.split('/', 1)[1]} /work/preview/{path.split('/', 1)[1]}",
+            f"--- /work/baseline/{path.split('/', 1)[1]}\told timestamp",
+            f"+++ /work/preview/{path.split('/', 1)[1]}\tnew timestamp",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ]) for path in paths]
+        statuses = ["Target addon-mqtt: no file changes.", "Target addon-Čas [test]: no file changes."]
+        detail = "\n".join(["## homeassistant", *chunks, *statuses]) + "\n"
+        for direction in ("apply", "save"):
+            with self.subTest(direction=direction), tempfile.TemporaryDirectory() as tmp:
+                server = load_server()
+                self.configure_paths(server, Path(tmp))
+                diff_key = "last_diff" if direction == "apply" else "last_save_diff"
+                paths_key = "last_preview_paths" if direction == "apply" else "last_save_preview_paths"
+                server.write_state({diff_key: detail, paths_key: paths})
+                cursor = server.read_state()[f"{diff_key}_cursor"]
+                for path, chunk in zip(paths, chunks):
+                    result = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor, "path": path})
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["diff"], chunk)
+                raw = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor})
+                self.assertTrue(raw["ok"], raw)
+                self.assertEqual(raw["diff"], detail)
+                self.assertEqual(server.read_state()[diff_key], detail)
+
+    def test_diff_get_keeps_same_basename_targets_separate_around_producer_status(self):
+        paths = ["addon-first/options.json", "addon-second/options.json"]
+        chunks = ["\n".join([
+            "diff -ruN /work/baseline/options.json /work/preview/options.json",
+            "--- /work/baseline/options.json\told timestamp",
+            "+++ /work/preview/options.json\tnew timestamp",
+            "@@ -1 +1 @@",
+            f'-{{"name":"old-{index}"}}',
+            f'+{{"name":"new-{index}"}}',
+        ]) for index in range(2)]
+        for direction in ("apply", "save"):
+            with self.subTest(direction=direction), tempfile.TemporaryDirectory() as tmp:
+                server = load_server()
+                self.configure_paths(server, Path(tmp))
+                producer = sys.modules["sync"].target_diff
+                status = producer(
+                    {"id": "addon-empty: no file changes."}, "baseline", "preview",
+                    lambda _args: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+                )
+                detail = "".join(
+                    producer(
+                        {"id": path.split("/", 1)[0]}, "baseline", "preview",
+                        lambda _args, chunk=chunk: subprocess.CompletedProcess(
+                            [], 1, stdout=chunk, stderr=""
+                        ),
+                    ) + status
+                    for path, chunk in zip(paths, chunks)
+                )
+                diff_key = "last_diff" if direction == "apply" else "last_save_diff"
+                paths_key = "last_preview_paths" if direction == "apply" else "last_save_preview_paths"
+                server.write_state({diff_key: detail, paths_key: list(reversed(paths))})
+                cursor = server.read_state()[f"{diff_key}_cursor"]
+                for path, chunk in zip(paths, chunks):
+                    result = server.web.dispatch_command(
+                        server.context(), "diff_get", {"cursor": cursor, "path": path}
+                    )
+                    self.assertTrue(result["ok"], result)
+                    self.assertEqual(result["diff"], chunk)
+                by_path, summary = server.web.diff_split.split_preview_diff_by_path(detail, paths)
+                self.assertEqual(by_path, dict(zip(paths, chunks)))
+                self.assertEqual(summary, "\n".join([
+                    "## addon-first", status.rstrip("\n"),
+                    "## addon-second", status.rstrip("\n"),
+                ]))
+                raw = server.web.dispatch_command(server.context(), "diff_get", {"cursor": cursor})
+                self.assertTrue(raw["ok"], raw)
+                self.assertEqual(raw["diff"], detail)
+
     def test_diff_get_explains_registry_change_for_preview_file(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:

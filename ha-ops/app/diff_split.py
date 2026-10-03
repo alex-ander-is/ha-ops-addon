@@ -62,7 +62,19 @@ def split_preview_diff_by_path(detail, paths):
         current_lines = []
         current_path = None
 
-    for line in detail.splitlines():
+    # Diff records use LF; other separators can be literal hunk content.
+    lines = detail.replace("\r\n", "\n").split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    for line in lines:
+        # target_diff() emits this standalone status between target diffs.
+        if line.startswith("Target ") and line.endswith(": no file changes."):
+            flush()
+            summary.append(line)
+            current_target = None
+            current_path = None
+            pending_old_path = None
+            continue
         if line.startswith("## "):
             flush()
             current_target = line[3:].strip()

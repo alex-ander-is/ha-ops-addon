@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.3.1
+
+Keep unchanged-target statuses out of file previews
+
+- Exclude unchanged-target status lines from expanded Apply and Save file diffs.
+- Preserve literal status text inside diff hunks and the complete raw preview.
+- Reset parser context at status boundaries and cover target ordering, deleted files, and both preview directions.
+
 ## 2.3.0
 
 Keep preview selections local until Apply or Save
