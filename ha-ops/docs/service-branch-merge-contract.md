@@ -116,7 +116,7 @@ Apply checks the existing backup policy after rebuilding and validating the
 reviewed preview and before creating a local release snapshot or writing live
 configuration. When a completed check finds no eligible system backup or only
 a stale backup and automatic backup creation is disabled, Apply ends with a
-failed terminal command and releases its operation fence. The reviewed diff,
+failed terminal command with warning severity and releases its operation fence. The reviewed diff,
 preview identity, selections, and HA/Git choices remain available.
 
 The Apply footer shows the configured freshness limit, then **Acknowledge & Proceed**,
@@ -141,8 +141,11 @@ or downstream Apply failures retain the existing recovery behavior. A stale
 intent or similarly worded exception never grants continuation authority.
 
 The same mounted page retains its submitted choices after a typed refusal.
-Local edits dismiss that warning permanently for this page without transport.
-Reload starts empty and cannot offer continuation of old server decisions.
+Local edits dismiss continuation permanently for this page without transport.
+The diagnostic WARNING and configured freshness limit remain visible while the
+authoritative refusal matches the current preview and generation. Reload or a
+new tab shows this diagnostic with an empty local draft and cannot offer
+continuation of old server decisions.
 Any newly claimed mutation, replacement or cleared preview, completion, startup
 repair, and version repair clear the server warning.
 An interrupted continuation remains governed by the existing durable Apply

@@ -185,6 +185,7 @@ class HarnessScenarioController:
         self.events = []
         self.last_save_commit_subject = None
         self.backup_policy = None
+        self.backup_max_age_hours = 24
         self.counters["backup_gate_calls"] = 0
         self.counters["backup_acknowledgements"] = 0
 
@@ -263,11 +264,11 @@ class HarnessScenarioController:
                         self.counters["backup_acknowledgements"] += 1
                     else:
                         self.counters["backup_gate_calls"] += 1
-                        if self.backup_policy == "missing":
+                        if self.backup_policy in {"missing", "stale"}:
                             state = ctx.read_state()
-                            ctx.write_state({"last_status": "error", "last_message": "No fresh system backup found within 24 hour(s)"})
+                            ctx.write_state({"last_status": "warning", "last_message": f"No fresh system backup found within {self.backup_max_age_hours} hour(s)"})
                             return job_logic.ApplyBackupRefusal(
-                                state["active_operation"]["command_id"], state["operation_generation"], 24,
+                                state["active_operation"]["command_id"], state["operation_generation"], self.backup_max_age_hours,
                             )
                 self._write_apply_complete(ctx, details)
             elif action == "deleted_devices_preview":
@@ -874,8 +875,12 @@ class DevHarnessContext(app_context.AppContext):
     def dev_harness_handle_post(self, route, body):
         if route == "/__dev_harness__/backup-policy":
             policy = _first(body, "policy")
-            if policy not in {"missing", "fresh"}:
+            if policy not in {"missing", "stale", "fresh"}:
                 return {"ok": False, "status": 400}
+            hours = _first(body, "hours") or "24"
+            if not hours.isdecimal() or not 1 <= int(hours) <= 168:
+                return {"ok": False, "status": 400}
+            self.harness_controller.backup_max_age_hours = int(hours)
             self.harness_controller.backup_policy = policy
             return {"ok": True}
         if route == "/__dev_harness__/seed-internal-ids":

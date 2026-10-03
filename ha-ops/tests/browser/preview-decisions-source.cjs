@@ -93,12 +93,31 @@ async function final() {
   }
 }
 async function backup() {
-  const p=preview(); assert(!p.backupRefusal);
-  p.selectAll(true); p.runFinalAction(); p.running=false; p.state.apply_backup_refusal={operation_id:'old',max_age_hours:24}; assert(p.backupRefusal);
-  p.onPreviewSelect(event({path:'a.yaml',selected:false})); assert(!p.backupRefusal);
-  p.onPreviewSelect(event({path:'a.yaml',selected:true})); assert(!p.backupRefusal);
+  const p=preview(); assert(!p.backupRefusal); assert(!p.backupWarning);
+  const refusal = id => ({operation_id:id,generation:p.state.operation_generation,max_age_hours:12,preview_identity:Object.fromEntries(Object.entries(context.structuredClone(vm.runInNewContext('previewIdentity',context)(p.state,'apply'))).sort(([a],[b])=>a.localeCompare(b)))});
+  p.state.apply_backup_refusal=refusal('old');
+  assert(p.backupWarning,'reload must expose non-actionable diagnostic');
+  assert.equal(p.submitted,false); assert.equal(p.selectedPaths.length,0); assert(!p.backupRefusal);
+  p.runFinalAction('acknowledge'); p.runFinalAction('retry'); assert.equal(p.events.length,0);
+  p.selectAll(true); p.runFinalAction(); p.running=false;
+  p.state.apply_backup_refusal=refusal('submitted'); assert(p.backupRefusal);
+  p.wrapAll(false); assert(p.backupRefusal,'wrap is not a processing decision');
+  p.onPreviewSelect(event({path:'a.yaml',selected:false})); assert(!p.backupRefusal); assert(p.backupWarning);
+  p.onPreviewSelect(event({path:'a.yaml',selected:true})); assert(!p.backupRefusal); assert(p.backupWarning);
+  p.onPreviewResolve(event({path:'a.yaml',choice:'ha'})); p.onPreviewResolve(event({path:'a.yaml',choice:'git'}));
+  p.state={...p.state,last_message:'unrelated state update'}; p.willUpdate(); assert(!p.backupRefusal); assert(p.backupWarning);
   p.runFinalAction(); p.running=false; assert(!p.backupRefusal,'dismissed old refusal must never revive');
-  p.state={...p.state,apply_backup_refusal:{operation_id:'new'}}; assert(p.backupRefusal); checks++;
+  p.state={...p.state,apply_backup_refusal:refusal('new')}; assert(p.backupRefusal);
+  const current=p.state;
+  for(const field of ['apply_preview_id','last_preview_commit','last_preview_fingerprint','last_preview_paths','last_preview_conflict_paths','last_preview_live_fingerprints','last_diff_cursor','apply_decision_revision','operation_generation']) {
+    const changed=field.endsWith('paths')?['different']:field.endsWith('fingerprints')?{changed:'different'}:field==='last_diff_cursor'?{...current.last_diff_cursor,artifact:'different'}:field.endsWith('revision')||field==='operation_generation'?99:'different';
+    p.state={...current,[field]:changed}; assert(!p.backupWarning,field); assert(!p.backupRefusal,field);
+  }
+  p.state={...current,apply_backup_refusal:null,last_status:'warning',last_message:'No fresh system backup found within 24 hour(s)'};
+  assert(!p.backupWarning); assert(!p.backupRefusal);
+  p.state={...current,apply_backup_refusal:null,last_status:'error'}; assert(!p.backupWarning);
+  p.state={...current,last_preview_paths:[]}; assert(!p.backupWarning);
+  checks++;
 }
 async function fences() {
   for(const gate of ['intent','accepted','uncertain','operation','running','recovery','prune']) {

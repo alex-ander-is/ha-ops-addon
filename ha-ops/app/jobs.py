@@ -2306,7 +2306,7 @@ def run_apply_job(ctx, lock_acquired=False, backup_mode="normal"):
                 # Return evidence only after the caught refusal has been recorded.
                 # The command finalizer atomically publishes it and releases the fence.
                 write_state({
-                    "last_run_at": utc_now(), "last_status": "error", "last_action": "apply",
+                    "last_run_at": utc_now(), "last_status": "warning", "last_action": "apply",
                     "last_message": str(exc), "last_details": [*details, str(exc)],
                 })
                 return ApplyBackupRefusal(

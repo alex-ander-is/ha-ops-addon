@@ -620,9 +620,10 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                 try:
                     outcome = target(*args, lock_acquired=reserved_lock)
                     final_state = ctx.read_state()
+                    typed_refusal = isinstance(outcome, job_logic.ApplyBackupRefusal)
                     refusal = None
                     operation = final_state.get(state_store.ACTIVE_OPERATION_KEY) or {}
-                    if (action == "apply" and isinstance(outcome, job_logic.ApplyBackupRefusal)
+                    if (action == "apply" and typed_refusal
                         and outcome.operation_id == command_id == operation.get("command_id")
                         and outcome.generation == operation.get("accepted_generation")
                         and outcome.generation == final_state.get("operation_generation")):
@@ -636,15 +637,15 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                         command_id,
                         "terminal",
                         {
-                            "ok": final_state.get("last_status") not in {"error", "interrupted"},
+                            "ok": not typed_refusal and final_state.get("last_status") not in {"error", "interrupted"},
                             "status": final_state.get("last_status"),
                             "message": final_state.get("last_message", ""),
                             "backup_refusal": refusal,
-                            "safe_terminal": action in {"preview", "save_preview"} or (
+                            "safe_terminal": not typed_refusal and (action in {"preview", "save_preview"} or (
                                 action == "apply" and
                                 (final_state.get("apply_intent") or {}).get("operation_id") == command_id and
                                 (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
-                            ),
+                            )),
                         },
                     )
                 except BaseException as exc:

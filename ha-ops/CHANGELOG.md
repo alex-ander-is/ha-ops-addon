@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.3.3
+
+Keep missing or stale backup warnings visible after reload
+
+- Show the configured backup freshness warning with a native WARNING badge after reload or in a new tab, while keeping continuation restricted to the submitted review.
+- Record typed backup refusals as unsuccessful commands with warning severity and preserve recovery fences for unmatched outcomes.
+- Retain reviewed diffs and one-use Acknowledge and Retry behavior.
+
 ## 2.3.2
 
 Restore Git Access deploy-key guidance and public key

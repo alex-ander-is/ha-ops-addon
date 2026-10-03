@@ -1,4 +1,5 @@
 import { LitElement, css, html, nothing } from "lit";
+import "@vaadin/badge";
 import "@vaadin/button";
 import "@vaadin/checkbox";
 import "@vaadin/confirm-dialog";
@@ -614,19 +615,14 @@ class HaOpsPreview extends LitElement {
     footer { display: block; min-width: 0; max-width: 100%; }
     .footer-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: .5rem; min-width: 0; max-width: 100%; width: 100%; }
     .footer-actions.apply-only { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
-    .backup-warning { display: inline-flex; align-items: center; gap: .5rem; color: #b42318; margin-right: auto; }
-    .backup-warning-badge {
-      display: inline-flex;
-      align-items: center;
-      padding: .3rem .7rem;
-      border: 1px solid #fda29b;
-      border-radius: 999px;
-      background: #fef3f2;
-      color: #d92d20;
-      font-size: .75rem;
-      font-weight: 700;
-      line-height: 1.2;
-      text-transform: uppercase;
+    .backup-warning { display: inline-flex; align-items: center; gap: .5rem; color: #92400e; margin-right: auto; min-width: 0; max-width: 100%; }
+    .backup-warning-message { min-width: 0; overflow-wrap: anywhere; }
+    vaadin-badge.backup-warning-badge {
+      --vaadin-badge-background: #fffbeb;
+      --vaadin-badge-border-color: #fcd34d;
+      --vaadin-badge-text-color: #92400e;
+      --vaadin-badge-font-size: .75rem;
+      --vaadin-badge-font-weight: 700;
     }
     ${previewDisabledButtonStyles}
     vaadin-text-field.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
@@ -735,11 +731,13 @@ class HaOpsPreview extends LitElement {
               ?disabled=${this.running}
               @input=${this.onCommitSubjectInput}></vaadin-text-field>
           ` : nothing}
-          ${this.direction === "apply" && this.backupRefusal ? html`
+          ${this.backupWarning ? html`
             <span class="backup-warning" role="alert">
-              <span class="backup-warning-badge">ERROR</span>
-              ${TEXT.backupRequired.replace("{hours}", String(this.state.apply_backup_refusal.max_age_hours))}
+              <vaadin-badge class="backup-warning-badge" theme="warning">WARNING</vaadin-badge>
+              <span class="backup-warning-message">${TEXT.backupRequired.replace("{hours}", String(this.backupWarning.max_age_hours))}</span>
             </span>
+          ` : nothing}
+          ${this.direction === "apply" && this.backupRefusal ? html`
             <vaadin-button theme="secondary" ?disabled=${this.isFinalActionDisabled()} @click=${() => this.runFinalAction("acknowledge")}>
               ${TEXT.acknowledgeBackup}
             </vaadin-button>
@@ -764,8 +762,20 @@ class HaOpsPreview extends LitElement {
     if (this.running) return;
     for (const file of this.renderRoot.querySelectorAll("ha-ops-preview-file")) file.setExpanded(expanded);
   }
-  get backupRefusal() {
+  get backupWarning() {
     const refusal = this.state.apply_backup_refusal;
+    if (this.direction !== "apply" || !this.paths.length || !refusal?.operation_id
+      || refusal.generation !== Number(this.state.operation_generation || 0)
+      || !refusal.preview_identity) return null;
+    // Diagnostic display uses authoritative submitted identity, never the empty
+    // local draft on reload. Continuation still requires this page's submission.
+    const canonical = value => Array.isArray(value) ? value.map(canonical)
+      : value && typeof value === "object" ? Object.fromEntries(Object.entries(value)
+        .sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => [key, canonical(item)])) : value;
+    return JSON.stringify(canonical(refusal.preview_identity)) === JSON.stringify(canonical(previewIdentity(this.state, "apply"))) ? refusal : null;
+  }
+  get backupRefusal() {
+    const refusal = this.backupWarning;
     return this.submitted && refusal?.operation_id !== this.dismissedRefusalId ? refusal : null;
   }
   dismissContinuation() {

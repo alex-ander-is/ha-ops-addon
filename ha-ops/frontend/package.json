@@ -6,6 +6,7 @@
     "build": "esbuild src/ha-ops.js --bundle --format=esm --minify --target=es2022 --outfile=../app/static/ha-ops.js"
   },
   "dependencies": {
+    "@vaadin/badge": "25.2.8",
     "@vaadin/button": "25.2.8",
     "@vaadin/checkbox": "25.2.8",
     "@vaadin/confirm-dialog": "25.2.8",

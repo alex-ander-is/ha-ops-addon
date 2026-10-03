@@ -165,6 +165,10 @@ class BackupContinuationTests(unittest.TestCase):
         result, state = self.send(envelope)
         self.assertTrue(result["ok"], result)
         self.assertIsNone(state["active_operation"])
+        self.assertEqual(state["last_status"], "warning")
+        record = state["command_records"][envelope["command_id"]]
+        self.assertFalse(record["result"]["ok"])
+        self.assertEqual(record["result"]["status"], "warning")
         self.assertEqual(state["apply_backup_refusal"]["operation_id"], envelope["command_id"])
         return state
 
@@ -496,16 +500,86 @@ class BackupContinuationTests(unittest.TestCase):
                 self.assertIsNone(state.get("apply_backup_refusal"))
                 self.ctx.write_state({"active_operation": None, "command_records": {}})
 
-    def test_stale_refusal_outcome_cannot_release_another_operation(self):
-        old = self.refuse()["apply_backup_refusal"]
-        def run_apply_job(*args, lock_acquired=False):
-            self.ctx.write_state({"last_status": "error", "last_message": "unrelated failure"})
-            self.ctx.run_lock.release()
-            return self.server.web.job_logic.ApplyBackupRefusal(old["operation_id"], old["generation"], 24)
-        with patch.object(self.ctx, "run_apply_job", run_apply_job):
-            _, state = self.send(self.envelope("retry"))
-        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
-        self.assertIsNone(state.get("apply_backup_refusal"))
+    def test_real_stale_refusal_uses_configured_hours_without_effects(self):
+        options = json.loads(self.server.OPTIONS_PATH.read_text())
+        self.server.OPTIONS_PATH.write_text(json.dumps({**options, "backup_max_age_hours": 12}))
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(locations=[None])]})
+        with patch.object(self.ctx, "create_release_snapshot") as snapshot, patch.object(self.ctx, "apply_targets") as apply:
+            state = self.refuse()
+        snapshot.assert_not_called(); apply.assert_not_called()
+        self.assertEqual(state["apply_backup_refusal"]["max_age_hours"], 12)
+        self.assertIn("within 12 hour(s)", state["last_message"])
+
+    def test_typed_warning_outcome_binding_matrix_preserves_recovery(self):
+        original = self.ctx.read_state()
+        cases = ("matched", "wrong_id", "wrong_outcome_generation", "wrong_accepted_generation",
+                 "wrong_final_generation", "no_operation", "displaced_operation", "stale_rollback", "normal_warning")
+        for case in cases:
+            with self.subTest(case=case):
+                self.ctx.write_state({**original, "active_operation": None, "command_records": {}, "apply_backup_refusal": None})
+                envelope = self.envelope()
+                displaced = None
+                def run_apply_job(*args, lock_acquired=False):
+                    nonlocal displaced
+                    current = self.ctx.read_state()
+                    operation = current["active_operation"]
+                    operation_id = envelope["command_id"]
+                    generation = current["operation_generation"]
+                    updates = {"last_status": "warning", "last_message": "typed backup refusal"}
+                    if case in {"wrong_id", "stale_rollback"}:
+                        operation_id = "older-command"
+                    elif case == "wrong_outcome_generation":
+                        generation += 1
+                    elif case == "wrong_accepted_generation":
+                        updates["active_operation"] = {**operation, "accepted_generation": generation + 1}
+                    elif case == "wrong_final_generation":
+                        updates["operation_generation"] = generation + 1
+                    elif case == "no_operation":
+                        updates["active_operation"] = None
+                    elif case == "displaced_operation":
+                        displaced = {**operation, "command_id": "another-command"}
+                        updates["active_operation"] = displaced
+                    if case == "stale_rollback":
+                        updates["apply_intent"] = {"operation_id": envelope["command_id"], "phase": "caught_rollback_complete"}
+                    self.ctx.write_state(updates)
+                    self.ctx.run_lock.release()
+                    return True if case == "normal_warning" else self.server.web.job_logic.ApplyBackupRefusal(operation_id, generation, 24)
+                with patch.object(self.ctx, "run_apply_job", run_apply_job):
+                    result, state = self.send(envelope)
+                self.assertTrue(result["ok"], result)  # admission is independent of completion
+                record = state["command_records"][envelope["command_id"]]["result"]
+                self.assertEqual(record["ok"], case == "normal_warning")
+                self.assertFalse(record["safe_terminal"])
+                self.assertEqual(record["status"], "warning")
+                if case == "matched":
+                    self.assertEqual(state["apply_backup_refusal"]["operation_id"], envelope["command_id"])
+                    self.assertIsNone(state["active_operation"])
+                else:
+                    self.assertIsNone(state.get("apply_backup_refusal"))
+                    if case in {"no_operation", "normal_warning"}:
+                        self.assertIsNone(state["active_operation"])
+                    elif case == "displaced_operation":
+                        self.assertEqual(state["active_operation"], displaced)
+                    else:
+                        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+
+    def test_refused_warning_replays_over_http_and_websocket_without_effects(self):
+        for transport in ("http", "ws"):
+            with self.subTest(transport=transport):
+                self.ctx.write_state({"active_operation": None, "command_records": {}, "apply_backup_refusal": None})
+                envelope = self.envelope()
+                with patch.object(self.ctx, "ensure_fresh_system_backup", wraps=self.ctx.ensure_fresh_system_backup) as gate:
+                    accepted = self.websocket(envelope) if transport == "ws" else self.send(envelope, http=True)[0]
+                    state = self.ctx.read_state()
+                    duplicate = self.send(envelope, http=True)[0] if transport == "ws" else self.websocket(envelope)
+                self.assertTrue(accepted["ok"])
+                self.assertTrue(duplicate["duplicate"])
+                gate.assert_called_once()
+                record = state["command_records"][envelope["command_id"]]
+                self.assertEqual(duplicate["command_record"], record)
+                self.assertFalse(record["result"]["ok"])
+                self.assertEqual(record["result"]["status"], "warning")
+                self.assertEqual(self.server.web._snapshot_payload(self.ctx)["state"]["apply_backup_refusal"], state["apply_backup_refusal"])
 
     def test_downstream_live_write_failure_rolls_back_with_snapshot(self):
         self.refuse()
