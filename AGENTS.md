@@ -36,3 +36,12 @@ Repeat relevant review/checks if cleanup changes tracked content. The unchanged
 pre-push hook remains the full-suite gate; do not repeat that suite immediately
 before publishing. Restore any targeted stash of user changes exactly after
 publication and clean any new task scratch created by delivery checks.
+
+Design functional UI parts as reusable components from the start. Prefer the
+installed Vaadin OSS components, and inspect the installed version before
+adding a custom control. Wrap app-specific behavior in small components with
+clear inputs and events. Use one shared status-badge component for status and
+backup-warning badges instead of styling each instance separately. Keep its
+appearance and accessibility consistent wherever it is used, including across
+light and shadow roots. Ask the user when a choice about component behavior or
+scope cannot be resolved from existing product requirements.
