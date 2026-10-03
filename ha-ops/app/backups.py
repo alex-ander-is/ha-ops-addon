@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import policies
+
 
 class FreshBackupRequired(RuntimeError):
     """A completed policy check found no eligible fresh system backup."""
@@ -244,3 +246,26 @@ def ensure_fresh_system_backup(
         raise RuntimeError(f"Created backup {slug}, but it is older than {status['max_age_hours']} hour(s).")
     add_detail(details, f"Created fresh system backup: {backup_status_message(backup, backup_date)}")
     return slug
+
+
+def policy_identity(options, option_bool):
+    """Normalized consent-affecting policy, never a freshness cache."""
+    hours = policies.option_int(options, "backup_max_age_hours", policies.DEFAULT_BACKUP_MAX_AGE_HOURS, minimum=1)
+    return {"require_fresh_backup": option_bool(options, "require_fresh_backup", True),
+            "max_age_hours": hours,
+            "backup_require_location": option_bool(options, "backup_require_location", True),
+            "create_ha_backup": option_bool(options, "create_ha_backup", True)}
+
+
+def read_only_admission(ctx, options):
+    policy = policy_identity(options, ctx.option_bool)
+    if not policy["require_fresh_backup"]:
+        return "disabled", None, policy
+    status = ctx.latest_system_backup_status(options)
+    if status.get("available") is not True:
+        return "unavailable", None, policy
+    if status.get("refusal_reason") in {"missing", "stale"}:
+        return status["refusal_reason"], None, policy
+    if status.get("stale") is False and status.get("backup"):
+        return "fresh", backup_slug(status["backup"]), policy
+    return "unavailable", None, policy

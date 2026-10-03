@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.4.0
+
+Check backup freshness before building Git to HA previews
+
+- Check the backup inventory before repository checkout or diff construction and show missing or stale backup warnings immediately.
+- Add separate one-use Continue Preview Without a Fresh Backup and Retry Preview actions; reviewing a diff grants no Apply authority.
+- Recheck backup freshness for acknowledged Apply without creating backups, retaining current recovery and reviewed-decision safeguards.
+
 ## 2.3.3
 
 Keep missing or stale backup warnings visible after reload

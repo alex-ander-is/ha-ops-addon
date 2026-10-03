@@ -6191,6 +6191,7 @@ class ServerTests(unittest.TestCase):
                         "repo_branch": "main",
                         "repo_path": "ha-config",
                         "apply_path": "homeassistant",
+                        "require_fresh_backup": False,
                     }
                 )
             )
@@ -12074,7 +12075,7 @@ devices:
                 remote = self.seed_remote(root)
                 ctx = server.app_context.AppContext(data_dir=root / "data", config_dir=root / "config")
                 ctx.work_dir.mkdir(parents=True)
-                options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config"}
+                options = {"repo_url": str(remote), "repo_branch": "main", "repo_path": "ha-config", "require_fresh_backup": False}
                 ctx.options_path.write_text(json.dumps(options))
                 repo = ctx.ensure_repo(options)
                 tracked = repo / "homeassistant" / "configuration.yaml"

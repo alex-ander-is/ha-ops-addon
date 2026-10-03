@@ -157,9 +157,23 @@ try {
   });
   async function preview() {
     await page.getByRole("button", { name: "Preview Git to HA", exact: true }).click();
+    const warning = page.getByTestId("preview-backup-warning");
+    await warning.waitFor(); await settle();
+    assert(await page.locator('ha-ops-preview[direction="apply"]').count() === 0, "early backup refusal built a diff");
+    assert((await warning.innerText()).includes("Preview has not been built. You can continue to review changes; Apply will check the backup again."), "preflight support copy missing");
+    const refused = await state();
+    assert(refused.preview_backup_check.status === "missing" || refused.preview_backup_check.status === "stale", "typed preflight status missing");
+    await page.screenshot({ path: `${artifacts}/preflight-${refused.preview_backup_check.status}.png`, fullPage: true });
+    await page.reload(); await settle();
+    await warning.waitFor();
+    assert(await page.getByRole("button", { name: "Continue Preview Without a Fresh Backup", exact: true }).count() === 0, "reload restored preview consent");
+    await page.getByRole("button", { name: "Retry Preview Git to HA", exact: true }).click();
+    await page.getByRole("button", { name: "Continue Preview Without a Fresh Backup", exact: true }).waitFor(); await settle();
+    await page.getByRole("button", { name: "Continue Preview Without a Fresh Backup", exact: true }).click();
     const component = page.locator('ha-ops-preview[direction="apply"]');
     await component.waitFor();
     await settle();
+    assert(await component.evaluate(p => p.selectedPaths.length === 0), "continued diff selected paths automatically");
     await component.getByRole("button", { name: "Select All", exact: true }).click();
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).waitFor();
     await settle();
@@ -244,6 +258,7 @@ try {
     const afterReloadCounters = (await fixtureJson(`${baseUrl}__dev_harness__/diagnostics`)).counters;
     assert(afterReloadCounters.backup_gate_calls === reloadCounters.backup_gate_calls, "reload automatically retried Apply");
     assert(afterReloadCounters.backup_acknowledgements === reloadCounters.backup_acknowledgements, "reload automatically acknowledged backup refusal");
+    assert(await component.evaluate(p => p.selectedPaths.length === 0), "continued diff selected paths automatically");
     await component.getByRole("button", { name: "Select All", exact: true }).click();
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
     await ack.waitFor(); await settle();
@@ -288,6 +303,7 @@ try {
     assert(!(await state()).apply_backup_refusal, "acknowledgement kept warning");
     assert(diagnosticsBefore.counters.backup_gate_calls === diagnosticsAfter.counters.backup_gate_calls, "ack called backup gate");
     assert(diagnosticsAfter.counters.backup_acknowledgements === diagnosticsBefore.counters.backup_acknowledgements + 1, "ack missing");
+    assert(diagnosticsAfter.counters.backup_inventory_queries === diagnosticsBefore.counters.backup_inventory_queries + 1, "ack did not recheck inventory");
     await seed("stale", 12);
     component = await preview();
     await component.getByRole('button', { name: 'Apply Git to HA', exact: true }).click();

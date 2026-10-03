@@ -60,3 +60,8 @@ For local HAOS development, clone this repository into:
 ```text
 /addons/ha-ops-addon
 ```
+
+Preview Git to HA checks backup freshness before building the diff. A missing or stale
+backup shows an immediate warning. Retry Preview checks again; Continue Preview Without
+a Fresh Backup permits one diff review only. Apply checks independently, including a
+read-only recheck for Acknowledge & Proceed. Unknown backup status cannot be bypassed.

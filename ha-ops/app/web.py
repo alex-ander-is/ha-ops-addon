@@ -15,6 +15,7 @@ import conflicts as conflict_logic
 import git_ops
 import i18n
 import jobs as job_logic
+import backups
 import manifest as manifest_logic
 import registry_diff
 import state as state_store
@@ -620,34 +621,71 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                 try:
                     outcome = target(*args, lock_acquired=reserved_lock)
                     final_state = ctx.read_state()
-                    typed_refusal = isinstance(outcome, job_logic.ApplyBackupRefusal)
+                    typed_apply_refusal = isinstance(outcome, job_logic.ApplyBackupRefusal)
+                    typed_preview_refusal = isinstance(outcome, job_logic.PreviewBackupRefusal)
+                    typed_refusal = typed_apply_refusal or typed_preview_refusal or isinstance(outcome, job_logic.PreviewBackupInvalidated)
                     refusal = None
                     operation = final_state.get(state_store.ACTIVE_OPERATION_KEY) or {}
-                    if (action == "apply" and typed_refusal
+                    if (action == "apply" and typed_apply_refusal
                         and outcome.operation_id == command_id == operation.get("command_id")
                         and outcome.generation == operation.get("accepted_generation")
                         and outcome.generation == final_state.get("operation_generation")):
                         refusal = {
                             "operation_id": command_id, "generation": outcome.generation,
                             "max_age_hours": outcome.max_age_hours,
+                            "policy_identity": outcome.policy_identity,
                             "preview_identity": preview_identity_for_state(final_state, "apply"),
                             "decision_digest": preview_decision_digest(final_state, "apply"),
                         }
-                    ctx.update_command(
-                        command_id,
-                        "terminal",
-                        {
-                            "ok": not typed_refusal and final_state.get("last_status") not in {"error", "interrupted"},
-                            "status": final_state.get("last_status"),
-                            "message": final_state.get("last_message", ""),
-                            "backup_refusal": refusal,
-                            "safe_terminal": not typed_refusal and (action in {"preview", "save_preview"} or (
-                                action == "apply" and
-                                (final_state.get("apply_intent") or {}).get("operation_id") == command_id and
-                                (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
-                            )),
-                        },
-                    )
+                    preview_refusal = None
+                    if (action == "preview" and typed_preview_refusal
+                        and outcome.operation_id == command_id == operation.get("command_id")
+                        and outcome.accepted_generation == operation.get("accepted_generation")
+                        and outcome.generation == final_state.get("operation_generation")
+                        and outcome.policy_identity == backups.policy_identity(ctx.load_options(), ctx.option_bool)):
+                        preview_refusal = {"operation_id": command_id,
+                            "accepted_generation": outcome.accepted_generation, "generation": outcome.generation,
+                            "max_age_hours": outcome.max_age_hours, "reason": outcome.reason,
+                            "policy_identity": outcome.policy_identity}
+                    result = {
+                        "ok": not typed_refusal and final_state.get("last_status") not in {"error", "interrupted"},
+                        "status": final_state.get("last_status"),
+                        "message": final_state.get("last_message", ""),
+                        "backup_refusal": refusal,
+                        "preview_backup_refusal": preview_refusal,
+                        "preview_backup_check": final_state.get("preview_backup_check") if action == "preview" else None,
+                        "safe_terminal": not typed_refusal and (action in {"preview", "save_preview"} or (
+                            action == "apply" and
+                            (final_state.get("apply_intent") or {}).get("operation_id") == command_id and
+                            (final_state.get("apply_intent") or {}).get("phase") == "caught_rollback_complete"
+                        )),
+                    }
+                    if action == "preview":
+                        # Capture only this worker's outcome, never another operation's diagnostic.
+                        check = getattr(outcome, "check", None)
+                        if isinstance(outcome, job_logic.PreviewJobOutcome):
+                            result.update(ok=outcome.ok, status=outcome.status, message=outcome.message,
+                                          preview_backup_check=check, safe_terminal=True)
+                        elif typed_preview_refusal:
+                            if preview_refusal is None:
+                                result.update(ok=False, status="error", message=job_logic.PreviewBackupInvalidated.message,
+                                              preview_backup_check=check, safe_terminal=False, preview_invalidated=True)
+                            else:
+                                result.update(ok=False, status="warning",
+                                              message=f"No fresh system backup found within {outcome.max_age_hours} hour(s).",
+                                              preview_backup_check=check, safe_terminal=False)
+                        elif isinstance(outcome, job_logic.PreviewBackupInvalidated):
+                            result.update(ok=False, status=outcome.status, message=outcome.message,
+                                          preview_backup_check=None, safe_terminal=False, preview_invalidated=True)
+                        else:
+                            result["preview_backup_check"] = (
+                                result["preview_backup_check"] if (result.get("preview_backup_check") or {}).get("operation_id") == command_id else None
+                            )
+                        if isinstance(outcome, (job_logic.PreviewJobOutcome, job_logic.PreviewBackupRefusal)):
+                            result["preview_terminal_binding"] = {
+                                "operation": outcome.operation, "generation": outcome.generation, "check": check,
+                            }
+                    ctx.update_command(command_id, "terminal", result)
                 except BaseException as exc:
                     ctx.update_command(command_id, "terminal", {"ok": False, "message": str(exc)})
                     raise
@@ -691,7 +729,7 @@ def _deleted_devices_transient_snapshot_fields(ctx, state):
 
 
 UI_STATE_FIELDS = frozenset({
-    "apply_backup_refusal",
+    "apply_backup_refusal", "preview_backup_refusal", "preview_backup_check",
     "last_seen_addon_version", "last_run_at", "last_status", "last_action", "last_message", "last_details",
     "last_release", "last_backup_slug", "last_diff_cursor", "last_diff_generated_at", "last_preview_commit", "last_preview_fingerprint",
     "last_preview_paths", "last_preview_conflicts", "last_preview_conflict_paths", "last_preview_live_fingerprints",
@@ -986,8 +1024,19 @@ def dispatch_command(ctx, command, body=None, start_job=None):
                             candidate = {**current, **updates}
                             if (not refusal or refusal.get("operation_id") != envelope_payload.get("backup_refusal_id")
                                 or refusal.get("generation") != current.get("operation_generation")
+                                or mode == "acknowledge" and refusal.get("policy_identity") != backups.policy_identity(ctx.load_options(), ctx.option_bool)
                                 or refusal.get("preview_identity") != preview_identity_for_state(current, "apply")
                                 or refusal.get("decision_digest") != preview_decision_digest(candidate, "apply")):
+                                raise StalePreviewDecision(_("error.backup_continuation_stale"))
+                    if command == "preview":
+                        mode = envelope_payload.get("preview_backup_mode", "normal")
+                        if mode not in {"normal", "retry", "continue"}:
+                            raise ValueError(_("error.backup_continuation_stale"))
+                        if mode != "normal":
+                            refusal = current.get("preview_backup_refusal") or {}
+                            if (not refusal or refusal.get("operation_id") != envelope_payload.get("preview_backup_refusal_id")
+                                or refusal.get("generation") != current.get("operation_generation")
+                                or mode in {"continue", "acknowledge"} and refusal.get("policy_identity") != backups.policy_identity(ctx.load_options(), ctx.option_bool)):
                                 raise StalePreviewDecision(_("error.backup_continuation_stale"))
                     if command == "internal_ids_migrate":
                         selected = envelope_payload.get("selected")
@@ -1058,12 +1107,13 @@ def dispatch_command(ctx, command, body=None, start_job=None):
     if command in {"select_internal_ids", "select_retained_device"}:
         return command_result(True, "Selection updated.", **_snapshot_payload(ctx))
     if command == "preview":
+        mode_args = (envelope_payload.get("preview_backup_mode"),) if envelope_payload.get("preview_backup_mode") in {"retry", "continue"} else ()
         if start_job is None:
             ok = start_reserved_background(
-                ctx, ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id
+                ctx, ctx.run_preview_job, *mode_args, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id
             )
         else:
-            ok = start_job(ctx.run_preview_job, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id)
+            ok = start_job(ctx.run_preview_job, *mode_args, state_updates=state_store.ALL_PREVIEW_CLEAR_UPDATES, command_id=command_id)
         if not ok:
             record_duplicate_rejection("preview")
         finalize_rejected(command_id, ok)

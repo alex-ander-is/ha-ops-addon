@@ -151,6 +151,9 @@ class JobContext:
     discard_deleted_devices_rollback: Any
     enforce_apply_limits: Any
     ensure_fresh_system_backup: Any
+    latest_system_backup_status: Any
+    publish_preview_backup_check: Any
+    publish_preview_state: Any
     ensure_preview_matches_state: Any
     ensure_repo: Any
     export_targets: Any
@@ -2127,6 +2130,7 @@ class ApplyBackupRefusal:
     operation_id: str
     generation: int
     max_age_hours: int
+    policy_identity: Any = None
 
     def __bool__(self):
         return False
@@ -2298,6 +2302,16 @@ def run_apply_job(ctx, lock_acquired=False, backup_mode="normal"):
         }
         write_state({"apply_intent": apply_intent})
         if backup_mode == "acknowledge":
+            policy = backups.policy_identity(options, ctx.option_bool)
+            if operation.get("backup_policy_identity") != policy:
+                raise RuntimeError(_("error.backup_continuation_stale"))
+            status, backup_slug, _policy = backups.read_only_admission(ctx, options)
+            assert_repaired_generation(ctx, "apply", accepted_generation)
+            current_operation = ctx.read_state().get(state_store.ACTIVE_OPERATION_KEY) or {}
+            if (current_operation != operation or backups.policy_identity(ctx.load_options(), ctx.option_bool) != policy):
+                raise RuntimeError(_("error.backup_continuation_stale"))
+            if status == "unavailable":
+                raise RuntimeError("Backup status unavailable; acknowledged Apply cannot proceed.")
             ctx.add_detail(details, _("detail.backup_acknowledged_once"))
         else:
             try:
@@ -2311,6 +2325,7 @@ def run_apply_job(ctx, lock_acquired=False, backup_mode="normal"):
                 })
                 return ApplyBackupRefusal(
                     apply_intent["operation_id"], accepted_generation, exc.max_age_hours,
+                    backups.policy_identity(options, ctx.option_bool),
                 )
         apply_intent = {**apply_intent, "backup_slug": backup_slug, "phase": "before_snapshot"}
         write_state({"apply_intent": apply_intent})
@@ -2464,30 +2479,163 @@ def run_apply_job(ctx, lock_acquired=False, backup_mode="normal"):
         release_run_lock(ctx)
 
 
-def run_preview_job(ctx, lock_acquired=False):
-    write_state = ctx.write_state
-    utc_now = ctx.utc_now
+class PreviewBackupInvalidated:
+    status = "error"
+    message = "Preview operation changed; run a fresh Preview after recovery."
 
-    if not enter_run_lock(ctx, "preview", lock_acquired):
+    def __bool__(self):
         return False
 
+
+class BackupAdmissionChanged(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class PreviewBackupAdmission:
+    check: Any
+    operation: Any
+    generation: int
+    policy_identity: Any
+
+
+class PreviewProgress(list):
+    """Carry Preview ownership through the shared export/build progress helpers."""
+
+    def __init__(self, ctx, admission, details):
+        super().__init__(details)
+        self.ctx = ctx
+        self.admission = admission
+
+    def publish_detail(self, message):
+        updated = [*self, message]
+        try:
+            self.ctx.publish_preview_state(
+                {"last_run_at": self.ctx.utc_now(), "last_details": updated},
+                self.admission.operation, self.admission.generation, self.admission.check,
+            )
+        except RuntimeError as exc:
+            raise BackupAdmissionChanged(str(exc)) from exc
+        self.append(message)
+
+
+@dataclass(frozen=True)
+class PreviewJobOutcome:
+    ok: bool
+    status: str
+    message: str
+    check: Any
+    operation: Any
+    generation: int
+
+    def __bool__(self):
+        return self.ok
+
+
+@dataclass(frozen=True)
+class PreviewBackupRefusal:
+    operation_id: str
+    accepted_generation: int
+    generation: int
+    max_age_hours: int
+    reason: str
+    policy_identity: Any
+    check: Any = None
+    operation: Any = None
+
+    def __bool__(self):
+        return False
+
+
+def preview_backup_gate(ctx, options, preview_backup_mode="normal", expected_operation=None, expected_generation=None):
+    state = ctx.read_state()
+    generation = int(state.get("operation_generation") or 0) if expected_generation is None else expected_generation
+    try:
+        assert_repaired_generation(ctx, "preview", generation)
+    except RuntimeError as exc:
+        raise BackupAdmissionChanged(str(exc)) from exc
+    operation = (state.get(state_store.ACTIVE_OPERATION_KEY) or {}) if expected_operation is None else expected_operation
+    operation_id = operation.get("command_id")
+    policy = backups.policy_identity(options, ctx.option_bool)
+    if preview_backup_mode not in {"normal", "retry", "continue"} or (
+        preview_backup_mode != "normal" and (
+            operation.get("command") != "preview" or operation.get("phase") != "dispatching"
+            or operation.get("preview_backup_mode") != preview_backup_mode
+            or preview_backup_mode == "continue" and operation.get("backup_policy_identity") != policy
+        )
+    ):
+        raise BackupAdmissionChanged(_("error.backup_continuation_stale"))
+    status, slug, _policy = backups.read_only_admission(ctx, options)
+    try:
+        assert_repaired_generation(ctx, "preview", generation)
+    except RuntimeError as exc:
+        raise BackupAdmissionChanged(str(exc)) from exc
+    if backups.policy_identity(ctx.load_options(), ctx.option_bool) != policy:
+        raise BackupAdmissionChanged(_("error.backup_continuation_stale"))
+    check = {"status": status, "checked_at": ctx.utc_now(), "max_age_hours": policy["max_age_hours"],
+             "operation_id": operation_id, "generation": generation}
+    if slug:
+        check["backup_slug"] = slug
+    diagnostic = {}
+    message = ""
+    if status == "unavailable":
+        message = "Backup status unavailable; Preview has not been built."
+        diagnostic = {"last_status": "error", "last_action": "preview", "last_message": message, "last_details": [message]}
+    elif status in {"missing", "stale"} and preview_backup_mode != "continue":
+        message = f"No fresh system backup found within {policy['max_age_hours']} hour(s)."
+        diagnostic = {"last_status": "warning", "last_action": "preview", "last_message": message, "last_details": [message]}
+    try:
+        ctx.publish_preview_backup_check(check, operation, generation, diagnostic=diagnostic)
+    except RuntimeError as exc:
+        raise BackupAdmissionChanged(str(exc)) from exc
+    if status == "unavailable":
+        return PreviewJobOutcome(False, "error", message, check, operation, generation)
+    if status in {"missing", "stale"} and preview_backup_mode != "continue":
+        return PreviewBackupRefusal(operation_id, operation.get("accepted_generation"), generation,
+                                    policy["max_age_hours"], status, policy, check, operation)
+    return PreviewBackupAdmission(check, operation, generation, policy)
+
+
+def run_preview_job(ctx, lock_acquired=False, preview_backup_mode="normal"):
+    utc_now = ctx.utc_now
+
+    owns_lock = lock_acquired
+    try:
+        initial_generation = assert_repaired_generation(ctx, "preview")
+        if not enter_run_lock(ctx, "preview", lock_acquired):
+            return False
+        owns_lock = True
+        assert_repaired_generation(ctx, "preview", initial_generation)
+        state = ctx.read_state()
+        operation = state.get(state_store.ACTIVE_OPERATION_KEY) or {}
+        if operation and (operation.get("command") != "preview" or operation.get("phase") != "dispatching"
+                          or int(state.get("operation_generation") or 0) != operation.get("accepted_generation", -2) + 1):
+            release_run_lock(ctx)
+            return PreviewBackupInvalidated()
+    except Exception:
+        if owns_lock:
+            release_run_lock(ctx)
+        return PreviewBackupInvalidated()
+
     details = []
-    options = ctx.load_options()
     resolved_targets = []
 
-    write_state(
-        {
-            **state_store.ALL_PREVIEW_CLEAR_UPDATES,
-            "last_run_at": utc_now(),
-            "last_status": "running",
-            "last_action": "preview",
-            "last_message": _("message.preparing_apply_preview"),
-            "last_details": details,
-        }
-    )
-
+    admission = None
+    generation = initial_generation
     try:
-        state = ctx.read_state()
+        options = ctx.load_options()
+        initial = ctx.publish_preview_state(
+            {
+                **state_store.ALL_PREVIEW_CLEAR_UPDATES,
+                "last_run_at": utc_now(),
+                "last_status": "running",
+                "last_action": "preview",
+                "last_message": _("message.preparing_apply_preview"),
+                "last_details": details,
+            }, operation, initial_generation,
+        )
+        generation = int(initial.get("operation_generation") or 0)
+        state = initial
         if state.get("deleted_devices_pending_confirmation"):
             write_pending_deleted_devices(ctx, "preview", details, resolved_targets)
             return False
@@ -2501,27 +2649,49 @@ def run_preview_job(ctx, lock_acquired=False):
             )
             return False
 
+        admission = preview_backup_gate(ctx, options, preview_backup_mode, operation, generation)
+        if not isinstance(admission, PreviewBackupAdmission):
+            return admission
+        details = PreviewProgress(ctx, admission, details)
+        def current():
+            if backups.policy_identity(ctx.load_options(), ctx.option_bool) != admission.policy_identity:
+                raise BackupAdmissionChanged(_("error.backup_continuation_stale"))
+            try:
+                ctx.publish_preview_state({}, admission.operation, admission.generation, admission.check)
+            except RuntimeError as exc:
+                raise BackupAdmissionChanged(str(exc)) from exc
+        current()
         prepare_repo_checkout_for_sync(ctx, options, details, "Preview Git to HA")
+        current()
         repo_dir = ctx.ensure_repo(options)
+        current()
         env = ctx.git_env(options)
         branch = options.get("repo_branch", "main")
         addons = ctx.get_installed_addons()
+        current()
         manifest, manifest_path = ctx.load_manifest(repo_dir, options, addons)
         resolved_targets = ctx.resolve_targets(repo_dir, manifest, addons, require_source=False)
+        current()
 
         ctx.add_detail(details, _("detail.fetched_repository_commit", commit=ctx.git_head_or_unborn(repo_dir)))
         ctx.add_detail(details, _("detail.using_manifest", path=manifest_path))
         ctx.add_detail(details, _("detail.building_apply_preview"))
         preview = ctx.build_apply_preview(resolved_targets, details, repo_dir, branch)
+        current()
         commit = ctx.git_head_or_unborn(repo_dir)
+        current()
         ctx.push_branch(repo_dir, env, "ha-ops/ha-live")
+        current()
         ctx.add_detail(details, _("detail.pushed_ha_live"))
         git_state_out_of_date = False
         try:
             ctx.push_branch(repo_dir, env, "ha-ops/base")
+            current()
             ctx.add_detail(details, _("detail.pushed_ha_base"))
         except RuntimeError as exc:
+            current()
             git_state_out_of_date = record_service_branch_push_failure(ctx, details, "ha-ops/base", exc)
+        current()
         message = _("message.apply_preview_finished")
         if preview.get("storage_changes"):
             paths = preview.get("storage_change_paths") or []
@@ -2530,46 +2700,57 @@ def run_preview_job(ctx, lock_acquired=False):
         if git_state_out_of_date:
             message = _("message.git_state_out_of_date")
 
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "warning" if git_state_out_of_date else "success",
-                "last_action": "preview",
-                "last_message": message,
-                "last_details": details,
-                "last_targets": resolved_targets,
-                "last_diff": preview["diff"],
-                "last_diff_generated_at": utc_now(),
-                "last_preview_commit": commit,
-                "last_preview_fingerprint": preview["fingerprint"],
-                "apply_preview_id": str(uuid.uuid4()),
-                "apply_decision_revision": 0,
-                "last_preview_deletions": preview["deletions"],
-                "last_preview_storage_changes": preview.get("storage_changes", False),
-                "last_preview_storage_paths": preview.get("storage_change_paths", []),
-                "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
-                "last_preview_warnings": preview.get("warnings", []),
-                "last_preview_paths": preview.get("paths", []),
-                "last_preview_conflicts": bool(preview.get("conflicts")),
-                "last_preview_conflict_paths": preview.get("conflicts", []),
-                "apply_preview_resolutions": {},
-                "apply_preview_selected_paths": [],
-            }
-        )
-        return True
+        final_check = {**admission.check, "generation": admission.generation + 1}
+        try:
+            final = ctx.publish_preview_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "warning" if git_state_out_of_date else "success",
+                    "last_action": "preview",
+                    "last_message": message,
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                    "preview_backup_check": final_check,
+                    "last_diff": preview["diff"],
+                    "last_diff_generated_at": utc_now(),
+                    "last_preview_commit": commit,
+                    "last_preview_fingerprint": preview["fingerprint"],
+                    "apply_preview_id": str(uuid.uuid4()),
+                    "apply_decision_revision": 0,
+                    "last_preview_deletions": preview["deletions"],
+                    "last_preview_storage_changes": preview.get("storage_changes", False),
+                    "last_preview_storage_paths": preview.get("storage_change_paths", []),
+                    "last_preview_live_fingerprints": preview.get("live_fingerprints", {}),
+                    "last_preview_warnings": preview.get("warnings", []),
+                    "last_preview_paths": preview.get("paths", []),
+                    "last_preview_conflicts": bool(preview.get("conflicts")),
+                    "last_preview_conflict_paths": preview.get("conflicts", []),
+                    "apply_preview_resolutions": {},
+                    "apply_preview_selected_paths": [],
+                }, admission.operation, admission.generation, admission.check,
+            )
+        except RuntimeError as exc:
+            raise BackupAdmissionChanged(str(exc)) from exc
+        return PreviewJobOutcome(True, final["last_status"], message, final_check, admission.operation, int(final["operation_generation"]))
+    except BackupAdmissionChanged:
+        return PreviewBackupInvalidated()
     except Exception as exc:
         details.append(str(exc))
-        write_state(
-            {
-                "last_run_at": utc_now(),
-                "last_status": "error",
-                "last_action": "preview",
-                "last_message": str(exc),
-                "last_details": details,
-                "last_targets": resolved_targets,
-            }
-        )
-        return False
+        try:
+            failed = ctx.publish_preview_state(
+                {
+                    "last_run_at": utc_now(),
+                    "last_status": "error",
+                    "last_action": "preview",
+                    "last_message": str(exc),
+                    "last_details": details,
+                    "last_targets": resolved_targets,
+                }, operation, generation,
+                admission.check if isinstance(admission, PreviewBackupAdmission) else None,
+            )
+        except RuntimeError:
+            return PreviewBackupInvalidated()
+        return PreviewJobOutcome(False, "error", str(exc), failed.get("preview_backup_check"), operation, int(failed["operation_generation"]))
     finally:
         release_run_lock(ctx)
 

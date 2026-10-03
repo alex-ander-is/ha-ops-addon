@@ -1183,6 +1183,7 @@ class HaOpsApp extends LitElement {
     this.commandIntent = null;
     this.clientError = "";
     this.managedTargetsOpen = false;
+    this.previewSubmittedCommandId = null;
   }
 
   connectedCallback() {
@@ -1386,8 +1387,19 @@ class HaOpsApp extends LitElement {
                   this.issue("include_redundant_data", requested ? { include_redundant_data: "on" } : {}); }}>
               </vaadin-checkbox></section>
               <section class="action-section"><h2>${t("heading.git_to_ha")}</h2><div class="action-row">
-                ${this.actionButton("preview", t("action.preview_apply"), { disabled: controlsBlocked })}
-              </div></section>
+                ${this.state.preview_backup_refusal ? html`
+                  ${this.previewSubmittedCommandId === this.state.preview_backup_refusal.operation_id ? this.actionButton("preview", "Continue Preview Without a Fresh Backup", {
+                    disabled: controlsBlocked, theme: "secondary", payload: { preview_backup_mode: "continue", preview_backup_refusal_id: this.state.preview_backup_refusal.operation_id },
+                  }) : nothing}
+                  ${this.actionButton("preview", "Retry Preview Git to HA", { disabled: controlsBlocked, theme: "primary",
+                    payload: { preview_backup_mode: "retry", preview_backup_refusal_id: this.state.preview_backup_refusal.operation_id } })}
+                ` : this.actionButton("preview", t("action.preview_apply"), { disabled: controlsBlocked })}
+              </div>
+              ${this.state.preview_backup_refusal ? html`<div data-testid="preview-backup-warning" role="status">
+                <vaadin-badge class="backup-warning-badge" theme="warning" style="--vaadin-badge-background: #fffbeb; --vaadin-badge-border-color: #fcd34d; --vaadin-badge-text-color: #92400e; --vaadin-badge-font-weight: 700;">WARNING</vaadin-badge>
+                <p>No fresh system backup found within ${this.state.preview_backup_refusal.max_age_hours} hour(s).</p>
+                <p>Preview has not been built. You can continue to review changes; Apply will check the backup again.</p>
+              </div>` : nothing}</section>
               <section class="action-section"><h2>${t("heading.reset_git_state")}</h2><div class="action-row">
                 ${this.actionButton("reset_git_state", t("action.reset_git_state"), { disabled: controlsBlocked, confirm: t("confirm.reset_git_state") })}
               </div></section>
@@ -1591,6 +1603,7 @@ class HaOpsApp extends LitElement {
       generation: Number(this.state.operation_generation || 0),
       payload: structuredClone(payload),
     };
+    if (command === "preview") this.previewSubmittedCommandId = envelope.command_id;
     const intent = { id: envelope.command_id, command, sent: false, recordSeen: false };
     this.commandIntent = intent;
     this.requestUpdate();

@@ -121,8 +121,9 @@ class BackupContinuationTests(unittest.TestCase):
         s.get_installed_addons = lambda: []
         s.do_core_check = lambda: None
         s.core_reload_yaml = lambda: None
-        s.backup_manager_info = Mock(return_value={"backups": []})
+        s.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
         self.assertTrue(s.run_preview_job())
+        s.backup_manager_info = Mock(return_value={"backups": []})
         h.select_all_apply_preview_files(s)
         self.ctx = s.context()
         self.background = patch.object(s.web, "start_background", lambda callback: callback())
@@ -209,7 +210,9 @@ class BackupContinuationTests(unittest.TestCase):
         self.refuse()
         self.send(self.envelope("acknowledge"))
         (self.server.CONFIG_DIR / "configuration.yaml").write_text("homeassistant:\n  name: Later live edit\n")
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
         self.assertTrue(self.server.run_preview_job())
+        self.server.backup_manager_info = Mock(return_value={"backups": []})
         self.helper.select_all_apply_preview_files(self.server)
         with patch.object(self.ctx, "ensure_fresh_system_backup", wraps=self.ctx.ensure_fresh_system_backup) as gate, patch.object(self.ctx, "apply_targets") as apply:
             state = self.refuse()
@@ -1149,3 +1152,506 @@ class BackupPolicyTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError) as caught:
                     s.ensure_fresh_system_backup({"create_ha_backup": False}, [])
                 self.assertNotIsInstance(caught.exception, backups.FreshBackupRequired)
+
+
+class PreviewBackupAdmissionTests(unittest.TestCase):
+    """Production command/worker/finalizer boundary, with real disposable Git."""
+    setUp = BackupContinuationTests.setUp
+    send = BackupContinuationTests.send
+    envelope = BackupContinuationTests.envelope
+    refuse = BackupContinuationTests.refuse
+
+    def preview_send(self, mode="normal", envelope=None):
+        state = self.ctx.read_state()
+        payload = {} if mode == "normal" else {"preview_backup_mode": mode,
+            "preview_backup_refusal_id": (state.get("preview_backup_refusal") or {}).get("operation_id")}
+        envelope = envelope or {"command_id": str(uuid.uuid4()), "command": "preview",
+            "generation": state["operation_generation"], "payload": payload}
+        result = self.server.web.dispatch_command(self.ctx, "preview", envelope)
+        return result, self.ctx.read_state(), envelope
+
+    def test_early_missing_stale_gate_precedes_every_expensive_effect(self):
+        for create in (False, True):
+            for inventory, reason in (([], "missing"), ([backup_fixture()], "stale")):
+                with self.subTest(create=create, reason=reason):
+                    options = json.loads(self.server.OPTIONS_PATH.read_text())
+                    self.server.OPTIONS_PATH.write_text(json.dumps({**options, "create_ha_backup": create}))
+                    self.server.backup_manager_info = Mock(return_value={"backups": inventory})
+                    with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout, patch.object(self.ctx, "build_apply_preview", side_effect=AssertionError("diff")) as build, patch.object(self.ctx, "push_branch", side_effect=AssertionError("push")) as push, patch.object(self.ctx, "create_ha_backup", side_effect=AssertionError("creation")) as creation, patch.object(self.ctx, "create_release_snapshot", side_effect=AssertionError("snapshot")) as snapshot:
+                        accepted, state, envelope = self.preview_send()
+                    self.assertTrue(accepted["ok"])
+                    self.assertEqual(state["last_status"], "warning", state["last_details"])
+                    self.assertEqual(state["preview_backup_check"]["status"], reason)
+                    self.assertEqual(state["preview_backup_refusal"]["operation_id"], envelope["command_id"])
+                    self.assertEqual(state["preview_backup_refusal"]["accepted_generation"] + 2, state["operation_generation"])
+                    self.assertFalse(state["command_records"][envelope["command_id"]]["result"]["ok"])
+                    self.assertIsNone(state["active_operation"])
+                    self.assertFalse(state["last_preview_paths"])
+                    self.server.backup_manager_info.assert_called_once()
+                    for spy in (checkout, build, push, creation, snapshot): spy.assert_not_called()
+
+    def test_preview_continue_is_one_shot_diff_only_and_apply_rechecks(self):
+        _, refused, original = self.preview_send()
+        self.assertIsNone(refused["apply_backup_refusal"])
+        _, retry, _ = self.preview_send("retry")
+        self.assertFalse(retry["last_preview_paths"])
+        _, done, envelope = self.preview_send("continue")
+        self.assertEqual(done["last_status"], "success", done["last_details"])
+        self.assertTrue(done["last_preview_paths"])
+        self.assertEqual(done["apply_preview_selected_paths"], [])
+        before = self.server.backup_manager_info.call_count
+        duplicate, _, _ = self.preview_send(envelope=envelope)
+        self.assertTrue(duplicate["duplicate"])
+        self.assertEqual(before, self.server.backup_manager_info.call_count)
+        reused = copy.deepcopy(envelope); reused["command_id"] = str(uuid.uuid4()); reused["generation"] = done["operation_generation"]
+        self.assertFalse(self.preview_send(envelope=reused)[0]["ok"])
+        self.helper.select_all_apply_preview_files(self.server)
+        self.refuse()
+        self.assertGreater(self.server.backup_manager_info.call_count, before)
+
+    def test_fresh_check_is_visible_before_diff_and_disabled_avoids_query(self):
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+        build = self.ctx.build_apply_preview
+        def inspect(*args, **kwargs):
+            state = self.ctx.read_state()
+            self.assertEqual(state["preview_backup_check"]["status"], "fresh")
+            self.assertFalse(state["last_preview_paths"])
+            self.assertEqual(self.server.web._snapshot_payload(self.ctx)["state"]["preview_backup_check"]["status"], "fresh")
+            return build(*args, **kwargs)
+        with patch.object(self.ctx, "build_apply_preview", side_effect=inspect):
+            _, state, _ = self.preview_send()
+        self.assertEqual(state["last_status"], "success", state["last_details"])
+        self.assertEqual(state["preview_backup_check"]["generation"], state["operation_generation"])
+        options = json.loads(self.server.OPTIONS_PATH.read_text())
+        self.server.OPTIONS_PATH.write_text(json.dumps({**options, "require_fresh_backup": False}))
+        self.server.backup_manager_info = Mock(side_effect=AssertionError("disabled query"))
+        _, state, _ = self.preview_send()
+        self.assertEqual(state["preview_backup_check"]["status"], "disabled")
+        self.server.backup_manager_info.assert_not_called()
+
+    def test_unavailable_does_not_grant_preview_authority_or_diff(self):
+        for inventory in ({}, {"backups": [{}]}, {"backups": [backup_fixture(), {}]}, {"backups": [backup_fixture(), backup_fixture()]}):
+            self.server.backup_manager_info = Mock(return_value=inventory)
+            with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+                _, state, _ = self.preview_send()
+            self.assertEqual(state["last_status"], "error")
+            self.assertEqual(state["preview_backup_check"]["status"], "unavailable")
+            self.assertIsNone(state["preview_backup_refusal"])
+            checkout.assert_not_called()
+
+    def test_query_wait_invalidates_generation_and_never_releases_foreign_fence(self):
+        def query():
+            self.ctx.write_state({"last_preview_commit": "superseded"})
+            return {"backups": []}
+        self.server.backup_manager_info = Mock(side_effect=query)
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            _, state, _ = self.preview_send()
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertIsNone(state["preview_backup_check"])
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+        checkout.assert_not_called()
+
+    def test_policy_change_during_inventory_blocks_without_diff(self):
+        def query():
+            options = json.loads(self.server.OPTIONS_PATH.read_text())
+            self.server.OPTIONS_PATH.write_text(json.dumps({**options, "backup_max_age_hours": 1}))
+            return {"backups": []}
+        self.server.backup_manager_info = Mock(side_effect=query)
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            _, state, _ = self.preview_send()
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+        checkout.assert_not_called()
+
+    def test_acknowledge_rechecks_fresh_slug_after_limits_before_snapshot(self):
+        self.refuse()
+        events = []
+        self.server.backup_manager_info = Mock(side_effect=lambda: events.append("query") or {"backups": [backup_fixture(slug="fresh-now", date=datetime.now(timezone.utc).isoformat())]})
+        limits = self.ctx.enforce_apply_limits; snapshot = self.ctx.create_release_snapshot
+        with patch.object(self.ctx, "enforce_apply_limits", side_effect=lambda *a: events.append("limits") or limits(*a)), patch.object(self.ctx, "create_release_snapshot", side_effect=lambda *a: events.append("snapshot") or snapshot(*a)), patch.object(self.ctx, "create_ha_backup", side_effect=AssertionError("creation")):
+            _, state = self.send(self.envelope("acknowledge"))
+        self.assertEqual(state["last_status"], "success", state["last_details"])
+        self.assertEqual(events, ["limits", "query", "snapshot"])
+        self.assertEqual(state["last_backup_slug"], "fresh-now")
+        self.server.backup_manager_info.assert_called_once()
+
+    def test_acknowledge_unavailable_retains_fence_and_consumed_authority(self):
+        self.refuse()
+        self.server.backup_manager_info = Mock(return_value={"backups": [{}]})
+        with patch.object(self.ctx, "create_release_snapshot", side_effect=AssertionError("snapshot")) as snapshot:
+            _, state = self.send(self.envelope("acknowledge"))
+        self.assertEqual(state["last_status"], "error")
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+        self.assertIsNone(state["apply_backup_refusal"])
+        snapshot.assert_not_called()
+
+    def test_invalid_inventory_matrix_stays_unknown_at_preview(self):
+        for name, response in invalid_backup_inventories():
+            with self.subTest(name=name):
+                self.server.backup_manager_info = Mock(return_value=response)
+                with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+                    _, state, _ = self.preview_send()
+                self.assertEqual(state["last_status"], "error", name)
+                self.assertEqual(state["preview_backup_check"]["status"], "unavailable", name)
+                self.assertIsNone(state["preview_backup_refusal"])
+                checkout.assert_not_called()
+
+    def test_preview_tokens_cannot_be_used_for_apply_or_policy_changed_continue(self):
+        _, state, _ = self.preview_send()
+        refusal = state["preview_backup_refusal"]
+        apply_envelope = self.envelope("acknowledge")
+        apply_envelope["payload"]["backup_refusal_id"] = refusal["operation_id"]
+        self.assertFalse(self.send(apply_envelope)[0]["ok"])
+        options = json.loads(self.server.OPTIONS_PATH.read_text())
+        self.server.OPTIONS_PATH.write_text(json.dumps({**options, "backup_require_location": False}))
+        self.assertFalse(self.preview_send("continue")[0]["ok"])
+        self.assertIsNotNone(self.ctx.read_state()["preview_backup_refusal"])
+        # Retry needs no bypass authority and evaluates current normal policy.
+        self.assertTrue(self.preview_send("retry")[0]["ok"])
+
+    def test_retry_continue_concurrent_claims_accept_one(self):
+        import threading
+        self.preview_send()
+        state = self.ctx.read_state()
+        envelopes = [{"command_id": str(uuid.uuid4()), "command": "preview", "generation": state["operation_generation"],
+            "payload": {"preview_backup_mode": mode, "preview_backup_refusal_id": state["preview_backup_refusal"]["operation_id"]}}
+            for mode in ("retry", "continue")]
+        barrier = threading.Barrier(3)
+        results, queued = [], []
+        def submit(envelope):
+            barrier.wait(); results.append(self.preview_send(envelope=envelope)[0]["ok"])
+        with patch.object(self.server.web, "start_background", queued.append):
+            threads = [threading.Thread(target=submit, args=(envelope,)) for envelope in envelopes]
+            for thread in threads: thread.start()
+            barrier.wait()
+            for thread in threads: thread.join(timeout=5)
+        self.assertEqual(sorted(results), [False, True])
+        self.assertEqual(len(queued), 1)
+        queued[0]()
+
+    def test_blocked_inventory_cannot_overwrite_replacement_operation(self):
+        import threading
+        entered, release = threading.Event(), threading.Event()
+        def query():
+            entered.set()
+            if not release.wait(timeout=5): raise RuntimeError("query timeout")
+            return {"backups": []}
+        self.server.backup_manager_info = Mock(side_effect=query)
+        queued = []
+        with patch.object(self.server.web, "start_background", queued.append):
+            _, state, envelope = self.preview_send()
+        foreign = {**state["active_operation"], "command_id": str(uuid.uuid4()), "phase": "dispatching"}
+        sentinel = {"status": "disabled", "operation_id": foreign["command_id"]}
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            worker = threading.Thread(target=queued[0]); worker.start()
+            try:
+                self.assertTrue(entered.wait(timeout=5))
+                self.ctx.write_state({"active_operation": foreign, "preview_backup_check": sentinel})
+            finally:
+                release.set(); worker.join(timeout=5)
+            self.assertFalse(worker.is_alive())
+        state = self.ctx.read_state()
+        self.assertEqual(state["active_operation"], foreign)
+        self.assertEqual(state["preview_backup_check"], sentinel)
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertFalse(state["command_records"][envelope["command_id"]]["result"]["ok"])
+        checkout.assert_not_called()
+
+    def test_unbound_typed_preview_outcome_does_not_release_or_grant(self):
+        import jobs
+        queued = []
+        with patch.object(self.server.web, "start_background", queued.append):
+            _, state, envelope = self.preview_send()
+        # Even a matching command/generation without the completed gate evidence is unsafe.
+        def unbound(*args):
+            current = self.ctx.read_state()
+            return jobs.PreviewBackupRefusal(envelope["command_id"], current["active_operation"]["accepted_generation"], current["operation_generation"], 24, "missing", jobs.backups.policy_identity(self.ctx.load_options(), self.ctx.option_bool))
+        with patch.object(jobs, "preview_backup_gate", side_effect=unbound): queued[0]()
+        state = self.ctx.read_state()
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+
+    def test_direct_continue_and_restart_cannot_reconstruct_authority(self):
+        _, state, _ = self.preview_send()
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            self.assertFalse(self.ctx.run_preview_job(preview_backup_mode="continue"))
+        checkout.assert_not_called()
+        self.ctx.write_state({"preview_backup_refusal": state["preview_backup_refusal"], "preview_backup_check": state["preview_backup_check"]})
+        self.ctx.operation_store.begin_repair()
+        self.assertIsNone(self.ctx.read_state()["preview_backup_refusal"])
+        self.assertIsNone(self.ctx.read_state()["preview_backup_check"])
+        self.ctx.operation_store.mark_repaired()
+        state_module = self.server.app_context.state_store
+        self.ctx.write_state({"preview_backup_refusal": state["preview_backup_refusal"], "preview_backup_check": state["preview_backup_check"]})
+        state_module.repair_startup_state(self.ctx.state_path, self.ctx.utc_now(), addon_version="next-test-version")
+        self.assertIsNone(self.ctx.read_state()["preview_backup_refusal"])
+        self.assertIsNone(self.ctx.read_state()["preview_backup_check"])
+
+    def test_post_publish_refusal_and_error_cannot_overwrite_new_operation(self):
+        for inventory in ({"backups": []}, {"backups": [{}]}):
+            with self.subTest(inventory=inventory):
+                self.ctx.write_state({"active_operation": None})
+                self.server.backup_manager_info = Mock(return_value=inventory)
+                real = self.ctx.operation_store.publish_preview_backup_check
+                foreign_id = str(uuid.uuid4())
+                def replace(check, operation, generation, **kwargs):
+                    result = real(check, operation, generation, **kwargs)
+                    self.ctx.write_state({"active_operation": {**operation, "command_id": foreign_id},
+                        "last_status": "running", "last_action": "foreign-test", "last_message": "NEWER STATE",
+                        "preview_backup_check": {"status": "disabled", "operation_id": foreign_id, "generation": generation}})
+                    return result
+                with patch.object(self.ctx.operation_store, "publish_preview_backup_check", side_effect=replace):
+                    _, state, envelope = self.preview_send()
+                self.assertEqual((state["last_status"], state["last_action"], state["last_message"]), ("running", "foreign-test", "NEWER STATE"))
+                self.assertEqual(state["active_operation"]["command_id"], foreign_id)
+                record = state["command_records"][envelope["command_id"]]["result"]
+                self.assertFalse(record["ok"])
+                self.assertEqual(record["status"], "error")
+                self.assertNotEqual((record.get("preview_backup_check") or {}).get("operation_id"), foreign_id)
+                self.assertIsNone(state["preview_backup_refusal"])
+
+    def test_preview_expiration_after_build_or_push_keeps_foreign_or_repaired_state(self):
+        for boundary in ("build", "push"):
+            for change in ("foreign", "repair", "generation"):
+                with self.subTest(boundary=boundary, change=change):
+                    case = PreviewBackupAdmissionTests(); case.setUp()
+                    try:
+                        case.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+                        build = case.ctx.build_apply_preview
+                        foreign_id = str(uuid.uuid4())
+                        def invalidate():
+                            state = case.ctx.read_state()
+                            if change == "repair":
+                                case.ctx.operation_store.begin_repair()
+                                case.ctx.operation_store.reconcile_startup_fence()
+                                case.ctx.operation_store.mark_repaired()
+                            elif change == "generation":
+                                case.ctx.write_state({"last_preview_commit": "superseded"})
+                            else:
+                                case.ctx.write_state({"active_operation": {**state["active_operation"], "command_id": foreign_id},
+                                    "preview_backup_check": {"status": "disabled", "operation_id": foreign_id, "generation": state["operation_generation"]},
+                                    "last_status": "running", "last_action": "foreign-test", "last_message": "NEWER STATE"})
+                        def built(*args):
+                            result = build(*args)
+                            if boundary == "build": invalidate()
+                            return result
+                        def pushed(*args):
+                            if boundary == "push": invalidate()
+                        with patch.object(case.ctx, "build_apply_preview", side_effect=built), patch.object(case.ctx, "push_branch", side_effect=pushed) as push:
+                            _, state, envelope = case.preview_send()
+                        self.assertEqual(push.call_count, 0 if boundary == "build" else 1)
+                        self.assertFalse(state["last_preview_paths"])
+                        record = state["command_records"][envelope["command_id"]]["result"]
+                        self.assertFalse(record["ok"])
+                        self.assertEqual(record["status"], "error")
+                        self.assertNotEqual((record.get("preview_backup_check") or {}).get("operation_id"), foreign_id)
+                        if change == "foreign":
+                            self.assertEqual(state["active_operation"]["command_id"], foreign_id)
+                            self.assertEqual(state["last_message"], "NEWER STATE")
+                        else:
+                            self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+                        self.assertIsNone(state["preview_backup_refusal"])
+                    finally: case.doCleanups()
+
+    def test_preview_guard_lock_ownership_matrix(self):
+        import threading
+        for reserved in (False, True):
+            for timing in ("before", "after"):
+                for change in ("generation", "repair"):
+                    with self.subTest(reserved=reserved, timing=timing, change=change):
+                        ctx = self.ctx
+                        ctx.run_lock = threading.Lock()
+                        if reserved: ctx.run_lock.acquire()
+                        original = ctx.assert_repaired_for_current_preview_read
+                        calls = 0
+                        def guard(reason="preview"):
+                            nonlocal calls
+                            calls += 1
+                            if calls == (1 if timing == "before" else 2):
+                                if change == "repair": ctx.operation_store.begin_repair()
+                                else: ctx.write_state({"last_preview_commit": "changed-after-acquisition"})
+                                if timing == "before": raise RuntimeError("generation expired")
+                            return original(reason)
+                        try:
+                            with patch.object(ctx, "assert_repaired_for_current_preview_read", side_effect=guard), patch.object(ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+                                outcome = ctx.run_preview_job(lock_acquired=reserved)
+                            self.assertFalse(outcome)
+                            checkout.assert_not_called()
+                            self.assertFalse(ctx.run_lock.locked(), "owned Preview lock leaked")
+                        finally:
+                            if ctx.run_lock.locked(): ctx.run_lock.release()
+                            ctx.operation_store.mark_repaired()
+        # A guard that fails before local acquisition must not release another owner.
+        self.ctx.run_lock.acquire()
+        try:
+            with patch.object(self.ctx, "assert_repaired_for_current_preview_read", side_effect=RuntimeError("expired")):
+                self.assertFalse(self.ctx.run_preview_job())
+            self.assertTrue(self.ctx.run_lock.locked())
+        finally: self.ctx.run_lock.release()
+
+    def test_invalidated_preview_has_failed_terminal_status_and_restart_recovery(self):
+        def query():
+            self.ctx.write_state({"last_preview_commit": "changed-in-query"})
+            return {"backups": []}
+        self.server.backup_manager_info = Mock(side_effect=query)
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            _, state, envelope = self.preview_send()
+        record = state["command_records"][envelope["command_id"]]
+        self.assertEqual(record["status"], "terminal")
+        self.assertEqual(record["result"]["status"], "error")
+        self.assertEqual(state["last_status"], "error")
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+        self.assertIsNone(state["preview_backup_refusal"])
+        checkout.assert_not_called()
+        self.ctx.repair_startup_state()
+        self.assertIsNone(self.ctx.read_state()["active_operation"])
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+        _, state, _ = self.preview_send()
+        self.assertEqual(state["last_status"], "success", state["last_details"])
+
+    def test_preview_final_publication_and_terminal_binding_are_atomic(self):
+        for timing in ("before", "after"):
+            with self.subTest(timing=timing):
+                case = PreviewBackupAdmissionTests(); case.setUp()
+                try:
+                    case.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+                    real = case.ctx.operation_store.publish_preview_state
+                    foreign_id = str(uuid.uuid4())
+                    def newer(operation):
+                        case.ctx.write_state({"active_operation": {**operation, "command_id": foreign_id},
+                            "last_preview_paths": ["newer-preview"], "last_status": "running", "last_action": "foreign-test", "last_message": "NEWER STATE",
+                            "preview_backup_check": {"status": "disabled", "operation_id": foreign_id}})
+                    def publication(updates, operation, generation, check=None):
+                        final = updates.get("last_status") == "success" and "last_diff" in updates
+                        if final and timing == "before": newer(operation)
+                        result = real(updates, operation, generation, check)
+                        if final and timing == "after": newer(operation)
+                        return result
+                    with patch.object(case.ctx.operation_store, "publish_preview_state", side_effect=publication):
+                        _, state, envelope = case.preview_send()
+                    self.assertEqual(state["last_preview_paths"], ["newer-preview"])
+                    self.assertEqual(state["last_message"], "NEWER STATE")
+                    self.assertEqual(state["active_operation"]["command_id"], foreign_id)
+                    result = state["command_records"][envelope["command_id"]]["result"]
+                    self.assertFalse(result["ok"])
+                    self.assertEqual(result["status"], "error")
+                    self.assertNotEqual((result.get("preview_backup_check") or {}).get("operation_id"), foreign_id)
+                finally: case.doCleanups()
+
+    def test_policy_change_after_check_publication_has_recoverable_terminal_error(self):
+        real = self.ctx.operation_store.publish_preview_backup_check
+        def changed_policy(check, operation, generation, **kwargs):
+            result = real(check, operation, generation, **kwargs)
+            options = json.loads(self.server.OPTIONS_PATH.read_text())
+            self.server.OPTIONS_PATH.write_text(json.dumps({**options, "backup_max_age_hours": 1}))
+            return result
+        with patch.object(self.ctx.operation_store, "publish_preview_backup_check", side_effect=changed_policy):
+            _, state, envelope = self.preview_send()
+        result = state["command_records"][envelope["command_id"]]["result"]
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(state["last_status"], "error")
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertEqual(state["active_operation"]["phase"], "recovery_required")
+        self.ctx.repair_startup_state()
+        self.assertIsNone(self.ctx.read_state()["active_operation"])
+
+    def test_owned_error_before_inventory_preserves_reason_and_allows_fresh_preview(self):
+        queued = []
+        with patch.object(self.server.web, "start_background", queued.append):
+            _, _, envelope = self.preview_send()
+        options = self.server.OPTIONS_PATH.read_text()
+        self.server.OPTIONS_PATH.write_text("{")
+        with patch.object(self.ctx, "ensure_repo", side_effect=AssertionError("checkout")) as checkout:
+            queued[0]()
+        state = self.ctx.read_state()
+        result = state["command_records"][envelope["command_id"]]["result"]
+        self.assertIn("Expecting property name", result["message"])
+        self.assertEqual(result["message"], state["last_message"])
+        self.assertEqual(result["status"], "error")
+        self.assertFalse(result.get("preview_invalidated", False))
+        self.assertIsNone(state["active_operation"])
+        self.assertIsNone(state["preview_backup_check"])
+        self.assertIsNone(state["preview_backup_refusal"])
+        self.assertFalse(state["last_preview_paths"])
+        self.server.backup_manager_info.assert_not_called()
+        checkout.assert_not_called()
+        self.assertFalse(self.ctx.run_lock.locked())
+        self.server.OPTIONS_PATH.write_text(options)
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+        accepted, state, _ = self.preview_send()
+        self.assertTrue(accepted["ok"])
+        self.assertEqual(state["last_status"], "success", state["last_details"])
+
+    def test_expired_preview_progress_cannot_replace_newer_log_at_nested_boundaries(self):
+        for boundary in ("base_push", "export", "diff"):
+            for raises in (False, True):
+                with self.subTest(boundary=boundary, raises=raises):
+                    case = PreviewBackupAdmissionTests(); case.setUp()
+                    try:
+                        case.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+                        foreign_id = str(uuid.uuid4())
+                        def newer():
+                            state = case.ctx.read_state()
+                            case.ctx.operation_store.write_state({"active_operation": {**state["active_operation"], "command_id": foreign_id},
+                                "last_status": "running", "last_action": "foreign-test", "last_message": "NEWER STATE",
+                                "last_details": ["NEWER DETAILS"],
+                                "preview_backup_check": {"status": "disabled", "operation_id": foreign_id, "generation": state["operation_generation"]}})
+                        sync = case.server.app_context.sync_logic
+                        owner = case.ctx if boundary == "base_push" else sync
+                        name = {"base_push": "push_branch", "export": "export_homeassistant_config", "diff": "target_diff_normalized"}[boundary]
+                        real = getattr(owner, name)
+                        calls = 0
+                        log_after_expiration = []
+                        expired = False
+                        def log(message):
+                            if expired: log_after_expiration.append(message)
+                        def blocking(*args, **kwargs):
+                            nonlocal calls, expired
+                            calls += 1
+                            if boundary == "base_push" and calls == 1: return None
+                            result = None if boundary == "base_push" else real(*args, **kwargs)
+                            newer(); expired = True
+                            if raises: raise RuntimeError("non-fast-forward expired worker")
+                            return result
+                        with patch.object(owner, name, side_effect=blocking), patch.object(case.ctx, "log", side_effect=log):
+                            _, state, envelope = case.preview_send()
+                        self.assertEqual(state["last_details"], ["NEWER DETAILS"])
+                        self.assertEqual(state["last_message"], "NEWER STATE")
+                        self.assertEqual(state["active_operation"]["command_id"], foreign_id)
+                        self.assertFalse(state["last_preview_paths"])
+                        result = state["command_records"][envelope["command_id"]]["result"]
+                        self.assertFalse(result["ok"])
+                        self.assertEqual(result["status"], "error")
+                        self.assertNotEqual((result.get("preview_backup_check") or {}).get("operation_id"), foreign_id)
+                        self.assertIsNone(state["preview_backup_refusal"])
+                        self.assertFalse(case.ctx.run_lock.locked())
+                        self.assertEqual(log_after_expiration, [], "stale nested progress reached process Log")
+                    finally: case.doCleanups()
+
+    def test_preview_progress_rejects_generation_check_and_readiness_expiration(self):
+        import jobs
+        for changed in ("generation", "check", "readiness"):
+            with self.subTest(changed=changed):
+                case = PreviewBackupAdmissionTests(); case.setUp()
+                try:
+                    state = case.ctx.read_state()
+                    check = {"status": "fresh", "operation_id": None, "generation": state["operation_generation"]}
+                    case.ctx.write_state({"preview_backup_check": check})
+                    admission = jobs.PreviewBackupAdmission(check, state.get("active_operation") or {},
+                        state["operation_generation"], {})
+                    details = jobs.PreviewProgress(case.ctx, admission, [])
+                    case.ctx.add_detail(details, "Owned progress")
+                    self.assertEqual(case.ctx.read_state()["last_details"], ["Owned progress"])
+                    if changed == "generation":
+                        case.ctx.write_state({"last_preview_commit": "superseded", "last_details": ["NEWER DETAILS"]})
+                    elif changed == "check":
+                        case.ctx.write_state({"preview_backup_check": {"status": "unavailable"}, "last_details": ["NEWER DETAILS"]})
+                    else:
+                        case.ctx.operation_store.begin_repair()
+                        case.ctx.write_state({"last_details": ["NEWER DETAILS"]})
+                    with self.assertRaises(jobs.BackupAdmissionChanged):
+                        case.ctx.add_detail(details, "Stale progress")
+                    self.assertEqual(case.ctx.read_state()["last_details"], ["NEWER DETAILS"])
+                    self.assertEqual(details, ["Owned progress"])
+                finally: case.doCleanups()

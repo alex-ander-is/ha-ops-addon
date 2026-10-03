@@ -123,8 +123,7 @@ The Apply footer shows the configured freshness limit, then **Acknowledge & Proc
 then **Retry Git to HA**. Retry occupies the original Apply action position at the
 end of the footer and keeps the primary style; Acknowledge is secondary. Retry
 uses normal backup policy, including configured backup creation. Acknowledge
-skips the system backup gate for one attempt only; it does not query freshness
-again. Both use the existing `apply` command and
+rechecks the inventory read-only for one attempt: fresh uses the verified slug, known missing/stale uses the consumed acknowledgment, and unavailable/invalid fails fenced. It never creates a backup. Both use the existing `apply` command and
 job, rerun all preview and limit checks, and retain optional local snapshots,
 protected storage approval, live execution, and rollback behavior.
 
@@ -150,6 +149,30 @@ Any newly claimed mutation, replacement or cleared preview, completion, startup
 repair, and version repair clear the server warning.
 An interrupted continuation remains governed by the existing durable Apply
 fence; recovery never restores consumed acknowledgement.
+
+## Preview Backup Admission
+
+Preview checks backup inventory before checkout, export, branch construction or diff.
+Missing/stale inventory ends with a typed WARNING and no Change List. Unavailable
+or invalid inventory fails with no continuation authority. Preview never creates a
+backup. Continue Preview Without a Fresh Backup consumes only the matching Preview
+warning for one read-only recheck and diff build. Retry Preview uses normal admission.
+The resulting diff has empty selections; Apply independently checks current policy.
+
+The redacted `preview_backup_check` is diagnostic history, visible before diff work,
+not later authorization. Preview continuation is bound to command, accepted/current
+generation and normalized policy. Newly claimed mutations, replacement/clear preview,
+startup and version repair expire it. Reload retains the diagnostic and clears local
+submission state; a fresh explicit Preview is required to offer continuation again.
+Diagnostic and final diff publication validate the original owner, generation and
+captured check atomically. Workers recheck ownership after blocking build and
+service-ref push calls. Preview progress carries the same binding through nested
+export and diff helpers, including handled push errors; expired progress cannot
+replace a newer operation's Log. A still-owned failure before inventory reports
+its original error and safely releases its fence without granting continuation.
+An invalidated worker records a terminal error, preserves
+its initial recovery fence and uses the existing failed-Preview restart recovery;
+it cannot overwrite a replacement operation or borrow its backup evidence.
 
 ## Preview State and Staleness
 

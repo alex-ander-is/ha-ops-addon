@@ -105,6 +105,12 @@ class AppContext:
                 updates = {**updates, "last_details": details}
         return self.operation_store.write_state(updates)
 
+    def publish_preview_backup_check(self, check, operation, generation, diagnostic=None):
+        return self.operation_store.publish_preview_backup_check(check, operation, generation, diagnostic=diagnostic)
+
+    def publish_preview_state(self, updates, operation, generation, check=None):
+        return self.operation_store.publish_preview_state(updates, operation, generation, check)
+
     def readiness_snapshot(self):
         return self.operation_store.readiness_snapshot()
 
@@ -646,6 +652,9 @@ class AppContext:
         )
 
     def add_detail(self, details, message):
+        if isinstance(details, job_logic.PreviewProgress):
+            details.publish_detail(message)
+            return
         details.append(message)
         self.write_state(
             {
@@ -1307,6 +1316,9 @@ class AppContext:
             discard_deleted_devices_rollback=self.discard_deleted_devices_rollback,
             enforce_apply_limits=self.enforce_apply_limits,
             ensure_fresh_system_backup=self.ensure_fresh_system_backup,
+            latest_system_backup_status=self.latest_system_backup_status,
+            publish_preview_backup_check=self.operation_store.publish_preview_backup_check,
+            publish_preview_state=self.operation_store.publish_preview_state,
             ensure_preview_matches_state=self.ensure_preview_matches_state,
             ensure_repo=self.ensure_repo,
             export_targets=self.export_targets,
@@ -1359,8 +1371,8 @@ class AppContext:
     def run_apply_job(self, backup_mode="normal", lock_acquired=False):
         return job_logic.run_apply_job(self.job_deps(), lock_acquired=lock_acquired, backup_mode=backup_mode)
 
-    def run_preview_job(self, lock_acquired=False):
-        return job_logic.run_preview_job(self.job_deps(), lock_acquired=lock_acquired)
+    def run_preview_job(self, preview_backup_mode="normal", lock_acquired=False):
+        return job_logic.run_preview_job(self.job_deps(), lock_acquired=lock_acquired, preview_backup_mode=preview_backup_mode)
 
     def run_save_preview_job(self, lock_acquired=False):
         return job_logic.run_save_preview_job(self.job_deps(), lock_acquired=lock_acquired)

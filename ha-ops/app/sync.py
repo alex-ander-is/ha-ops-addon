@@ -2894,9 +2894,9 @@ def fingerprint_text(text):
 
 
 def preview_progress(ctx, details, message):
-    ctx.log(message)
     if details is not None:
         ctx.add_detail(details, message)
+    ctx.log(message)
 
 
 def build_apply_preview_from_sources(resolved_targets, ctx, details=None):

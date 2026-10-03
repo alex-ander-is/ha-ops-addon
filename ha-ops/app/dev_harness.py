@@ -225,10 +225,11 @@ class HarnessScenarioController:
             self.counters["ws_replays_seen"] += 1
             self.events.append({"phase": "ws-replay"})
 
-    def run_job(self, ctx, action, lock_acquired=False, commit_subject=None, backup_mode="normal"):
+    def run_job(self, ctx, action, lock_acquired=False, commit_subject=None, backup_mode="normal", preview_backup_mode="normal"):
         action = self._normalize_action(action)
         if not job_logic.enter_run_lock(ctx, action, lock_acquired):
             return False
+        outcome = True
         gate = "running"
         details = [f"HARNESS {action} running-held"]
         try:
@@ -255,12 +256,18 @@ class HarnessScenarioController:
             if item is not None and not item["release"].wait(timeout=30):
                 raise RuntimeError(f"dev harness gate timed out: {action}/{gate}")
             if action == "preview":
-                self._write_apply_preview(ctx, details)
+                refusal = job_logic.preview_backup_gate(ctx, ctx.load_options(), preview_backup_mode)
+                if not isinstance(refusal, job_logic.PreviewBackupAdmission):
+                    return refusal
+                outcome = self._write_apply_preview(ctx, details, refusal)
             elif action == "save_preview":
                 self._write_save_preview(ctx, details)
             elif action == "apply":
                 if self.backup_policy is not None:
                     if backup_mode == "acknowledge":
+                        status, slug, _policy = job_logic.backups.read_only_admission(ctx, ctx.load_options())
+                        if status == "unavailable":
+                            raise RuntimeError("Backup status unavailable; acknowledged Apply cannot proceed.")
                         self.counters["backup_acknowledgements"] += 1
                     else:
                         self.counters["backup_gate_calls"] += 1
@@ -269,6 +276,7 @@ class HarnessScenarioController:
                             ctx.write_state({"last_status": "warning", "last_message": f"No fresh system backup found within {self.backup_max_age_hours} hour(s)"})
                             return job_logic.ApplyBackupRefusal(
                                 state["active_operation"]["command_id"], state["operation_generation"], self.backup_max_age_hours,
+                                job_logic.backups.policy_identity(ctx.load_options(), ctx.option_bool),
                             )
                 self._write_apply_complete(ctx, details)
             elif action == "deleted_devices_preview":
@@ -288,8 +296,10 @@ class HarnessScenarioController:
             with self._lock:
                 self.counters["completed_jobs"][action] = self.counters["completed_jobs"].get(action, 0) + 1
                 self.events.append({"action": action, "phase": "terminal"})
-            return True
+            return outcome
         except Exception as exc:
+            if action == "preview":
+                return job_logic.PreviewBackupInvalidated()
             ctx.write_state(
                 {
                     "last_run_at": ctx.utc_now(),
@@ -332,7 +342,7 @@ class HarnessScenarioController:
             }
         return payload
 
-    def _write_apply_preview(self, ctx, details):
+    def _write_apply_preview(self, ctx, details, admission):
         path = "homeassistant/configuration.yaml"
         second_path = "homeassistant/packages/harness.yaml"
         diff = (
@@ -351,13 +361,15 @@ class HarnessScenarioController:
             "+input_boolean:\n"
             "+  harness_git_package:\n"
         )
-        ctx.write_state(
+        check = {**admission.check, "generation": admission.generation + 1}
+        final = ctx.publish_preview_state(
             {
                 "last_run_at": ctx.utc_now(),
                 "last_status": "success",
                 "last_action": "preview",
                 "last_message": "Harness Git to HA preview finished.",
                 "last_details": [*details, "Harness Git to HA preview finished."],
+                "preview_backup_check": check,
                 "last_diff": diff,
                 "last_diff_generated_at": ctx.utc_now(),
                 "last_preview_commit": "harness-preview",
@@ -372,8 +384,9 @@ class HarnessScenarioController:
                 "last_preview_conflict_paths": [],
                 "apply_preview_resolutions": {},
                 "apply_preview_selected_paths": [],
-            }
+            }, admission.operation, admission.generation, admission.check,
         )
+        return job_logic.PreviewJobOutcome(True, "success", final["last_message"], check, admission.operation, int(final["operation_generation"]))
 
     def _write_save_preview(self, ctx, details):
         path = "homeassistant/configuration.yaml"
@@ -813,10 +826,14 @@ class DevHarnessContext(app_context.AppContext):
         return self.fake_supervisor.call("GET", "/mounts")
 
     def latest_system_backup_status(self, options=None):
-        return {"ok": True, "message": "Dev harness: fake backup status.", "backup": None}
+        self.harness_controller.counters["backup_inventory_queries"] = self.harness_controller.counters.get("backup_inventory_queries", 0) + 1
+        policy = self.harness_controller.backup_policy or "fresh"
+        return {"available": policy != "unavailable", "refusal_reason": policy if policy in {"missing", "stale"} else None,
+                "stale": policy != "fresh", "backup": {"slug": "harness-fresh"} if policy == "fresh" else None,
+                "max_age_hours": self.harness_controller.backup_max_age_hours}
 
-    def run_preview_job(self, lock_acquired=False):
-        return self.harness_controller.run_job(self, "preview", lock_acquired=lock_acquired)
+    def run_preview_job(self, preview_backup_mode="normal", lock_acquired=False):
+        return self.harness_controller.run_job(self, "preview", lock_acquired=lock_acquired, preview_backup_mode=preview_backup_mode)
 
     def run_save_preview_job(self, lock_acquired=False):
         return self.harness_controller.run_job(self, "save_preview", lock_acquired=lock_acquired)
@@ -875,11 +892,14 @@ class DevHarnessContext(app_context.AppContext):
     def dev_harness_handle_post(self, route, body):
         if route == "/__dev_harness__/backup-policy":
             policy = _first(body, "policy")
-            if policy not in {"missing", "stale", "fresh"}:
+            if policy not in {"missing", "stale", "fresh", "unavailable"}:
                 return {"ok": False, "status": 400}
             hours = _first(body, "hours") or "24"
             if not hours.isdecimal() or not 1 <= int(hours) <= 168:
                 return {"ok": False, "status": 400}
+            options = self.load_options()
+            options.update(require_fresh_backup=True, backup_max_age_hours=int(hours))
+            self.options_path.write_text(json.dumps(options))
             self.harness_controller.backup_max_age_hours = int(hours)
             self.harness_controller.backup_policy = policy
             return {"ok": True}

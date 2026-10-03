@@ -52,6 +52,7 @@ DIFF_CURSOR_FIELDS = {
     "last_save_diff": "last_save_diff_cursor",
 }
 REDACTED_TEXT_FIELDS = {
+    "preview_backup_check", "preview_backup_refusal",
     ACTIVE_OPERATION_KEY,
     "last_message",
     "last_details",
@@ -281,6 +282,8 @@ def cleanup_action_allowed(state, action):
 
 APPLY_PREVIEW_CLEAR_UPDATES = {
     "apply_backup_refusal": None,
+    "preview_backup_refusal": None,
+    "preview_backup_check": None,
     "apply_preview_id": None,
     "apply_decision_revision": 0,
     "last_diff": "",
@@ -443,6 +446,8 @@ def default_state():
         "last_details": [],
         "last_release": None,
         "last_backup_slug": None,
+        "preview_backup_refusal": None,
+        "preview_backup_check": None,
         "last_targets": [],
         "last_diff": "",
         "last_diff_cursor": None,
@@ -658,6 +663,9 @@ def write_state(path, updates):
             "apply_preview_id", "apply_decision_revision", "apply_preview_selected_paths", "apply_preview_resolutions",
         } for key in updates):
             current["apply_backup_refusal"] = None
+            current["preview_backup_refusal"] = None
+            if "preview_backup_check" not in updates:
+                current["preview_backup_check"] = None
         current["state_revision"] = int(current.get("state_revision") or 0) + 1
         current["operation_generation"] = int(current.get("operation_generation") or 0)
         advance_generation = any(key in PREVIEW_GENERATION_FIELDS for key in updates)
@@ -704,7 +712,7 @@ class OperationStore:
     def begin_repair(self):
         with self._condition:
             # A restart expires the warning; no consent survives process recovery.
-            write_state(self.path, {"apply_backup_refusal": None})
+            write_state(self.path, {"apply_backup_refusal": None, "preview_backup_refusal": None, "preview_backup_check": None})
             self._readiness_generation += 1
             self._readiness = READINESS_RUNNING
             self._blocked_message = ""
@@ -1011,7 +1019,10 @@ class OperationStore:
                     raise ValueError("command validation returned invalid state updates")
                 current.update(validated_updates)
             # Validation and consumption share the same durable claim/reservation.
+            claimed_policy = (current.get("preview_backup_refusal") or {}).get("policy_identity") if command == "preview" else (current.get("apply_backup_refusal") or {}).get("policy_identity")
             current["apply_backup_refusal"] = None
+            current["preview_backup_refusal"] = None
+            current["preview_backup_check"] = None
             now = datetime.now(timezone.utc).isoformat()
             record = {
                 "command_id": canonical_id,
@@ -1033,6 +1044,8 @@ class OperationStore:
                     "payload_sha256": payload_digest,
                     "accepted_generation": current_generation,
                     "apply_backup_mode": payload.get("backup_mode", "normal") if command == "apply" else None,
+                    "preview_backup_mode": payload.get("preview_backup_mode", "normal") if command == "preview" else None,
+                    "backup_policy_identity": claimed_policy,
                     "phase": "accepted",
                     "accepted_at": now,
                 }
@@ -1041,6 +1054,22 @@ class OperationStore:
             self._change_sequence += 1
             self._condition.notify_all()
             return True, dict(record)
+
+    def publish_preview_state(self, updates, expected_operation, generation, expected_check=None):
+        """Linearize every Preview publication with its original ownership."""
+        with self._condition:
+            self.assert_repaired_for_current_preview_read("preview-publication")
+            current = read_state(self.path)
+            if (int(current.get("operation_generation") or 0) != generation
+                or (current.get(ACTIVE_OPERATION_KEY) or {}) != expected_operation
+                or expected_check is not None and current.get("preview_backup_check") != expected_check):
+                raise RuntimeError(READINESS_BLOCKED_MESSAGE)
+            return self.write_state(updates) if updates else current
+
+    def publish_preview_backup_check(self, check, expected_operation, generation, diagnostic=None):
+        return self.publish_preview_state(
+            {"preview_backup_check": check, **(diagnostic or {})}, expected_operation, generation,
+        )
 
     def update_command(self, command_id, status, result=None):
         if status not in {"accepted", "running", "terminal", "failed_unknown"}:
@@ -1051,6 +1080,30 @@ class OperationStore:
             record = records.get(str(command_id))
             if record is None:
                 return None
+            if status == "terminal" and record.get("command") == "preview" and isinstance(result, dict):
+                result = dict(result)
+                binding = result.pop("preview_terminal_binding", None)
+                # A still-owned failure before inventory has no backup authority,
+                # but can safely report its actual cause and release its fence.
+                early_error = (result.get("ok") is False and result.get("status") == "error"
+                               and result.get("safe_terminal") is True
+                               and not result.get("preview_invalidated")
+                               and result.get("preview_backup_refusal") is None)
+                if isinstance(binding, dict) and (
+                    self._readiness != READINESS_REPAIRED
+                    or binding.get("operation") != (current.get(ACTIVE_OPERATION_KEY) or {})
+                    or binding.get("generation") != current.get("operation_generation")
+                    or binding.get("check") is None and not early_error
+                    or binding.get("check") != current.get("preview_backup_check")
+                ):
+                    result = {**result, "ok": False, "status": "error", "safe_terminal": False,
+                              "preview_backup_refusal": None, "preview_invalidated": True,
+                              "message": "Preview operation changed; run a fresh Preview after recovery."}
+                operation = current.get(ACTIVE_OPERATION_KEY) or {}
+                if result.get("preview_invalidated") and operation.get("command_id") == str(command_id):
+                    # Preserve the initial fence, but leave a stable error for supported restart recovery.
+                    current.update(last_status="error", last_action="preview", last_message=result["message"],
+                                   last_details=[result["message"]])
             record = {
                 **record,
                 "status": status,
@@ -1070,6 +1123,16 @@ class OperationStore:
                         and refusal.get("generation") == operation.get("accepted_generation")
                         and refusal.get("generation") == current.get("operation_generation")):
                         current["apply_backup_refusal"] = refusal
+                        current[ACTIVE_OPERATION_KEY] = None
+                    elif (self._readiness == READINESS_REPAIRED and operation.get("phase") == "dispatching"
+                          and record.get("command") == "preview" and isinstance(result, dict)
+                          and isinstance(result.get("preview_backup_refusal"), dict)
+                          and result["preview_backup_refusal"].get("operation_id") == str(command_id)
+                          and result["preview_backup_refusal"].get("accepted_generation") == operation.get("accepted_generation")
+                          and result["preview_backup_refusal"].get("generation") == current.get("operation_generation")
+                          and (current.get("preview_backup_check") or {}).get("operation_id") == str(command_id)
+                          and (current.get("preview_backup_check") or {}).get("generation") == current.get("operation_generation")):
+                        current["preview_backup_refusal"] = result["preview_backup_refusal"]
                         current[ACTIVE_OPERATION_KEY] = None
                     elif operation.get("phase") == "accepted" or isinstance(result, dict) and (
                         result.get("ok") is True or result.get("safe_terminal") is True
@@ -1150,6 +1213,7 @@ def is_recovered_stale_error(state):
 def repair_startup_state(path, now, addon_version=None, preserve_save_retry=False, clear_save_retry_pending=False):
     state_file_exists = path.exists()
     current = read_state(path)
+    current.update({"preview_backup_refusal": None, "preview_backup_check": None})
     stored_version = current.get("last_seen_addon_version")
     known_addon_version = addon_version if addon_version and addon_version != "unknown" else None
     version_changed = bool(known_addon_version) and state_file_exists and stored_version != known_addon_version
