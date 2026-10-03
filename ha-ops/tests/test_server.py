@@ -10,6 +10,7 @@ import time
 import unicodedata
 import unittest
 import uuid
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
@@ -2523,6 +2524,133 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(ctx.config_dir, Path("/homeassistant"))
         self.assertEqual(ctx.options_path, Path("/data/options.json"))
 
+    def test_git_access_snapshot_selected_mode_url_matrix_and_public_only(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            ctx = server.context()
+            key, pub = ctx.generated_deploy_key_path, ctx.generated_deploy_key_pub_path
+            private = "GENERATED_PRIVATE_SENTINEL"
+            manual = "MANUAL_PRIVATE_SENTINEL"
+            public = "ssh-ed25519 PUBLIC_SENTINEL <comment>&"
+            for mode in ("none", "generated", "manual"):
+                for url in ("git@example.invalid:repo", "ssh://example.invalid/repo", "https://user:secret@example.invalid/repo", "", " git@example.invalid:repo"):
+                    with self.subTest(mode=mode, url=url):
+                        for path in (key, pub):
+                            path.unlink(missing_ok=True)
+                        if mode != "none":
+                            key.write_text(private)
+                            pub.write_text(public + "\n")
+                        options = {"repo_url": url, "git_ssh_key": manual if mode == "manual" else ""}
+                        ctx.options_path.write_text(json.dumps(options))
+                        before = ctx.read_state()
+                        original = ctx.load_generated_public_key
+                        with mock.patch.object(ctx, "load_generated_public_key", wraps=original) as loader:
+                            snapshot = server.web._snapshot_payload(ctx)
+                        self.assertEqual(snapshot["view"]["git_access"], {
+                            "mode": mode, "uses_ssh": url.startswith(("git@", "ssh://")),
+                            "public_key": public if mode == "generated" else "",
+                        })
+                        self.assertEqual(snapshot["view"]["auth_mode"], mode)
+                        self.assertEqual(loader.call_count, int(mode == "generated"))
+                        self.assertEqual(ctx.read_state(), before)
+                        self.assertEqual(json.loads(ctx.options_path.read_text()), options)
+                        encoded = json.dumps(snapshot)
+                        for secret in (private, manual, "user:secret", str(key), str(pub)):
+                            self.assertNotIn(secret, encoded)
+
+    def test_git_access_snapshot_clears_removed_pair_and_manual_override(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            ctx = server.context()
+            ctx.generated_deploy_key_path.write_text("PRIVATE")
+            ctx.generated_deploy_key_pub_path.write_text("public-one")
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["public_key"], "public-one")
+            ctx.generated_deploy_key_pub_path.write_text("public-two")
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["public_key"], "public-two")
+            ctx.options_path.write_text(json.dumps({"git_ssh_key": "MANUAL"}))
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"], {
+                "mode": "manual", "uses_ssh": False, "public_key": ""})
+            ctx.options_path.write_text("{}")
+            ctx.generated_deploy_key_path.unlink()
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["mode"], "none")
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["public_key"], "")
+            ctx.generated_deploy_key_path.write_text("PRIVATE")
+            ctx.generated_deploy_key_pub_path.unlink()
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["mode"], "none")
+
+    def test_git_access_optional_display_read_failures_preserve_usable_snapshot(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            ctx = server.context()
+            ctx.generated_deploy_key_path.write_text("PRIVATE")
+            ctx.generated_deploy_key_pub_path.write_text("public")
+            before = ctx.read_state()
+            for error in (PermissionError("unreadable"), UnicodeError("invalid encoding")):
+                with self.subTest(error=type(error).__name__), mock.patch.object(ctx, "load_generated_public_key", side_effect=error):
+                    for command in ("state_get", "debug_snapshot", "replay"):
+                        response = server.web.dispatch_command(ctx, command)
+                        self.assertTrue(response["ok"])
+                        self.assertEqual(response["view"]["git_access"], {
+                            "mode": "generated", "uses_ssh": False, "public_key": ""})
+                        self.assertEqual(response["view"]["auth_mode"], "generated")
+            with mock.patch.object(ctx, "git_auth_mode", side_effect=OSError("metadata unavailable")), mock.patch.object(ctx, "load_generated_public_key") as loader:
+                self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"]["mode"], "none")
+                loader.assert_not_called()
+            self.assertEqual(ctx.read_state(), before)
+            self.assertEqual(ctx.generated_deploy_key_path.read_text(), "PRIVATE")
+
+    def test_git_access_http_generation_duplicate_and_failure_keep_authoritative_projection(self):
+        server = load_server()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.configure_paths(server, Path(tmp))
+            ctx = server.context()
+            calls = []
+            def generate():
+                calls.append(True)
+                ctx.generated_deploy_key_path.write_text("PRIVATE_SENTINEL")
+                ctx.generated_deploy_key_pub_path.write_text("ssh-ed25519 fixture-public")
+                return "ssh-ed25519 fixture-public"
+            def send(envelope):
+                handler = server.web.create_handler(ctx)
+                request = handler.__new__(handler)
+                body = json.dumps(envelope).encode()
+                request.path = "/generate-key"
+                request.rfile, request.wfile = io.BytesIO(body), io.BytesIO()
+                request.headers = Message()
+                for name, value in {"Accept": "application/json", "Content-Type": "application/json",
+                                    "X-Requested-With": "fetch", "Content-Length": str(len(body))}.items():
+                    request.headers[name] = value
+                request.responses = []
+                request.send_response = MethodType(lambda self, status: self.responses.append(status), request)
+                request.send_header = MethodType(lambda *args: None, request)
+                request.end_headers = MethodType(lambda *args: None, request)
+                request.do_POST()
+                return request.responses[-1], json.loads(request.wfile.getvalue())
+            envelope = {"command_id": str(uuid.uuid4()), "command": "generate_key",
+                        "generation": ctx.read_state()["operation_generation"], "payload": {}}
+            with mock.patch.object(ctx, "generate_deploy_key", side_effect=generate):
+                status, response = send(envelope)
+                self.assertEqual(status, 200)
+                self.assertTrue(response["ok"])
+                duplicate_status, duplicate = send(envelope)
+                self.assertEqual(duplicate_status, 200)
+                self.assertTrue(duplicate["duplicate"])
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(ctx.read_state()["command_records"][envelope["command_id"]]["status"], "terminal")
+            access = server.web._snapshot_payload(ctx)["view"]["git_access"]
+            self.assertEqual(access["public_key"], "ssh-ed25519 fixture-public")
+            failed = {**envelope, "command_id": str(uuid.uuid4()), "generation": ctx.read_state()["operation_generation"]}
+            with mock.patch.object(ctx, "generate_deploy_key", side_effect=RuntimeError("fixture keygen failure")) as keygen:
+                status, response = send(failed)
+                self.assertEqual(status, 500)
+                self.assertFalse(response["ok"])
+                send(failed)
+                self.assertEqual(keygen.call_count, 1)
+            self.assertEqual(server.web._snapshot_payload(ctx)["view"]["git_access"], access)
+
     def test_git_auth_module_uses_injected_paths_and_runner(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2557,6 +2685,7 @@ class ServerTests(unittest.TestCase):
 
             self.assertEqual(public_key, "new-public")
             self.assertEqual(key_path.read_text(), "new-private")
+            self.assertEqual(key_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(commands[0][0], "ssh-keygen")
 
     def test_conflict_module_resolves_save_conflict_with_context_state(self):

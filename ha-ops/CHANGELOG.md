@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.3.2
+
+Restore Git Access deploy-key guidance and public key
+
+- Show the selected authentication mode and SSH URL guidance in Git Access.
+- Display the generated public key with GitHub Deploy Keys write-access instructions and a Regenerate Deploy Key action.
+- Keep the public-key view current after generation, reload, key removal, and manual-key selection.
+
 ## 2.3.1
 
 Keep unchanged-target statuses out of file previews

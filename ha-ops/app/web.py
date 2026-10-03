@@ -818,6 +818,23 @@ def _snapshot_payload(ctx):
         "operation_id": docker_fence.get("operation_id"),
         "recovery_token": docker_fence.get("recovery_token"),
     }
+    # Optional display metadata must not prevent state/replay from loading.
+    try:
+        auth_mode = ctx.git_auth_mode(options)
+    except (OSError, UnicodeError):
+        auth_mode = "none"
+    public_key = ""
+    if auth_mode == "generated":
+        try:
+            public_key = ctx.load_generated_public_key()
+        except (OSError, UnicodeError):
+            pass
+    repo_url = options.get("repo_url", "")
+    git_access = {
+        "mode": auth_mode,
+        "uses_ssh": repo_url.startswith("git@") or repo_url.startswith("ssh://"),
+        "public_key": public_key,
+    }
     return {
         **payload,
         "schema_version": 1,
@@ -826,7 +843,8 @@ def _snapshot_payload(ctx):
         "view": {
             "branch": str(options.get("repo_branch") or "main"),
             "manifest": str(options.get("manifest_path") or "ha-ops.json"),
-            "auth_mode": ctx.git_auth_mode(options),
+            "auth_mode": auth_mode,
+            "git_access": git_access,
             "display_times": display_times,
             "targets": targets,
             "addons": addons,

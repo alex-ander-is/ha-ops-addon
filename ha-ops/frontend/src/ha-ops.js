@@ -1221,6 +1221,30 @@ class HaOpsApp extends LitElement {
       || Boolean(this.state.docker_build_cache_prune_fence);
   }
 
+  gitAccessBlocked() {
+    return this.mutationBlocked() || Boolean(this.state.deleted_devices_pending_confirmation)
+      || Boolean(this.state.save_push_retry_pending) || this.versionMismatchOpen;
+  }
+
+  renderGitAccess() {
+    const access = this.view.git_access || {};
+    const mode = access.mode || "none";
+    const status = mode === "manual" ? "notice.git_auth_manual"
+      : mode === "generated" ? "notice.git_auth_generated" : "notice.git_auth_no_key";
+    const hint = !access.uses_ssh ? "notice.git_auth_non_ssh"
+      : mode === "none" ? "notice.git_auth_ssh_hint" : "";
+    return html`<section class="card wide" data-testid="git-access-section">
+      <h2>${t("heading.git_access")}</h2>
+      <p>${t(status)}</p>
+      ${hint ? html`<p>${t(hint)}</p>` : nothing}
+      <div class="actions">${this.actionButton("generate_key",
+        t(mode === "generated" ? "action.regenerate_deploy_key" : "action.generate_deploy_key"),
+        { disabled: this.gitAccessBlocked() })}</div>
+      ${mode === "generated" ? html`<p>${t("notice.git_auth_generated_hint")}</p>
+        <pre>${access.public_key || ""}</pre>` : nothing}
+    </section>`;
+  }
+
   renderInternalIdsPreview(blocked) {
     if (this.acceptedCommandId || this.uncertainCommandId || this.state.active_operation || this.isRunning()) return nothing;
     const rows = this.state.last_internal_ids_rows || [];
@@ -1465,10 +1489,7 @@ class HaOpsApp extends LitElement {
           </section>` : nothing}
         <div id="reactive-previews" data-testid="reactive-previews">${this.previewTemplate()}</div>
         ${this.renderInternalIdsPreview(controlsBlocked)}
-        <section class="card wide"><h2>${t("heading.git_access")}</h2>
-          <p>${this.view.auth_mode || ""}</p>
-          ${this.actionButton("generate_key", t("action.generate_deploy_key"), { disabled: controlsBlocked })}
-        </section>
+        ${this.renderGitAccess()}
         <section class="card wide" data-testid="managed-targets-section"><h2>${t("heading.managed_targets")}</h2>
           <p>${t("notice.managed_targets")}</p>
           <vaadin-details .opened=${this.managedTargetsOpen}
@@ -1552,7 +1573,8 @@ class HaOpsApp extends LitElement {
 
   async dispatchCommand(command, action, payload = {}) {
     // Fence synchronously, before a response or Lit's disabled rendering can arrive.
-    if (this.commandIntent || (["apply", "save"].includes(command) && this.mutationBlocked())) return;
+    if (this.commandIntent || (["apply", "save"].includes(command) && this.mutationBlocked())
+      || (command === "generate_key" && this.gitAccessBlocked())) return;
     const envelope = {
       command_id: uuid(),
       command,
