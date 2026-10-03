@@ -43,6 +43,13 @@ by the runner (override with `HA_OPS_BROWSER_ARTIFACTS_DIR`). The fixture simula
 results and configured freshness limits; the real backup gate and Apply job are covered by
 `test_backup_continuation.py` using temporary local Git/config fixtures.
 
+The browser flow verifies all four status/version/backup badge sites through their
+native Vaadin shadow roots: original title-row geometry, distinct version tints,
+HA theme inheritance, severity changes, literal labels, desktop/mobile bounds,
+and forced colors. Explicit HA dark variables are changed after mounting. Set
+`HA_OPS_BROWSER_BUNDLE_OVERRIDE` and optional `HA_OPS_BROWSER_CSS_OVERRIDE` to
+serve disposable historical assets for regression proof without editing App files.
+
 The browser flow exercises refusal, normal Retry, fresh Retry, and one-attempt
 acknowledgement over WebSocket and HTTP fallback, plus retained decisions,
 visible WARNING after reload and in a new tab without actionable continuation,
@@ -66,7 +73,7 @@ Screenshots and DOM evidence go to the printed temporary directory; override
 it with `HA_OPS_BROWSER_ARTIFACTS_DIR`. `HA_OPS_BROWSER_BUNDLE_OVERRIDE` serves a
 disposable historical bundle for regression proof without changing App files.
 
-The separate `test_preview_decisions.py` group runs seven complete-module Node
+The separate `test_preview_decisions.py` group runs nine complete-module Node
 scenarios with inert Lit/Vaadin imports. It explicitly skips when Node is
 unavailable and does not replace this rendered flow. Use
 `HA_OPS_FRONTEND_SOURCE` to select a disposable historical source for those

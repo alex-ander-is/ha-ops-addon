@@ -177,5 +177,39 @@ async function transport() {
     checks++;
   }
 }
-const groups={local,lifetime,final,backup,fences,native,lazyDiff,transport};
+async function badges() {
+  const Badge=registered.get('ha-ops-status-badge');
+  assert(Badge, 'shared status badge must register in the complete module');
+  const badge=new Badge();
+  context.fetch=()=>{throw Error('presentation attempted network')};
+  badge.dispatchEvent=()=>{throw Error('presentation attempted command')};
+  for(const [severity,theme] of [['idle','success'],['success','success'],['error','error'],['running',''],['conflicts',''],['interrupted','warning'],['pending','warning'],['pending decision','warning'],['warning','warning'],['transport','warning'],['version',''],['neutral',''],['future','success']]) {
+    badge.severity=severity; badge.label='<b> & literal >';
+    const rendered=badge.render();
+    assert.equal(badge.badgeTheme,theme);
+    assert(rendered.strings.join('').includes('<vaadin-badge'));
+    assert(rendered.values.includes('<b> & literal >'),'label must stay a text binding'); checks++;
+  }
+  const renderText=value=>value&&value.strings?value.strings.reduce((s,t,i)=>s+t+renderText(value.values[i]),''):Array.isArray(value)?value.map(renderText).join(''):value===context.nothing||value==null?'':String(value);
+  const app=fixture(); app.backendVersion='2.4.1';
+  for(const connection of ['http','unknown']) for(const status of ['warning','error','success']) {
+    app.connection=connection; app.state.last_status=status;
+    const output=renderText(app.render());
+    assert(output.includes('ha-ops-status-badge'));
+    assert(output.includes('data-status-code='+status));
+    assert(output.includes('data-connection-state='+connection));
+    assert(output.includes('.label='+(connection==='unknown'?'unknown':status==='success'?'done':status)+' data-status-code='+status)); checks++;
+  }
+  app.connection='http'; app.state.deleted_devices_pending_confirmation=true; app.state.last_status='error';
+  assert(renderText(app.render()).includes('.severity=pending decision .label=pending decision data-status-code=pending decision'),'pending status precedence changed');
+  app.backendVersion=''; assert(renderText(app.render()).includes('severity="version" .label= data-testid="version-badge"'),'empty version bootstrap changed'); checks++;
+  const original=fs.readFileSync(sourcePath,'utf8');
+  assert.equal((original.match(/<ha-ops-status-badge\b/g)||[]).length,4,'all four application badge sites share one component');
+  assert.equal((original.match(/<vaadin-badge\b/g)||[]).length,1,'native markup belongs only to shared component');
+  assert(!original.includes('class="badge')&&!original.includes('class=${`badge'));
+  assert(!original.includes('--vaadin-badge-background: #fffbeb'));
+  assert(original.includes('--status-background-tint: 10%')&&original.includes('--status-border-tint: 28%'),'preserve distinct version tints');
+  checks++;
+}
+const groups={local,lifetime,final,backup,fences,native,lazyDiff,transport,badges};
 (async()=>{const name=process.argv[2];assert(groups[name]);await groups[name]();console.log(JSON.stringify({scenario:name,checks,completeProductionModule:true,rendered:false,result:'passed'}));})().catch(error=>{console.error(error);process.exitCode=1;});

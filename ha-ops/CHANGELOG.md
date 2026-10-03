@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.4.1
+
+Unify status and backup warning badges
+
+- Use one reusable Vaadin status badge for header status, version, and backup warnings, preserving title-row geometry, HA theme colors, and the distinct version tint.
+- Verify shared rendering across shadow roots, severity and theme changes, desktop/mobile layouts, and backup continuation recovery.
+
 ## 2.4.0
 
 Check backup freshness before building Git to HA previews

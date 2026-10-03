@@ -335,6 +335,52 @@ function websocketUrl() {
   return url.href;
 }
 
+// Native Vaadin owns content/slots; this component owns every app badge's appearance.
+class HaOpsStatusBadge extends LitElement {
+  static properties = {
+    severity: { type: String, reflect: true },
+    label: { type: String },
+    accessibleLabel: { type: String, attribute: "accessible-label" },
+  };
+  static styles = css`
+    :host {
+      display: inline-flex; flex: none; font-family: var(--ha-font, system-ui, sans-serif);
+      --status-color: var(--ha-success, #43a047);
+      --status-background-tint: 14%; --status-border-tint: 30%;
+    }
+    :host([severity="error"]) { --status-color: var(--ha-error, #db4437); }
+    :host([severity="running"]), :host([severity="conflicts"]) { --status-color: var(--ha-info, #039be5); }
+    :host([severity="warning"]), :host([severity="pending"]), :host([severity="pending decision"]),
+    :host([severity="interrupted"]), :host([severity="transport"]) { --status-color: var(--ha-warning, #f9ab00); }
+    :host([severity="neutral"]), :host([severity="version"]) { --status-color: var(--ha-muted, #6b7280); }
+    :host([severity="version"]) { --status-background-tint: 10%; --status-border-tint: 28%; }
+    vaadin-badge {
+      height: auto; min-width: 0; margin: 0; text-transform: uppercase;
+      --vaadin-badge-padding: 6px 12px;
+      --vaadin-badge-font-size: .8rem;
+      --vaadin-badge-font-weight: 400;
+      --vaadin-badge-font-family: inherit;
+      --vaadin-badge-line-height: normal;
+      --vaadin-badge-border-radius: 999px;
+      --vaadin-badge-border-width: 1px;
+      --vaadin-badge-background: color-mix(in srgb, var(--status-color) var(--status-background-tint), transparent);
+      --vaadin-badge-border-color: color-mix(in srgb, var(--status-color) var(--status-border-tint), transparent);
+      --vaadin-badge-text-color: var(--status-color);
+    }
+  `;
+  constructor() { super(); this.severity = "idle"; this.label = ""; this.accessibleLabel = ""; }
+  get badgeTheme() {
+    if (this.severity === "error") return "error";
+    if (["warning", "pending", "pending decision", "interrupted", "transport"].includes(this.severity)) return "warning";
+    if (["running", "conflicts", "version", "neutral"].includes(this.severity)) return "";
+    return "success";
+  }
+  render() {
+    return html`<vaadin-badge theme=${this.badgeTheme} aria-label=${this.accessibleLabel || nothing}>${this.label}</vaadin-badge>`;
+  }
+}
+customElements.define("ha-ops-status-badge", HaOpsStatusBadge);
+
 class HaOpsLog extends LitElement {
   static properties = { lines: { type: Array }, status: { type: String } };
   static styles = css`
@@ -617,13 +663,6 @@ class HaOpsPreview extends LitElement {
     .footer-actions.apply-only { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; }
     .backup-warning { display: inline-flex; align-items: center; gap: .5rem; color: #92400e; margin-right: auto; min-width: 0; max-width: 100%; }
     .backup-warning-message { min-width: 0; overflow-wrap: anywhere; }
-    vaadin-badge.backup-warning-badge {
-      --vaadin-badge-background: #fffbeb;
-      --vaadin-badge-border-color: #fcd34d;
-      --vaadin-badge-text-color: #92400e;
-      --vaadin-badge-font-size: .75rem;
-      --vaadin-badge-font-weight: 700;
-    }
     ${previewDisabledButtonStyles}
     vaadin-text-field.commit-subject { box-sizing: border-box; width: 100%; min-width: 0; max-width: 100%; }
     @media (max-width: 700px) {
@@ -733,7 +772,7 @@ class HaOpsPreview extends LitElement {
           ` : nothing}
           ${this.backupWarning ? html`
             <span class="backup-warning" role="alert">
-              <vaadin-badge class="backup-warning-badge" theme="warning">WARNING</vaadin-badge>
+              <ha-ops-status-badge class="backup-warning-badge" severity="warning" label="WARNING"></ha-ops-status-badge>
               <span class="backup-warning-message">${TEXT.backupRequired.replace("{hours}", String(this.backupWarning.max_age_hours))}</span>
             </span>
           ` : nothing}
@@ -1361,8 +1400,8 @@ class HaOpsApp extends LitElement {
         <div class="top-grid">
           <section class="card control-card">
             <div class="title-row"><h1>${t("title.site")}</h1><div class="header-badges">
-              <div class=${`badge ${status}`} data-status-code=${status} data-connection-state=${this.connection} data-testid="status-badge">${displayedStatus}</div>
-              <div class="badge version" data-testid="version-badge">${this.backendVersion || ""}</div>
+              <ha-ops-status-badge .severity=${status} .label=${displayedStatus} data-status-code=${status} data-connection-state=${this.connection} data-testid="status-badge"></ha-ops-status-badge>
+              <ha-ops-status-badge severity="version" .label=${this.backendVersion || ""} data-testid="version-badge"></ha-ops-status-badge>
             </div></div>
             <p>${t("site.description")}</p>
             <dl>
@@ -1396,7 +1435,7 @@ class HaOpsApp extends LitElement {
                 ` : this.actionButton("preview", t("action.preview_apply"), { disabled: controlsBlocked })}
               </div>
               ${this.state.preview_backup_refusal ? html`<div data-testid="preview-backup-warning" role="status">
-                <vaadin-badge class="backup-warning-badge" theme="warning" style="--vaadin-badge-background: #fffbeb; --vaadin-badge-border-color: #fcd34d; --vaadin-badge-text-color: #92400e; --vaadin-badge-font-weight: 700;">WARNING</vaadin-badge>
+                <ha-ops-status-badge class="backup-warning-badge" severity="warning" label="WARNING"></ha-ops-status-badge>
                 <p>No fresh system backup found within ${this.state.preview_backup_refusal.max_age_hours} hour(s).</p>
                 <p>Preview has not been built. You can continue to review changes; Apply will check the backup again.</p>
               </div>` : nothing}</section>

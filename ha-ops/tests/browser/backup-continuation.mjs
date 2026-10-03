@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -155,6 +155,81 @@ try {
     const app = document.querySelector("ha-ops-app");
     return app && !app.mutationBlocked();
   });
+  const warningText = component => component.getByRole('alert').evaluate(alert =>
+    `${alert.querySelector('ha-ops-status-badge')?.shadowRoot.querySelector('vaadin-badge')?.textContent || ''} ${alert.querySelector('.backup-warning-message')?.textContent || ''}`.replace(/\s+/g, ' ').trim());
+  const badgeEvidence = async () => page.evaluate(async () => {
+    const app=document.querySelector('ha-ops-app');
+    const hosts=[...app.querySelectorAll('ha-ops-status-badge'), ...[...app.querySelectorAll('ha-ops-preview')].flatMap(p=>[...p.shadowRoot.querySelectorAll('ha-ops-status-badge')])];
+    const properties=['fontFamily','fontSize','fontWeight','lineHeight','paddingTop','paddingRight','paddingBottom','paddingLeft','borderRadius','borderTopWidth','backgroundColor','color','borderTopColor','marginTop','marginLeft','minWidth'];
+    const sample=node=>{const style=getComputedStyle(node),rect=node.getBoundingClientRect();return {style:Object.fromEntries(properties.map(p=>[p,style[p]])),rect:{left:rect.left,right:rect.right,top:rect.top,bottom:rect.bottom,width:rect.width,height:rect.height}};};
+    const result=[];
+    for(const host of hosts) {
+      await host.updateComplete;
+      const native=host.shadowRoot.querySelector('vaadin-badge'); await native.updateComplete;
+      const content=native.shadowRoot.querySelector('[part="content"]');
+      const color=host.severity==='version'?'var(--ha-muted)':host.severity==='error'?'var(--ha-error)':host.severity==='running'||host.severity==='conflicts'?'var(--ha-info)':'var(--ha-warning)';
+      const reference=document.createElement('div'); reference.textContent=native.textContent;
+      reference.style.cssText=`display:inline-flex;align-items:center;padding:6px 12px;border-radius:999px;font-size:.8rem;text-transform:uppercase;font-family:var(--ha-font);font-weight:400;line-height:normal;box-sizing:border-box;background:color-mix(in srgb,${color} ${host.severity==='version'?'10':'14'}%,transparent);color:${color};border:1px solid color-mix(in srgb,${color} ${host.severity==='version'?'28':'30'}%,transparent)`;
+      app.append(reference); const expected=sample(reference); reference.remove();
+      const bounds=sample(native),hostBounds=sample(host),partBounds=content.getBoundingClientRect();
+      result.push({site:host.dataset.testid||'backup-warning',severity:host.severity,label:native.textContent,theme:native.getAttribute('theme'),native:bounds,host:hostBounds,expected,content:{width:partBounds.width,height:partBounds.height,scrollWidth:content.scrollWidth,clientWidth:content.clientWidth,display:getComputedStyle(content).display},accessible:{role:host.getAttribute('role'),nativeRole:native.getAttribute('role'),tabindex:host.getAttribute('tabindex'),nativeTabindex:native.getAttribute('tabindex'),ariaLabel:native.getAttribute('aria-label')},injected:native.querySelector('b')!==null});
+    }
+    return {registered:Boolean(customElements.get('ha-ops-status-badge')&&customElements.get('vaadin-badge')),width:document.documentElement.clientWidth,badges:result};
+  });
+  const assertBadges = evidence => {
+    assert(evidence.registered && evidence.badges.length >= 3, 'shared/native badges must be defined at every mounted site');
+    const warning=evidence.badges.filter(b=>b.theme==='warning');
+    assert(warning.length>=2,'header and backup warnings must share severity');
+    for(const b of evidence.badges) {
+      assert(JSON.stringify(b.native.style)===JSON.stringify(b.expected.style), `title baseline mismatch: ${JSON.stringify(b)}`);
+      assert(Math.abs(b.native.rect.height-b.expected.rect.height)<.1 && Math.abs(b.native.rect.width-b.expected.rect.width)<.1, `title baseline geometry mismatch: ${JSON.stringify(b)}`);
+      assert(b.label.trim() && b.content.height>0 && b.content.display!=='none' && b.content.scrollWidth<=b.content.clientWidth+1,'native content hidden/clipped');
+      assert(b.native.rect.left>=0 && b.native.rect.right<=evidence.width && b.host.rect.left>=0 && b.host.rect.right<=evidence.width,'badge outside viewport');
+      assert(!b.accessible.role&&!b.accessible.nativeRole&&!b.accessible.tabindex&&!b.accessible.nativeTabindex&&!b.accessible.ariaLabel,'badge adds interactive/live/duplicate semantics');
+    }
+    assert(warning.every(b=>JSON.stringify(b.native.style)===JSON.stringify(warning[0].native.style)),'warning style differs across roots');
+  };
+  const inspectTheme = async name => {
+    const evidence=await badgeEvidence();
+    writeFileSync(`${artifacts}/${name}-badges.json`,JSON.stringify(evidence,null,2));
+    assertBadges(evidence);
+    await page.screenshot({path:`${artifacts}/${name}-badges.png`,fullPage:true});
+    return evidence;
+  };
+  const inspectPresentation = async name => {
+    const light=await inspectTheme(`${name}-light`);
+    await page.locator('ha-ops-app').evaluate(app=>{app.style.cssText='--ha-bg:#101418;--ha-card-bg:#1d232a;--ha-text:#eef1f5;--ha-muted:#bdc5d0;--ha-warning:#ffd46a;--ha-error:#ff7474;--ha-font:Arial,sans-serif;color-scheme:dark';});
+    const dark=await inspectTheme(`${name}-dark`);
+    assert(light.badges.find(b=>b.severity==='warning').native.style.color!==dark.badges.find(b=>b.severity==='warning').native.style.color,'mounted warning ignores changed HA theme');
+    const dynamics=await page.getByTestId('status-badge').evaluate(async host=>{
+      const native=host.shadowRoot.querySelector('vaadin-badge'),original={severity:host.severity,label:host.label};
+      const records=[];
+      for(const severity of ['error','warning','error','running','conflicts','pending decision','interrupted','transport','success','idle']) {
+        host.severity=severity;host.label=severity;await host.updateComplete;await native.updateComplete;
+        records.push({severity,reflected:host.getAttribute('severity'),theme:native.getAttribute('theme'),text:native.textContent,color:getComputedStyle(native).color});
+      }
+      host.label='<b> & literal >';await host.updateComplete;await native.updateComplete;
+      const literal={text:native.textContent,injected:Boolean(native.querySelector('b'))};
+      host.severity=original.severity;host.label=original.label;await host.updateComplete;await native.updateComplete;
+      return {records,literal};
+    });
+    assert(dynamics.records.every(r=>r.reflected===r.severity&&r.text===r.severity&&r.theme===(r.severity==='error'?'error':['warning','pending decision','interrupted','transport'].includes(r.severity)?'warning':['running','conflicts'].includes(r.severity)?'':'success')),'stale severity/label/theme');
+    assert(dynamics.records[0].color===dynamics.records[2].color && dynamics.records[0].color!==dynamics.records[1].color,'error/warning palette drift');
+    assert(dynamics.literal.text==='<b> & literal >'&&!dynamics.literal.injected,'label injected markup');
+    writeFileSync(`${artifacts}/${name}-dynamics.json`,JSON.stringify(dynamics,null,2));
+    await bounded(page.setViewportSize({width:390,height:844}),'badge mobile viewport');
+    await page.getByTestId('status-badge').evaluate(async host=>{window.badgeMobileOriginal={severity:host.severity,label:host.label};host.severity='pending decision';host.label='pending decision';await host.updateComplete;});
+    await inspectTheme(`${name}-dark-mobile`);
+    await page.emulateMedia({forcedColors:'active'});
+    const forced=await badgeEvidence();
+    assert(forced.badges.every(b=>b.content.height>0&&parseFloat(b.native.style.borderTopWidth)>=1),'forced-colors badge hidden');
+    await page.screenshot({path:`${artifacts}/${name}-forced-colors.png`,fullPage:true});
+    await page.emulateMedia({forcedColors:'none'});
+    await page.locator('ha-ops-app').evaluate(app=>app.removeAttribute('style'));
+    await inspectTheme(`${name}-light-mobile`);
+    await page.getByTestId('status-badge').evaluate(async host=>{Object.assign(host,window.badgeMobileOriginal);delete window.badgeMobileOriginal;await host.updateComplete;});
+    await bounded(page.setViewportSize({width:1600,height:1000}),'badge desktop viewport');
+  };
   async function preview() {
     await page.getByRole("button", { name: "Preview Git to HA", exact: true }).click();
     const warning = page.getByTestId("preview-backup-warning");
@@ -163,7 +238,7 @@ try {
     assert((await warning.innerText()).includes("Preview has not been built. You can continue to review changes; Apply will check the backup again."), "preflight support copy missing");
     const refused = await state();
     assert(refused.preview_backup_check.status === "missing" || refused.preview_backup_check.status === "stale", "typed preflight status missing");
-    await page.screenshot({ path: `${artifacts}/preflight-${refused.preview_backup_check.status}.png`, fullPage: true });
+    await inspectPresentation(`preflight-${refused.preview_backup_check.status}`);
     await page.reload(); await settle();
     await warning.waitFor();
     assert(await page.getByRole("button", { name: "Continue Preview Without a Fresh Backup", exact: true }).count() === 0, "reload restored preview consent");
@@ -179,6 +254,10 @@ try {
     await settle();
     return component;
   }
+  if (process.env.HA_OPS_BROWSER_BUNDLE_OVERRIDE) {
+    await page.route('**/assets/ha-ops.js', route => route.fulfill({ contentType: 'application/javascript', body: readFileSync(process.env.HA_OPS_BROWSER_BUNDLE_OVERRIDE, 'utf8') }));
+  }
+  if (process.env.HA_OPS_BROWSER_CSS_OVERRIDE) await page.route('**/assets/ha-ops.css', route => route.fulfill({contentType:'text/css',body:readFileSync(process.env.HA_OPS_BROWSER_CSS_OVERRIDE,'utf8')}));
   await page.goto(baseUrl);
   await settle();
   for (const transport of ["ws", "http"]) {
@@ -198,9 +277,9 @@ try {
     const retry = component.getByRole("button", { name: "Retry Git to HA", exact: true });
     const ack = component.getByRole("button", { name: "Acknowledge & Proceed", exact: true });
     await retry.waitFor(); await settle();
-    assert((await component.getByRole("alert").innerText()).replace(/\s+/g, " ").trim() === "WARNING No fresh system backup found within 24 hour(s)", "warning text mismatch");
-    assert(await component.locator(".backup-warning-badge").textContent() === "WARNING", "backup warning badge missing");
-    assert(await component.locator("vaadin-badge.backup-warning-badge").getAttribute("theme") === "warning", "warning must be a native Vaadin badge");
+    assert((await warningText(component)) === "WARNING No fresh system backup found within 24 hour(s)", "warning text mismatch");
+    assert(await component.locator(".backup-warning-badge vaadin-badge").textContent() === "WARNING", "backup warning badge missing");
+    assert(await component.locator("ha-ops-status-badge.backup-warning-badge vaadin-badge").getAttribute("theme") === "warning", "warning must be a native Vaadin badge");
     assert(await page.evaluate(() => Boolean(customElements.get("vaadin-badge"))), "native badge undefined");
     assert(await page.locator('[data-testid="status-badge"]').getAttribute('data-status-code') === 'warning', "top status must be warning");
     assert(await retry.getAttribute("theme") === "primary", "Retry is not the primary action");
@@ -212,7 +291,7 @@ try {
     assert(JSON.stringify(before.selected) === JSON.stringify(rejected.apply_preview_selected_paths), "submitted selection lost");
     const dom = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
-      const badge = footer.querySelector('vaadin-badge');
+      const badge = footer.querySelector('ha-ops-status-badge').shadowRoot.querySelector('vaadin-badge');
       const badgeStyle = getComputedStyle(badge);
       return { text: footer.innerText, badge: { tag: badge.localName, text: badge.textContent, theme: badge.getAttribute('theme'), background: badgeStyle.backgroundColor, color: badgeStyle.color, border: badgeStyle.borderColor }, tags: [...footer.querySelectorAll("vaadin-button")].map(e => e.localName),
         actions: [...footer.querySelectorAll("vaadin-button")].map(e => ({ text: e.textContent.trim(), theme: e.getAttribute("theme"), right: e.getBoundingClientRect().right })),
@@ -223,7 +302,7 @@ try {
     assert(dom.actions[1].text === "Retry Git to HA" && dom.actions[1].theme === "primary" && dom.actions[0].right < dom.actions[1].right, "Retry must occupy the final Apply action position");
     assert(Math.max(...dom.rects.map(r => r.top)) < Math.min(...dom.rects.map(r => r.bottom)), "warning and buttons not on same desktop row");
     await page.screenshot({ path: `${artifacts}/${transport}-backup-warning.png`, fullPage: true });
-    assert(dom.badge.background === 'rgb(255, 251, 235)' && dom.badge.color === 'rgb(146, 64, 14)' && dom.badge.border === 'rgb(252, 211, 77)', `native warning palette mismatch: ${JSON.stringify(dom.badge)}`);
+    await inspectPresentation(`${transport}-apply`);
     const commandCount = Object.keys(rejected.command_records).length;
     const reloadCounters = (await fixtureJson(`${baseUrl}__dev_harness__/diagnostics`)).counters;
     await page.locator("ha-ops-app").evaluate(app => { app.setConnection("reconnecting"); app.replayPending = true; });
@@ -236,7 +315,7 @@ try {
     await page.reload(); await settle();
     assert(await ack.count() === 0 && await retry.count() === 0, "reload revived actionable continuation");
     assert(await component.evaluate(p => p.selectedPaths.length === 0 && Object.keys(p.resolutions).length === 0 && !p.submitted && !p.backupRefusal && Boolean(p.backupWarning)), "reload hydrated decisions or hid diagnostic");
-    assert((await component.getByRole('alert').innerText()).replace(/\s+/g, ' ').trim() === 'WARNING No fresh system backup found within 24 hour(s)', 'reload lost visible warning');
+    assert((await warningText(component)) === 'WARNING No fresh system backup found within 24 hour(s)', 'reload lost visible warning');
     assert(await page.locator('[data-testid="status-badge"]').getAttribute('data-status-code') === 'warning', 'reload lost warning status');
     assert(await component.getByRole('button', { name: 'Apply Git to HA', exact: true }).isDisabled(), 'empty reload draft enabled Apply');
     await component.evaluate(p => { p.runFinalAction('acknowledge'); p.runFinalAction('retry'); });
@@ -247,7 +326,7 @@ try {
     await newTab.goto(baseUrl);
     await newTab.waitForFunction(() => { const app=document.querySelector('ha-ops-app'); return app && !app.mutationBlocked(); });
     const other = newTab.locator('ha-ops-preview[direction="apply"]');
-    assert((await other.getByRole('alert').innerText()).replace(/\s+/g, ' ').trim() === 'WARNING No fresh system backup found within 24 hour(s)', 'new tab lost visible warning');
+    assert((await warningText(other)) === 'WARNING No fresh system backup found within 24 hour(s)', 'new tab lost visible warning');
     assert(await other.evaluate(p => p.selectedPaths.length === 0 && Object.keys(p.resolutions).length === 0 && !p.submitted && !p.backupRefusal), 'new tab restored continuation');
     assert(await other.getByRole('button', { name: 'Acknowledge & Proceed', exact: true }).count() === 0 && await other.getByRole('button', { name: 'Retry Git to HA', exact: true }).count() === 0, 'new tab revived continuation');
     await other.evaluate(p => { p.runFinalAction('acknowledge'); p.runFinalAction('retry'); });
@@ -276,10 +355,10 @@ try {
     const mobile = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
       const warning = footer.querySelector('.backup-warning');
-      return { width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth, warningRight: warning.getBoundingClientRect().right, warningText: warning.innerText, right: footer.getBoundingClientRect().right,
-        buttons: [...footer.querySelectorAll("vaadin-button")].map(button => ({ width: button.getBoundingClientRect().width, text: button.textContent.trim() })) };
+      return { width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth, warningRight: warning.getBoundingClientRect().right, warningText: warning.querySelector('ha-ops-status-badge').shadowRoot.querySelector('vaadin-badge').textContent + warning.innerText, right: footer.getBoundingClientRect().right,
+        buttons: [...footer.querySelectorAll("vaadin-button")].map(button => ({ width: button.getBoundingClientRect().width, left:button.getBoundingClientRect().left, right:button.getBoundingClientRect().right, top:button.getBoundingClientRect().top, bottom:button.getBoundingClientRect().bottom, text: button.textContent.trim() })) };
     });
-    assert(mobile.right <= mobile.width && mobile.warningRight <= mobile.width && mobile.scrollWidth <= mobile.width && mobile.warningText.includes("WARNING") && mobile.buttons.every(button => button.width > 0), `mobile footer overflows or hides action: ${JSON.stringify(mobile)}`);
+    assert(mobile.right <= mobile.width && mobile.warningRight <= mobile.width && mobile.scrollWidth <= mobile.width && mobile.warningText.includes("WARNING") && mobile.buttons.every(button => button.width > 0 && button.left >= 0 && button.right <= mobile.width && button.bottom > button.top), `mobile footer overflows or hides action: ${JSON.stringify(mobile)}`);
     await page.screenshot({ path: `${artifacts}/${transport}-backup-mobile.png`, fullPage: true });
     await bounded(page.setViewportSize({ width: 1600, height: 1000 }), "desktop viewport update");
     await retry.click();
@@ -292,6 +371,7 @@ try {
     await retry.click();
     await page.waitForFunction(() => { const app = document.querySelector("ha-ops-app"); return !app.mutationBlocked() && !app.state.apply_backup_refusal && app.state.last_status === "success" && app.state.last_action === "apply"; });
     assert(!(await state()).apply_backup_refusal, "fresh Retry kept warning");
+    assert(await page.locator('.backup-warning-badge').count()===0 && await page.getByTestId('status-badge').getAttribute('severity')==='success','fresh Retry kept a stale badge');
     await seed("missing");
     component = await preview();
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
@@ -301,6 +381,7 @@ try {
     await page.waitForFunction(() => { const app = document.querySelector("ha-ops-app"); return !app.mutationBlocked() && !app.state.apply_backup_refusal && app.state.last_status === "success" && app.state.last_action === "apply"; });
     const diagnosticsAfter = await fixtureJson(`${baseUrl}__dev_harness__/diagnostics`);
     assert(!(await state()).apply_backup_refusal, "acknowledgement kept warning");
+    assert(await page.locator('.backup-warning-badge').count()===0 && await page.getByTestId('status-badge').getAttribute('severity')==='success','acknowledgement kept a stale badge');
     assert(diagnosticsBefore.counters.backup_gate_calls === diagnosticsAfter.counters.backup_gate_calls, "ack called backup gate");
     assert(diagnosticsAfter.counters.backup_acknowledgements === diagnosticsBefore.counters.backup_acknowledgements + 1, "ack missing");
     assert(diagnosticsAfter.counters.backup_inventory_queries === diagnosticsBefore.counters.backup_inventory_queries + 1, "ack did not recheck inventory");
@@ -311,7 +392,7 @@ try {
     const staleRefusal = (await state()).apply_backup_refusal;
     assert(staleRefusal.max_age_hours === 12, 'configured limit not preserved');
     await page.reload(); await settle();
-    assert((await component.getByRole('alert').innerText()).replace(/\s+/g, ' ').trim() === 'WARNING No fresh system backup found within 12 hour(s)', 'stale configured-limit warning missing on reload');
+    assert((await warningText(component)) === 'WARNING No fresh system backup found within 12 hour(s)', 'stale configured-limit warning missing on reload');
     assert(await ack.count() === 0 && await retry.count() === 0, 'stale reload revived continuation');
     await page.screenshot({ path: `${artifacts}/${transport}-backup-stale-12h.png`, fullPage: true });
     writeFileSync(`${artifacts}/${transport}-evidence.json`, JSON.stringify({ dom, disabled, mobile, reloadCounters, afterReloadCounters, diagnosticsAfter, staleRefusal }, null, 2));
