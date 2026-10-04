@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (700 total); remaining
+pytest items including the preview decision guards (856 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -28,6 +28,8 @@ pytest items including the preview decision guards (700 total); remaining
 | Client commands | `test_client_contract.py` | 22 | Durable command claims, concurrency, preview identities, stale selections, recovery, and client/server boundaries |
 | Preview decisions | `test_preview_decisions.py` | 46 | Complete frontend module with inert Lit/Vaadin imports: local edits, content lifetime, synchronous final batches, refusal dismissal, real-operation fences, and native checkbox guards |
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
+| Native topology fixture | `test_native_topology.py` | 59 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
+| Local virtualization wrapper | `test_local_virtualization.py` | 97 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
 ```sh
@@ -43,6 +45,8 @@ python3 -m pytest ha-ops/tests/test_preview_decisions.py
 python3 -m pytest ha-ops/tests/test_registry_diff.py ha-ops/tests/test_heap_layout.py
 # Release safeguards
 python3 -m pytest ha-ops/tests/test_release_readiness.py ha-ops/tests/test_pre_push_hook.py ha-ops/tests/test_release_script.py
+# Local virtualization wrapper
+python3 -m pytest ha-ops/tests/test_local_virtualization.py
 ```
 
 The smaller groups omit worker startup overhead. Each command can run alone
@@ -70,6 +74,41 @@ and `ha-ops/tests/browser/preview-decisions.mjs` covers preview decisions.
 See [browser instructions](ha-ops/tests/browser/README.md) for commands and
 session behavior. Run the affected browser flow for visual changes; source
 contract assertions alone cannot establish rendered behavior.
+
+## Candidate native container topology
+
+```sh
+# Portable ordinary-directory fixture: Git mechanics and staging guards only
+python3 -m pytest ha-ops/tests/test_native_topology.py
+# Real Linux bind mounts, full container replacement, persistence and index audit
+python3 ha-ops/tests/integration/run_native_topology.py
+```
+
+The Docker runner is separate from pytest and the normal full-suite gate.
+A successful real bind-mount run with full container replacement is mandatory
+to complete native-tree step 1. The local Colima proof has passed; its report
+is kept outside Git under `dev/virtualization/.local/topology-report.json`.
+Use [the reusable local runner](dev/virtualization/README.md) for later tests.
+It requires Docker on a local Unix endpoint backed by a Linux engine, and
+network access during disposable image build to fetch Python/Git. Test runtime
+uses no network and binds only freshly created temporary sources. Missing
+Docker, daemon access or Linux engine returns nonzero; it does not count as a
+successful skip. Every daemon command pins the validated endpoint and a frozen
+environment, so changing the CLI's default context cannot redirect the test.
+The runner attempts removal and absence verification independently for each
+exact owned container and image, including after earlier cleanup errors;
+aggregated cleanup failures fail the run. Its temporary directory is also cleaned.
+
+`.github/workflows/native-topology.yml` runs the portable fixture,
+release-readiness checks and the required Docker proof on Ubuntu. Both `push`
+and `pull_request` use identical filters covering all `ha-ops/**` code,
+configuration and build inputs, plus `repository.yaml`, `requirements-dev.txt`,
+`TESTING.md` and the workflow itself. Topology dependency changes therefore run
+the proof even when the fixture is unchanged. Its success artifact records
+recreation, index audit and tool versions. Creating that
+workflow locally does not run CI or authorize publication. See
+[candidate topology and live inventory](ha-ops/docs/native-tree-topology.md)
+for evidence boundaries and remaining migration blockers.
 
 ## Inventory review and parallelism
 

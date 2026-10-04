@@ -1,0 +1,41 @@
+name: Native container topology
+
+on:
+  push:
+    paths:
+      - 'ha-ops/**'
+      - 'repository.yaml'
+      - 'requirements-dev.txt'
+      - 'TESTING.md'
+      - '.github/workflows/native-topology.yml'
+  pull_request:
+    paths:
+      - 'ha-ops/**'
+      - 'repository.yaml'
+      - 'requirements-dev.txt'
+      - 'TESTING.md'
+      - '.github/workflows/native-topology.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  topology:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install -r requirements-dev.txt
+      - name: Ordinary fixture and release safeguards
+        run: python3 -m pytest ha-ops/tests/test_native_topology.py ha-ops/tests/test_release_readiness.py
+      - name: Real Linux bind mounts and container replacement
+        run: python3 ha-ops/tests/integration/run_native_topology.py --report native-topology-result.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-topology-result
+          path: native-topology-result.json
+          if-no-files-found: error
