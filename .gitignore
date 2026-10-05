@@ -6,3 +6,4 @@ __pycache__/
 ha-ops/.ha-ops-dev/
 ha-ops/tests/browser/artifacts/
 ha-ops/frontend/node_modules/
+dev/virtualization/.local/

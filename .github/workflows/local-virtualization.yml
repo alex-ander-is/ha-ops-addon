@@ -1,0 +1,36 @@
+name: Local virtualization wrapper checks
+
+on:
+  push:
+    paths:
+      - 'dev/virtualization/**'
+      - 'ha-ops/tests/test_local_virtualization.py'
+      - 'ha-ops/tests/integration/run_native_topology.py'
+      - 'ha-ops/tests/integration/fixture_cleanup.py'
+      - 'ha-ops/tests/native_topology_helpers.py'
+      - 'ha-ops/tests/integration/container_probe.py'
+      - 'requirements-dev.txt'
+      - '.github/workflows/local-virtualization.yml'
+  pull_request:
+    paths:
+      - 'dev/virtualization/**'
+      - 'ha-ops/tests/test_local_virtualization.py'
+      - 'ha-ops/tests/integration/run_native_topology.py'
+      - 'ha-ops/tests/integration/fixture_cleanup.py'
+      - 'ha-ops/tests/native_topology_helpers.py'
+      - 'ha-ops/tests/integration/container_probe.py'
+      - 'requirements-dev.txt'
+      - '.github/workflows/local-virtualization.yml'
+
+jobs:
+  wrapper-contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python3 -m pip install -r requirements-dev.txt
+      - run: python3 -m pytest -q ha-ops/tests/test_local_virtualization.py
