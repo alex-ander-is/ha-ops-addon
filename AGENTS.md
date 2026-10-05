@@ -19,6 +19,26 @@ flow, read `ha-ops/docs/service-branch-merge-contract.md`. It documents the
 parts of the branch, preview, conflict, `.storage`, and UI behavior that are
 intentional versus unsafe shortcuts.
 
+## Isolated development and test virtualization
+
+For HA Ops development, use the repository-owned local Linux virtualization
+wrapper under `dev/virtualization/` for container-dependent tests. If the
+environment is absent, provision it through that wrapper before such tests;
+do not install tools ad hoc or substitute the live Home Assistant host as a
+Docker runner. Keep the named VM and reusable images available between tasks;
+remove only exact test-owned containers and fixture data after each run. If
+the wrapper has not yet been implemented or cannot provision a local runner,
+report the affected proof as incomplete and continue only with independent
+work. Follow the installation and network approval policy when invoking a
+wrapper that would install dependencies or download a VM image.
+
+The live HA host is for narrowly scoped read-only inventory during development.
+Do not build images, create test containers or scratch data, run migration
+rehearsals, or verify Apply by writing to live HA. Production migration, Apply,
+restart, deployment, or any other live write needs the user's separate explicit
+authorization. This boundary applies to every step of the native-tree TODO,
+not only its initial topology proof.
+
 ## Cleanup before commit approval
 
 After verification and review, before requesting commit approval or creating an
