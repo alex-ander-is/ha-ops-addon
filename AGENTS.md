@@ -32,12 +32,16 @@ report the affected proof as incomplete and continue only with independent
 work. Follow the installation and network approval policy when invoking a
 wrapper that would install dependencies or download a VM image.
 
-The live HA host is for narrowly scoped read-only inventory during development.
-Do not build images, create test containers or scratch data, run migration
-rehearsals, or verify Apply by writing to live HA. Production migration, Apply,
-restart, deployment, or any other live write needs the user's separate explicit
-authorization. This boundary applies to every step of the native-tree TODO,
-not only its initial topology proof.
+Read-only inspection and diagnostics of live HA remain available when relevant,
+subject to the workspace HA compatibility preflight. For ordinary development
+and verification, do not build images, create test containers or scratch data,
+run migration rehearsals, or verify Apply by writing to live HA. This is a
+test-environment default, not a ban on live work: when the user explicitly
+requests a live investigation, repair, Apply, restart, deployment, or a
+specific live test, follow that request within its authorization and the
+applicable live-system safeguards. An unavailable local VM by itself never
+authorizes moving an otherwise local test to the HA host. This rule covers
+every native-tree implementation step, not only its topology proof.
 
 ## Cleanup before commit approval
 
