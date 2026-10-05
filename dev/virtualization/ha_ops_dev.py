@@ -713,7 +713,7 @@ def copy_input(source, destination, *, expected=None):
         owned.close()
 
 
-def generic_run(input_path, command):
+def generic_run(input_path, command, recreate=False):
     if not command:
         raise Refused("A command after -- is required")
     input_source = ROOT / input_path
@@ -734,32 +734,39 @@ def generic_run(input_path, command):
         copy_input(input_source, source, expected=input_snapshot)
         output.mkdir()
         setup_data = setup(exact_sources=(source, output))
-        args = ["create", "--name", name, "--label", f"ha-ops.dev.run={run_id}",
-                "--network", "none", "--read-only", "--tmpfs", "/tmp",
-                "--mount", f"type=bind,source={source},target=/workspace/input,readonly",
-                "--mount", f"type=bind,source={output},target=/workspace/output",
-                "--workdir", "/workspace/input", "--platform", setup_data["platform"],
-                setup_data["image"], *command]
-        create_attempted = True
-        created_id = docker(*args).stdout.decode().strip()
-        inspected = json.loads(docker("container", "inspect", created_id).stdout)[0]
-        if inspected.get("Id") != created_id or inspected["Config"]["Labels"].get("ha-ops.dev.run") != run_id:
-            raise Refused("Created container identity or owner changed")
-        mounts = {row["Destination"]: row for row in inspected["Mounts"]}
-        expected = {"/workspace/input": (source, False), "/workspace/output": (output, True)}
-        if set(mounts) != set(expected) or any(
-            mounts[key]["Type"] != "bind" or mounts[key]["Source"] != str(path) or mounts[key]["RW"] != writable
-            for key, (path, writable) in expected.items()
-        ):
-            raise Refused("Container mount inspection failed")
-        if inspected["HostConfig"]["NetworkMode"] != "none":
-            raise Refused("Container network isolation failed")
-        docker("start", created_id)
-        result = docker("wait", created_id, timeout=1800)
-        logs = docker("logs", created_id)
-        sys.stdout.buffer.write(logs.stdout)
-        sys.stderr.buffer.write(logs.stderr)
-        code = int(result.stdout.strip())
+        for attempt in range(2 if recreate else 1):
+            args = ["create", "--name", name, "--label", f"ha-ops.dev.run={run_id}",
+                    "--network", "none", "--read-only", "--tmpfs", "/tmp",
+                    "--mount", f"type=bind,source={source},target=/workspace/input,readonly",
+                    "--mount", f"type=bind,source={output},target=/workspace/output",
+                    "--workdir", "/workspace/input", "--platform", setup_data["platform"],
+                    setup_data["image"], *command]
+            create_attempted = True
+            created_id = docker(*args).stdout.decode().strip()
+            inspected = json.loads(docker("container", "inspect", created_id).stdout)[0]
+            if inspected.get("Id") != created_id or inspected["Config"]["Labels"].get("ha-ops.dev.run") != run_id:
+                raise Refused("Created container identity or owner changed")
+            mounts = {row["Destination"]: row for row in inspected["Mounts"]}
+            expected = {"/workspace/input": (source, False), "/workspace/output": (output, True)}
+            if set(mounts) != set(expected) or any(
+                mounts[key]["Type"] != "bind" or mounts[key]["Source"] != str(path) or mounts[key]["RW"] != writable
+                for key, (path, writable) in expected.items()
+            ):
+                raise Refused("Container mount inspection failed")
+            if inspected["HostConfig"]["NetworkMode"] != "none":
+                raise Refused("Container network isolation failed")
+            docker("start", created_id)
+            result = docker("wait", created_id, timeout=1800)
+            logs = docker("logs", created_id)
+            sys.stdout.buffer.write(logs.stdout)
+            sys.stderr.buffer.write(logs.stderr)
+            code = int(result.stdout.strip())
+            if code != 0:
+                return code
+            if recreate and attempt == 0:
+                remove_owned(created_id, run_id)
+                created_id = None
+                create_attempted = False
         return code
     finally:
         try:
@@ -876,6 +883,7 @@ def main():
     top.add_argument("--report", type=Path, default=LOCAL / "topology-report.json")
     run = commands.add_parser("run")
     run.add_argument("--input", required=True, type=Path)
+    run.add_argument("--recreate", action="store_true", help="Repeat command in a new container with the same output bind")
     run.add_argument("program", nargs=argparse.REMAINDER)
     clean = commands.add_parser("cleanup")
     clean.add_argument("--run", required=True)
@@ -887,7 +895,7 @@ def main():
             print(json.dumps(topology(args.report), indent=2, sort_keys=True))
         elif args.command == "run":
             program = args.program[1:] if args.program[:1] == ["--"] else args.program
-            return generic_run(args.input, program)
+            return generic_run(args.input, program, recreate=args.recreate)
         elif args.command == "status":
             if not shutil.which("colima"):
                 print(json.dumps({"profile": PROFILE, "status": "absent"}))

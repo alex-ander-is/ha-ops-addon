@@ -62,6 +62,13 @@ python3 dev/virtualization/ha_ops_dev.py stop
 python3 dev/virtualization/ha_ops_dev.py cleanup --run EXACT_RUN_ID
 ```
 
+`run --recreate` repeats the same command in a second, newly created container
+against the same disposable output bind. It verifies removal of the first
+exact owned container before creating the second, and preserves all ordinary
+network, mount and cleanup guards. The command can detect its first/second
+phase using only a marker in `/workspace/output`; default `run` executes once.
+Both containers and the fixture are removed on success.
+
 `run` copies one repository-relative input from this local, credential-free checkout into a fresh fixture. Use `--input .`
 for tests that resolve files from the repository root, including the topology
 unit tests above. It mounts the

@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (864 total); remaining
+pytest items including the preview decision guards (1114 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -29,6 +29,7 @@ pytest items including the preview decision guards (864 total); remaining
 | Preview decisions | `test_preview_decisions.py` | 46 | Complete frontend module with inert Lit/Vaadin imports: local edits, content lifetime, synchronous final batches, refusal dismissal, real-operation fences, and native checkbox guards |
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
 | Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
+| Native state | `test_native_operations.py` | 250 | Inactive durable candidates, review identity, lifecycle, corruption, crash/reopen, worker ownership, replay, all-domain initial scope provenance and persisted approval prerequisites; container replacement is a separate local runner probe |
 | Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
@@ -111,6 +112,23 @@ recreation, index audit and tool versions. Creating that
 workflow locally does not run CI or authorize publication. See
 [candidate topology and live inventory](ha-ops/docs/native-tree-topology.md)
 for evidence boundaries and remaining migration blockers.
+
+## Inactive native operation state
+
+```sh
+python3 -m pytest ha-ops/tests/test_native_operations.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_operations.py
+# Full container replacement with the same disposable persistent data bind
+python3 dev/virtualization/ha_ops_dev.py run --input . --recreate -- python3 ha-ops/tests/test_native_operations.py --container-recreation
+```
+
+This file belongs to the native state group and is collected by the full suite.
+It checks inert state/transition behavior, strict corruption handling, artifacts,
+real separate-process crash/reopen and competing ownership. The two-container
+probe separately proves manifest/artifact persistence and owner fencing across
+container replacement. Observations and outcome evidence are deterministic
+fixtures; these tests do not verify future Git/live adapters or activate native
+Save, Apply or migration. See [the state contract](ha-ops/docs/native-operation-state.md).
 
 ## Inventory review and parallelism
 
