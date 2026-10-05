@@ -1,3 +1,4 @@
+import json
 """Ordinary directories prove Git mechanics only, never real bind mounts."""
 
 import importlib.util
@@ -380,3 +381,31 @@ def test_owned_docker_resources_cleaned_on_failure(tmp_path, monkeypatch, failur
     assert ["rm", "--force", "owned-fixture-first"] in calls
     assert ["rm", "--force", "owned-fixture-second"] in calls
     assert not any("prune" in call for call in calls)
+
+
+@pytest.mark.parametrize("failed_operation", ["removal", "inspection"])
+def test_owned_cleanup_checks_absence_and_later_resources_after_failure(monkeypatch, failed_operation):
+    runner = runner_module()
+    calls = []
+    inspections = {}
+    def fake(args, **kwargs):
+        calls.append(args)
+        if args[:2] == ["container", "inspect"]:
+            name = args[2]
+            inspections[name] = inspections.get(name, 0) + 1
+            if inspections[name] == 1:
+                return json.dumps([{"Id": name, "Config": {"Labels": {"ha-ops.dev.run": "fixture-run"}}}]).encode()
+            if name == "first" and failed_operation == "inspection":
+                raise RuntimeError("absence check failed")
+            return b"[]"
+        if args == ["rm", "--force", "first"] and failed_operation == "removal":
+            raise RuntimeError("removal failed")
+        return b"[]" if "inspect" in args else b""
+    monkeypatch.setattr(runner, "docker", fake)
+    with pytest.raises(runner.CleanupFailure):
+        runner.cleanup("fixture-image", ["first", "second"], run_id="fixture-run")
+    assert calls == [
+        ["container", "inspect", "first"], ["rm", "--force", "first"], ["container", "inspect", "first"],
+        ["container", "inspect", "second"], ["rm", "--force", "second"], ["container", "inspect", "second"],
+        ["image", "rm", "fixture-image"], ["image", "inspect", "fixture-image"],
+    ]

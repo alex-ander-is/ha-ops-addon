@@ -1,7 +1,7 @@
 # Testing HA Ops
 
 Run commands from the repository root with the dependencies pinned in
-`requirements-dev.txt` (pytest 8.4.2 and pytest-xdist 3.8.0).
+`requirements-dev.txt` (pytest 8.4.2, pytest-xdist 3.8.0, and PyYAML 6.0.3).
 
 ## Full verification
 
@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (856 total); remaining
+pytest items including the preview decision guards (864 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -28,8 +28,8 @@ pytest items including the preview decision guards (856 total); remaining
 | Client commands | `test_client_contract.py` | 22 | Durable command claims, concurrency, preview identities, stale selections, recovery, and client/server boundaries |
 | Preview decisions | `test_preview_decisions.py` | 46 | Complete frontend module with inert Lit/Vaadin imports: local edits, content lifetime, synchronous final batches, refusal dismissal, real-operation fences, and native checkbox guards |
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
-| Native topology fixture | `test_native_topology.py` | 59 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
-| Local virtualization wrapper | `test_local_virtualization.py` | 97 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
+| Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
+| Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
 ```sh
@@ -97,7 +97,9 @@ successful skip. Every daemon command pins the validated endpoint and a frozen
 environment, so changing the CLI's default context cannot redirect the test.
 The runner attempts removal and absence verification independently for each
 exact owned container and image, including after earlier cleanup errors;
-aggregated cleanup failures fail the run. Its temporary directory is also cleaned.
+aggregated cleanup failures fail the run. The fixture is removed after successful
+resource cleanup. If resource absence cannot be confirmed, retain the fixture
+and report its exact path and run ID for recovery.
 
 `.github/workflows/native-topology.yml` runs the portable fixture,
 release-readiness checks and the required Docker proof on Ubuntu. Both `push`

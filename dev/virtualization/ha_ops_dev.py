@@ -455,10 +455,21 @@ def owned_container(name, run_id):
 
 def remove_owned(name, run_id):
     container_id = owned_container(name, run_id)
-    if container_id:
+    if not container_id:
+        return
+    failures = []
+    errors = (OSError, RuntimeError, subprocess.SubprocessError, ValueError)
+    try:
         docker("rm", "--force", container_id)
+    except errors as error:
+        failures.append(f"removal: {error}")
+    try:
         if owned_container(container_id, run_id):
-            raise Refused("Owned container remains after removal")
+            failures.append("Owned container remains after removal")
+    except errors as error:
+        failures.append(f"inspection: {error}")
+    if failures:
+        raise Refused("Owned container cleanup failed: " + ", ".join(failures))
 
 
 GENERATED_INPUTS = {".git", ".local", ".codex-audit", "node_modules", "__pycache__", ".pytest_cache", ".DS_Store"}

@@ -107,7 +107,9 @@ image. Intel macOS `x86_64` is supported by the same profile settings but
 requires its own successful local proof. Cross-architecture emulation is not
 enabled. The image starts from the digest-pinned
 `python:3.12.10-slim-bookworm` base, with the exact Python test dependencies
-in `requirements-dev.txt`. `toolchain.json` pins Colima 0.10.3, Docker CLI
+in `requirements-dev.txt`, including PyYAML for backend imports. The development
+Dockerfile also pins rsync `3.2.7-1+deb12u6` for disposable Preview workflows.
+`toolchain.json` pins Colima 0.10.3, Docker CLI
 29.8.2, Docker Engine 29.5.2, and guest Git 2.39.5 (Debian package
 `1:2.39.5-0+deb12u3`); a version change needs
 a reviewed toolchain update and fresh image proof. Observed host versions are

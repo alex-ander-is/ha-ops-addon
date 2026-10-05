@@ -107,7 +107,8 @@ The runner bounds subprocesses and removes only its exact generated container
 and image identities and owned temporary directory. Removal and absence
 verification are independent attempts for every owned resource; an earlier
 error cannot skip later resources. Errors are aggregated after all attempts,
-and cleanup failure is a test failure. Missing Docker, inaccessible daemon or non-Linux engine is a nonzero
+and cleanup failure is a test failure. Uncertain resource cleanup retains the
+fixture and reports its exact path and run ID for recovery. Missing Docker, inaccessible daemon or non-Linux engine is a nonzero
 unverified result, never a successful pytest skip.
 
 ## References

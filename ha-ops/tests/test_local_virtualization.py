@@ -13,6 +13,17 @@ import pytest
 SOURCE = Path(__file__).resolve().parents[2] / "dev/virtualization/ha_ops_dev.py"
 
 
+def test_reusable_image_declares_backend_dependencies():
+    # The backend imports yaml at module load; a pytest-only image cannot
+    # collect or execute its tests even though the topology probe succeeds.
+    # Preview workflows also execute rsync in disposable repository fixtures.
+    requirements = (SOURCE.parents[2] / "requirements-dev.txt").read_text().splitlines()
+    assert any(line.lower().startswith("pyyaml==") for line in requirements)
+    dockerfile = (SOURCE.parent / "Dockerfile").read_text()
+    assert "ARG RSYNC_DEB_VERSION=" in dockerfile
+    assert '"rsync=${RSYNC_DEB_VERSION}"' in dockerfile
+
+
 def pinned_toolchain():
     return json.loads((SOURCE.parent / "toolchain.json").read_text())
 
@@ -1300,3 +1311,49 @@ def test_generic_cleanup_failure_preserves_fixture_and_closes_anchor(tmp_path, m
         subject.generic_run(Path("input"), ["true"])
     assert len(list(subject.RUNS.iterdir())) == 1
     assert all(owned.root is None for owned in captured)
+
+
+@pytest.mark.parametrize("failure", ["removal", "inspection"])
+def test_wrapper_checks_owned_container_absence_after_removal_error(monkeypatch, failure):
+    subject = wrapper()
+    calls = []
+    def inspect(name, run_id):
+        calls.append(("inspect", name))
+        if name == "fixture-name":
+            return "immutable-id"
+        if failure == "inspection":
+            raise subject.Refused("inspection failed")
+        return None
+    def remove(*args, **kwargs):
+        calls.append(tuple(args))
+        if failure == "removal":
+            raise subprocess.TimeoutExpired(args, 1)
+    monkeypatch.setattr(subject, "owned_container", inspect)
+    monkeypatch.setattr(subject, "docker", remove)
+    with pytest.raises(subject.Refused, match="cleanup failed"):
+        subject.remove_owned("fixture-name", "fixture-run")
+    assert calls == [("inspect", "fixture-name"), ("rm", "--force", "immutable-id"), ("inspect", "immutable-id")]
+
+
+@pytest.mark.parametrize("failure", ["cleanup", "ordinary", "success"])
+def test_default_topology_fixture_retained_only_for_uncertain_cleanup(tmp_path, monkeypatch, capsys, failure):
+    subject = topology_runner()
+    fixture = tmp_path / "owned-fixture"
+    fixture.mkdir()
+    monkeypatch.setattr(subject.tempfile, "mkdtemp", lambda **kw: str(fixture))
+    monkeypatch.setattr(subject, "preflight", lambda: {"engine": "test", "os": "linux"})
+    monkeypatch.setattr(subject, "present", lambda *a: False)
+    def exercise(directory, *a, **kw):
+        (Path(directory) / "evidence").write_text("left for inspection")
+        if failure == "cleanup":
+            raise subject.CleanupFailure("container absence unconfirmed")
+        if failure == "ordinary":
+            raise RuntimeError("proof failed after clean resources")
+        return {}
+    monkeypatch.setattr(subject, "exercise", exercise)
+    monkeypatch.setattr(sys, "argv", ["run_native_topology.py"])
+    assert subject.main() == (0 if failure == "success" else 1)
+    assert fixture.exists() == (failure == "cleanup")
+    if failure == "cleanup":
+        assert (fixture / "evidence").read_text() == "left for inspection"
+        assert str(fixture) in capsys.readouterr().err

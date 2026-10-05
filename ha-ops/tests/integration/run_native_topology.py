@@ -158,10 +158,21 @@ def owned_id(name, run_id):
 
 def remove_owned(name, run_id):
     identity = owned_id(name, run_id)
-    if identity:
+    if not identity:
+        return
+    failures = []
+    errors = (OSError, RuntimeError, subprocess.SubprocessError, ValueError)
+    try:
         docker(["rm", "--force", identity])
+    except errors as error:
+        failures.append(f"removal: {error}")
+    try:
         if owned_id(identity, run_id):
-            raise RuntimeError("Owned container remains after removal")
+            failures.append("Owned container remains after removal")
+    except errors as error:
+        failures.append(f"inspection: {error}")
+    if failures:
+        raise CleanupFailure("Owned resource cleanup failed: " + ", ".join(failures))
 
 
 def cleanup(image, names, *, retain_image=False, run_id=None):
@@ -172,13 +183,18 @@ def cleanup(image, names, *, retain_image=False, run_id=None):
                 remove_owned(name, run_id)
             except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
                 failures.append(f"{name} removal: {error}")
+        if not retain_image:
+            try:
+                docker(["image", "rm", image], check=False)
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                failures.append(f"{image} removal: {error}")
+            try:
+                if present(["image", "inspect", image]):
+                    failures.append(f"{image} remains present")
+            except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as error:
+                failures.append(f"{image} inspection: {error}")
         if failures:
             raise CleanupFailure("Owned resource cleanup failed: " + ", ".join(failures))
-        if retain_image:
-            return
-        docker(["image", "rm", image], check=False)
-        if present(["image", "inspect", image]):
-            raise RuntimeError("Owned CI image remains after cleanup")
         return
     resources = [(name, ["rm", "--force", name], ["container", "inspect", name]) for name in names]
     if not retain_image:
@@ -382,8 +398,16 @@ def main():
                 else:
                     shutil.rmtree(args.fixture_root)
         else:
-            with tempfile.TemporaryDirectory(prefix="native-topology-") as directory:
+            directory = tempfile.mkdtemp(prefix="native-topology-")
+            try:
                 result = exercise(directory, image, first, second, run_id=generated_run_id)
+            except CleanupFailure as error:
+                raise CleanupFailure(f"Run {generated_run_id}; retained fixture {directory}: {error}") from error
+            except BaseException:
+                shutil.rmtree(directory)
+                raise
+            else:
+                shutil.rmtree(directory)
         result["docker"] = versions
         result["status"] = "passed"
         rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
