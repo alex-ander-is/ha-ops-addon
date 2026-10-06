@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (1282 total); remaining
+pytest items including the preview decision guards (1394 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -30,6 +30,7 @@ pytest items including the preview decision guards (1282 total); remaining
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
 | Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
 | Native state | `test_native_operations.py` | 418 | Inactive durable candidates, bounded retention/checkpoints/policy provenance, generation replay, explicit schema-1 upgrade, exact streaming large artifacts, lifecycle, empty-store high-water integrity, corruption, crash/reopen and independent recovery pins; container replacement is a separate local runner probe |
+| Native inventory | `test_native_inventory.py` | 112 | Dormant metadata-only byte-path inventory, known-secret exclusions, component-fenced file/directory mounts and aliases, literal scope whitelist, separate effective-ignore and complete-index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
 | Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
@@ -84,6 +85,31 @@ python3 -m pytest ha-ops/tests/test_native_topology.py
 # Real Linux bind mounts, full container replacement, persistence and index audit
 python3 ha-ops/tests/integration/run_native_topology.py
 ```
+
+Native-tree step 3 has a separate dormant inventory contract:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_inventory.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_inventory.py
+```
+
+The Linux command is mandatory for step 3's actual `/proc/self/mountinfo`
+same-device bind-boundary proof. A host-only skip does not establish that proof.
+APFS's byte/case/Unicode filename limitations are exercised fully under Linux.
+See [inventory API and acceptance/risk proof map](ha-ops/docs/native-inventory.md).
+No production inventory import, workflow activation or live HA access is used.
+
+For the whole suite inside the local runner, the read-only input copy excludes
+`.git` and the container's `/tmp` is not executable. Use a disposable copy under
+`/workspace/output/checkout`, initialize and commit a fixture Git checkout,
+provide fixture `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` and
+`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`, and set `TMPDIR` to a fresh directory
+under `/workspace/output` so hook fixtures can execute. These are test-fixture
+requirements; do not change the host checkout or production Git configuration.
+Run the native-inventory group separately with the runner's default Linux `/tmp`
+instead of the output `TMPDIR`: the output bind is backed by APFS, whose filename
+rules cannot prove arbitrary Unix bytes and distinct case/Unicode names. The
+other groups need executable fixture storage; this group needs Linux tmpfs.
 
 The Docker runner is separate from pytest and the normal full-suite gate.
 A successful real bind-mount run with full container replacement is mandatory
