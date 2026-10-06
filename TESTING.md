@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (1824 total); remaining
+pytest items including the preview decision guards (2068 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -31,7 +31,7 @@ pytest items including the preview decision guards (1824 total); remaining
 | Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
 | Native state | `test_native_operations.py` | 418 | Inactive durable candidates, bounded retention/checkpoints/policy provenance, generation replay, explicit schema-1 upgrade, exact streaming large artifacts, lifecycle, empty-store high-water integrity, corruption, crash/reopen and independent recovery pins; container replacement is a separate local runner probe |
 | Native inventory | `test_native_inventory.py` | 252 | Dormant metadata-only byte-path inventory, scope-local diagnostics/blockers, both-phase stability and fallback proof, semantic parent safety independent of observed kind, retained parent/root acquisition failures, escaped LF/CR exclusion and scaffold fences, known-secret exclusions, component-fenced mounts and aliases, exact scope whitelist, separate effective-ignore/index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
-| Native Git adapter | `test_native_git.py` | 290 | Dormant fixed routing, kind-specific NUL byte records and real independent Git status axes/intent-to-add, complete tracked status with scoped untracked requests, exact bounded blobs and existing-object reuse proofs, complete selected/unselected blob dependencies and generated root/subtree destinations, ref CAS/uncertainty with malformed loose/packed storage and diagnostic refusal, complete private indexes with prior-evidence validation, no-checkout owned worktrees with exact parent reservations, real process interruption, kernel leases, foreign-resource preservation and durable addressed cleanup debt; full Unix byte identities require the local Linux wrapper |
+| Native Git adapter | `test_native_git.py` | 534 | Dormant fixed routing, kind-specific NUL byte records and real independent Git status axes/intent-to-add, complete tracked status with scoped untracked requests, exact bounded blobs and existing-object reuse proofs, complete selected/unselected blob dependencies and generated root/subtree destinations, ref CAS/uncertainty with malformed loose/packed storage and diagnostic refusal, complete private indexes with prior-evidence validation, no-checkout owned worktrees with bounded descriptors, verified sequential reopens, exact parent reservations and substitution non-adoption, real process interruption, kernel leases, foreign-resource preservation and durable addressed cleanup debt; full Unix byte identities require the local Linux wrapper |
 | Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
@@ -113,7 +113,17 @@ byte-path index/tree/materialization proof. macOS executes parser/operation
 checks and proves collision refusal before content writes; its narrower
 filesystem set cannot replace Linux evidence. Mount-boundary cleanup uses real
 kernel mountinfo plus a narrow same-device topology seam, without privileged
-mounts. Process-kill tests prove lease release, addressed recovery and explicit
+mounts. A real child with 120 selected files and soft `RLIMIT_NOFILE=64` checks all
+reservations are empty before the first blob copy, exact bytes/modes and complete
+cleanup. Descriptor failure and namespace/leaf mutation proofs retain original
+errors and explicit addressed debt without adopting foreign entries. Grow/truncate
+fixtures explicitly establish changed timestamp evidence; metadata-equivalent
+roundtrips may be indistinguishable. Close double-fault guards preserve the first
+exception/interruption, append secondary diagnostics and forbid unsafe FD retries.
+Actual readback syscall guards cover selected content and owner/backlink evidence,
+including single predecessor-close failure, leaf read/fstat/close and parent
+open/fstat/final-close faults with balanced descriptors and addressed recovery.
+Process-kill tests prove lease release, addressed recovery and explicit
 retention when a file or marker was not durably acknowledged. Wrapper cleanup
 failure makes the proof incomplete. See [native Git API and proof map](ha-ops/docs/native-git.md).
 No production import, workflow activation, network or live HA write is used.

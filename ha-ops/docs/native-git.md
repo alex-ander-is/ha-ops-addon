@@ -133,14 +133,60 @@ set, so unrelated base entries retain their exact OIDs.
 `temporary_worktree(full_commit_oid, operation_id=UUID, owner_id=UUID,
 paths=exact_paths)` uses detached `worktree add --no-checkout --lock` with a
 resource-bound reason. Empty paths materialize nothing. Selected regular blobs
-are streamed through descriptor-relative no-follow exclusive opens with their
-executable meaning preserved. The complete path/type/parent set is validated
-first; all filenames are reserved before content writes, detecting case or
+are exclusively reserved with each leaf descriptor closed immediately, then
+streamed sequentially through descriptor-relative verified no-follow reopens
+with their executable meaning preserved. Open descriptors stay bounded in
+selection size and path depth; file bytes are never accumulated in memory.
+The complete path/type/parent set is validated first; all filenames are reserved
+before content writes, detecting case or
 normalization collisions on filesystems unable to represent the requested set.
 Parent reservations require the same exact byte prefix and directory inode;
 different parent spellings cannot alias even when their leaf names differ.
 Traversal, absolute/NUL paths, `.git`, duplicates, parent collisions and unsafe
-parents are refused. No Git checkout/filter fallback exists.
+parents are refused. Reopens use neither create nor truncate and use nonblocking
+mode to refuse substituted FIFOs without hanging. Root and parent identity/mode,
+plus each regular single-link leaf's identity/mode/empty size and nanosecond
+mtime/ctime, must match both before open and on the opened descriptor before
+copying. Writes preserve the descriptor's observed identity; publication records
+cached original reservation/write evidence, never a refused current occupant.
+Completed content is hashed once for publication, with inexpensive metadata
+checks for earlier files rather than repeated whole-tree content reads.
+
+Observed namespace/identity/mutation refusals retain addressed worktree debt;
+automatic context cleanup retains an observable same-inode edit truncated back
+to its former empty content when the compared metadata changed. The resource
+owner resolves foreign changes and retries that exact resource ID; recovery
+still requires the existing complete
+identity/mode/digest and admin proofs. A producer error or interruption remains
+the primary error, with publication/cleanup/descriptor-close failures appended.
+Descriptor ownership transfers before closing predecessors, and uncertain close
+errors never trigger a second close attempt on the same descriptor number.
+Owned-content and baseline marker/backlink verification use a separate worktree
+readback path with the same single-owner close scopes, no-follow/nonblocking
+reads, pre/post-read metadata checks and exact streamed marker-byte validation.
+Readback parent traversal transfers successors before predecessor close, so an
+uncertain close cannot strand the successor or retry a closed descriptor number.
+Materialization also uses separate journal loading/release and publication
+scopes. Manifest reads, lock acquisition/unlock/close, raw publication descriptors,
+stream transfers, file/directory durability and temporary-file removal preserve
+the first exact exception and append later failures. A collected verification
+error already counts as the primary error before later durability/publication;
+checked publication may still retain the original proven ownership as debt.
+Unlock errors still reach descriptor close. Temporary publication removal
+requires the original observed identity; if identity was never obtained or the
+pathname was replaced, the temporary occupant is retained rather than adopted.
+Generic private index/spool record/capture/journal/publication helpers and the
+journal schema retain their existing behavior.
+
+These checks cover substitutions observed at the reservation, reopen and
+publication boundaries within the existing private 0700 resource/cooperative
+lease model. Timestamps are change evidence, not unforgeable provenance. A
+same-inode grow/truncate roundtrip can leave every compared field identical,
+including natural same-clock-tick timestamps. Such metadata-equivalent mutations
+are indistinguishable at these boundaries and may proceed normally; they do not
+establish a detectable ownership refusal or cleanup debt. The checks do not
+provide atomic exclusion of arbitrary same-UID mutation or ancestor
+renames after the final checks. No Git checkout/filter fallback exists.
 
 LF and CR names remain diagnostic identities in status/index/tree records.
 **Every selection entrypoint refuses `unsupported-line-break-name`**, including
@@ -211,6 +257,7 @@ All new executable proofs are in `tests/test_native_git.py`.
 | A2 / R04 | Required expected-old, explicit absence, stale/correct update/delete, packed/peeled/loose-override and symbolic refs, both-format corrupt packed records/names/OIDs/peels/order and diagnostic refusal, separate-process one-winner CAS, observation failure and effect-after-timeout evidence without replay. |
 | A3 / R01, R02, R05 | Canonical index/HEAD/live snapshots; complete independent base overlay; unsupported complete-index modes, missing/edited/replaced acknowledged indexes, unknown locks and failed-effect evidence retention; current selected/unselected blob dependency routes/type/missing guards and generated subtree destinations; config/filter/include/ambient environment, hooks/fsmonitor, replacement and no-fetch guards; inspected argv/cwd/index routing. |
 | A4 / R07–R11 | Real process deaths at allocation/ready/removal boundaries and after worktree registration; unacknowledged index/spool debt; active lease/busy and concurrent/nested allocation; forged/closed handles; foreign content/marker/special-file/mount preservation, parent-component alias refusal before content; independent cleanup errors, fsync/absence publication debt, addressed retries. |
+| Materialization descriptor/ownership regression | Real subprocess with 120 mixed-mode files and nested/shared/distinct parents under soft `RLIMIT_NOFILE=64`; every reservation empty at first copy; descriptor balance for success/open/fstat/fdopen/copy/interrupt/flush/chmod/fsync/publication failures; leaf/root/parent/repeated-prefix and stat/open substitution refusal; regular/symlink/FIFO/hardlink/growth/truncate/chmod/unknown-addition non-adoption, retained addressed debt and exact retry; linear blob hash-read count; deterministic changed-timestamp roundtrip fixtures and first-error preservation across writer/root/parent/next-parent/leaf close double faults, including interrupts and transfer-before-close without retry; actual readback syscalls for selected/marker/backlink evidence, with single predecessor-close and file-read/fstat/close or parent-open/fstat/final-close failures, exact first-error identity, zero FD delta and addressed recovery; actual materialization journal manifest/lock and publication acquisition/read/write/flush/fsync/transfer/release/unlink faults, collected baseline failures plus later durability/publication failures, parser and interruption triple-release failures, and refusal to remove substituted publication occupants. |
 | A5 / R12 | Constructor/restart/update dormancy; production AST import guard; accounting and completed-record removal; Linux proof and adjacent native inventory/state plus repository suite. |
 
 Git behavior was checked against the pinned 2.39.5 local runner and tagged

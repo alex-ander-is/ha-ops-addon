@@ -989,13 +989,13 @@ class NativeGit:
                     raise
                 original.cleanup_errors = tuple(getattr(original, "cleanup_errors", ())) + ("ownership-publication:" + str(exc),)
 
-    def _handle_record(self, handle, journal):
+    def _handle_record(self, handle, journal, *, check_owner=None):
         if not isinstance(handle, ResourceHandle) or handle._binding != self._binding() or handle.resource_id not in self._active or self._active[handle.resource_id][1] is not handle:
             raise InvalidInput("closed-or-foreign-resource-handle")
         record = journal["records"].get(handle.resource_id) if journal else None
         if not record or (record["operation"], record["owner"], record["kind"]) != (handle.operation_id, handle.owner_id, handle.kind):
             raise InvalidInput("resource-binding-mismatch")
-        self._check_owner(handle.resource_id, record)
+        (check_owner or self._check_owner)(handle.resource_id, record)
         return record
 
     def _binding(self):
@@ -1266,54 +1266,397 @@ class NativeGit:
     def _lock_reason(handle):
         return "ha-ops-native:" + handle.resource_id + ":" + handle.owner_id + ":" + handle.operation_id
 
-    def _materialize(self, handle, entries):
-        root = os.path.join(self._resource_path(handle.resource_id), b"tree")
-        # Exclusive directory reservations prove the filesystem can represent the complete set
-        # before any blob bytes are written (case/normalization collisions fail here).
-        opened = []
-        reserved_parents = {b""}
-        parent_identities = {}
-        rootfd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    @staticmethod
+    def _materialization_stat(info):
+        return (info.st_dev, info.st_ino, stat.S_IFMT(info.st_mode),
+                stat.S_IMODE(info.st_mode), info.st_nlink, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+
+    @staticmethod
+    def _materialization_directory(info):
+        if not stat.S_ISDIR(info.st_mode):
+            raise InvalidInput("replaced-materialization-parent")
+        return (info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode))
+
+    def _materialization_root(self, root, rootfd, parents):
+        expected = parents[b""]
+        if (self._materialization_directory(os.fstat(rootfd)) != expected or
+                self._materialization_directory(os.stat(root, follow_symlinks=False)) != expected):
+            raise InvalidInput("replaced-materialization-root")
+
+    @contextmanager
+    def _materialization_closing(self, close):
+        primary = None
         try:
-            for entry in entries:
-                parentfd = os.dup(rootfd)
-                try:
-                    components = entry.path.split(b"/")
-                    prefix = b""
-                    for component in components[:-1]:
-                        prefix = component if not prefix else prefix + b"/" + component
-                        try:
-                            os.mkdir(component, 0o700, dir_fd=parentfd)
-                        except FileExistsError:
-                            if prefix not in reserved_parents:
-                                raise InvalidInput("unrepresentable-parent-component-set")
-                        nextfd = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parentfd)
-                        info = os.fstat(nextfd)
-                        identity = (info.st_dev, info.st_ino)
-                        if identity in parent_identities and parent_identities[identity] != prefix:
-                            os.close(nextfd)
-                            raise InvalidInput("aliased-parent-component")
-                        parent_identities[identity] = prefix
-                        reserved_parents.add(prefix)
-                        os.close(parentfd)
-                        parentfd = nextfd
-                    fd = os.open(components[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parentfd)
-                    opened.append((fd, entry))
-                finally:
-                    os.close(parentfd)
-            self._capture(handle)
-            for fd, entry in opened:
-                with os.fdopen(os.dup(fd), "wb") as stream:
-                    self.copy_blob(entry.oid, stream)
-                    stream.flush()
-                    os.fchmod(stream.fileno(), 0o755 if entry.mode == b"100755" else 0o644)
-                    os.fsync(stream.fileno())
-                self._capture_paths(handle, [b"tree/" + entry.path])
-            self._fsync(root)
+            yield
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            for fd, _ in opened:
-                os.close(fd)
-            os.close(rootfd)
+            try:
+                close()
+            except BaseException as exc:
+                if primary is None:
+                    raise
+                primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("materialization-close:" + str(exc),)
+
+    @contextmanager
+    def _materialization_fd(self, fd):
+        owner = [fd]
+        def close():
+            current, owner[0] = owner[0], None
+            if current is not None:
+                # A failed close has uncertain FD state: never retry its number.
+                os.close(current)
+        with self._materialization_closing(close):
+            yield owner
+
+    @contextmanager
+    def _materialization_parent(self, root, rootfd, parents, path):
+        self._materialization_root(root, rootfd, parents)
+        with self._materialization_fd(os.dup(rootfd)) as owner:
+            prefix = b""
+            for component in path.split(b"/")[:-1]:
+                prefix = component if not prefix else prefix + b"/" + component
+                with self._materialization_fd(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                      dir_fd=owner[0])) as next_owner:
+                    if self._materialization_directory(os.fstat(next_owner[0])) != parents[prefix]:
+                        raise InvalidInput("replaced-materialization-parent")
+                    previous = owner[0]
+                    owner[0], next_owner[0] = next_owner[0], None
+                    os.close(previous)
+            yield owner[0], path.split(b"/")[-1]
+
+    @contextmanager
+    def _materialization_record_parent(self, root, path):
+        _path(path)
+        identity = self._materialization_directory(os.stat(root, follow_symlinks=False))
+        with self._materialization_fd(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)) as owner:
+            if self._materialization_directory(os.fstat(owner[0])) != identity:
+                raise InvalidInput("replaced-materialization-record-root")
+            for component in path.split(b"/")[:-1]:
+                expected = self._materialization_directory(os.stat(component, dir_fd=owner[0], follow_symlinks=False))
+                with self._materialization_fd(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                      dir_fd=owner[0])) as next_owner:
+                    if self._materialization_directory(os.fstat(next_owner[0])) != expected:
+                        raise InvalidInput("replaced-materialization-record-parent")
+                    previous = owner[0]
+                    owner[0], next_owner[0] = next_owner[0], None
+                    os.close(previous)
+            yield owner[0], path.split(b"/")[-1]
+
+    def _materialization_record_file(self, root, path, *, directory=False, expected_data=None):
+        # Worktree-only readback: common index/spool record helpers retain their
+        # existing semantics. Every actual hashing/traversal FD uses one owner.
+        with self._materialization_record_parent(root, path) as (parent, name):
+            info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            if directory:
+                identity = self._materialization_directory(info)
+                return list(identity) + ["directory"]
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise InvalidInput("unsafe-filesystem-route")
+            observed = self._materialization_stat(info)
+            with self._materialization_fd(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                                  dir_fd=parent)) as owner:
+                if self._materialization_stat(os.fstat(owner[0])) != observed:
+                    raise InvalidInput("replaced-owned-file")
+                digest, offset = hashlib.sha256(), 0
+                while chunk := os.read(owner[0], CHUNK):
+                    digest.update(chunk)
+                    if expected_data is not None and chunk != expected_data[offset:offset + len(chunk)]:
+                        raise InvalidInput("foreign-resource-marker")
+                    offset += len(chunk)
+                if expected_data is not None and offset != len(expected_data):
+                    raise InvalidInput("foreign-resource-marker")
+                if self._materialization_stat(os.fstat(owner[0])) != observed:
+                    raise InvalidInput("changed-materialization-record-file")
+                return [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), digest.hexdigest()]
+
+    def _materialization_check_owner(self, rid, record):
+        root = self._resource_path(rid)
+        if _identity(root, directory=True) != record["root"]:
+            raise InvalidInput("replaced-resource-root")
+        expected = {"resource": rid, "operation": record["operation"], "owner": record["owner"], "binding": self._binding()}
+        encoded = json.dumps(expected, sort_keys=True).encode()
+        item = record["entries"].get(_encode(b"owner.json"))
+        if not item or self._materialization_record_file(root, b"owner.json", expected_data=encoded) != item:
+            raise InvalidInput("unproven-resource-marker")
+        if _identity(root, directory=True) != record["root"]:
+            raise InvalidInput("replaced-resource-root")
+
+    @contextmanager
+    def _materialization_journal(self):
+        # The shared schema and generic callers stay unchanged. This boundary
+        # encloses worktree evidence checks, including manifest loading/release.
+        with self._mutex:
+            if not os.path.lexists(self.resources_root):
+                yield None
+                return
+            _components(self.resources_root)
+            identity = _identity(self.resources_root, directory=True)
+            if identity[2] != 0o700 or (self._storage_id is not None and identity != self._storage_id):
+                raise InvalidInput("replaced-or-nonprivate-resource-storage")
+            self._storage_id = identity
+            lockpath = os.path.join(self.resources_root, b"journal.lock")
+            if not os.path.lexists(lockpath):
+                if os.path.lexists(os.path.join(self.resources_root, b"journal.json")):
+                    raise InvalidInput("missing-stable-journal-lock")
+                yield None
+                return
+            with self._materialization_fd(os.open(lockpath, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)) as owner:
+                # Unlock and close have independent owners: unlock failure must
+                # still reach close, with the first exception retained.
+                with self._materialization_closing(lambda: fcntl.flock(owner[0], fcntl.LOCK_UN)):
+                    identity = _identity(lockpath)
+                    if identity[2] != 0o600:
+                        raise InvalidInput("private-journal-lock-required")
+                    fcntl.flock(owner[0], fcntl.LOCK_EX)
+                    info = os.fstat(owner[0])
+                    if [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)] != identity or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise InvalidInput("replaced-journal-lock")
+                    manifest = os.path.join(self.resources_root, b"journal.json")
+                    if os.path.lexists(manifest):
+                        observed = self._materialization_stat(os.stat(manifest, follow_symlinks=False))
+                        if observed[2:5] != (stat.S_IFREG, 0o600, 1):
+                            raise InvalidInput("private-journal-required")
+                        with self._materialization_fd(os.open(manifest, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)) as reader:
+                            if self._materialization_stat(os.fstat(reader[0])) != observed:
+                                raise InvalidInput("replaced-resource-journal")
+                            chunks = []
+                            while chunk := os.read(reader[0], CHUNK):
+                                chunks.append(chunk)
+                            journal = _json(b"".join(chunks))
+                            if self._materialization_stat(os.fstat(reader[0])) != observed:
+                                raise InvalidInput("changed-resource-journal")
+                            self._validate_journal(journal)
+                    else:
+                        journal = {"schema": 1, "root": self._root_id, "metadata": self._meta_id, "storage": self._storage_id, "records": {}}
+                    yield journal
+
+    def _materialization_publish(self, journal):
+        if _identity(self.resources_root, directory=True) != self._storage_id:
+            raise InvalidInput("replaced-or-nonprivate-resource-storage")
+        data = json.dumps(journal, sort_keys=True, separators=(",", ":")).encode()
+        name = os.path.join(self.resources_root, (".publish-" + str(uuid.uuid4())).encode())
+        identity = None
+        def remove():
+            if os.path.lexists(name):
+                if identity is None or _identity(name) != identity:
+                    raise InvalidInput("unproven-materialization-publication-file")
+                os.unlink(name)
+        with self._materialization_closing(remove):
+            with self._materialization_fd(os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)) as owner:
+                info = os.fstat(owner[0])
+                identity = [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)]
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or identity[2] != 0o600:
+                    raise InvalidInput("unsafe-materialization-publication-file")
+                stream = os.fdopen(owner[0], "wb")
+                owner[0] = None
+                with self._materialization_closing(stream.close):
+                    _write_all(stream, data)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            if _identity(name) != identity:
+                raise InvalidInput("replaced-materialization-publication-file")
+            if _identity(self.resources_root, directory=True) != self._storage_id:
+                raise InvalidInput("replaced-or-nonprivate-resource-storage")
+            os.replace(name, os.path.join(self.resources_root, b"journal.json"))
+            with self._materialization_fd(os.open(self.resources_root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)) as parent:
+                if list(self._materialization_directory(os.fstat(parent[0]))) != self._storage_id or _identity(self.resources_root, directory=True) != self._storage_id:
+                    raise InvalidInput("replaced-or-nonprivate-resource-storage")
+                os.fsync(parent[0])
+
+    def _capture_materialization(self, handle, rootfd, evidence):
+        # Only reservations and descriptor-observed writes may extend ownership.
+        # Refused entries retain their prior evidence, never a foreign snapshot.
+        resource = self._resource_path(handle.resource_id)
+        root = os.path.join(resource, b"tree")
+        parents, files = evidence["parents"], evidence["files"]
+        verified, errors = {}, []
+        try:
+            self._materialization_root(root, rootfd, parents)
+        except BaseException as exc:
+            errors.append(exc)
+        expected = set(evidence["baseline"])
+        for path, identity in parents.items():
+            if path:
+                encoded = _encode(b"tree/" + path)
+                expected.add(encoded)
+                # Identity was obtained from an exclusively created directory.
+                # Persist that original evidence even if its namespace moved.
+                verified[encoded] = list(identity) + ["directory"]
+                try:
+                    with self._materialization_parent(root, rootfd, parents, path + b"/_") as (fd, _):
+                        os.fsync(fd)
+                except BaseException as exc:
+                    errors.append(exc)
+        for path, item in files.items():
+            encoded = _encode(b"tree/" + path)
+            expected.add(encoded)
+            # Cached evidence comes only from the exclusive reservation or our
+            # held writer; the current pathname cannot replace this identity.
+            verified[encoded] = item["entry"]
+            try:
+                with self._materialization_parent(root, rootfd, parents, path) as (fd, name):
+                    if self._materialization_stat(os.stat(name, dir_fd=fd, follow_symlinks=False)) != item["stat"]:
+                        raise InvalidInput("changed-materialization-file")
+            except BaseException as exc:
+                errors.append(exc)
+        try:
+            names = set()
+            for parent, dirs, leaves in os.walk(resource, followlinks=False):
+                names.update(_encode(os.path.relpath(os.path.join(parent, name), resource)) for name in dirs + leaves)
+            if names != expected:
+                raise InvalidInput("unknown-or-missing-materialization-entry")
+        except BaseException as exc:
+            errors.append(exc)
+        # Marker/backlink bytes are small and fixed. Completed blobs use cached
+        # digests, never a whole-tree rehash. Do not recapture baseline evidence.
+        for encoded, item in evidence["baseline"].items():
+            try:
+                if self._materialization_record_file(resource, _decode(encoded), directory=item[3] == "directory") != item:
+                    raise InvalidInput("changed-materialization-baseline")
+            except BaseException as exc:
+                errors.append(exc)
+        # A collected verification failure is already the primary exception.
+        # Continue publishing only the original proven ownership/debt, retaining
+        # every later durability/publication/release failure as a diagnostic.
+        try:
+            os.fsync(rootfd)
+        except BaseException as exc:
+            errors.append(exc)
+        try:
+            with self._materialization_journal() as journal:
+                record = self._handle_record(handle, journal, check_owner=self._materialization_check_owner)
+                record["entries"].update(verified)
+                record["phase"] = "debt" if errors else "ready"
+                if errors:
+                    record["errors"] = ["materialization-refused:" + str(exc) for exc in errors]
+                self._materialization_publish(journal)
+        except BaseException as exc:
+            errors.append(exc)
+        if errors:
+            primary = errors[0]
+            secondary = []
+            for exc in errors[1:]:
+                secondary.append("ownership-publication:" + str(exc))
+                secondary.extend(getattr(exc, "cleanup_errors", ()))
+            primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + tuple(secondary)
+            raise primary
+
+    def _materialize(self, handle, entries):
+        resource = self._resource_path(handle.resource_id)
+        root = os.path.join(resource, b"tree")
+        with self._materialization_journal() as journal:
+            baseline = dict(self._handle_record(handle, journal, check_owner=self._materialization_check_owner)["entries"])
+        tree_identity = baseline[_encode(b"tree")]
+        evidence = {"baseline": baseline, "parents": {b"": tuple(tree_identity[:3])}, "files": {}}
+        parents, files = evidence["parents"], evidence["files"]
+        parent_identities = {tuple(tree_identity[:2]): b""}
+        with self._materialization_fd(os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)) as root_owner:
+            rootfd = root_owner[0]
+            primary = None
+            try:
+                self._materialization_root(root, rootfd, parents)
+                # Reserve the complete exact byte set before copying any blob, closing
+                # each exclusive leaf immediately so selection size does not retain FDs.
+                for entry in entries:
+                    self._materialization_root(root, rootfd, parents)
+                    with self._materialization_fd(os.dup(rootfd)) as parent_owner:
+                        components, prefix = entry.path.split(b"/"), b""
+                        for component in components[:-1]:
+                            prefix = component if not prefix else prefix + b"/" + component
+                            try:
+                                os.mkdir(component, 0o700, dir_fd=parent_owner[0])
+                            except FileExistsError:
+                                if prefix not in parents:
+                                    raise InvalidInput("unrepresentable-parent-component-set")
+                            with self._materialization_fd(os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                                                  dir_fd=parent_owner[0])) as next_owner:
+                                identity = self._materialization_directory(os.fstat(next_owner[0]))
+                                if prefix in parents and parents[prefix] != identity:
+                                    raise InvalidInput("replaced-materialization-parent")
+                                if identity[:2] in parent_identities and parent_identities[identity[:2]] != prefix:
+                                    raise InvalidInput("aliased-parent-component")
+                                parents[prefix] = identity
+                                parent_identities[identity[:2]] = prefix
+                                previous = parent_owner[0]
+                                parent_owner[0], next_owner[0] = next_owner[0], None
+                                os.close(previous)
+                        with self._materialization_fd(os.open(components[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                                                              0o600, dir_fd=parent_owner[0])) as leaf_owner:
+                            info = os.fstat(leaf_owner[0])
+                            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size:
+                                raise InvalidInput("unsafe-materialization-reservation")
+                            files[entry.path] = {"stat": self._materialization_stat(info),
+                                                "entry": [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), hashlib.sha256(b"").hexdigest()]}
+                            os.fsync(leaf_owner[0])
+                for path in sorted(parents, key=lambda p: -p.count(b"/")):
+                    if path:
+                        with self._materialization_parent(root, rootfd, parents, path + b"/_") as (fd, _):
+                            os.fsync(fd)
+                os.fsync(rootfd)
+                self._capture_materialization(handle, rootfd, evidence)
+                for entry in entries:
+                    item = files[entry.path]
+                    with self._materialization_parent(root, rootfd, parents, entry.path) as (parentfd, name):
+                        if self._materialization_stat(os.stat(name, dir_fd=parentfd, follow_symlinks=False)) != item["stat"]:
+                            raise InvalidInput("changed-materialization-file")
+                        with self._materialization_fd(os.open(name, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                                              dir_fd=parentfd)) as leaf_owner:
+                            if self._materialization_stat(os.fstat(leaf_owner[0])) != item["stat"]:
+                                raise InvalidInput("changed-materialization-file")
+                            stream = os.fdopen(leaf_owner[0], "wb", buffering=0)
+                            leaf_owner[0] = None  # the stream is now the only descriptor owner
+                            with self._materialization_closing(stream.close):
+                                write_primary = None
+                                try:
+                                    self.copy_blob(entry.oid, stream)
+                                    stream.flush()
+                                    os.fchmod(stream.fileno(), 0o755 if entry.mode == b"100755" else 0o644)
+                                    os.fsync(stream.fileno())
+                                except BaseException as exc:
+                                    write_primary = exc
+                                    raise
+                                finally:
+                                    try:
+                                        # Observe only our still-open inode, including actual
+                                        # partial bytes left by a producer interruption.
+                                        info = os.fstat(stream.fileno())
+                                        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or
+                                                (info.st_dev, info.st_ino) != item["stat"][:2]):
+                                            raise InvalidInput("changed-materialization-file")
+                                        observed = self._materialization_stat(info)
+                                        self._materialization_root(root, rootfd, parents)
+                                        if self._materialization_stat(os.stat(name, dir_fd=parentfd, follow_symlinks=False)) != observed:
+                                            raise InvalidInput("changed-materialization-file")
+                                        os.fsync(stream.fileno())
+                                        owned = self._materialization_record_file(resource, b"tree/" + entry.path)
+                                        if owned[:3] != [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)]:
+                                            raise InvalidInput("changed-materialization-file")
+                                        with self._materialization_parent(root, rootfd, parents, entry.path) as (checkfd, checkname):
+                                            if self._materialization_stat(os.stat(checkname, dir_fd=checkfd, follow_symlinks=False)) != observed:
+                                                raise InvalidInput("changed-materialization-file")
+                                        item["stat"], item["entry"] = observed, owned
+                                    except BaseException as exc:
+                                        if write_primary is None:
+                                            raise
+                                        write_primary.cleanup_errors = tuple(getattr(write_primary, "cleanup_errors", ())) + ("ownership-publication:" + str(exc),)
+                    self._capture_materialization(handle, rootfd, evidence)
+                os.fsync(rootfd)
+            except BaseException as exc:
+                primary = exc
+                raise
+            finally:
+                try:
+                    # Includes verified partial reservations/output after failures.
+                    # The same checked boundary refuses foreign additions/replacements.
+                    if primary is not None:
+                        self._capture_materialization(handle, rootfd, evidence)
+                except BaseException as exc:
+                    if primary is None:
+                        raise
+                    primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("ownership-publication:" + str(exc),)
 
     @contextmanager
     def temporary_worktree(self, commit_oid, *, operation_id, owner_id, paths=()):
@@ -1348,8 +1691,7 @@ class NativeGit:
                     primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("worktree-ownership:" + str(exc),)
             self._capture(handle)
             if entries:
-                with self._capture_after(handle):
-                    self._materialize(handle, entries)
+                self._materialize(handle, entries)
             yield handle
 
     def worktree_path(self, handle):
@@ -1381,6 +1723,9 @@ class NativeGit:
                 raise InvalidInput("resource-binding-mismatch")
             root, leasepath = self._resource_path(rid), self._lease_path(rid)
             try:
+                if (held_lease is not None and record["kind"] == "worktree" and
+                        any(error.startswith("materialization-refused:") for error in record["errors"])):
+                    raise InvalidInput("refused-materialization-requires-addressed-recovery")
                 if lease is None and os.path.lexists(leasepath):
                     if _identity(leasepath) != record["lease"]:
                         raise InvalidInput("replaced-resource-lease")

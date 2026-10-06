@@ -1067,10 +1067,10 @@ def test_worktree_add_failure_remains_primary_when_backlink_publication_fails(re
 
 def test_materialization_failure_remains_primary_when_capture_fails(repo, monkeypatch):
     root, adapter = repo
-    def fail_capture(handle, **kwargs):
+    def fail_capture(handle, rootfd, evidence):
         raise OSError('materialization-publication-failed')
     def copy(oid, destination):
-        monkeypatch.setattr(adapter, '_capture', fail_capture)
+        monkeypatch.setattr(adapter, '_capture_materialization', fail_capture)
         raise RuntimeError('materialization-primary')
     monkeypatch.setattr(adapter, 'copy_blob', copy)
     with pytest.raises(RuntimeError, match='materialization-primary') as error:
@@ -1599,3 +1599,1104 @@ def test_ref_observation_diagnostics_are_failures_even_with_successful_exit(repo
     else:
         assert str(error.value) == 'malformed-quiet-ref-output'
     assert canonical(root) == before
+
+
+def observable_empty_roundtrip(target):
+    before = n.NativeGit._materialization_stat(os.lstat(target))
+    with open(target, 'wb') as stream:
+        stream.write(b'changed-and-truncated')
+    with open(target, 'wb'):
+        pass
+    # Natural same-clock-tick roundtrips may preserve every observed field.
+    # Establish distinct timestamp evidence rather than depending on clock speed.
+    info = os.lstat(target)
+    os.utime(target, ns=(info.st_atime_ns, before[6] + 1_000_000_000))
+    after = n.NativeGit._materialization_stat(os.lstat(target))
+    assert before[:6] == after[:6] and before[6:] != after[6:], (before, after)
+
+
+def materialization_commit(root, adapter, paths):
+    blobs = [adapter.write_blob_stream(b'materialized\0\r\n').oid,
+             adapter.write_blob_stream(b'').oid]
+    with adapter.isolated_index(None, **ids()) as handle:
+        adapter.update_index(handle, [n.IndexEntry(path, b'100755' if i % 2 else b'100644',
+                                                  blobs[i == 0], 0) for i, path in enumerate(paths)])
+        oid = adapter.write_tree(handle, allowed_paths=paths)
+    return git(root, 'commit-tree', oid, '-m', 'materialization fixture').strip().decode()
+
+
+def test_materialization_real_low_nofile_reserves_all_before_first_write(repo):
+    root, adapter = repo
+    paths = [(b'homeassistant/shared/deep/' if i % 3 == 0 else
+              b'homeassistant/parent%03d/deep/' % i if i % 3 == 1 else
+              b'homeassistant/') + b'file%03d' % i for i in range(120)]
+    commit = materialization_commit(root, adapter, paths)
+    before = canonical(root)
+    code = '''
+import resource,stat
+paths = ''' + repr(paths) + '''
+original = g.copy_blob
+# Warm Python's entropy source before measuring task-owned descriptors.
+uuid.uuid4()
+fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+descriptors_before = len(os.listdir(fd_directory))
+calls = []
+def copy(oid, destination):
+ if not calls:
+  base = os.path.join(g._resource_path(g.resources()[0]['resource_id']),b'tree')
+  for path in paths:
+   info = os.stat(os.path.join(base,path),follow_symlinks=False)
+   assert stat.S_ISREG(info.st_mode) and info.st_size == 0 and info.st_nlink == 1
+ calls.append(oid)
+ return original(oid,destination)
+g.copy_blob = copy
+soft,hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+assert hard >= 64
+resource.setrlimit(resource.RLIMIT_NOFILE,(64,hard))
+with g.temporary_worktree(sys.argv[4],paths=paths,operation_id=sys.argv[2],owner_id=sys.argv[3]) as handle:
+ base = g.worktree_path(handle)
+ for i,path in enumerate(paths):
+  with open(os.path.join(base,path),'rb') as stream:
+   assert stream.read() == (b'' if i == 0 else b'materialized\\0\\r\\n')
+  assert stat.S_IMODE(os.stat(os.path.join(base,path)).st_mode) == (0o755 if i % 2 else 0o644)
+assert len(calls) == len(paths)
+assert len(os.listdir(fd_directory)) == descriptors_before, (descriptors_before,os.listdir(fd_directory))
+assert not g.resources()
+assert not os.path.exists(os.path.join(g.metadata,b'worktrees')) or not os.listdir(os.path.join(g.metadata,b'worktrees'))
+assert set(os.listdir(g.resources_root)) == {b'journal.json',b'journal.lock'}
+print('120 files; soft RLIMIT_NOFILE=64; exact bytes/modes; all reservations empty before first copy; cleanup complete')
+'''
+    binding = ids()
+    process = child(root, code, binding['operation_id'], binding['owner_id'], commit)
+    out, error = process.communicate(timeout=45)
+    assert process.returncode == 0, (out, error)
+    assert b'120 files; soft RLIMIT_NOFILE=64' in out
+    assert adapter.resources() == ()
+    assert canonical(root) == before
+
+
+@pytest.mark.parametrize('when', ['initial', 'after-write', 'failure'])
+@pytest.mark.parametrize('change', ['regular', 'symlink', 'fifo', 'hardlink', 'grow', 'grow-truncate', 'chmod', 'addition'])
+def test_materialization_refuses_foreign_capture_and_retains_addressed_debt(repo, monkeypatch, when, change):
+    root, adapter = repo
+    paths = [b'homeassistant/a', b'homeassistant/b']
+    binding, before = ids(), canonical(root)
+    original_capture, original_copy = adapter._capture_materialization, adapter.copy_blob
+    state, copies = {}, []
+    foreign = root / 'foreign-sentinel'
+    foreign.write_bytes(b'FOREIGN')
+    os.chmod(foreign, 0o640)
+    sentinel = (foreign.read_bytes(), foreign.stat().st_mode, foreign.stat().st_mtime_ns)
+
+    def mutate(handle):
+        if state:
+            return
+        base = adapter.worktree_path(handle)
+        target = os.path.join(base, paths[1])
+        saved = os.path.join(os.fsencode(root), b'saved-owned-reservation')
+        state.update(rid=handle.resource_id, target=target, saved=saved)
+        if change in ('regular', 'symlink', 'fifo', 'hardlink'):
+            os.rename(target, saved)
+            if change == 'regular':
+                # Same bytes as the empty reservation still have foreign identity.
+                write(base, paths[1], b'')
+            elif change == 'symlink':
+                os.symlink(os.fsencode(foreign), target)
+            elif change == 'fifo':
+                os.mkfifo(target)
+            else:
+                os.link(foreign, target)
+        elif change == 'addition':
+            state['target'] = os.path.join(base, b'foreign-addition')
+            write(base, b'foreign-addition', b'FOREIGN ADDITION')
+        elif change == 'chmod':
+            os.chmod(target, 0o644)
+        elif change == 'grow-truncate':
+            observable_empty_roundtrip(target)
+        else:
+            with open(target, 'wb') as stream:
+                stream.write(b'FOREIGN CONTENT')
+        state['foreign_info'] = os.lstat(state['target'])
+        if change == 'regular':
+            state['foreign_bytes'] = Path(os.fsdecode(target)).read_bytes()
+
+    def capture(handle, rootfd, evidence):
+        if when == 'initial' or (when == 'after-write' and copies):
+            mutate(handle)
+        return original_capture(handle, rootfd, evidence)
+
+    def copy(oid, destination):
+        copies.append(oid)
+        result = original_copy(oid, destination)
+        if when == 'failure':
+            mutate(next(value[1] for value in adapter._active.values()))
+            raise RuntimeError('producer-primary')
+        return result
+
+    monkeypatch.setattr(adapter, '_capture_materialization', capture)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    expected = RuntimeError if when == 'failure' else n.InvalidInput
+    with pytest.raises(expected) as error:
+        with adapter.temporary_worktree(head(root), paths=paths, **binding):
+            pytest.fail('foreign mutation was accepted')
+    if when == 'failure':
+        assert str(error.value) == 'producer-primary'
+    assert len(copies) == (0 if when == 'initial' else 1)
+    record = adapter.resources()[0]
+    assert record['resource_id'] == state['rid'] and record['phase'] == 'debt'
+    assert record['errors']
+    if change in ('regular', 'symlink', 'fifo', 'hardlink'):
+        item = record['entries'].get(n._encode(b'tree/' + paths[1]))
+        assert item is None or item[1] != state['foreign_info'].st_ino
+        assert os.lstat(state['target']).st_ino == state['foreign_info'].st_ino
+        if change == 'regular':
+            assert Path(os.fsdecode(state['target'])).read_bytes() == state['foreign_bytes']
+    elif change == 'addition':
+        assert n._encode(b'tree/foreign-addition') not in record['entries']
+        assert Path(os.fsdecode(state['target'])).read_bytes() == b'FOREIGN ADDITION'
+    assert (foreign.read_bytes(), foreign.stat().st_mode, foreign.stat().st_mtime_ns) == sentinel
+    monkeypatch.undo()
+    if change in ('regular', 'symlink', 'fifo', 'hardlink'):
+        os.unlink(state['target'])
+        os.rename(state['saved'], state['target'])
+    elif change == 'addition':
+        os.unlink(state['target'])
+    else:
+        # Restore only this fixture's mutation; durable cleanup uses exact
+        # identity/mode/digest, not unstable reservation timestamps.
+        with open(state['target'], 'wb'):
+            pass
+        os.chmod(state['target'], 0o600)
+    assert adapter.recover_resource(state['rid'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+    assert canonical(root) == before
+
+
+@pytest.mark.parametrize('where', ['root', 'parent'])
+@pytest.mark.parametrize('when', ['initial', 'later'])
+def test_materialization_refuses_directory_substitution_without_cleanup_adoption(repo, monkeypatch, where, when):
+    root, adapter = repo
+    binding, copies, state = ids(), [], {}
+    original_capture, original_copy = adapter._capture_materialization, adapter.copy_blob
+    def capture(handle, rootfd, evidence):
+        if not state and (when == 'initial' or copies):
+            base = adapter.worktree_path(handle)
+            target = base if where == 'root' else os.path.join(base, b'homeassistant')
+            saved = os.path.join(os.fsencode(root), b'saved-owned-directory')
+            os.rename(target, saved)
+            os.mkdir(target, 0o700)
+            write(target, b'foreign', b'FOREIGN DIRECTORY')
+            state.update(rid=handle.resource_id, target=target, saved=saved)
+        return original_capture(handle, rootfd, evidence)
+    def copy(oid, destination):
+        copies.append(oid)
+        return original_copy(oid, destination)
+    monkeypatch.setattr(adapter, '_capture_materialization', capture)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    with pytest.raises(n.InvalidInput):
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a', b'homeassistant/b'], **binding):
+            pass
+    assert len(copies) == (0 if when == 'initial' else 1)
+    assert adapter.resources()[0]['phase'] == 'debt'
+    assert Path(os.fsdecode(os.path.join(state['target'], b'foreign'))).read_bytes() == b'FOREIGN DIRECTORY'
+    monkeypatch.undo()
+    os.unlink(os.path.join(state['target'], b'foreign'))
+    os.rmdir(state['target'])
+    os.rename(state['saved'], state['target'])
+    assert adapter.recover_resource(state['rid'], **binding).state == 'removed'
+
+
+@pytest.mark.parametrize('change', ['regular', 'symlink', 'fifo', 'hardlink', 'grow', 'grow-truncate', 'chmod'])
+def test_materialization_reopen_fstat_refuses_stat_open_substitution(repo, monkeypatch, change):
+    root, adapter = repo
+    binding, state, copies = ids(), {}, []
+    original_open, original_copy = os.open, adapter.copy_blob
+    foreign = root / 'stat-open-foreign'
+    foreign.write_bytes(b'SENTINEL')
+    before = (foreign.read_bytes(), foreign.stat().st_mode, foreign.stat().st_mtime_ns)
+    def open_file(path, flags, *args, **kwargs):
+        if (not state and path == b'a' and kwargs.get('dir_fd') is not None
+                and flags & os.O_WRONLY and not flags & os.O_CREAT):
+            assert flags & os.O_NONBLOCK and flags & os.O_NOFOLLOW
+            assert not flags & os.O_TRUNC
+            handle = next(value[1] for value in adapter._active.values())
+            target = os.path.join(adapter.worktree_path(handle), b'homeassistant/a')
+            saved = os.path.join(os.fsencode(root), b'stat-open-owned')
+            state.update(rid=handle.resource_id, target=target, saved=saved)
+            if change in ('regular', 'symlink', 'fifo', 'hardlink'):
+                os.rename(target, saved)
+                if change == 'regular':
+                    write(os.path.dirname(target), b'a', b'FOREIGN')
+                elif change == 'symlink':
+                    os.symlink(os.fsencode(foreign), target)
+                elif change == 'fifo':
+                    os.mkfifo(target)
+                else:
+                    os.link(foreign, target)
+            elif change == 'chmod':
+                os.chmod(target, 0o644)
+            elif change == 'grow-truncate':
+                observable_empty_roundtrip(target)
+            else:
+                with open(target, 'wb') as stream:
+                    stream.write(b'changed')
+        return original_open(path, flags, *args, **kwargs)
+    def copy(oid, destination):
+        copies.append(oid)
+        return original_copy(oid, destination)
+    monkeypatch.setattr(os, 'open', open_file)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    with pytest.raises((n.InvalidInput, OSError)):
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pass
+    assert not copies and state
+    assert adapter.resources()[0]['phase'] == 'debt'
+    assert (foreign.read_bytes(), foreign.stat().st_mode, foreign.stat().st_mtime_ns) == before
+    monkeypatch.undo()
+    if change in ('regular', 'symlink', 'fifo', 'hardlink'):
+        os.unlink(state['target'])
+        os.rename(state['saved'], state['target'])
+    else:
+        with open(state['target'], 'wb'):
+            pass
+        os.chmod(state['target'], 0o600)
+    assert adapter.recover_resource(state['rid'], **binding).state == 'removed'
+
+
+@pytest.mark.parametrize('failure', ['reserve-open', 'reserve-fstat', 'parent-fstat', 'reopen-fstat',
+                                      'fdopen', 'copy', 'interrupt', 'flush', 'fchmod', 'fsync', 'publish'])
+def test_materialization_descriptor_balance_and_primary_failures(repo, monkeypatch, failure):
+    root, adapter = repo
+    binding, before = ids(), canonical(root)
+    originals = {name: getattr(os, name) for name in ('open', 'fstat', 'fdopen', 'fchmod', 'fsync')}
+    original_materialize, original_copy, original_publish = adapter._materialize, adapter.copy_blob, adapter._materialization_publish
+    state = {'active': False, 'failed': False, 'target': None, 'writing': False, 'publishes': 0}
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def fail():
+        state['failed'] = True
+        if failure == 'interrupt':
+            raise KeyboardInterrupt('materialization-injected-interrupt')
+        raise OSError('materialization-injected-' + failure)
+    def materialize(handle, entries):
+        state['active'] = True
+        try:
+            return original_materialize(handle, entries)
+        finally:
+            state['active'] = False
+    def open_file(path, flags, *args, **kwargs):
+        reserve = state['active'] and path == b'a' and flags & os.O_CREAT
+        reopen = state['active'] and path == b'a' and flags & os.O_WRONLY and not flags & os.O_CREAT
+        if reserve and failure == 'reserve-open' and not state['failed']:
+            fail()
+        fd = originals['open'](path, flags, *args, **kwargs)
+        if (reserve and failure == 'reserve-fstat') or (reopen and failure in ('reopen-fstat', 'fdopen', 'flush', 'fchmod', 'fsync')):
+            state['target'] = fd
+            state['writing'] = bool(reopen)
+        if state['active'] and path == b'homeassistant' and flags & os.O_DIRECTORY and failure == 'parent-fstat':
+            state['target'] = fd
+        return fd
+    def fstat(fd):
+        if (state['active'] and fd == state['target'] and not state['failed']
+                and failure in ('reserve-fstat', 'parent-fstat', 'reopen-fstat')):
+            fail()
+        return originals['fstat'](fd)
+    def fdopen(fd, *args, **kwargs):
+        if state['active'] and fd == state['target'] and failure == 'fdopen' and not state['failed']:
+            fail()
+        stream = originals['fdopen'](fd, *args, **kwargs)
+        if state['active'] and fd == state['target'] and failure == 'flush':
+            class Stream:
+                def write(self, data):
+                    return stream.write(data)
+                def fileno(self):
+                    return stream.fileno()
+                def flush(self):
+                    if not state['failed']:
+                        fail()
+                    return stream.flush()
+                def close(self):
+                    return stream.close()
+            return Stream()
+        return stream
+    def fchmod(fd, mode):
+        if state['active'] and fd == state['target'] and failure == 'fchmod' and not state['failed']:
+            fail()
+        return originals['fchmod'](fd, mode)
+    def fsync(fd):
+        if state['active'] and state['writing'] and fd == state['target'] and failure == 'fsync' and not state['failed']:
+            fail()
+        return originals['fsync'](fd)
+    def copy(oid, destination):
+        if failure in ('copy', 'interrupt') and not state['failed']:
+            destination.write(b'partial-owned-output')
+            fail()
+        return original_copy(oid, destination)
+    def publish(journal):
+        if state['active']:
+            state['publishes'] += 1
+            if failure == 'publish' and state['publishes'] == 2 and not state['failed']:
+                fail()
+        return original_publish(journal)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    monkeypatch.setattr(adapter, '_materialization_publish', publish)
+    for name, function in [('open', open_file), ('fstat', fstat), ('fdopen', fdopen), ('fchmod', fchmod), ('fsync', fsync)]:
+        monkeypatch.setattr(os, name, function)
+    expected = KeyboardInterrupt if failure == 'interrupt' else OSError
+    with pytest.raises(expected, match='materialization-injected-' + failure):
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pass
+    assert state['failed']
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert canonical(root) == before
+    monkeypatch.undo()
+    if adapter.resources():
+        record = adapter.resources()[0]
+        assert failure in ('reserve-fstat', 'parent-fstat')
+        # These faults occur before metadata evidence exists. Remove only this
+        # disposable fixture's unacknowledged reservation, then retry by ID.
+        base = os.path.join(adapter._resource_path(record['resource_id']), b'tree/homeassistant')
+        if failure == 'reserve-fstat':
+            os.unlink(os.path.join(base, b'a'))
+        else:
+            os.rmdir(base)
+        assert adapter.recover_resource(record['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+    assert len(os.listdir(fd_directory)) == descriptors_before
+
+
+def test_materialization_same_prefix_replacement_during_reservation_is_refused(repo, monkeypatch):
+    root, adapter = repo
+    binding, state, copies = ids(), {}, []
+    original_mkdir, original_copy = os.mkdir, adapter.copy_blob
+    def mkdir(path, *args, **kwargs):
+        if path == b'homeassistant' and kwargs.get('dir_fd') is not None:
+            state['visits'] = state.get('visits', 0) + 1
+            if state['visits'] == 2:
+                handle = next(value[1] for value in adapter._active.values())
+                base = adapter.worktree_path(handle)
+                target = os.path.join(base, path)
+                saved = os.path.join(os.fsencode(root), b'first-reserved-parent')
+                os.rename(target, saved)
+                original_mkdir(target, 0o700)
+                write(target, b'foreign', b'FOREIGN PREFIX')
+                state.update(rid=handle.resource_id, target=target, saved=saved)
+        return original_mkdir(path, *args, **kwargs)
+    def copy(oid, destination):
+        copies.append(oid)
+        return original_copy(oid, destination)
+    monkeypatch.setattr(os, 'mkdir', mkdir)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    with pytest.raises(n.InvalidInput, match='replaced-materialization-parent'):
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a', b'homeassistant/b'], **binding):
+            pass
+    assert not copies
+    assert adapter.resources()[0]['phase'] == 'debt'
+    assert Path(os.fsdecode(os.path.join(state['target'], b'foreign'))).read_bytes() == b'FOREIGN PREFIX'
+    monkeypatch.undo()
+    os.unlink(os.path.join(state['target'], b'foreign'))
+    os.rmdir(state['target'])
+    os.rename(state['saved'], state['target'])
+    assert adapter.recover_resource(state['rid'], **binding).state == 'removed'
+
+
+def test_materialization_hash_reads_grow_linearly_without_blob_buffering(repo, monkeypatch):
+    root, adapter = repo
+    paths = [b'homeassistant/many/file%02d' % i for i in range(30)]
+    commit = materialization_commit(root, adapter, paths)
+    original_safe, original_common, calls = adapter._materialization_record_file, adapter._record_file, []
+    def record(original, resource, path, **kwargs):
+        if path.startswith(b'tree/homeassistant/') and not kwargs.get('directory', False):
+            calls.append(path)
+        return original(resource, path, **kwargs)
+    monkeypatch.setattr(adapter, '_materialization_record_file', lambda *args, **kwargs: record(original_safe, *args, **kwargs))
+    monkeypatch.setattr(adapter, '_record_file', lambda *args, **kwargs: record(original_common, *args, **kwargs))
+    with adapter.temporary_worktree(commit, paths=paths, **ids()):
+        assert calls == [b'tree/' + path for path in paths]
+    # One hash per new blob plus one exact complete cleanup verification.
+    assert sorted(calls) == sorted([b'tree/' + path for path in paths] * 2)
+    assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('ack_failure', ['fstat', 'fsync', 'readback', 'publish'])
+def test_materialization_partial_producer_error_survives_acknowledgement_failure(repo, monkeypatch, ack_failure):
+    root, adapter = repo
+    binding, state = ids(), {}
+    original_fstat, original_fsync = os.fstat, os.fsync
+    original_record, original_publish = adapter._materialization_record_file, adapter._materialization_publish
+    before = canonical(root)
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def fstat(fd):
+        if state.get('fd') == fd and not state.get('ack_failed'):
+            state['ack_failed'] = True
+            raise OSError('acknowledgement-fstat-failed')
+        return original_fstat(fd)
+    def fsync(fd):
+        if state.get('fd') == fd and not state.get('ack_failed'):
+            state['ack_failed'] = True
+            raise OSError('acknowledgement-fsync-failed')
+        return original_fsync(fd)
+    def record(resource, path, **kwargs):
+        if path == b'tree/homeassistant/a' and not state.get('ack_failed'):
+            state['ack_failed'] = True
+            raise OSError('acknowledgement-readback-failed')
+        return original_record(resource, path, **kwargs)
+    def publish(journal):
+        if not state.get('ack_failed'):
+            state['ack_failed'] = True
+            raise OSError('acknowledgement-publish-failed')
+        return original_publish(journal)
+    def copy(oid, destination):
+        destination.write(b'owned-partial-output')
+        state['fd'] = destination.fileno()
+        targets = {'fstat': (os, 'fstat', fstat), 'fsync': (os, 'fsync', fsync),
+                   'readback': (adapter, '_materialization_record_file', record), 'publish': (adapter, '_materialization_publish', publish)}
+        monkeypatch.setattr(*targets[ack_failure])
+        raise RuntimeError('partial-producer-is-primary')
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    with pytest.raises(RuntimeError, match='partial-producer-is-primary') as error:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pass
+    assert any('acknowledgement-' + ack_failure + '-failed' in message for message in error.value.cleanup_errors)
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert canonical(root) == before
+    monkeypatch.undo()
+    record = adapter.resources()[0]
+    assert record['phase'] == 'debt'
+    # The test owns this disposable ambiguous partial output. Restoring only
+    # its prior acknowledged bytes permits exact addressed recovery.
+    path = os.path.join(adapter._resource_path(record['resource_id']), b'tree/homeassistant/a')
+    with open(path, 'wb'):
+        pass
+    assert adapter.recover_resource(record['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('primary_stage', ['fstat', 'readback', 'fsync', 'producer', 'interrupt'])
+@pytest.mark.parametrize('close_where', ['stream', 'parent', 'root'])
+def test_materialization_first_error_survives_writer_parent_root_close_double_fault(repo, monkeypatch, primary_stage, close_where):
+    root, adapter = repo
+    binding, before = ids(), canonical(root)
+    error = KeyboardInterrupt('interrupt-primary') if primary_stage == 'interrupt' else (
+        RuntimeError('producer-primary') if primary_stage == 'producer' else OSError('ack-' + primary_stage + '-primary'))
+    state = {'active': False, 'armed': False, 'primary_raised': False, 'secondary_raised': False, 'close_attempts': 0, 'syncs': 0}
+    originals = {name: getattr(os, name) for name in ('open', 'close', 'fdopen', 'fstat', 'fsync')}
+    original_materialize, original_copy, original_record = adapter._materialize, adapter.copy_blob, adapter._materialization_record_file
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(handle, entries):
+        state['active'] = True
+        try:
+            return original_materialize(handle, entries)
+        finally:
+            state['active'] = False
+    def open_file(path, flags, *args, **kwargs):
+        fd = originals['open'](path, flags, *args, **kwargs)
+        if state['active'] and os.path.basename(os.fsencode(path)) == b'tree' and kwargs.get('dir_fd') is None:
+            state.setdefault('root', fd)
+        if state['active'] and path == b'a' and flags & os.O_WRONLY and not flags & os.O_CREAT:
+            state['parent'] = kwargs['dir_fd']
+        return fd
+    def close(fd):
+        if state['armed'] and state['active'] and close_where != 'stream' and fd == state.get(close_where) and not state['secondary_raised']:
+            state['close_attempts'] += 1
+            originals['close'](fd)
+            state['secondary_raised'] = True
+            raise OSError(close_where + '-close-secondary')
+        return originals['close'](fd)
+    def fdopen(fd, *args, **kwargs):
+        stream = originals['fdopen'](fd, *args, **kwargs)
+        if kwargs.get('buffering') != 0 or close_where != 'stream':
+            return stream
+        class Stream:
+            def write(self, data):
+                return stream.write(data)
+            def flush(self):
+                return stream.flush()
+            def fileno(self):
+                return stream.fileno()
+            def close(self):
+                state['close_attempts'] += 1
+                stream.close()
+                state['secondary_raised'] = True
+                raise OSError('stream-close-secondary')
+        return Stream()
+    def raise_primary():
+        state['primary_raised'] = True
+        raise error
+    def copy(oid, destination):
+        state['writer'] = destination.fileno()
+        if primary_stage in ('producer', 'interrupt'):
+            destination.write(b'owned-partial')
+            state['armed'] = True
+            raise_primary()
+        result = original_copy(oid, destination)
+        state['armed'] = True
+        return result
+    def fstat(fd):
+        if state['armed'] and fd == state['writer'] and primary_stage == 'fstat' and not state['primary_raised']:
+            raise_primary()
+        return originals['fstat'](fd)
+    def fsync(fd):
+        if state['armed'] and fd == state['writer']:
+            state['syncs'] += 1
+            if primary_stage == 'fsync' and state['syncs'] == 2 and not state['primary_raised']:
+                raise_primary()
+        return originals['fsync'](fd)
+    def record(resource, path, **kwargs):
+        if state['armed'] and path == b'tree/homeassistant/a' and primary_stage == 'readback' and not state['primary_raised']:
+            raise_primary()
+        return original_record(resource, path, **kwargs)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    monkeypatch.setattr(adapter, '_materialization_record_file', record)
+    for name, function in [('open', open_file), ('close', close), ('fdopen', fdopen), ('fstat', fstat), ('fsync', fsync)]:
+        monkeypatch.setattr(os, name, function)
+    with pytest.raises(type(error)) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pytest.fail('double fault was accepted')
+    assert raised.value is error
+    assert state['primary_raised'] and state['secondary_raised'] and state['close_attempts'] == 1
+    assert any(close_where + '-close-secondary' in message for message in error.cleanup_errors)
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert canonical(root) == before
+    monkeypatch.undo()
+    if adapter.resources():
+        record = adapter.resources()[0]
+        path = os.path.join(adapter._resource_path(record['resource_id']), b'tree/homeassistant/a')
+        with open(path, 'wb'):
+            pass
+        os.chmod(path, 0o600)
+        assert adapter.recover_resource(record['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('primary_kind', ['error', 'interrupt'])
+@pytest.mark.parametrize('boundary', ['reservation-leaf', 'reservation-next-parent', 'reservation-parent',
+                                      'reopen-leaf', 'verified-next-parent', 'predecessor-transfer'])
+def test_materialization_traversal_reservation_close_preserves_primary_without_retry(repo, monkeypatch, primary_kind, boundary):
+    root, adapter = repo
+    binding = ids()
+    primary = KeyboardInterrupt('boundary-primary') if primary_kind == 'interrupt' else OSError('boundary-primary')
+    state = {'active': False, 'target': None, 'primary_raised': False, 'secondary_raised': False, 'closes': 0,
+             'materialize_parents': 0, 'closed_number': None, 'unsafe_retry': False}
+    originals = {name: getattr(os, name) for name in ('open', 'close', 'fstat', 'dup')}
+    original_materialize, original_parent = adapter._materialize, adapter._materialization_parent
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(handle, entries):
+        state['active'] = True
+        try:
+            return original_materialize(handle, entries)
+        finally:
+            state['active'] = False
+    def parent(*args):
+        state['materialize_parents'] += 1
+        return original_parent(*args)
+    def dup(fd):
+        result = originals['dup'](fd)
+        if result == state['closed_number']:
+            state['closed_number'] = None
+        if state['active'] and state['target'] is None and boundary == 'predecessor-transfer':
+            state['target'] = result
+        return result
+    def open_file(path, flags, *args, **kwargs):
+        if state['active'] and path == b'a' and flags & os.O_CREAT and boundary == 'reservation-parent' and not state['primary_raised']:
+            state['target'] = kwargs['dir_fd']
+            state['primary_raised'] = True
+            raise primary
+        fd = originals['open'](path, flags, *args, **kwargs)
+        if fd == state['closed_number']:
+            state['closed_number'] = None
+        if state['active'] and path == b'homeassistant' and flags & os.O_DIRECTORY and boundary == 'predecessor-transfer':
+            state.setdefault('successor', fd)
+        if state['active'] and state['target'] is None:
+            if boundary == 'reservation-leaf' and path == b'a' and flags & os.O_CREAT:
+                state['target'] = fd
+            elif boundary == 'reopen-leaf' and path == b'a' and flags & os.O_WRONLY and not flags & os.O_CREAT:
+                state['target'] = fd
+            elif boundary == 'reservation-next-parent' and path == b'homeassistant' and flags & os.O_DIRECTORY:
+                state['target'] = fd
+            elif boundary == 'verified-next-parent' and state['materialize_parents'] and path == b'homeassistant' and flags & os.O_DIRECTORY:
+                state['target'] = fd
+        return fd
+    def fstat(fd):
+        if state['active'] and fd == state['target'] and boundary not in ('reservation-parent', 'predecessor-transfer') and not state['primary_raised']:
+            state['primary_raised'] = True
+            raise primary
+        return originals['fstat'](fd)
+    def close(fd):
+        if state['active'] and fd == state['closed_number']:
+            state['unsafe_retry'] = True
+        if state['active'] and fd == state['target'] and not state['primary_raised'] and boundary == 'predecessor-transfer':
+            state['closes'] += 1
+            originals['close'](fd)
+            state['closed_number'] = fd
+            state['primary_raised'] = True
+            raise primary
+        successor = boundary == 'predecessor-transfer' and state['primary_raised'] and fd == state.get('successor')
+        if state['active'] and (fd == state['target'] or successor) and not state['secondary_raised']:
+            if not successor:
+                state['closes'] += 1
+            originals['close'](fd)
+            state['closed_number'] = fd
+            state['secondary_raised'] = True
+            raise OSError('boundary-close-secondary')
+        return originals['close'](fd)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(adapter, '_materialization_parent', parent)
+    for name, function in [('open', open_file), ('close', close), ('fstat', fstat), ('dup', dup)]:
+        monkeypatch.setattr(os, name, function)
+    with pytest.raises(type(primary)) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pass
+    assert raised.value is primary and state['primary_raised'] and state['secondary_raised'] and state['closes'] == 1
+    assert not state['unsafe_retry']
+    assert any('boundary-close-secondary' in message for message in primary.cleanup_errors)
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    monkeypatch.undo()
+    if adapter.resources():
+        record = adapter.resources()[0]
+        base = os.path.join(adapter._resource_path(record['resource_id']), b'tree/homeassistant')
+        if boundary == 'reservation-leaf':
+            os.unlink(os.path.join(base, b'a'))
+        elif boundary == 'reservation-next-parent':
+            os.rmdir(base)
+        assert adapter.recover_resource(record['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+
+
+_READBACK_FAULTS = [(target, fault) for target in ('selected', 'owner', 'backlink')
+                   for fault in ('file-fstat', 'file-read', 'file-close', 'parent-open', 'parent-fstat',
+                                 'predecessor-close', 'predecessor-single', 'parent-final-close', 'parent-final-double')
+                   if not (target == 'owner' and fault in ('predecessor-close', 'predecessor-single'))]
+
+
+@pytest.mark.parametrize('primary_kind', ['error', 'interrupt'])
+@pytest.mark.parametrize('target,fault', _READBACK_FAULTS)
+def test_materialization_real_readback_syscalls_preserve_first_error_and_fd_balance(repo, monkeypatch, target, fault, primary_kind):
+    root, adapter = repo
+    binding, before = ids(), canonical(root)
+    primary = KeyboardInterrupt('readback-syscall-primary') if primary_kind == 'interrupt' else OSError('readback-syscall-primary')
+    path = {'selected': b'tree/homeassistant/a', 'owner': b'owner.json', 'backlink': b'tree/.git'}[target]
+    state = {'active': False, 'reading': False, 'copied': False, 'primary_hit': False, 'secondary_hit': False,
+             'root_fd': None, 'file_fd': None, 'parent_fd': None, 'previous': None, 'successor': None,
+             'closed_numbers': set(), 'unsafe_retry': False, 'fault_closes': []}
+    originals = {name: getattr(os, name) for name in ('open', 'close', 'fstat', 'read', 'dup')}
+    original_materialize, original_copy = adapter._materialize, adapter.copy_blob
+    # The old helper name supports executing these actual syscall guards against
+    # the isolated pre-correction module; no helper is mocked to raise a fault.
+    record_name = '_materialization_record_file' if hasattr(adapter, '_materialization_record_file') else '_record_file'
+    original_record = getattr(adapter, record_name)
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(handle, entries):
+        state['active'] = True
+        try:
+            return original_materialize(handle, entries)
+        finally:
+            state['active'] = False
+    def record(resource, candidate, **kwargs):
+        previous = state['reading']
+        state['reading'] = state['active'] and candidate == path and (target != 'selected' or state['copied'])
+        try:
+            return original_record(resource, candidate, **kwargs)
+        finally:
+            state['reading'] = previous
+    def copy(oid, destination):
+        result = original_copy(oid, destination)
+        state['copied'] = True
+        return result
+    def raise_primary():
+        state['primary_hit'] = True
+        raise primary
+    def open_file(name, flags, *args, **kwargs):
+        if state['reading'] and fault == 'parent-open' and kwargs.get('dir_fd') is None and not state['primary_hit']:
+            raise_primary()
+        fd = originals['open'](name, flags, *args, **kwargs)
+        state['closed_numbers'].discard(fd)
+        if state['reading'] and not state['primary_hit']:
+            if flags & os.O_DIRECTORY:
+                if kwargs.get('dir_fd') is None:
+                    state['root_fd'] = fd
+                elif fault in ('predecessor-close', 'predecessor-single') and state['previous'] is None:
+                    state['previous'], state['successor'] = kwargs['dir_fd'], fd
+            else:
+                state['file_fd'], state['parent_fd'] = fd, kwargs['dir_fd']
+        return fd
+    def dup(fd):
+        value = originals['dup'](fd)
+        state['closed_numbers'].discard(value)
+        return value
+    def fstat(fd):
+        if state['reading'] and not state['primary_hit']:
+            if (fault == 'file-fstat' and fd == state['file_fd']) or (fault == 'parent-fstat' and fd == state['root_fd']):
+                raise_primary()
+        return originals['fstat'](fd)
+    def read(fd, count):
+        if state['reading'] and fd == state['file_fd'] and fault in ('file-read', 'parent-final-double') and not state['primary_hit']:
+            raise_primary()
+        return originals['read'](fd, count)
+    def close(fd):
+        if state['reading'] and fd in state['closed_numbers']:
+            state['unsafe_retry'] = True
+        if state['reading'] and not state['primary_hit']:
+            first = ((fault == 'file-close' and fd == state['file_fd']) or
+                     (fault in ('predecessor-close', 'predecessor-single') and fd == state['previous']) or
+                     (fault == 'parent-final-close' and fd == state['parent_fd']))
+            if first:
+                originals['close'](fd)
+                state['closed_numbers'].add(fd)
+                state['fault_closes'].append(fd)
+                raise_primary()
+        if state['reading'] and state['primary_hit'] and not state['secondary_hit']:
+            second = ((fault in ('file-fstat', 'file-read') and fd == state['file_fd']) or
+                      (fault == 'parent-fstat' and fd == state['root_fd']) or
+                      (fault in ('file-close', 'parent-final-double') and fd == state['parent_fd']) or
+                      (fault == 'predecessor-close' and fd == state['successor']))
+            if second:
+                originals['close'](fd)
+                state['closed_numbers'].add(fd)
+                state['fault_closes'].append(fd)
+                state['secondary_hit'] = True
+                raise OSError('readback-close-secondary')
+        return originals['close'](fd)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(adapter, record_name, record)
+    monkeypatch.setattr(adapter, 'copy_blob', copy)
+    for name, function in [('open', open_file), ('dup', dup), ('fstat', fstat), ('read', read), ('close', close)]:
+        monkeypatch.setattr(os, name, function)
+    with pytest.raises(type(primary)) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pytest.fail('readback fault was not reached')
+    assert state['primary_hit'] and raised.value is primary
+    assert not state['unsafe_retry']
+    assert len(state['fault_closes']) == len(set(state['fault_closes']))
+    if fault not in ('parent-open', 'parent-final-close', 'predecessor-single'):
+        assert state['secondary_hit']
+        assert any('readback-close-secondary' in value for value in primary.cleanup_errors)
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert canonical(root) == before
+    monkeypatch.undo()
+    if adapter.resources():
+        resource = adapter.resources()[0]
+        if target == 'selected':
+            # This fixture alone owns the unacknowledged copied bytes. Restore
+            # the last durable reservation evidence; marker/backlink stay intact.
+            selected = os.path.join(adapter._resource_path(resource['resource_id']), path)
+            with open(selected, 'wb'):
+                pass
+            os.chmod(selected, 0o600)
+        assert adapter.recover_resource(resource['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+
+
+_JOURNAL_PUBLICATION_FAULTS = [
+    'lock-open', 'lock-acquire', 'lock-fstat', 'manifest-open', 'manifest-fstat',
+    'manifest-read', 'manifest-close', 'owner-read', 'lock-unlock', 'lock-close',
+    'publication-open', 'publication-fstat', 'publication-fdopen', 'publication-write',
+    'publication-flush', 'publication-fsync', 'publication-close', 'publication-replace',
+    'directory-open', 'directory-fstat', 'directory-fsync', 'directory-close',
+    'publication-unlink',
+]
+_CAPTURE_LATER_FAULTS = ['root-fsync', 'owner-read', 'lock-acquire', 'lock-fstat',
+                        'lock-unlock', 'lock-close', 'publication-fdopen',
+                        'publication-write', 'publication-flush', 'publication-fsync',
+                        'publication-close', 'directory-open', 'directory-fstat',
+                        'directory-fsync', 'directory-close', 'publication-unlink']
+
+
+@pytest.mark.parametrize('primary_kind', ['error', 'interrupt'])
+@pytest.mark.parametrize('pending,target,fault',
+    [(False, None, fault) for fault in _JOURNAL_PUBLICATION_FAULTS] +
+    [(True, target, fault) for target in ('owner', 'backlink') for fault in _CAPTURE_LATER_FAULTS])
+def test_materialization_real_journal_publication_syscalls_preserve_first_error(
+        repo, monkeypatch, pending, target, fault, primary_kind):
+    import fcntl
+    root, adapter = repo
+    binding, before = ids(), canonical(root)
+    primary = KeyboardInterrupt('journal-publication-primary') if primary_kind == 'interrupt' else OSError('journal-publication-primary')
+    secondary = OSError('journal-publication-secondary')
+    state = {'active': False, 'capture': False, 'primary': False, 'secondary': False,
+             'extra': False, 'fds': {}, 'closed': set(), 'unsafe_retry': False,
+             'publications': {}, 'rootfd': None, 'baseline_read': False}
+    originals = {name: getattr(os, name) for name in ('open', 'dup', 'close', 'fstat', 'read', 'fdopen', 'fsync', 'replace', 'unlink')}
+    original_flock, original_materialize, original_capture = fcntl.flock, adapter._materialize, adapter._capture_materialization
+    original_record = adapter._materialization_record_file
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(*args):
+        state['active'] = True
+        try:
+            return original_materialize(*args)
+        finally:
+            state['active'] = False
+    def capture(handle, rootfd, evidence):
+        previous = state['capture']
+        state['capture'], state['rootfd'] = True, rootfd
+        try:
+            return original_capture(handle, rootfd, evidence)
+        finally:
+            state['capture'] = previous
+    def record(resource, path, **kwargs):
+        previous = state['baseline_read']
+        state['baseline_read'] = pending and state['capture'] and path == {'owner': b'owner.json', 'backlink': b'tree/.git'}.get(target)
+        try:
+            return original_record(resource, path, **kwargs)
+        finally:
+            state['baseline_read'] = previous
+    def hit(point):
+        if not state['active']:
+            return
+        if point == 'baseline-read' and pending and not state['primary']:
+            state['primary'] = True
+            raise primary
+        if point != fault or (pending and not state['primary']):
+            return
+        key = 'secondary' if pending else 'primary'
+        if not state[key]:
+            state[key] = True
+            raise secondary if pending else primary
+    def open_file(path, flags, *args, **kwargs):
+        kind = None
+        if state['active']:
+            name = os.path.basename(path)
+            if name == b'journal.lock': kind = 'lock'
+            elif name == b'journal.json': kind = 'manifest'
+            elif name.startswith(b'.publish-'): kind = 'publication'
+            elif path == adapter.resources_root and flags & os.O_DIRECTORY: kind = 'directory'
+            elif name == b'owner.json': kind = 'owner'
+            elif name == b'.git': kind = 'backlink'
+            if kind: hit(kind + '-open')
+        fd = originals['open'](path, flags, *args, **kwargs)
+        state['closed'].discard(fd)
+        state['fds'][fd] = kind
+        if kind == 'publication': state['publications'][path] = fd
+        return fd
+    def dup(fd):
+        value = originals['dup'](fd)
+        state['closed'].discard(value)
+        state['fds'][value] = None
+        return value
+    def fstat(fd):
+        kind = state['fds'].get(fd)
+        if kind: hit(kind + '-fstat')
+        return originals['fstat'](fd)
+    def read(fd, count):
+        if state['baseline_read']: hit('baseline-read')
+        kind = state['fds'].get(fd)
+        if kind: hit(kind + '-read')
+        return originals['read'](fd, count)
+    def release_extra(point):
+        # Exercise a second actual release fault with every first fault. Unlock
+        # executes before reporting failure, and close executes exactly once.
+        if state['active'] and state['primary'] and not state['extra'] and point == 'lock-unlock':
+            state['extra'] = True
+            raise OSError('journal-release-extra')
+    def flock(fd, operation):
+        if operation == fcntl.LOCK_EX: hit('lock-acquire')
+        result = original_flock(fd, operation)
+        if operation == fcntl.LOCK_UN:
+            hit('lock-unlock')
+            release_extra('lock-unlock')
+        return result
+    def close(fd):
+        if state['active'] and fd in state['closed']: state['unsafe_retry'] = True
+        result = originals['close'](fd)
+        state['closed'].add(fd)
+        kind = state['fds'].get(fd)
+        if kind: hit(kind + '-close')
+        if (state['active'] and state['primary'] and (not pending or state['secondary'])
+                and kind in ('publication', 'directory', 'lock') and not state.get(kind + '_release')):
+            state[kind + '_release'] = True
+            raise OSError(kind + '-close-extra')
+        return result
+    def fdopen(fd, *args, **kwargs):
+        kind = state['fds'].get(fd)
+        if kind == 'publication': hit('publication-fdopen')
+        stream = originals['fdopen'](fd, *args, **kwargs)
+        if kind != 'publication': return stream
+        class Stream:
+            def fileno(self): return stream.fileno()
+            def write(self, data):
+                value = stream.write(data)
+                hit('publication-write')
+                # Unlink failure needs a still-owned temporary pathname.
+                if fault == 'publication-unlink' and state['active'] and not state['extra']:
+                    state['extra'] = True
+                    raise OSError('publication-write-before-unlink') if pending else primary
+                return value
+            def flush(self):
+                value = stream.flush(); hit('publication-flush'); return value
+            def close(self):
+                value = stream.close()
+                state['closed'].add(fd)
+                hit('publication-close')
+                if (state['active'] and state['primary'] and (not pending or state['secondary'])
+                        and not state.get('publication_release')):
+                    state['publication_release'] = True
+                    raise OSError('publication-close-extra')
+                return value
+        return Stream()
+    def fsync(fd):
+        if state['capture'] and fd == state['rootfd']: hit('root-fsync')
+        kind = state['fds'].get(fd)
+        if kind: hit(kind + '-fsync')
+        return originals['fsync'](fd)
+    def replace(source, destination):
+        if source in state['publications']: hit('publication-replace')
+        return originals['replace'](source, destination)
+    def unlink(path, *args, **kwargs):
+        if path in state['publications']:
+            hit('publication-unlink')
+        return originals['unlink'](path, *args, **kwargs)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(adapter, '_capture_materialization', capture)
+    monkeypatch.setattr(adapter, '_materialization_record_file', record)
+    monkeypatch.setattr(fcntl, 'flock', flock)
+    for name, fn in [('open', open_file), ('dup', dup), ('fstat', fstat), ('read', read), ('close', close),
+                     ('fdopen', fdopen), ('fsync', fsync), ('replace', replace), ('unlink', unlink)]:
+        monkeypatch.setattr(os, name, fn)
+    # An unlink fault follows an earlier write fault, so that exact write error
+    # is the primary even when there was no collected baseline read error.
+    if not pending and fault == 'publication-unlink':
+        primary = KeyboardInterrupt('publication-write-before-unlink') if primary_kind == 'interrupt' else OSError('publication-write-before-unlink')
+        original_hit = hit
+        def hit(point):
+            if point == 'publication-unlink' and state['active'] and not state['secondary']:
+                state['primary'], state['secondary'] = True, True
+                raise secondary
+            return original_hit(point)
+    with pytest.raises(BaseException) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **binding):
+            pytest.fail('actual syscall fault was not reached')
+    assert state['primary'] and (not pending or state['secondary'])
+    assert raised.value is primary
+    assert not state['unsafe_retry']
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert canonical(root) == before
+    if pending:
+        assert any('journal-publication-secondary' in value for value in primary.cleanup_errors)
+    monkeypatch.undo()
+    # Only these exact exclusive publication paths belong to this fixture. A
+    # failed initial fstat cannot prove ownership to product cleanup; retain it
+    # rather than adopt a current occupant. The fixture can remove its own file.
+    for path in state['publications']:
+        if os.path.lexists(path): os.unlink(path)
+    if adapter.resources():
+        resource = adapter.resources()[0]
+        # Multiple publication/release faults can prevent all durable extension
+        # of the baseline. Recovery must refuse those unacknowledged additions;
+        # this fixture alone can remove its own empty reservations first.
+        base = adapter._resource_path(resource['resource_id'])
+        for candidate in (b'tree/homeassistant/a', b'tree/homeassistant'):
+            path = os.path.join(base, candidate)
+            if n._encode(candidate) not in resource['entries'] and os.path.lexists(path):
+                if candidate.endswith(b'/a'):
+                    assert os.stat(path).st_size == 0 and stat.S_IMODE(os.stat(path).st_mode) == 0o600
+                    os.unlink(path)
+                else:
+                    os.rmdir(path)
+        assert adapter.recover_resource(resource['resource_id'], **binding).state == 'removed'
+    assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('primary_kind', ['parse', 'interrupt'])
+def test_materialization_manifest_parse_and_three_release_failures(repo, monkeypatch, primary_kind):
+    import fcntl
+    root, adapter = repo
+    state = {'active': False, 'manifest': None, 'lock': None, 'primary': None,
+             'read': False, 'manifest_close': False, 'unlock': False, 'lock_close': False}
+    originals = {name: getattr(os, name) for name in ('open', 'read', 'close')}
+    original_flock, original_materialize = fcntl.flock, adapter._materialize
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(*args):
+        state['active'] = True
+        try: return original_materialize(*args)
+        finally: state['active'] = False
+    def open_file(path, *args, **kwargs):
+        fd = originals['open'](path, *args, **kwargs)
+        if state['active'] and os.path.basename(path) in (b'journal.lock', b'journal.json'):
+            state['lock' if path.endswith(b'journal.lock') else 'manifest'] = fd
+        return fd
+    def read(fd, count):
+        value = originals['read'](fd, count)
+        if state['active'] and fd == state['manifest'] and not state['read']:
+            state['read'] = True
+            if primary_kind == 'interrupt':
+                state['primary'] = KeyboardInterrupt('manifest-read-interruption')
+                raise state['primary']
+            # Exercise the real parser and retain its exact exception object.
+            try: n._json(b'{invalid')
+            except BaseException as exc:
+                state['primary'] = exc
+                raise
+        return value
+    def close(fd):
+        value = originals['close'](fd)
+        if state['active'] and state['primary'] is not None:
+            key = 'manifest_close' if fd == state['manifest'] else 'lock_close' if fd == state['lock'] else None
+            if key and not state[key]:
+                state[key] = True
+                raise OSError(key + '-secondary')
+        return value
+    def flock(fd, operation):
+        value = original_flock(fd, operation)
+        if state['active'] and state['primary'] is not None and operation == fcntl.LOCK_UN and not state['unlock']:
+            state['unlock'] = True
+            raise OSError('unlock-secondary')
+        return value
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(fcntl, 'flock', flock)
+    for name, fn in [('open', open_file), ('read', read), ('close', close)]: monkeypatch.setattr(os, name, fn)
+    with pytest.raises(BaseException) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **ids()): pass
+    assert raised.value is state['primary'] and state['read']
+    assert state['manifest_close'] and state['unlock'] and state['lock_close']
+    assert all(any(label + '-secondary' in text for text in raised.value.cleanup_errors)
+               for label in ('manifest_close', 'unlock', 'lock_close'))
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    monkeypatch.undo()
+    assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('primary_kind', ['error', 'interrupt'])
+def test_materialization_publication_cleanup_refuses_substituted_temporary_file(repo, monkeypatch, primary_kind):
+    root, adapter = repo
+    primary = OSError('publication-transfer-primary') if primary_kind == 'error' else KeyboardInterrupt('publication-transfer-primary')
+    state = {'active': False, 'fd': None, 'path': None, 'injected': False}
+    original_materialize, original_open, original_fdopen = adapter._materialize, os.open, os.fdopen
+    fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+    descriptors_before = len(os.listdir(fd_directory))
+    def materialize(*args):
+        state['active'] = True
+        try: return original_materialize(*args)
+        finally: state['active'] = False
+    def open_file(path, *args, **kwargs):
+        fd = original_open(path, *args, **kwargs)
+        if state['active'] and os.path.basename(path).startswith(b'.publish-') and state['fd'] is None:
+            state['fd'], state['path'] = fd, path
+        return fd
+    def fdopen(fd, *args, **kwargs):
+        if state['active'] and fd == state['fd'] and not state['injected']:
+            state['injected'] = True
+            os.unlink(state['path'])
+            with open(state['path'], 'wb') as stream: stream.write(b'foreign publication sentinel')
+            os.chmod(state['path'], 0o600)
+            raise primary
+        return original_fdopen(fd, *args, **kwargs)
+    monkeypatch.setattr(adapter, '_materialize', materialize)
+    monkeypatch.setattr(os, 'open', open_file)
+    monkeypatch.setattr(os, 'fdopen', fdopen)
+    with pytest.raises(BaseException) as raised:
+        with adapter.temporary_worktree(head(root), paths=[b'homeassistant/a'], **ids()): pass
+    assert state['injected'] and raised.value is primary
+    assert any('unproven-materialization-publication-file' in value for value in primary.cleanup_errors)
+    assert len(os.listdir(fd_directory)) == descriptors_before
+    assert Path(os.fsdecode(state['path'])).read_bytes() == b'foreign publication sentinel'
+    monkeypatch.undo()
+    os.unlink(state['path'])  # Only the foreign sentinel created by this fixture.
+    assert adapter.resources() == ()
