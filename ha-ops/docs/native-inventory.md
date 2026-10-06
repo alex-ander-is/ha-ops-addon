@@ -13,9 +13,14 @@ fresh inventory. These observations cannot authorize later writes.
 and collapses component ancestors. `foo` never includes `foobar`. Case,
 Unicode normalization forms, invalid UTF-8, whitespace, backslashes and
 literal glob characters remain distinct. Strings use `os.fsencode`; display
-text is not identity. LF/CR names remain in inventory and index diagnostics,
-but `render_ignore` refuses them because line-based allow rules cannot safely
-represent them. It returns no partial policy.
+text is not identity. Immutable entries and issues expose `display_path`,
+which escapes controls, backslashes and surrogate bytes without changing
+the byte identity. For the agreed first version, any LF/CR-containing component
+has reason `unsupported-line-break-name` and cannot be selected. Its row remains
+visible; excluded directories are not traversed. An eligible selected parent
+omits these children and keeps ordinary files available. Explicit LF/CR selection
+blocks. The renderer retains a defensive LF/CR refusal; this is a deliberate
+support limitation, not a claim that Git inherently cannot represent such names.
 
 `inventory(root, selected, policy=..., mounts=..., confirmed_mounts=...,
 topology_verified=...)` checks the root and every directory component with
@@ -28,17 +33,50 @@ Traversal is iterative and closes directory descriptors before the next
 directory. Membership, metadata and root namespace rechecks report failures
 and races explicitly, never as an empty successful scope.
 
+`Inventory.diagnostics` is the complete immutable issue tuple;
+`Inventory.blockers` is its subset relevant to the selected candidate or safety
+anchors. The appended diagnostics default preserves four-positional construction.
+Empty scope can render a deny-by-default policy despite unrelated WAL churn.
+Exact selected files retain full device/inode/mode, size, link-count, mtime and
+ctime observations, including changes through another hardlink. Required parent
+directories and the root retain identity checks; sibling changes to their
+timestamps, sizes or membership are diagnostic. Selected folders additionally
+retain recursively observed eligible file/directory membership. Eligible additions,
+removals or replacements block; known-denied children are excluded. Runtime
+warnings do not remove membership or selected-file obligations.
+
+Child inspection failures remain local. An exact leaf can be proven directly
+through guarded parents even if unrelated sibling stat or listing fails.
+Established observations and failures are retained across this fallback and
+namespace rechecks. Selected-folder listing failures, unavailable selected paths,
+and replaced required parents block. Diagnostics cannot expand the exact observed
+managed-file whitelist or authorize later writes.
+Acquisition/identity failures on required parents and the root remain blockers
+even if the original namespace returns before fallback. A failed sibling listing
+does not have that meaning. Removal of a previously observed unsupported leaf
+between listing and stat stays diagnostic; an unknown eligible child's stat
+failure still blocks selected-folder completeness.
+Required proper prefixes have a semantic parent role independent of observed
+kind. A first-observed regular file, FIFO or symlink in that role records
+`unsafe-required-parent`; subsequent directory recovery cannot clear it.
+Every required-prefix identity/type replacement blocks, while directory metadata
+alone stays diagnostic. Unsupported sibling leaves under a selected folder retain
+their separate excluded role; unsupported-to-unsupported replacement is diagnostic,
+and transitions that change eligible membership block.
+
 `parse_mountinfo` preserves mount IDs, parent IDs, filesystem roots, mountpoints,
 device fields and sources, including documented octal byte escapes. Device
 equality does not establish mount topology. A root requires confirmed mount
 evidence. A descendant boundary requires its own confirmation for every entry
 kind; unconfirmed regular-file mounts cannot become managed files. Neither
 reserved directory scaffolding nor repository-only exceptions can cross an
-unconfirmed boundary. Ambiguous stacked records and malformed mount paths block.
+unconfirmed boundary. Unknown or stacked boundaries on selected routes block;
+unrelated boundaries remain diagnostic and untraversed. Invalid mount evidence
+and an unconfirmed or ambiguous root always block.
 `linux_mounts()` reads `/proc/self/mountinfo`.
 Every inventory descendant acquisition checks each component's unique confirmed
 mount before stat/open. The shared guard covers preliminary alias probes, the
-main scan and final namespace rechecks; a confirmed deeper mount cannot bypass
+main scan, independent selected proof and final namespace rechecks; a confirmed deeper mount cannot bypass
 an unknown or stacked ancestor. The initial root descriptor and its final
 identity check are diagnostic anchors, not permission to descend. Separate
 policy-copy and Git audits retain their explicit-location contracts.
@@ -54,7 +92,9 @@ identity. It is never rewritten into canonical selection. Denied directories
 remain visible without enumerating their contents. Explicit selection of a
 denied root blocks; a selected eligible ancestor omits denied children.
 An absent alias is optional in a synthetic fixture; a present alias with an
-absent or disappearing canonical target explicitly blocks confirmation.
+absent or disappearing canonical target prevents alias confirmation and remains
+diagnostic. A canonical selection must independently prove its actual guarded
+route; alias evidence never authorizes it.
 
 ## Finite known-secret policy
 
@@ -75,11 +115,14 @@ configured denials, additional live roots and repository-only files.
 | `data` except exact configured files below `data/native/repository-files/` | `service-data` |
 | `proc`, `sys`, `dev`, `run`, `tmp`, `bin`, `sbin`, `usr`, `lib`, `lib64`, `etc`, `root`, `var`, `opt` | `container-system-root` |
 | Other root paths | `non-managed-root` |
+| Any LF/CR-containing component | `unsupported-line-break-name` |
 
 Additional deny paths extend this matrix. Additional roots cannot reopen
 reserved/system paths. Repository-only exceptions open only exact files;
 their directory scaffolding never permits selecting `data`, private metadata,
 options, keys, state, diffs, recovery, logs or the old checkout.
+The scaffold exception applies only to `service-data`; the shared acquisition
+guard never traverses LF/CR, Git-metadata or configured-deny components.
 
 Whole device/entity registries remain eligible. Other `.storage` records emit
 `unclassified-storage-content`; they are not certified secret-free. This is
@@ -93,7 +136,8 @@ confirmation UI is step 16.
 
 ## Three separate checks
 
-`render_ignore(snapshot, policy)` requires a complete snapshot. It denies
+`render_ignore(snapshot, policy)` requires a complete selected scope with no
+blockers; unrelated diagnostics do not prevent rendering. It denies
 everything, reopens exact eligible enumerated files and `/.gitignore`, and
 reopens required parents while denying their other children. Literal pattern
 escaping preserves spaces, tabs, backslashes, `!`, `#`, `*`, `?` and brackets.
@@ -147,12 +191,17 @@ All new tests are in `tests/test_native_inventory.py`.
 | R002: finite secret matrix without legacy runtime exclusions | Parametrized secret/whole-file matrices, sparse 10-GiB metadata fixture, repository-only denies |
 | R003: no leaf reads or dereferences; explicit failed/raced scans | No-follow sentinel, changed-child including FIFO directory replacement, namespace-failure, policy-replacement and bounded root/saved policy FIFO-race tests |
 | R004: explicit same-device mounts | Mount parser, malformed injected evidence, all entry-kind/scaffolding boundaries, alias no-open guards for unknown/stacked ancestor/self and confirmed child under unknown ancestor, shared scan/recheck component guard, and real Linux bind proof |
-| R005: canonical alias, hardlinks, reserved roots | Alias mismatch, present-alias/missing-canonical blocker and mapped-source identity fixtures, hardlink metadata, reserved-root/repository-file cases |
+| R005: canonical alias, hardlinks, reserved roots | Alias mismatch, present-alias/missing-canonical diagnostics, selected-route negative counterparts and mapped-source identity fixtures, hardlink metadata, reserved-root/repository-file cases |
 | R006: exact whitelist and both nested override directions | Real Git literal rules, empty scope, tracked `check-ignore --no-index`, nested override tests |
 | R007: independent complete index, merge stages/modes/deletions | Force-added LF/invalid-byte fixture; real Git symlink/gitlink and unmerged stage fixtures; malformed/sparse-mode seams |
 | R008: complete effective-ignore parsing and command failures | Four-field, nonmatch, negation, duplicate/missing/malformed tuple, exit-status and timeout tests |
 | R009: isolated routing and policy copies | Hostile environment, fsmonitor sentinel, external excludes, linked metadata, exact single-link/nonblocking policy tests and static/raced index/config/HEAD FIFOs with bounded Git invocation |
 | R010: dormant lifecycle, fresh scope, resources | Consecutive broad/narrow/empty results, immutable records, deep-tree descriptor cleanup, no-production-import guard |
+| Scope-local stability in both observation phases | Real WAL append with empty/exact scope, ordinary sibling append/add/remove, denied child churn, selected empty-folder membership, strict selected-file size/mtime/links/identity/hardlink/symlink/FIFO changes |
+| Independent exact-leaf proof and retained baselines | Unrelated sibling stat failures before/after the selected name, parent listing failure, selected mutation followed by failed listing, replaced required directory/symlink/FIFO, empty-scope root replacement |
+| Agreed LF/CR first-version exclusion | Escaped immutable entry/issue display, explicit selection refusal, excluded leaf/directory rows, containing-folder rendering, excluded-name churn, real effective-ignore and forced-index byte-path checks |
+| Correction 1: retained acquisition evidence and exclusion fences | Real transient parent replacement/restoration for top-level, nested and repository-only routes; recovered root acquisition failures; FIFO/symlink disappearance after listing at both stat seams; unknown eligible-child failure; LF/CR/Git/configured-deny repository scaffold no-open sentinels |
+| Correction 2: semantic parent role independent of initial kind | 18 real regular/FIFO/symlink-to-directory replacements at both seams across top-level/nested/repository-only prefixes, with retained initial unsafe-parent blockers; unsupported-to-unsupported positive and eligible-membership retype negative counterparts |
 
 Before/after file hashes and modes include disposable Git metadata and policy
 copies. They prove diagnostics and scope recomputation do not write the fixture.
@@ -175,10 +224,18 @@ never completes the Linux proof requirement. Development runtime: Python
 3.12.10 and Git 2.39.5; host portable runtime: Python 3.9.6, Git 2.39.5.
 Production runtime/activation and full container migration remain unverified.
 
-Executed October 6, 2026 after correction 2: host focused suite **111 passed,
-1 explicit Linux mount-proof skip**; isolated Linux focused suite **112 passed,
+Executed October 6, 2026 after stability correction 2: host focused suite **251 passed,
+1 explicit Linux mount-proof skip**; isolated Linux focused suite **252 passed,
 no skips**. The final Linux run printed input/output mount IDs **317 / 318**,
-both device **0:41**. `git diff --check` passed. The foreman owns the independent tester
+both device **0:41**. Four deterministic real WAL regressions failed on the
+baseline before implementation, covering empty/exact scope and both observation
+phases. `git diff --check` passed.
+Nine supplied correction regressions also failed on the first sealed source
+before correction; expanded adjacent route/anchor/exclusion guards now pass.
+All 18 correction-2 regressions failed on the correction-1 source before the
+semantic parent-role fix. This was a review of a newly identified adjacent
+observation class, not a formal repeated-class model-review gate.
+The foreman owns the independent tester
 passes and final full-suite gate; this focused result does not claim those
 later checks passed.
 The focused Linux command uses default Linux `/tmp`. Other baseline groups

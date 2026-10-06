@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (1394 total); remaining
+pytest items including the preview decision guards (1534 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -30,7 +30,7 @@ pytest items including the preview decision guards (1394 total); remaining
 | Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
 | Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
 | Native state | `test_native_operations.py` | 418 | Inactive durable candidates, bounded retention/checkpoints/policy provenance, generation replay, explicit schema-1 upgrade, exact streaming large artifacts, lifecycle, empty-store high-water integrity, corruption, crash/reopen and independent recovery pins; container replacement is a separate local runner probe |
-| Native inventory | `test_native_inventory.py` | 112 | Dormant metadata-only byte-path inventory, known-secret exclusions, component-fenced file/directory mounts and aliases, literal scope whitelist, separate effective-ignore and complete-index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
+| Native inventory | `test_native_inventory.py` | 252 | Dormant metadata-only byte-path inventory, scope-local diagnostics/blockers, both-phase stability and fallback proof, semantic parent safety independent of observed kind, retained parent/root acquisition failures, escaped LF/CR exclusion and scaffold fences, known-secret exclusions, component-fenced mounts and aliases, exact scope whitelist, separate effective-ignore/index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
 | Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 

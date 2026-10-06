@@ -40,6 +40,10 @@ class Issue:
     path: bytes
     reason: str
 
+    @property
+    def display_path(self):
+        return repr(os.fsdecode(self.path))[1:-1]
+
 
 @dataclass(frozen=True)
 class Mount:
@@ -103,7 +107,7 @@ def linux_mounts():
 
 
 # This finite matrix is deliberately independent of legacy export projections.
-DENY_MATRIX = b"native-known-secrets-v1:secrets.yaml;storage/core.config_entries,auth,auth_provider.homeassistant;.cloud;.google.token;.ssh;.gnupg;.git-credentials;.git;zigbee2mqtt/coordinator_backup*.json;reserved/config,data,backup,system"
+DENY_MATRIX = b"native-known-secrets-v1:secrets.yaml;storage/core.config_entries,auth,auth_provider.homeassistant;.cloud;.google.token;.ssh;.gnupg;.git-credentials;.git;zigbee2mqtt/coordinator_backup*.json;reserved/config,data,backup,system;unsupported/LF,CR"
 POLICY_VERSION = "native-known-secrets-v1"
 POLICY_DIGEST = hashlib.sha256(DENY_MATRIX).hexdigest()
 
@@ -142,6 +146,8 @@ class Policy:
 
     def reason(self, path):
         path = path_bytes(path)
+        if b"\n" in path or b"\r" in path:
+            return "unsupported-line-break-name"
         parts = path.split(b"/")
         if b".git" in parts:
             return "git-metadata"
@@ -206,6 +212,10 @@ class Entry:
     warnings: tuple = ()
     alias_target: bytes | None = None
 
+    @property
+    def display_path(self):
+        return repr(os.fsdecode(self.path))[1:-1]
+
 
 @dataclass(frozen=True)
 class Inventory:
@@ -213,6 +223,7 @@ class Inventory:
     entries: tuple
     blockers: tuple
     topology_verified: bool
+    diagnostics: tuple = ()
 
     @property
     def managed_files(self):
@@ -290,9 +301,49 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
         if len({m.id for m in mounts}) != len(mounts):
             raise Blocked("duplicate-mount-id")
     except Blocked:
-        return Inventory(scope, (), (Issue(b"", "invalid-mount-evidence"),), topology_verified)
+        issue = Issue(b"", "invalid-mount-evidence")
+        return Inventory(scope, (), (issue,), topology_verified, (issue,))
     confirmed = frozenset(confirmed_mounts)
-    entries, issues, observations = [], [], []
+    entries, issues, blockers, observations = [], [], [], []
+    established = {}
+    def chosen(path):
+        return policy.reason(path) is None and any(beneath(path, p) for p in scope)
+    def parent_role(path):
+        # Root and proper selected-route prefixes retain their safety role
+        # even when first observed with an unsafe non-directory kind.
+        return not path or any(p.startswith(path + b"/") for p in scope)
+    def required(path):
+        return parent_role(path) or chosen(path) or path in scope
+    def issue(path, reason, blocking=False):
+        item = Issue(path, reason)
+        if item not in issues:
+            issues.append(item)
+        if blocking and item not in blockers:
+            blockers.append(item)
+    def establish(path, observation):
+        established.setdefault(path, observation)
+        if parent_role(path) and not stat.S_ISDIR(observation[2]):
+            issue(path, "unsafe-required-parent", True)
+    def kind_of(info):
+        return ("directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode)
+                else "symlink" if stat.S_ISLNK(info.st_mode) else "special")
+    def traversable(path):
+        reason = policy.reason(path)
+        return reason is None or (reason == "service-data" and policy.scaffold(path))
+    def unknown_or_relevant(path, error):
+        # Only actual disappearance can reuse a known unsupported leaf's
+        # exclusion. Other failures leave its current eligible kind unknown.
+        before = established.get(path)
+        return (path in scope or parent_role(path) or
+                (chosen(path) and (not isinstance(error, FileNotFoundError) or before is None
+                                  or stat.S_ISREG(before[2]) or stat.S_ISDIR(before[2]))))
+    def relevant_observation(path, before, after):
+        if parent_role(path):
+            return after is None or before[:3] != after[:3]
+        if after is not None and before[:3] == after[:3] and stat.S_ISDIR(before[2]):
+            return False
+        return required(path) and (stat.S_ISDIR(before[2]) or
+                                  (stat.S_ISREG(before[2]) and chosen(path)) or path in scope)
     points = {}
     for mount in mounts:
         points.setdefault(mount.point, []).append(mount)
@@ -308,19 +359,54 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
     try:
         root_fd = _open_absolute_directory(root)
     except (OSError, Blocked) as exc:
-        return Inventory(scope, (), (Issue(b"", "root-unavailable:" + type(exc).__name__),), topology_verified)
+        item = Issue(b"", "root-unavailable:" + type(exc).__name__)
+        return Inventory(scope, (), (item,), topology_verified, (item,))
     try:
         root_info = os.fstat(root_fd)
         base_mount = mount_at(root)
         if base_mount is None or base_mount.id not in confirmed:
-            return Inventory(scope, (), (Issue(b"", "unconfirmed-root-mount"),), topology_verified)
+            item = Issue(b"", "unconfirmed-root-mount")
+            return Inventory(scope, (), (item,), topology_verified, (item,))
         def require_confirmed_component(path):
             mount = mount_at(root.rstrip(b"/") + b"/" + path)
             if mount is None or mount.id not in confirmed:
-                issues.append(Issue(path, "unconfirmed-mount-boundary"))
+                issue(path, "unconfirmed-mount-boundary", required(path))
                 raise Blocked("unconfirmed-mount-boundary")
         def inventory_directory(path):
-            return _directory_at(root_fd, path, before_open=require_confirmed_component)
+            def before_open(component):
+                require_confirmed_component(component)
+                if not traversable(component):
+                    reason = policy.reason(component)
+                    issue(component, reason, required(component))
+                    raise Blocked(reason)
+            return _directory_at(root_fd, path, before_open=before_open)
+        def check_directory(fd, directory, before_dir, names, children):
+            current_names = tuple(sorted(os.fsencode(p) for p in os.listdir(fd)))
+            after_children = {}
+            for name in current_names:
+                path = directory + b"/" + name if directory else name
+                try:
+                    after_children[name] = _observation(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                except OSError as exc:
+                    issue(path, "incomplete-or-changed:" + str(exc), unknown_or_relevant(path, exc))
+            previous = dict(children)
+            if current_names != names:
+                issue(directory, "changed-directory-membership")
+            def eligible(values):
+                return {name for name, obs in values.items()
+                        if policy.reason(directory + b"/" + name if directory else name) is None
+                        and (stat.S_ISREG(obs[2]) or stat.S_ISDIR(obs[2]))}
+            if directory and chosen(directory) and eligible(previous) != eligible(after_children):
+                issue(directory, "changed-selected-membership", True)
+            for name, before in children:
+                path = directory + b"/" + name if directory else name
+                after = after_children.get(name)
+                if after != before:
+                    issue(path, "changed-entry", relevant_observation(path, before, after))
+            after_dir = _observation(os.fstat(fd))
+            if after_dir != before_dir:
+                issue(directory, "changed-directory",
+                      required(directory) and after_dir[:3] != before_dir[:3])
         # Alias evidence requires both mount/source identity and directory identity.
         alias_ok = False
         alias_present = False
@@ -341,89 +427,155 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
             finally:
                 os.close(canonical_fd)
             if not alias_ok:
-                issues.append(Issue(b"config", "unconfirmed-config-alias"))
+                issue(b"config", "unconfirmed-config-alias")
         except FileNotFoundError:
             if alias_present:
-                issues.append(Issue(b"config", "unconfirmed-config-alias"))
+                issue(b"config", "unconfirmed-config-alias")
         except (OSError, Blocked):
-            issues.append(Issue(b"config", "unconfirmed-config-alias"))
+            issue(b"config", "unconfirmed-config-alias")
         pending = [(b"", root_info)]
         while pending:
             directory, expected = pending.pop()
             fd = None
+            identity_validated = False
             try:
                 fd = inventory_directory(directory)
                 if _identity(os.fstat(fd)) != _identity(expected):
                     raise Blocked("changed-directory")
+                identity_validated = True
                 names = tuple(sorted(os.fsencode(p) for p in os.listdir(fd)))
                 directory_observations = []
                 for name in names:
                     path = directory + b"/" + name if directory else name
-                    info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    try:
+                        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    except OSError as exc:
+                        issue(path, "incomplete-or-changed:" + str(exc), unknown_or_relevant(path, exc))
+                        continue
                     directory_observations.append((name, _observation(info)))
-                    kind = "directory" if stat.S_ISDIR(info.st_mode) else "file" if stat.S_ISREG(info.st_mode) else "symlink" if stat.S_ISLNK(info.st_mode) else "special"
+                    establish(path, _observation(info))
+                    kind = kind_of(info)
                     reason = policy.reason(path)
-                    chosen = any(beneath(path, p) for p in scope)
+                    selected_path = any(beneath(path, p) for p in scope)
                     mount = mount_at(root.rstrip(b"/") + b"/" + path)
                     if kind in ("symlink", "special") and reason is None:
                         reason = "unsupported-" + kind
                     mount_ok = mount is not None and mount.id in confirmed
                     if not mount_ok:
                         reason = reason or "unconfirmed-mount-boundary"
-                        issues.append(Issue(path, "unconfirmed-mount-boundary"))
+                        issue(path, "unconfirmed-mount-boundary", required(path))
                     if path == b"config" and not alias_ok and not any(i.path == path and i.reason == "unconfirmed-config-alias" for i in issues):
-                        issues.append(Issue(path, "unconfirmed-config-alias"))
+                        issue(path, "unconfirmed-config-alias")
                     if path in scope and reason is not None:
-                        issues.append(Issue(path, reason))
+                        issue(path, reason, True)
                     target = b"addon_configs/" + policy.self_slug if path == b"config" else None
                     entries.append(Entry(path, kind, info.st_size, info.st_dev, info.st_ino, info.st_mode,
-                                         info.st_nlink, mount.id if mount else None, chosen and reason is None and mount_ok,
+                                         info.st_nlink, mount.id if mount else None, selected_path and reason is None and mount_ok,
                                          reason, policy.warnings(path, info.st_size) if reason is None else (), target))
-                    if kind == "directory" and mount_ok and (reason is None or (reason == "service-data" and policy.scaffold(path))):
+                    if kind == "directory" and mount_ok and traversable(path):
                         pending.append((path, info))
-                if names != tuple(sorted(os.fsencode(p) for p in os.listdir(fd))):
-                    raise Blocked("changed-directory-membership")
-                for name, before in directory_observations:
-                    if _observation(os.stat(name, dir_fd=fd, follow_symlinks=False)) != before:
-                        raise Blocked("changed-entry")
-                if _observation(os.fstat(fd)) != _observation(expected):
-                    raise Blocked("changed-directory-metadata")
                 observations.append((directory, _observation(expected), names, tuple(directory_observations)))
+                check_directory(fd, directory, _observation(expected), names, directory_observations)
             except (OSError, Blocked) as exc:
-                issues.append(Issue(directory, "incomplete-or-changed:" + str(exc)))
+                # Acquisition/identity protects every required parent, even
+                # after recovery. Listing protects selected folder membership;
+                # exact leaves retain independent proof below.
+                issue(directory, "incomplete-or-changed:" + str(exc),
+                      (chosen(directory) if directory else False) if identity_validated else required(directory))
             finally:
                 if fd is not None:
                     os.close(fd)
         # Recheck namespace membership after traversal, including scanned ancestors.
         for directory, identity, names, children in observations:
             fd = None
+            identity_validated = False
             try:
                 fd = inventory_directory(directory)
-                if _observation(os.fstat(fd)) != identity or tuple(sorted(os.fsencode(p) for p in os.listdir(fd))) != names:
-                    issues.append(Issue(directory, "changed-directory"))
-                for name, before in children:
-                    if _observation(os.stat(name, dir_fd=fd, follow_symlinks=False)) != before:
-                        issues.append(Issue(directory + b"/" + name if directory else name, "changed-entry"))
+                if _identity(os.fstat(fd)) != identity[:3]:
+                    raise Blocked("changed-directory")
+                identity_validated = True
+                check_directory(fd, directory, identity, names, children)
             except (OSError, Blocked):
-                issues.append(Issue(directory, "changed-directory"))
+                issue(directory, "changed-directory",
+                      (chosen(directory) if directory else False) if identity_validated else required(directory))
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        # Prove required prefixes and exact selections without sibling listing.
+        # Never reset an observation already established by the broad scan.
+        needed = {p for path in scope for p in
+                  (b"/".join(path.split(b"/")[:i]) for i in range(1, len(path.split(b"/")) + 1))}
+        needed.update(e.path for e in entries if e.selected)
+        seen = {e.path for e in entries}
+        for path in sorted(needed):
+            fd = None
+            try:
+                reason = policy.reason(path)
+                if reason and path in scope:
+                    issue(path, reason, True)
+                    continue
+                if not traversable(path):
+                    continue
+                parent, _, name = path.rpartition(b"/")
+                fd = inventory_directory(parent)
+                require_confirmed_component(path)
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                after = _observation(info)
+                before = established.get(path)
+                establish(path, after)
+                if before is not None and after != before:
+                    issue(path, "changed-entry", relevant_observation(path, before, after))
+                kind = kind_of(info)
+                if kind not in ("file", "directory"):
+                    issue(path, "unsupported-" + kind, True)
+                if path not in seen and path in scope:
+                    if kind == "directory":
+                        issue(path, "selected-path-unavailable", True)
+                    elif kind == "file" and reason is None:
+                        # Two direct observations establish a previously
+                        # unseen exact leaf; metadata only, no content opens.
+                        again = _observation(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                        if again != after:
+                            issue(path, "changed-entry", True)
+                        mount = mount_at(root.rstrip(b"/") + b"/" + path)
+                        entries.append(Entry(path, kind, info.st_size, info.st_dev, info.st_ino, info.st_mode,
+                                             info.st_nlink, mount.id, True, None, policy.warnings(path, info.st_size)))
+                        seen.add(path)
+            except (OSError, Blocked) as exc:
+                issue(path, "selected-path-unavailable:" + str(exc), True)
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        # A fallback must prove its newly acquired prefixes remain the same
+        # namespace, as well as retaining every earlier selected observation.
+        for path in sorted(needed):
+            if path not in established or not traversable(path):
+                continue
+            fd = None
+            try:
+                parent, _, name = path.rpartition(b"/")
+                fd = inventory_directory(parent)
+                require_confirmed_component(path)
+                after = _observation(os.stat(name, dir_fd=fd, follow_symlinks=False))
+                before = established[path]
+                if after != before:
+                    issue(path, "changed-entry", relevant_observation(path, before, after))
+            except (OSError, Blocked) as exc:
+                issue(path, "selected-path-unavailable:" + str(exc), True)
             finally:
                 if fd is not None:
                     os.close(fd)
         fresh = _open_absolute_directory(root)
         try:
             if _identity(os.fstat(fresh)) != _identity(root_info):
-                issues.append(Issue(b"", "changed-root"))
+                issue(b"", "changed-root", True)
         finally:
             os.close(fresh)
-        seen = {e.path for e in entries}
-        for path in scope:
-            if path not in seen:
-                issues.append(Issue(path, "selected-path-unavailable"))
     except (OSError, Blocked) as exc:
-        issues.append(Issue(b"", "incomplete-or-changed:" + str(exc)))
+        issue(b"", "incomplete-or-changed:" + str(exc), True)
     finally:
         os.close(root_fd)
-    return Inventory(scope, tuple(sorted(entries, key=lambda e: e.path)), tuple(issues), topology_verified)
+    return Inventory(scope, tuple(sorted(entries, key=lambda e: e.path)), tuple(blockers), topology_verified, tuple(issues))
 
 
 def _literal(path):

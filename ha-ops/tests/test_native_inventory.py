@@ -49,6 +49,30 @@ def bytes_snapshot(root):
     return result
 
 
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("selection", [(), (b"homeassistant/automations.yaml",)])
+def test_unselected_real_wal_append_is_diagnostic(tmp_path, monkeypatch, phase, selection):
+    write(tmp_path, b"homeassistant/automations.yaml")
+    wal = b"homeassistant/home-assistant_v2.db-wal"
+    write(tmp_path, wal)
+    original = os.stat
+    calls = 0
+    def changing(path, *args, **kwargs):
+        nonlocal calls
+        if path == b"home-assistant_v2.db-wal" and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == phase:
+                with open(os.fsencode(tmp_path) + b"/" + wal, "ab") as stream:
+                    stream.write(b"real WAL append\n")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", changing)
+    snapshot = scan(tmp_path, selection)
+    assert not snapshot.blockers
+    assert snapshot.managed_files == tuple(selection)
+    assert snapshot.diagnostics
+    assert n.render_ignore(snapshot).startswith(b"/*\n")
+
+
 @pytest.mark.parametrize("path", [b"", b"/x", b"x/", b"x//y", b".", b"x/../y", b"./x", b"x\0y"])
 def test_noncanonical_paths_rejected(path):
     with pytest.raises(n.Blocked):
@@ -72,15 +96,17 @@ def test_component_selection_bytes_and_immutability(tmp_path):
     assert selected.managed_files == (b"homeassistant/foo",)
     broad = scan(tmp_path, [b"homeassistant"])
     assert not broad.blockers
-    assert set(broad.managed_files) == {b"homeassistant/" + p for p in names + [b"hardlink"]}
+    assert set(broad.managed_files) == {b"homeassistant/" + p for p in names + [b"hardlink"]
+                                       if b"\n" not in p and b"\r" not in p}
     assert len({e.path for e in broad.entries}) == len(broad.entries)
     assert [e.links for e in broad.entries if e.path in (b"homeassistant/foo", b"homeassistant/hardlink")] == [2, 2]
     with pytest.raises(dataclasses.FrozenInstanceError):
         broad.entries = ()
     assert scan(tmp_path).managed_files == ()
     assert selected.managed_files == (b"homeassistant/foo",)
-    with pytest.raises(n.Blocked, match="unrepresentable"):
-        n.render_ignore(broad)
+    assert n.render_ignore(broad)
+    for entry in broad.entries:
+        assert "\n" not in entry.display_path and "\r" not in entry.display_path
 
 
 SECRET_PATHS = [b"homeassistant/secrets.yaml", b"homeassistant/nested/secrets.yaml", b"addon_configs/app/secrets.yaml",
@@ -317,14 +343,14 @@ def test_every_mount_kind_and_repository_scaffold_require_confirmation(tmp_path,
             n.render_ignore(result, policy)
 
 
-def test_present_alias_missing_canonical_target_is_a_blocker(tmp_path):
+def test_present_alias_missing_canonical_target_is_diagnostic(tmp_path):
     write(tmp_path, b"homeassistant/a")
     write(tmp_path, b"config/hidden")
     result = scan(tmp_path, [b"homeassistant"])
-    assert any(i.path == b"config" and i.reason == "unconfirmed-config-alias" for i in result.blockers)
+    assert not result.blockers
+    assert any(i.path == b"config" and i.reason == "unconfirmed-config-alias" for i in result.diagnostics)
     assert not any(e.path.startswith(b"config/") for e in result.entries)
-    with pytest.raises(n.Blocked):
-        n.render_ignore(result)
+    assert n.render_ignore(result)
 
 
 @pytest.mark.parametrize("swapped", [".gitignore", "data/native/root-ignore-policy"])
@@ -375,7 +401,8 @@ def test_alias_mismatch_not_inode_deduplication(tmp_path):
     write(tmp_path, b"config/a")
     write(tmp_path, b"addon_configs/07ef30c0_ha_ops/a")
     result = scan(tmp_path, [b"addon_configs"])
-    assert any(i.reason == "unconfirmed-config-alias" for i in result.blockers)
+    assert not result.blockers
+    assert any(i.reason == "unconfirmed-config-alias" for i in result.diagnostics)
     alias = next(e for e in result.entries if e.path == b"config")
     assert alias.alias_target == b"addon_configs/07ef30c0_ha_ops"
     assert b"config/a" not in {e.path for e in result.entries}
@@ -402,9 +429,11 @@ def test_alias_confirmed_using_filesystem_mount_root_and_identity(tmp_path, monk
 
 
 @pytest.mark.parametrize("topology", ["unconfirmed-ancestor", "unconfirmed-self", "stacked-ancestor", "stacked-self", "confirmed-child-unknown-ancestor", "confirmed"])
-def test_alias_probe_fences_each_canonical_component_before_open(tmp_path, monkeypatch, topology):
+@pytest.mark.parametrize("selected", [(), (b"homeassistant/a",), (b"addon_configs/07ef30c0_ha_ops",)])
+def test_alias_probe_fences_each_canonical_component_before_open(tmp_path, monkeypatch, topology, selected):
     """Contract round-1 no-open guards, with a confirmed positive counterpart."""
     (tmp_path / "config").mkdir()
+    write(tmp_path, b"homeassistant/a")
     (tmp_path / "addon_configs/07ef30c0_ha_ops").mkdir(parents=True)
     base = evidence(tmp_path)[0]
     addon = dataclasses.replace(base, id=2, parent=1, point=os.fsencode(tmp_path) + b"/addon_configs", root=b"/apps")
@@ -439,11 +468,12 @@ def test_alias_probe_fences_each_canonical_component_before_open(tmp_path, monke
         return original_open(path, flags, *args, **kwargs)
     monkeypatch.setattr(n.os, "open", observed)
     monkeypatch.setattr(n.os, "stat", same_alias)
-    result = n.inventory(tmp_path, mounts=mounts, confirmed_mounts=confirmed)
+    result = n.inventory(tmp_path, selected, mounts=mounts, confirmed_mounts=confirmed)
     if topology == "confirmed":
         assert not result.blockers and b"07ef30c0_ha_ops" in opened
     else:
-        assert any(i.path == relative and i.reason == "unconfirmed-mount-boundary" for i in result.blockers)
+        assert bool(result.blockers) == bool(selected and selected[0].startswith(b"addon_configs/"))
+        assert any(i.path == relative and i.reason == "unconfirmed-mount-boundary" for i in result.diagnostics)
         assert not any(e.path.startswith(relative + b"/") for e in result.entries)
         assert b"07ef30c0_ha_ops" not in opened
         if topology not in ("unconfirmed-self", "stacked-self"):
@@ -465,9 +495,9 @@ def test_inventory_acquisitions_share_component_guard_in_scan_and_recheck(tmp_pa
     result = scan(tmp_path, [b"homeassistant"])
     assert not result.blockers
     for path in (b"", b"homeassistant", b"homeassistant/nested"):
-        assert acquisitions.count(path) == 2  # scan and final namespace recheck
+        assert acquisitions.count(path) >= 2  # scan, final recheck and selected proof
     assert components.count(b"homeassistant") >= 4
-    assert components.count(b"homeassistant/nested") == 2
+    assert components.count(b"homeassistant/nested") >= 2
 
 
 @pytest.mark.skipif(not Path("/proc/self/mountinfo").exists() or not Path("/workspace/output").exists(), reason="real Linux runner bind proof is a separate mandatory invocation")
@@ -479,15 +509,318 @@ def test_real_linux_mountinfo_same_device_bind_boundaries():
     assert left.id != right.id and left.device == right.device
     policy = n.Policy(extra_live_roots=(b"output",))
     unconfirmed = n.inventory("/workspace", mounts=mounts, confirmed_mounts=(base.id,), policy=policy, topology_verified=True)
-    assert any(i.path == b"output" and i.reason == "unconfirmed-mount-boundary" for i in unconfirmed.blockers)
+    assert not unconfirmed.blockers
+    assert any(i.path == b"output" and i.reason == "unconfirmed-mount-boundary" for i in unconfirmed.diagnostics)
     with tempfile.TemporaryDirectory(dir="/workspace/output", prefix="native-inventory-") as root:
         write(root, b"file")
         selected = b"output/" + os.fsencode(Path(root).name)
+        blocked = n.inventory("/workspace", [selected], mounts=mounts, confirmed_mounts=(base.id,),
+                              policy=policy, topology_verified=True)
+        assert blocked.blockers and not blocked.managed_files
         result = n.inventory("/workspace", [selected], mounts=mounts, confirmed_mounts=(base.id, left.id, right.id), policy=policy, topology_verified=True)
         assert not result.blockers and result.topology_verified
         assert selected + b"/file" in result.managed_files
         assert all(not e.path.startswith(b"input/") for e in result.entries)
     print("real mountinfo proof: input/output IDs", left.id, right.id, "same device", left.device.decode())
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("folder", [False, True])
+@pytest.mark.parametrize("change", ["append", "add", "remove", "secret-add", "secret-remove", "secret-append", "line-add"])
+def test_scope_local_real_membership_and_content(tmp_path, monkeypatch, phase, folder, change):
+    write(tmp_path, b"homeassistant/a")
+    write(tmp_path, b"homeassistant/sibling")
+    write(tmp_path, b"homeassistant/secrets.yaml")
+    original_list, original_stat = os.listdir, os.stat
+    counts = {"list": 0, "stat": 0}
+    def mutate():
+        if change == "append":
+            with open(tmp_path / "homeassistant/sibling", "ab") as stream:
+                stream.write(b"changed")
+        elif change == "add":
+            write(tmp_path, b"homeassistant/new")
+        elif change == "remove":
+            (tmp_path / "homeassistant/sibling").unlink()
+        elif change == "secret-add":
+            write(tmp_path, b"homeassistant/.google.token")
+        elif change == "secret-remove":
+            (tmp_path / "homeassistant/secrets.yaml").unlink()
+        elif change == "secret-append":
+            with open(tmp_path / "homeassistant/secrets.yaml", "ab") as stream:
+                stream.write(b"changed")
+        else:
+            write(tmp_path, b"homeassistant/line\nname")
+    def listed(fd):
+        names = original_list(fd)
+        if "a" in names:
+            counts["list"] += 1
+            if change not in ("append", "secret-append") and counts["list"] == phase:
+                mutate()
+                names = original_list(fd)
+        return names
+    def stated(path, *args, **kwargs):
+        trigger = b"secrets.yaml" if change == "secret-append" else b"sibling"
+        if path == trigger and kwargs.get("dir_fd") is not None:
+            counts["stat"] += 1
+            if change in ("append", "secret-append") and counts["stat"] == phase:
+                mutate()
+        return original_stat(path, *args, **kwargs)
+    monkeypatch.setattr(os, "listdir", listed)
+    monkeypatch.setattr(os, "stat", stated)
+    result = scan(tmp_path, [b"homeassistant" if folder else b"homeassistant/a"])
+    assert bool(result.blockers) == (folder and change in ("append", "add", "remove"))
+    assert result.diagnostics
+    assert b"homeassistant/secrets.yaml" not in result.managed_files
+    assert b"homeassistant/line\nname" not in result.managed_files
+    if not result.blockers:
+        rules = n.render_ignore(result)
+        if not folder:
+            write(tmp_path, b".gitignore", rules)
+            write(tmp_path, b"data/native/root-ignore-policy", rules)
+            git(tmp_path, "init", "--initial-branch=fixture")
+            write(tmp_path, b"homeassistant/fresh")
+            assert n.audit_ignore(tmp_path, [b"homeassistant/a", b"homeassistant/fresh",
+                                             b"homeassistant/secrets.yaml"], result).clean
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("effect", ["size", "mtime", "links", "identity", "hardlink", "symlink", "fifo"])
+def test_selected_observation_real_changes_block(tmp_path, monkeypatch, phase, effect):
+    write(tmp_path, b"homeassistant/a")
+    leaf = tmp_path / "homeassistant/a"
+    if effect == "hardlink":
+        os.link(leaf, tmp_path / "homeassistant/z")
+    original = os.stat
+    calls = 0
+    def stated(path, *args, **kwargs):
+        nonlocal calls
+        if path == b"a" and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == phase:
+                if effect in ("size", "hardlink"):
+                    with open(tmp_path / ("homeassistant/z" if effect == "hardlink" else "homeassistant/a"), "ab") as stream:
+                        stream.write(b"changed")
+                elif effect == "mtime":
+                    os.utime(leaf, ns=(1, 1))
+                elif effect == "links":
+                    os.link(leaf, tmp_path / "homeassistant/z")
+                else:
+                    leaf.unlink()
+                    if effect == "identity":
+                        write(tmp_path, b"homeassistant/a")
+                    elif effect == "symlink":
+                        leaf.symlink_to("missing")
+                    else:
+                        os.mkfifo(leaf)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", stated)
+    result = scan(tmp_path, [b"homeassistant/a"])
+    assert result.blockers and result.diagnostics
+    with pytest.raises(n.Blocked):
+        n.render_ignore(result)
+
+
+@pytest.mark.parametrize("failure", ["before", "after", "listing"])
+def test_exact_file_proof_independent_of_sibling_failure(tmp_path, monkeypatch, failure):
+    for name in (b"a", b"m", b"z"):
+        write(tmp_path, b"homeassistant/" + name)
+    original_stat, original_list = os.stat, os.listdir
+    def stated(path, *args, **kwargs):
+        if path == (b"a" if failure == "before" else b"z") and failure != "listing" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("unrelated fixture stat")
+        return original_stat(path, *args, **kwargs)
+    def listed(fd):
+        names = original_list(fd)
+        if "m" in names and failure == "listing":
+            raise PermissionError("unrelated fixture listing")
+        return names
+    monkeypatch.setattr(os, "stat", stated)
+    monkeypatch.setattr(os, "listdir", listed)
+    result = scan(tmp_path, [b"homeassistant/m"])
+    assert not result.blockers and result.managed_files == (b"homeassistant/m",)
+    assert result.diagnostics and n.render_ignore(result)
+
+
+@pytest.mark.parametrize("name", [b"line\nname", b"cr\rname", b"dir\nname/child", b"dir\rname/child"])
+def test_line_break_names_visible_excluded_and_git_audited(tmp_path, name):
+    path = b"homeassistant/" + name
+    write(tmp_path, path)
+    write(tmp_path, b"homeassistant/a")
+    result, rules = fixture_git(tmp_path, [b"homeassistant"])
+    assert result.managed_files == (b"homeassistant/a",)
+    rowpath = b"homeassistant/" + name.split(b"/")[0]
+    row = next(e for e in result.entries if e.path == rowpath)
+    assert row.reason == "unsupported-line-break-name" and not row.selected
+    assert "\n" not in row.display_path and "\r" not in row.display_path
+    assert not any(e.path.startswith(rowpath + b"/") for e in result.entries)
+    explicit = scan(tmp_path, [path])
+    assert explicit.blockers and not explicit.managed_files
+    assert all("\n" not in i.display_path and "\r" not in i.display_path for i in explicit.diagnostics)
+    assert n.audit_ignore(tmp_path, [b"homeassistant/a", path], result).clean
+    git(tmp_path, "add", "-f", "--", path)
+    assert any(i.path == path and i.reason == "unsupported-line-break-name"
+               for i in n.audit_index(tmp_path, [b"homeassistant"]).blockers)
+    with pytest.raises(n.Blocked, match="unrepresentable"):
+        n._literal(path)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        row.display_path = "changed"
+
+
+def test_diagnostics_are_complete_immutable_and_compatibility_default(tmp_path):
+    old = n.Inventory((), (), (), False)
+    assert old.diagnostics == ()
+    invalid = n.inventory(tmp_path, mounts=(), confirmed_mounts=())
+    assert invalid.blockers and invalid.diagnostics == invalid.blockers
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        invalid.diagnostics = ()
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("selection", [(b"homeassistant/home-assistant_v2.db-wal",), (b"homeassistant",)])
+def test_runtime_warning_does_not_waive_selected_wal_stability(tmp_path, monkeypatch, phase, selection):
+    path = b"homeassistant/home-assistant_v2.db-wal"
+    write(tmp_path, path)
+    original = os.stat
+    calls = 0
+    def stated(name, *args, **kwargs):
+        nonlocal calls
+        if name == b"home-assistant_v2.db-wal" and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == phase:
+                with open(os.fsencode(tmp_path) + b"/" + path, "ab") as stream:
+                    stream.write(b"WAL append")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", stated)
+    assert scan(tmp_path, selection).blockers
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("denied", [False, True])
+def test_selected_empty_directory_membership_is_proven(tmp_path, monkeypatch, phase, denied):
+    folder = tmp_path / "homeassistant"
+    folder.mkdir()
+    identity = folder.stat().st_ino
+    original = os.listdir
+    calls = 0
+    def listed(fd):
+        nonlocal calls
+        if os.fstat(fd).st_ino == identity:
+            calls += 1
+            if calls == phase:
+                write(tmp_path, b"homeassistant/secrets.yaml" if denied else b"homeassistant/new")
+        return original(fd)
+    monkeypatch.setattr(os, "listdir", listed)
+    result = scan(tmp_path, [b"homeassistant"])
+    assert bool(result.blockers) == (not denied)
+    if denied:
+        assert not result.managed_files and n.render_ignore(result)
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("replacement", ["directory", "symlink", "fifo"])
+def test_exact_file_required_parent_identity_replacement_blocks(tmp_path, monkeypatch, phase, replacement):
+    write(tmp_path, b"homeassistant/a")
+    original = os.listdir
+    calls = 0
+    done = False
+    def listed(fd):
+        nonlocal calls, done
+        names = original(fd)
+        if "a" in names:
+            calls += 1
+            if calls == phase and not done:
+                done = True
+                (tmp_path / "homeassistant").rename(tmp_path / "old-parent")
+                if replacement == "directory":
+                    write(tmp_path, b"homeassistant/a")
+                elif replacement == "symlink":
+                    (tmp_path / "homeassistant").symlink_to("old-parent", target_is_directory=True)
+                else:
+                    os.mkfifo(tmp_path / "homeassistant")
+        return names
+    monkeypatch.setattr(os, "listdir", listed)
+    assert scan(tmp_path, [b"homeassistant/a"]).blockers
+
+
+def test_fallback_does_not_reset_established_selected_observation(tmp_path, monkeypatch):
+    write(tmp_path, b"homeassistant/a")
+    original = os.listdir
+    calls = 0
+    def listed(fd):
+        nonlocal calls
+        names = original(fd)
+        if "a" in names:
+            calls += 1
+            if calls == 2:
+                write(tmp_path, b"homeassistant/a", b"changed selected contents")
+                raise PermissionError("diagnostic listing failure")
+        return names
+    monkeypatch.setattr(os, "listdir", listed)
+    assert scan(tmp_path, [b"homeassistant/a"]).blockers
+
+
+def test_unselected_root_namespace_replacement_blocks(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    original = os.listdir
+    changed = False
+    def listed(fd):
+        nonlocal changed
+        if not changed:
+            changed = True
+            root.rename(tmp_path / "old-root")
+            root.mkdir()
+        return original(fd)
+    monkeypatch.setattr(os, "listdir", listed)
+    result = scan(root)
+    assert result.blockers and set(result.blockers).issubset(set(result.diagnostics))
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("name", [b"line\nname", b"cr\rname"])
+@pytest.mark.parametrize("change", ["append", "remove"])
+def test_excluded_line_break_churn_does_not_block_folder(tmp_path, monkeypatch, phase, name, change):
+    write(tmp_path, b"homeassistant/a")
+    write(tmp_path, b"homeassistant/" + name)
+    original = os.stat
+    calls = 0
+    def stated(path, *args, **kwargs):
+        nonlocal calls
+        if path == name and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == phase:
+                leaf = os.fsencode(tmp_path) + b"/homeassistant/" + name
+                if change == "remove":
+                    os.unlink(leaf)
+                else:
+                    with open(leaf, "ab") as stream:
+                        stream.write(b"changed")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", stated)
+    result = scan(tmp_path, [b"homeassistant"])
+    assert not result.blockers and result.managed_files == (b"homeassistant/a",)
+    assert result.diagnostics and n.render_ignore(result)
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+def test_unsupported_sibling_removal_is_diagnostic(tmp_path, monkeypatch, phase):
+    write(tmp_path, b"homeassistant/a")
+    os.mkfifo(tmp_path / "homeassistant/fifo")
+    original = os.listdir
+    calls = 0
+    def listed(fd):
+        nonlocal calls
+        names = original(fd)
+        if "a" in names:
+            calls += 1
+            if calls == phase:
+                (tmp_path / "homeassistant/fifo").unlink()
+                names = original(fd)
+        return names
+    monkeypatch.setattr(os, "listdir", listed)
+    result = scan(tmp_path, [b"homeassistant"])
+    assert not result.blockers and result.managed_files == (b"homeassistant/a",)
+    assert result.diagnostics and n.render_ignore(result)
 
 
 def test_real_git_literal_whitelist_empty_scope_and_no_writes(tmp_path):
@@ -692,3 +1025,195 @@ def test_no_production_import_or_legacy_policy_dependency():
     for file in app.glob("*.py"):
         if file.name != "native_inventory.py":
             assert "import native_inventory" not in file.read_text()
+
+
+@pytest.mark.parametrize('acquisition,replacement', [(1,'directory'), (1,'symlink'), (2,'symlink')])
+@pytest.mark.parametrize("leaf", [b"homeassistant/a", b"homeassistant/nested/a",
+                                  b"data/native/repository-files/nested/a"])
+def test_required_parent_transient_acquisition_failure_retained(tmp_path, monkeypatch, acquisition, replacement, leaf):
+    write(tmp_path, leaf)
+    relative = leaf.rpartition(b"/")[0]
+    parent = tmp_path / os.fsdecode(relative)
+    old = parent.parent / 'held'
+    transient = parent.parent / 'temporary'
+    policy = n.Policy(repository_files=(leaf,)) if leaf.startswith(b"data/") else n.Policy()
+    original = n._directory_at
+    calls = 0
+    def acquired(root_fd, path, **kwargs):
+        nonlocal calls
+        if path != relative:
+            return original(root_fd, path, **kwargs)
+        calls += 1
+        if calls != acquisition:
+            return original(root_fd, path, **kwargs)
+        parent.rename(old)
+        if replacement == 'directory':
+            parent.mkdir()
+            write(tmp_path, leaf, b'replacement')
+        else:
+            parent.symlink_to('held', target_is_directory=True)
+        try:
+            return original(root_fd, path, **kwargs)
+        finally:
+            if replacement == 'symlink':
+                parent.unlink()
+            else:
+                parent.rename(transient)
+            old.rename(parent)
+    monkeypatch.setattr(n, '_directory_at', acquired)
+    result = scan(tmp_path, [leaf], policy=policy)
+    assert result.diagnostics
+    assert result.blockers, (result.diagnostics, n.render_ignore(result))
+@pytest.mark.parametrize('phase', [2, 3])
+@pytest.mark.parametrize('kind', ['fifo', 'symlink'])
+def test_known_unsupported_disappears_between_listing_and_stat(tmp_path, monkeypatch, phase, kind):
+    write(tmp_path, b'homeassistant/a')
+    leaf = tmp_path / 'homeassistant/unsupported'
+    if kind == 'fifo':
+        os.mkfifo(leaf)
+    else:
+        leaf.symlink_to('absent')
+    original = os.stat
+    calls = 0
+    def stated(path, *args, **kwargs):
+        nonlocal calls
+        if path == b'unsupported' and kwargs.get('dir_fd') is not None:
+            calls += 1
+            if calls == phase:
+                leaf.unlink()
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'stat', stated)
+    result = scan(tmp_path, [b'homeassistant'])
+    assert not result.blockers
+    assert result.managed_files == (b'homeassistant/a',)
+    assert result.diagnostics and n.render_ignore(result)
+
+
+@pytest.mark.parametrize('component', [b'dir\nname', b'dir\rname', b'.git', b'configured-deny'])
+def test_repository_file_request_never_traverses_line_break_scaffold(tmp_path, monkeypatch, component):
+    leaf = b'data/native/repository-files/' + component + b'/nested/file'
+    write(tmp_path, leaf)
+    ancestor = leaf.split(b"/nested/")[0]
+    policy = n.Policy(repository_files=(leaf,), extra_denies=(ancestor,) if component == b"configured-deny" else ())
+    original = os.open
+    opened = []
+    def observed(path, flags, *args, **kwargs):
+        if path == component and kwargs.get('dir_fd') is not None:
+            opened.append(path)
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', observed)
+    result = scan(tmp_path, [leaf], policy=policy)
+    assert result.blockers and not result.managed_files
+    assert not opened
+
+
+@pytest.mark.parametrize("acquisition", [1, 2])
+@pytest.mark.parametrize("selected", [(), (b"homeassistant/a",)])
+def test_root_acquisition_failure_is_retained_even_after_recovery(tmp_path, monkeypatch, acquisition, selected):
+    write(tmp_path, b"homeassistant/a")
+    original = n._directory_at
+    calls = 0
+    def acquired(fd, path, **kwargs):
+        nonlocal calls
+        if path == b"":
+            calls += 1
+            if calls == acquisition:
+                raise PermissionError("root anchor acquisition fixture failure")
+        return original(fd, path, **kwargs)
+    monkeypatch.setattr(n, "_directory_at", acquired)
+    result = scan(tmp_path, selected)
+    assert result.blockers and set(result.blockers).issubset(set(result.diagnostics))
+
+
+def test_unknown_eligible_child_stat_failure_still_blocks_folder(tmp_path, monkeypatch):
+    write(tmp_path, b"homeassistant/a")
+    original_list, original_stat = os.listdir, os.stat
+    calls = 0
+    def listed(fd):
+        nonlocal calls
+        names = original_list(fd)
+        if "a" in names:
+            calls += 1
+            if calls == 2:
+                write(tmp_path, b"homeassistant/new")
+                names = original_list(fd)
+        return names
+    def stated(path, *args, **kwargs):
+        if path == b"new" and kwargs.get("dir_fd") is not None:
+            raise PermissionError("unknown eligible child")
+        return original_stat(path, *args, **kwargs)
+    monkeypatch.setattr(os, "listdir", listed)
+    monkeypatch.setattr(os, "stat", stated)
+    assert scan(tmp_path, [b"homeassistant"]).blockers
+
+
+@pytest.mark.parametrize('phase', [2, 3])
+@pytest.mark.parametrize('kind', ['regular', 'fifo', 'symlink'])
+@pytest.mark.parametrize('relative', [b'homeassistant/member', b'homeassistant/nested/member',
+                                    b'data/native/repository-files/member'])
+def test_required_prefix_nondirectory_baseline_cannot_become_allowed_directory(tmp_path, monkeypatch, phase, kind, relative):
+    leaf = relative + b'/child'
+    policy = n.Policy(repository_files=(leaf,)) if relative.startswith(b'data/') else n.Policy()
+    full = os.fsencode(tmp_path) + b'/' + relative
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    if kind == 'regular':
+        write(tmp_path, relative)
+    elif kind == 'fifo':
+        os.mkfifo(full)
+    else:
+        os.symlink(b'missing', full)
+    original = os.stat
+    calls = 0
+    def stated(path, *args, **kwargs):
+        nonlocal calls
+        if path == b'member' and kwargs.get('dir_fd') is not None:
+            calls += 1
+            if calls == phase:
+                os.unlink(full)
+                os.mkdir(full)
+                write(tmp_path, leaf)
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'stat', stated)
+    result = scan(tmp_path, [leaf], policy=policy)
+    assert result.diagnostics
+    assert result.blockers
+    assert any(i.path == relative and i.reason == "unsafe-required-parent" for i in result.blockers)
+    with pytest.raises(n.Blocked):
+        n.render_ignore(result, policy)
+
+
+@pytest.mark.parametrize("phase", [2, 3])
+@pytest.mark.parametrize("change", ["fifo-symlink", "symlink-fifo", "file-directory", "fifo-file"])
+def test_folder_unsupported_retypes_keep_semantic_membership(tmp_path, monkeypatch, phase, change):
+    write(tmp_path, b"homeassistant/a")
+    full = tmp_path / "homeassistant/member"
+    before, after = change.split("-")
+    if before == "fifo":
+        os.mkfifo(full)
+    elif before == "symlink":
+        full.symlink_to("missing")
+    else:
+        write(tmp_path, b"homeassistant/member")
+    original = os.stat
+    calls = 0
+    def stated(path, *args, **kwargs):
+        nonlocal calls
+        if path == b"member" and kwargs.get("dir_fd") is not None:
+            calls += 1
+            if calls == phase:
+                full.unlink()
+                if after == "fifo":
+                    os.mkfifo(full)
+                elif after == "symlink":
+                    full.symlink_to("missing")
+                elif after == "directory":
+                    full.mkdir()
+                else:
+                    write(tmp_path, b"homeassistant/member")
+        return original(path, *args, **kwargs)
+    monkeypatch.setattr(os, "stat", stated)
+    result = scan(tmp_path, [b"homeassistant"])
+    assert bool(result.blockers) == (change in ("file-directory", "fifo-file"))
+    if not result.blockers:
+        assert result.managed_files == (b"homeassistant/a",)
+        assert result.diagnostics and n.render_ignore(result)
