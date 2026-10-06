@@ -158,7 +158,7 @@
     - UI persists as-is with no visible difference, except
       - Checkbox status
       - Confirmation button
-      - LOg status potentially
+      - Log status potentially
 
 # 2026-09-30
 
