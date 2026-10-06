@@ -1,5 +1,9 @@
 # Agent Instructions
 
+Task backlog: `./Backlog.md`. Use it for HA Ops task discovery. Selecting an
+entry requires intention alignment under the global planning rules before
+implementation; preserve task text, order and status.
+
 All docs and interface must be written in US English.
 For HA Ops App changes under `ha-ops/` other than tests, every block/bunch of changes must bump `ha-ops/config.yaml` and add a matching new section in `ha-ops/CHANGELOG.md` before the last commit. If the work involves a series of commits, bump at the end. The commit that bumps `ha-ops/config.yaml` must have an annotated plain-version Git tag on that same commit. Repository instructions, release tooling, hooks, and tests alone do not change the shipped App and do not require an App version bump.
 For a user-requested App fix or feature, passing verification means the change is ready to commit, not that delivery is complete. Before reporting it as done, create a behavior-focused commit that includes the App change, the new version, and its changelog section, and attach the matching annotated version tag. Do this even when the user did not separately ask for a commit. Never call a fix or feature ready while its App changes are only staged or unstaged, its version is only in the working tree, or its release commit lacks the tag. If verification or local commit/tag creation cannot finish, report the exact blocker and call the work incomplete.
