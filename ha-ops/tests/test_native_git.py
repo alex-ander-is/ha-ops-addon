@@ -685,13 +685,48 @@ def test_constructor_dormancy_corrupt_journal_and_no_production_import(repo, mon
     with pytest.raises(n.InvalidInput, match="duplicate-journal"):
         adapter.resources()
     app = Path(n.__file__).parent
-    for path in app.glob("*.py"):
-        if path.name == "native_git.py":
-            continue
-        source = path.read_text()
+    assert_dormant_import_contour({path.name: path.read_text() for path in app.glob("*.py")})
+
+
+def assert_dormant_import_contour(sources):
+    for name, source in sources.items():
         for node in ast.walk(ast.parse(source)):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                assert "native_git" not in ast.unparse(node)
+            if isinstance(node, ast.Import):
+                modules = [part for alias in node.names for part in alias.name.split(".")]
+            elif isinstance(node, ast.ImportFrom):
+                modules = (node.module or "").split(".") + [part for alias in node.names for part in alias.name.split(".")]
+            else:
+                continue
+            for module in modules:
+                if module not in ("native_git", "native_disk"):
+                    continue
+                # Only this named dormant observational peer may reuse NativeGit.
+                # Neither adapter may become an ordinary app entrypoint import.
+                assert name == "native_disk.py" and module == "native_git", (name, module)
+
+
+@pytest.mark.parametrize("module", ["native_git", "native_disk", "native_git.helpers", "native_disk.helpers", "app.native_git", "app.native_disk", "app.native_git.helpers", "app.native_disk.helpers"])
+@pytest.mark.parametrize("syntax", ["import {module} as alias", "from {module} import Adapter"])
+def test_dormant_import_sentinel_detects_production_imports(module, syntax):
+    with pytest.raises(AssertionError):
+        assert_dormant_import_contour({"server.py": syntax.format(module=module)})
+
+
+@pytest.mark.parametrize("module", ["native_git", "native_disk"])
+@pytest.mark.parametrize("package", ["app", ".", "..app"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_dormant_import_sentinel_detects_package_imported_aliases(module, package, nested):
+    source = "from " + package + " import " + module + " as alias"
+    if nested:
+        source = "def lazy():\n    " + source
+    with pytest.raises(AssertionError):
+        assert_dormant_import_contour({"server.py": source})
+
+
+def test_dormant_import_sentinel_allows_only_named_observational_peer():
+    assert_dormant_import_contour({"native_disk.py": "def observe():\n    from native_git import NativeGit"})
+    with pytest.raises(AssertionError):
+        assert_dormant_import_contour({"another_dormant.py": "from native_git import NativeGit"})
 
 
 def test_forged_and_closed_handles_reject_before_subprocess(repo, monkeypatch):

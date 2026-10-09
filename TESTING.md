@@ -18,7 +18,7 @@ Git/config fixtures and fake Supervisor calls, never a live HA installation.
 ## Selectable groups
 
 Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (2068 total); remaining
+pytest items including the preview decision guards (2746 total); remaining
 `subTest` loops exercise additional cases within some items.
 
 | Group | Files under `ha-ops/tests/` | Items | Coverage |
@@ -31,7 +31,8 @@ pytest items including the preview decision guards (2068 total); remaining
 | Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
 | Native state | `test_native_operations.py` | 418 | Inactive durable candidates, bounded retention/checkpoints/policy provenance, generation replay, explicit schema-1 upgrade, exact streaming large artifacts, lifecycle, empty-store high-water integrity, corruption, crash/reopen and independent recovery pins; container replacement is a separate local runner probe |
 | Native inventory | `test_native_inventory.py` | 252 | Dormant metadata-only byte-path inventory, scope-local diagnostics/blockers, both-phase stability and fallback proof, semantic parent safety independent of observed kind, retained parent/root acquisition failures, escaped LF/CR exclusion and scaffold fences, known-secret exclusions, component-fenced mounts and aliases, exact scope whitelist, separate effective-ignore/index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
-| Native Git adapter | `test_native_git.py` | 534 | Dormant fixed routing, kind-specific NUL byte records and real independent Git status axes/intent-to-add, complete tracked status with scoped untracked requests, exact bounded blobs and existing-object reuse proofs, complete selected/unselected blob dependencies and generated root/subtree destinations, ref CAS/uncertainty with malformed loose/packed storage and diagnostic refusal, complete private indexes with prior-evidence validation, no-checkout owned worktrees with bounded descriptors, verified sequential reopens, exact parent reservations and substitution non-adoption, real process interruption, kernel leases, foreign-resource preservation and durable addressed cleanup debt; full Unix byte identities require the local Linux wrapper |
+| Native Git adapter | `test_native_git.py` | 563 | Dormant fixed routing, kind-specific NUL byte records and real independent Git status axes/intent-to-add, complete tracked status with scoped untracked requests, exact bounded blobs and existing-object reuse proofs, complete selected/unselected blob dependencies and generated root/subtree destinations, ref CAS/uncertainty with malformed loose/packed storage and diagnostic refusal, complete private indexes with prior-evidence validation, no-checkout owned worktrees with bounded descriptors, verified sequential reopens, exact parent reservations and substitution non-adoption, real process interruption, kernel leases, foreign-resource preservation and durable addressed cleanup debt; full Unix byte identities require the local Linux wrapper |
+| Native disk | `test_native_disk.py` | 649 | Dormant physical byte/inode accounting with user backups excluded; one actual immutable initial snapshot/forecast and phase scanner/capacity/Git sentinels, issued Snapshot/Plan refusal and context GC, bounded owner resource/state transitions and lifecycle fencing, exact raw marker/backlink controls, direct-ref alias refusal and pinned NativeGit replacement semantics, Repack membership fingerprints, private persisted journal/state and symmetric snapshot/current owner-lock presence and stable receipts with disclosed pre-first-observation limits, whole initial packed grammar and one explicit packed/peeled OID batch, descriptor-held proved absence versus acquisition uncertainty across initial/guard/phase Git/owner/output routes and monotone control presence, finite known-leaf loss refusal with real same/different-inode restoration and full Save reflog preimage retention, one initial artifact content verification, typed creation receipts retaining the original floor and nonblocking locks; real allocation, byte paths, mount aliases and process locks require the local runner |
 | Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
 | Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
 
@@ -127,6 +128,42 @@ Process-kill tests prove lease release, addressed recovery and explicit
 retention when a file or marker was not durably acknowledged. Wrapper cleanup
 failure makes the proof incomplete. See [native Git API and proof map](ha-ops/docs/native-git.md).
 No production import, workflow activation, network or live HA write is used.
+
+Native-tree step 6.5 has a dormant physical disk/accounting contract:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_disk.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_disk.py
+```
+
+The Linux command uses its default Linux `/tmp`; the output bind is virtiofs
+and does not establish the supported ext4/tmpfs allocator profile. The low-space advisory case caps initial availability as an arithmetic seam.
+Linux fixtures separately prove actual allocated blocks/free space, incompressible spool/blob
+and no-reuse repack overlap, many tiny files, invalid byte names, shared-capacity
+bind identities, same-operation native index phases, independent process
+flock/death recovery and usable local admission. The read-only persistent root
+prevents a real ext4 write fixture; that limitation is documented explicitly.
+Host arithmetic seams do not substitute for Linux physical proofs. The group
+also proves all exact file routes and creation receipts, canonical corruption
+of both owner stores, zero unchanged-phase historical artifact content reads,
+changed observation invalidation, one-shot issued contexts, no phase snapshot/forecast/capacity/Git enumeration, declared resource/output cardinality and length ceilings, same-owner lifecycle fencing, and bounded initial verification without
+an artifact size cap. Timestamp mutation tests set an explicit changed mtime
+so they do not depend on the local VM clock tick. Raw malformed-control tests
+compare both actual owner parsers; exact canonical idle/active operation state
+and idle/live journals retain their byte format with separate immutable
+operation identity metadata. The NativeGit AST guard permits only the named
+dormant NativeDisk dependency and detects flat, package-qualified and relative production imports of both, including aliases and nested imports.
+Raw owner-marker variants compare actual NativeGit refusal with disk refusal for
+real index/spool/worktree resources, including journal acknowledgement of new
+noncanonical bytes. Recovery copies remain qualified; system-backup recipes,
+receipts and attribution API have been removed from this dormant layer.
+External writers can still cause actual ENOSPC/short writes. Reused isolated
+NativeGit short-sink/publication/materialization/cleanup-debt and
+NativeOperationStore fsync/replace/artifact-failure tests cover the existing
+owner guarantees; dormant disk admission does not introduce a live executor.
+No live
+Home Assistant, production imports, executors, cleanup or activation is used.
+See [disk API, executor profile and risk map](ha-ops/docs/native-disk.md).
 
 For the whole suite inside the local runner, the read-only input copy excludes
 `.git` and the container's `/tmp` is not executable. Use a disposable copy under
