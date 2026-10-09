@@ -165,6 +165,29 @@ No live
 Home Assistant, production imports, executors, cleanup or activation is used.
 See [disk API, executor profile and risk map](ha-ops/docs/native-disk.md).
 
+Native-tree step 6.6 adds opt-in writable ext4 qualification without rerunning
+the older native API groups:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_local_virtualization.py ha-ops/tests/test_native_ext4.py ha-ops/tests/test_release_readiness.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile allocation --recreate --report dev/virtualization/.local/ext4-allocation-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile bytes --report dev/virtualization/.local/ext4-bytes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile inodes --report dev/virtualization/.local/ext4-inodes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+```
+
+All three real profiles and allocation recreation are required; host skips
+are not qualification. The development helper formats/mounts one bounded,
+fully preallocated guest-native image outside the nonroot, capability-free
+application container. Mandatory rows compare held physical byte/inode peaks
+with one immutable NativeDisk forecast, including complete index/control/log
+copies, materialization, independent recovery copies and no-reuse repack.
+Independent observer telemetry stays separate from forbidden product rescans.
+Actual byte/inode ENOSPC and scoped short/EIO owner failures preserve existing
+content/state; addressed unacknowledged-resource debt is reported rather than
+claimed removed. Exact cleanup, repeat cleanup and VM/image survival precede
+passed reports. See [runner contract and measured evidence](dev/virtualization/README.md#guest-native-ext4-qualification)
+for commands, profile boundaries and remaining future-executor obligations.
+
 For the whole suite inside the local runner, the read-only input copy excludes
 `.git` and the container's `/tmp` is not executable. Use a disposable copy under
 `/workspace/output/checkout`, initialize and commit a fixture Git checkout,

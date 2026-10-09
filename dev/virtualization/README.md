@@ -144,3 +144,109 @@ which is the Colima VM on macOS. See the upstream [Colima configuration][1],
 [2]: https://github.com/abiosoft/colima/blob/main/cmd/start.go
 [3]: https://docs.docker.com/engine/storage/bind-mounts/
 [4]: https://docs.docker.com/build/concepts/context/#local-tarballs
+
+## Guest-native ext4 qualification
+
+The opt-in ext4 route reuses the running VM and its existing fingerprinted
+image. It refuses missing tools or images rather than downloading dependencies.
+The privileged guest helper creates a fully preallocated image outside the
+application container. Formatting uses `nodiscard` and completed inode/journal
+initialization; reservation is checked again after formatting. Only one fixture
+can be active at a time. The allocation and byte profiles use 256 MiB / 8,192
+requested inodes; the inode profile uses 64 MiB / 128 requested inodes. Actual
+inode totals, filesystem features, UUID, loop identity and mount options are
+observed, not inferred from those requests.
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile allocation --recreate --report dev/virtualization/.local/ext4-allocation-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile bytes --report dev/virtualization/.local/ext4-bytes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile inodes --report dev/virtualization/.local/ext4-inodes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+# Interrupted runs retain an exact run ID in the ignored report.
+python3 dev/virtualization/ha_ops_dev.py cleanup --ext4 --run EXACT_RUN_ID
+```
+
+Admission checks host reserve plus copied input and backing demand, Docker's
+reserve, and the actual guest backing-parent bytes/inodes immediately before
+preallocation. The application receives three exact private binds: read-only
+input, writable output/report storage, and writable `/workspace/ext4`. It runs
+as the host's nonzero numeric UID/GID with `CapDrop=ALL`, no devices or added
+capabilities, `no-new-privileges`, a read-only root and no network. Container
+inspection verifies that boundary before start; each test independently proves
+its mountinfo and NativeDisk ext4 profile. Default pytest temporary directories
+and the virtiofs output share are not allocation evidence.
+
+Reports remain outside the full filesystem and survive successful resource
+cleanup. Each attempt publishes a schema-1 matrix to its own token-named file;
+the wrapper checks exact mandatory rows, mounted profile, measured/forecast
+terms, recipe families, real failure boundaries and current attempt/token.
+Recreation receives the previously validated matrix as a separate explicit
+input and must freshly observe the same sentinel device/inode/hash. Missing,
+malformed, partial, extra-row or stale reports refuse completion. A report is marked passed only after every required profile row, exact
+container absence, normal unmount, exact loop detachment, backing/run-directory
+removal, repeated cleanup and unchanged reusable image/VM identity. A failed
+proof retains its partial matrix and first error. Cleanup errors aggregate and
+return nonzero; unverified container removal prevents unmount/backing deletion.
+The helper journals each acquired resource and cleanup transition in private
+root-owned controls. A manifest write/fsync/replace failure retains the first
+exception while temporary-unlink and descriptor-close failures are appended as
+cleanup diagnostics. Structured helper error evidence survives the process
+boundary into the wrapper report; pre-replace failures retain the old manifest
+and any unremoved temporary as explicit debt. An outside-directory receipt makes interrupted final
+manifest removal resumable. Unknown or substituted identities retain explicit
+debt; cleanup never uses broad prune/removal, global loop detachment, lazy/force
+unmount or VM reset.
+
+The allocation profile holds real outputs at explicit overlap barriers:
+incompressible loose objects/spools; complete selected and unselected indexes
+with full lock bytes; generated trees/fanouts; no-checkout worktree admin and
+materialization; exact Save commits, deep independent refs/logs and full existing
+reflog append; complete old/new operation controls and streamed diffs;
+independent recovery copies, encoded metadata and replacement temporary; all
+Git object kinds including unreachable objects and retained old packs during
+no-reuse/no-delta pack/index/full temporary overlap. These are qualification
+fixtures, not deployed executors. One actual snapshot/forecast is retained per
+case; repeated phase checks forbid product scanners, Git enumeration and
+capacity refresh. Separate observer fsync, deduplicated `st_blocks`, inode and
+free-space telemetry measure the held outputs without replacing the forecast.
+No reserve or positive tolerance conceals a bound overrun.
+
+The failure profiles reach real kernel byte/inode `ENOSPC`. Byte exhaustion
+also reaches payload streaming, worktree materialization and state publication
+after a durable artifact. Inode exhaustion reports positive remaining byte
+capacity. Existing state, ref/object bytes, sentinels and recovery pins are
+preserved. Positive short writes retry to exact bytes; zero progress and scoped
+write/fsync/publication `EIO` refuse success. The materialization EIO proof enters `copy_blob` and writes/fsyncs 4,096 exact
+selected-file bytes before raising at that held descriptor; unrelated journal
+writes pass through. Post-replace directory fsync failure
+is reconciled as potentially published state. Addressed owner recovery reports
+its actual result: unacknowledged partial entries may remain `debt` with exact
+resource/owner/operation identities. That is an expected safe preservation
+outcome, not evidence of completed rollback.
+
+Observed local qualification (Linux aarch64, ext4 4,096-byte quantum):
+
+| Held family | Physical peak bytes | Forecast additional peak | New live inodes | Forecast inodes |
+| --- | ---: | ---: | ---: | ---: |
+| Loose objects and spools | 3,600,384 | 23,113,728 | 367 | 1,709 |
+| Complete index/lock and trees | 4,268,032 | 23,113,728 | 525 | 1,709 |
+| Worktree/admin/materialization and Save refs/logs | 6,287,360 | 23,113,728 | 759 | 1,709 |
+| Existing full reflog append/ref atomic overlap | 159,744 | 864,256 | 5 | 25 |
+| Complete operation controls/temp/diff/pending envelope | 286,720 | 765,952 | 5 | 23 |
+| Two independent copies/metadata/replacement | 3,153,920 | 6,385,664 | 6 | 11 |
+| Retained old pack/new pack/index/full temporary | 2,117,632 | 4,296,704 | 4 | 7 |
+
+Each cumulative scope row uses the same immutable Save plan; later rows keep
+earlier outputs live. Family fixtures and free-space observations include
+existing parent growth and filesystem metadata. Byte exhaustion returned
+`errno=28` after 242,614,272 acknowledged filler bytes. The low-inode fixture
+observed 128 total inodes and 63 new filler files before `errno=28`, with
+60,198,912 bytes still available. Allocation recreation retained filesystem
+UUID and sentinel device/inode/hash; all profiles verified exact cleanup and
+unchanged VM/image identity. Raw reports under ignored `.local/` contain the
+complete plan terms, reserves, versions, observations and owner debt.
+
+This qualifies current dormant recipe demand and existing owner refusal/local
+recovery. Future Apply crash recovery, exact metadata restoration, per-path
+rollback, remote publication and restart/health integration still need their
+own executor proofs. A host-only skip, green generic journal flag or disposable
+copy cannot close those obligations.

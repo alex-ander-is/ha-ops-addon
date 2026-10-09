@@ -331,9 +331,13 @@ allocation measurements still use the kernel. The local Linux wrapper uses
 writable tmpfs for actual allocation/free-space,
 invalid byte paths, incompressible spool/blob, no-reuse repack, tiny outputs and
 independent process/flock proofs. Input/output virtiofs mounts prove real bind
-aliases and shared capacity, not ext4 allocation. The persistent root is readonly;
-an actual writable ext4 proof remains unavailable. Host arithmetic seams are
-separate. New allocator/output families require future qualified evidence.
+aliases and shared capacity, not ext4 allocation. Those step 6.5 tests used a
+read-only persistent root and did not establish writable ext4 allocation.
+Step 6.6 now supplies [bounded guest-native ext4 qualification](../../dev/virtualization/README.md#guest-native-ext4-qualification)
+with measured held allocation/inode peaks, real byte/inode ENOSPC, scoped owner
+short/EIO failures and exact fixture cleanup. Host arithmetic seams remain
+separate; new allocator/output families still require their own qualified
+evidence, and future Apply/rollback executor proofs remain deferred.
 
 Future steps supply execution identity/controls, recovery metadata adapters,
 Calculate/Compact and incoming/legacy migration integration. This step changes

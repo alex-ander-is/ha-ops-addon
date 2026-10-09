@@ -1357,3 +1357,665 @@ def test_default_topology_fixture_retained_only_for_uncertain_cleanup(tmp_path, 
     if failure == "cleanup":
         assert (fixture / "evidence").read_text() == "left for inspection"
         assert str(fixture) in capsys.readouterr().err
+
+
+def ext4_helper():
+    spec = importlib.util.spec_from_file_location('ext4_fixture', SOURCE.parent / 'ext4_fixture.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+def ext4_inspection():
+    expected = {'/workspace/input': ('/input', False), '/workspace/output': ('/output', True), '/workspace/ext4': ('/guest/mount', True)}
+    return {'Id': 'container', 'Config': {'User': '501:1000', 'Labels': {'ha-ops.dev.run': 'a' * 32}},
+            'HostConfig': {'Privileged': False, 'Devices': [], 'CapAdd': [], 'CapDrop': ['ALL'],
+                           'SecurityOpt': ['no-new-privileges'], 'ReadonlyRootfs': True, 'NetworkMode': 'none'},
+            'Mounts': [{'Type': 'bind', 'Destination': k, 'Source': v[0], 'RW': v[1], 'Propagation': 'rprivate'} for k, v in expected.items()]}
+
+
+@pytest.mark.parametrize('fault', ['owner', 'root', 'privileged', 'device', 'capadd', 'capdrop', 'nnp', 'readonly', 'network', 'source', 'rw', 'propagation', 'duplicate'])
+def test_ext4_container_requires_exact_mounts_and_unprivileged_boundary(fault):
+    subject = wrapper(); inspected = ext4_inspection()
+    subject.verify_ext4_container(inspected, 'container', 'a' * 32, Path('/input'), Path('/output'), {'mount_path': '/guest/mount'}, '501:1000')
+    if fault == 'owner': inspected['Config']['Labels']['ha-ops.dev.run'] = 'b' * 32
+    elif fault == 'root': inspected['Config']['User'] = '0:1000'
+    elif fault == 'privileged': inspected['HostConfig']['Privileged'] = True
+    elif fault == 'device': inspected['HostConfig']['Devices'] = [{'PathOnHost': '/dev/loop0'}]
+    elif fault == 'capadd': inspected['HostConfig']['CapAdd'] = ['SYS_ADMIN']
+    elif fault == 'capdrop': inspected['HostConfig']['CapDrop'] = []
+    elif fault == 'nnp': inspected['HostConfig']['SecurityOpt'] = []
+    elif fault == 'readonly': inspected['HostConfig']['ReadonlyRootfs'] = False
+    elif fault == 'network': inspected['HostConfig']['NetworkMode'] = 'default'
+    elif fault == 'source': inspected['Mounts'][2]['Source'] = '/foreign'
+    elif fault == 'rw': inspected['Mounts'][2]['RW'] = False
+    elif fault == 'propagation': inspected['Mounts'][2]['Propagation'] = 'shared'
+    elif fault == 'duplicate': inspected['Mounts'].append(inspected['Mounts'][0])
+    with pytest.raises(subject.Refused): subject.verify_ext4_container(inspected, 'container', 'a' * 32, Path('/input'), Path('/output'), {'mount_path': '/guest/mount'}, '501:1000')
+
+
+@pytest.mark.parametrize('run', ['../image', 'a' * 31, 'a' * 33, 'A' * 32, '/dev/loop0'])
+def test_ext4_helper_rejects_hostile_run_before_guest_execution(run, monkeypatch):
+    subject = wrapper(); monkeypatch.setattr(subject, 'invoke', lambda *a, **k: pytest.fail('guest invoked'))
+    with pytest.raises(subject.Refused): subject.ext4_guest('cleanup', run)
+
+
+@pytest.mark.parametrize('fault', ['bytes', 'inodes'])
+def test_ext4_backing_capacity_checks_actual_parent(fault, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    subject = ext4_helper()
+    monkeypatch.setattr(subject.os, 'statvfs', lambda path: SimpleNamespace(f_bavail=1 if fault == 'bytes' else 10**9, f_frsize=4096, f_favail=1 if fault == 'inodes' else 100))
+    with pytest.raises(subject.Refused, match='backing-parent'): subject.capacity(tmp_path, 256 * 1024**2)
+
+
+@pytest.mark.parametrize('fault', ['inode', 'device', 'back-file', 'loop-name'])
+def test_ext4_loop_identity_rejects_substitution(fault):
+    subject = ext4_helper()
+    info = {'identity': [os.makedev(8, 1), 123, 0o100600, 1]}
+    row = {'name': '/dev/loop3', 'back-file': '/owned/image', 'back-ino': 123, 'back-maj:min': '8:1', 'maj:min': '7:3'}
+    subject.verify_loop(row, Path('/owned/image'), info)
+    if fault == 'inode': row['back-ino'] = 456
+    elif fault == 'device': row['back-maj:min'] = '8:2'
+    elif fault == 'back-file': row['back-file'] = '/foreign/image'
+    else: row['name'] = '/dev/sda'
+    with pytest.raises(subject.Refused): subject.verify_loop(row, Path('/owned/image'), info)
+
+
+@pytest.mark.parametrize('fault', ['source', 'device', 'filesystem', 'root', 'options', 'quota'])
+def test_ext4_actual_mount_profile_refuses_wrong_route(fault):
+    subject = ext4_helper(); loop = {'name': '/dev/loop3', 'maj:min': '7:3'}
+    mount = {'source': '/dev/loop3', 'device': '7:3', 'root': '/', 'filesystem': 'ext4', 'options': 'rw,nosuid,nodev,noexec', 'super_options': 'rw,data=ordered'}
+    subject.verify_mount(mount, loop)
+    if fault == 'source': mount['source'] = '/dev/loop4'
+    elif fault == 'device': mount['device'] = '7:4'
+    elif fault == 'filesystem': mount['filesystem'] = 'virtiofs'
+    elif fault == 'root': mount['root'] = '/sub'
+    elif fault == 'options': mount['options'] = 'ro,nodev,nosuid,noexec'
+    else: mount['super_options'] += ',quota'
+    with pytest.raises(subject.Refused): subject.verify_mount(mount, loop)
+
+
+def test_ext4_cleanup_backing_removal_intent_survives_unlink_interruption(tmp_path, monkeypatch):
+    subject = ext4_helper(); run = 'a' * 32; directory = tmp_path / run; directory.mkdir(mode=0o700)
+    image = directory / 'image'; image.write_bytes(b'owned')
+    mount = directory / 'mount'; mount.mkdir(mode=0o700)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    data = {'schema': 1, 'run': run, 'profile': 'allocation', 'directory': subject.identity(os.fstat(fd)),
+            'backing': {'identity': subject.identity(image.stat())}, 'mount_directory': subject.identity(mount.stat()), 'stage': 'mounted'}
+    subject.save(fd, data); monkeypatch.setattr(subject, 'BASE', tmp_path)
+    def backing(path, expected=None, size=None):
+        s = path.stat()
+        assert expected == subject.identity(s)
+        return {'identity': subject.identity(s)}
+    monkeypatch.setattr(subject, 'backing', backing); monkeypatch.setattr(subject, 'loops', lambda p: [])
+    monkeypatch.setattr(subject, 'mounts', lambda p: [])
+    original = subject.os.unlink
+    def interrupted(name, **kwargs):
+        original(name, **kwargs)
+        if name == 'image': raise OSError('interrupted after exact image unlink')
+    monkeypatch.setattr(subject.os, 'unlink', interrupted)
+    try:
+        with pytest.raises(OSError): subject.cleanup(fd, data)
+        assert json.loads((directory / 'manifest.json').read_text())['stage'] == 'backing-removal-pending'
+        monkeypatch.setattr(subject.os, 'unlink', original)
+        result = subject.cleanup(fd, json.loads((directory / 'manifest.json').read_text()))
+        assert result['status'] == 'absent' and not image.exists()
+    finally: os.close(fd)
+
+
+def test_ext4_cleanup_unexplained_backing_loss_refuses(tmp_path, monkeypatch):
+    subject = ext4_helper(); directory = tmp_path / ('a' * 32); directory.mkdir(); fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(subject, 'BASE', tmp_path)
+    monkeypatch.setattr(subject, 'backing', lambda *a: (_ for _ in ()).throw(FileNotFoundError()))
+    try:
+        with pytest.raises(subject.Refused, match='disappeared'): subject.cleanup(fd, {'run': 'a' * 32, 'backing': {'identity': [1, 2]}, 'stage': 'mounted'})
+    finally: os.close(fd)
+
+
+def test_ext4_fixture_uses_nondiscard_preallocation_and_no_broad_cleanup():
+    source = (SOURCE.parent / 'ext4_fixture.py').read_text()
+    assert "call('fallocate', '-l'" in source and 'nodiscard,lazy_itable_init=0,lazy_journal_init=0' in source
+    assert "s.st_blocks * 512 < size" in source
+    assert 'loop -D' not in source and "'--detach', loop['name']" in source
+    assert "call('umount', str(target))" in source and 'shutil.rmtree' not in source
+
+
+def test_ext4_directory_identity_survives_owned_child_creation(tmp_path):
+    subject = ext4_helper(); before = subject.identity(tmp_path.stat())
+    (tmp_path / 'mount').mkdir()
+    assert subject.identity(tmp_path.stat()) == before
+    assert len(before) == 3
+
+
+@pytest.mark.parametrize('missing', ['fallocate', 'mkfs.ext4', 'losetup', 'mount', 'umount', 'dumpe2fs', 'blkid'])
+def test_ext4_guest_missing_tool_refuses_before_backing_mutation(missing, tmp_path, monkeypatch):
+    subject = ext4_helper(); monkeypatch.setattr(subject, 'BASE', tmp_path / 'absent')
+    monkeypatch.setattr(subject.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(subject.shutil, 'which', lambda name: None if name == missing else '/usr/bin/' + name)
+    monkeypatch.setattr(sys, 'argv', ['ext4_fixture', 'setup', '--run', 'a' * 32])
+    with pytest.raises(subject.Refused, match='unavailable'): subject.main()
+    assert not subject.BASE.exists()
+
+
+@pytest.mark.parametrize('boundary', ['fallocate', 'mkfs.ext4', 'losetup', 'mount'])
+def test_ext4_setup_failure_retains_precise_partial_manifest(boundary, tmp_path, monkeypatch):
+    subject = ext4_helper(); run = 'a' * 32; path = tmp_path / run; path.mkdir(mode=0o700)
+    monkeypatch.setattr(subject, 'BASE', tmp_path); monkeypatch.setattr(subject, 'capacity', lambda *a: {'available_bytes': 10**10})
+    monkeypatch.setattr(subject, 'backing', lambda path, expected=None, size=None: {'identity': subject.identity(path.stat()), 'size': size or 0, 'allocated': size or 0})
+    attached = []
+    def call(*args):
+        if args[0] == boundary: raise subject.Refused('injected ' + boundary)
+        if args[0] == 'losetup':
+            s = (path / 'image').stat()
+            attached.append({'name': '/dev/loop3', 'maj:min': '7:3', 'back-file': str(path / 'image'), 'back-ino': s.st_ino,
+                             'back-maj:min': '%d:%d' % (os.major(s.st_dev), os.minor(s.st_dev))})
+        return ''
+    monkeypatch.setattr(subject, 'call', call); monkeypatch.setattr(subject, 'loops', lambda image: attached)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(subject.Refused, match='injected'): subject.setup(fd, run, 'allocation', 501, 1000)
+        record = json.loads((path / 'manifest.json').read_text())
+        assert record['run'] == run and record['backing']['identity'] == subject.identity((path / 'image').stat())
+        expected = {'fallocate': 'directory', 'mkfs.ext4': 'reserved', 'losetup': 'formatted', 'mount': 'attached'}
+        assert record['stage'] == expected[boundary]
+        if boundary == 'mount': assert record['loop'] == attached[0] and 'mount_directory' in record
+    finally: os.close(fd)
+
+
+@pytest.mark.parametrize('boundary', ['setup', 'create', 'start', 'wait', 'security', 'container-cleanup', 'guest-cleanup', 'report', 'timeout', 'incomplete-matrix', 'missing-second-report', 'stale-second-report', 'fresh'])
+def test_ext4_failures_never_publish_success_and_preserve_cleanup_order(boundary, tmp_path, monkeypatch):
+    subject = wrapper(); run_dirs = tmp_path / 'runs'; run_dirs.mkdir(); events = []; reports = []
+    monkeypatch.setattr(subject, 'ROOT', tmp_path); monkeypatch.setattr(subject, 'HERE', tmp_path); monkeypatch.setattr(subject, 'RUNS', run_dirs)
+    monkeypatch.setattr(subject, 'snapshot_input', lambda p: {'total': 10})
+    monkeypatch.setattr(subject, 'copy_input', lambda src, dst, **k: dst.mkdir())
+    monkeypatch.setattr(subject, 'capacity', lambda *a: 10**10)
+    monkeypatch.setattr(subject, 'make_context', lambda: b''); monkeypatch.setattr(subject, 'load_toolchain', lambda c: None)
+    monkeypatch.setattr(subject, 'installed', lambda: None); monkeypatch.setattr(subject, 'ready', lambda: {})
+    monkeypatch.setattr(subject, 'verify_source', lambda p: None); monkeypatch.setattr(subject, 'guest_platform', lambda: 'linux/arm64')
+    monkeypatch.setattr(subject, 'fingerprint', lambda c: 'fixture'); monkeypatch.setattr(subject, 'image_present', lambda i: True)
+    monkeypatch.setattr(subject, 'verify_image_arch', lambda *a: None); monkeypatch.setattr(subject, 'endpoint_info', lambda: {'Name': 'ha-ops-dev'})
+    monkeypatch.setattr(subject.shutil, 'which', lambda name: '/usr/bin/' + name)
+    fixture = {'mount_path': '/guest/mount', 'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}}
+    def guest(action, run, profile):
+        events.append('guest-' + action)
+        if action == boundary or boundary == 'guest-cleanup' and action == 'cleanup': raise subject.Refused('primary ' + boundary)
+        return fixture if action in {'setup', 'observe'} else {'status': 'absent'}
+    monkeypatch.setattr(subject, 'ext4_guest', guest)
+    run = []; environment = {}; past = []
+    def docker(*args, **kw):
+        events.append('docker-' + args[0])
+        if args[0] == boundary: raise subject.Refused('primary ' + boundary)
+        if boundary == 'timeout' and args[0] == 'wait': raise subprocess.TimeoutExpired('exact owned wait', 1)
+        if args[0] == 'create':
+            run.append(args[args.index('--label') + 1].split('=')[1])
+            environment.update(value.split('=', 1) for i, value in enumerate(args) if i and args[i - 1] == '--env')
+            return completed(b'container')
+        if args[0] == 'container':
+            info = ext4_inspection(); info['Config']['Labels']['ha-ops.dev.run'] = run[0]
+            info['Config']['User'] = str(os.getuid()) + ':' + str(os.getgid())
+            current = next(run_dirs.iterdir())
+            for row in info['Mounts']:
+                if row['Destination'] == '/workspace/input': row['Source'] = str(current / 'input')
+                if row['Destination'] == '/workspace/output': row['Source'] = str(current / 'output')
+            if boundary == 'security': info['HostConfig']['Privileged'] = True
+            return completed(json.dumps([info]).encode())
+        if args[0] == 'wait':
+            current = next(run_dirs.iterdir())
+            attempt = int(environment['HA_OPS_EXT4_ATTEMPT'])
+            proof = complete_ext4_proof(run[0], attempt=attempt, token=environment['HA_OPS_EXT4_TOKEN'])
+            if boundary == 'incomplete-matrix': proof['rows'] = {}
+            if attempt and boundary == 'missing-second-report': return completed(b'0')
+            if attempt and boundary == 'stale-second-report': proof = past[0]
+            (current / 'output' / Path(environment['HA_OPS_EXT4_REPORT']).name).write_text(json.dumps(proof)); past.append(proof)
+            return completed(b'0')
+        if args[0] == 'image': return completed(b'imageid')
+        return completed()
+    monkeypatch.setattr(subject, 'docker', docker)
+    def remove(*args):
+        events.append('container-absence')
+        if boundary == 'container-cleanup': raise subject.Refused('container absent unverified')
+    monkeypatch.setattr(subject, 'remove_owned', remove)
+    def report(path, value):
+        reports.append(value)
+        if boundary == 'report': raise OSError('report write failed')
+    monkeypatch.setattr(subject, 'write_report', report)
+    recreate = boundary in {'fresh', 'missing-second-report', 'stale-second-report'}
+    if boundary == 'fresh':
+        assert subject.ext4_run(Path('.'), ['fixture'], report=tmp_path / 'report.json', recreate=True) == 0
+        assert reports[-1]['status'] == 'passed' and [p['attempt'] for p in reports[-1]['proofs']] == [0, 1]
+        assert reports[-1]['proofs'][0]['attempt_token'] != reports[-1]['proofs'][1]['attempt_token']
+        return
+    with pytest.raises(subject.Refused): subject.ext4_run(Path('.'), ['fixture'], report=tmp_path / 'report.json', recreate=recreate)
+    if boundary == 'container-cleanup': assert 'guest-cleanup' not in events
+    elif 'guest-setup' in events: assert 'guest-cleanup' in events
+    if boundary not in {'setup', 'report'}: assert reports[-1]['status'] == 'failed'
+    if 'guest-cleanup' in events and 'container-absence' in events: assert events.index('container-absence') < events.index('guest-cleanup')
+
+
+@pytest.mark.parametrize('fault', ['sparse', 'wrong-size', 'hardlink', 'wrong-owner', 'special', 'substitution'])
+def test_ext4_backing_requires_exact_reserved_owned_inode(fault, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import stat
+    subject = ext4_helper(); image = tmp_path / 'image'; image.write_bytes(b'fixture')
+    s = SimpleNamespace(st_dev=8, st_ino=12, st_mode=stat.S_IFREG | 0o600, st_nlink=1, st_uid=0,
+                        st_size=256 * 1024**2, st_blocks=256 * 1024**2 // 512)
+    expected = subject.identity(s)
+    if fault == 'sparse': s.st_blocks = 0
+    elif fault == 'wrong-size': s.st_size -= 1
+    elif fault == 'hardlink': s.st_nlink = 2
+    elif fault == 'wrong-owner': s.st_uid = 501
+    elif fault == 'special': s.st_mode = stat.S_IFBLK | 0o600
+    else: s.st_ino += 1
+    monkeypatch.setattr(subject.os, 'fstat', lambda fd: s)
+    with pytest.raises(subject.Refused): subject.backing(image, expected, 256 * 1024**2)
+
+
+def test_ext4_backing_never_follows_symlink(tmp_path):
+    subject = ext4_helper(); image = tmp_path / 'image'; image.symlink_to(tmp_path / 'foreign')
+    with pytest.raises(OSError): subject.backing(image)
+
+
+@pytest.mark.parametrize('boundary', ['manifest-unlink', 'run-rmdir'])
+def test_ext4_final_cleanup_receipt_recovers_interrupted_empty_directory(boundary, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    subject = ext4_helper(); run = 'a' * 32; path = tmp_path / run; path.mkdir(mode=0o700)
+    original_fstat = os.fstat
+    def root_stat(fd):
+        s = original_fstat(fd)
+        fields = {name: getattr(s, name) for name in dir(s) if name.startswith('st_')}
+        fields['st_uid'] = 0
+        return SimpleNamespace(**fields)
+    monkeypatch.setattr(subject.os, 'fstat', root_stat); monkeypatch.setattr(subject.os, 'geteuid', lambda: 0)
+    original_lstat = Path.lstat
+    def guest_ancestors(path):
+        if str(path) in {'/var', '/var/lib'}: return SimpleNamespace(st_mode=0o40755, st_uid=0)
+        return original_lstat(path)
+    monkeypatch.setattr(subject.Path, 'lstat', guest_ancestors)
+    monkeypatch.setattr(subject, 'BASE', tmp_path); monkeypatch.setattr(subject.shutil, 'which', lambda name: '/usr/bin/' + name)
+    monkeypatch.setattr(subject, 'loops', lambda p: []); monkeypatch.setattr(subject, 'mounts', lambda p: [])
+    monkeypatch.setattr(sys, 'argv', ['ext4_fixture', 'cleanup', '--run', run])
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try: subject.save(fd, {'schema': 1, 'run': run, 'profile': 'allocation', 'directory': subject.identity(os.fstat(fd)),
+                          'stage': 'backing-removal-pending', 'backing': {'identity': [1, 2, 3, 1]}})
+    finally: os.close(fd)
+    original_unlink, original_rmdir = os.unlink, os.rmdir
+    def interrupted_unlink(name, **kw):
+        original_unlink(name, **kw)
+        if name == 'manifest.json' and boundary == 'manifest-unlink': raise OSError('interrupted final unlink')
+    def interrupted_rmdir(name, **kw):
+        original_rmdir(name, **kw)
+        if name == run and boundary == 'run-rmdir': raise OSError('interrupted final rmdir')
+    monkeypatch.setattr(subject.os, 'unlink', interrupted_unlink); monkeypatch.setattr(subject.os, 'rmdir', interrupted_rmdir)
+    with pytest.raises(OSError): subject.main()
+    assert (tmp_path / (run + '.cleanup')).exists()
+    monkeypatch.setattr(subject.os, 'unlink', original_unlink); monkeypatch.setattr(subject.os, 'rmdir', original_rmdir)
+    subject.main(); subject.main()
+    assert not path.exists() and not (tmp_path / (run + '.cleanup')).exists()
+
+
+@pytest.mark.parametrize('checkpoint', range(1, 8))
+def test_ext4_manifest_persistence_failures_keep_acknowledged_partial_ownership(checkpoint, tmp_path, monkeypatch):
+    subject = ext4_helper(); run = 'a' * 32; path = tmp_path / run; path.mkdir(mode=0o700)
+    monkeypatch.setattr(subject, 'BASE', tmp_path); monkeypatch.setattr(subject, 'capacity', lambda *a: {'available_bytes': 10**10})
+    monkeypatch.setattr(subject, 'backing', lambda image, expected=None, size=None: {'identity': subject.identity(image.stat()), 'size': size or 0, 'allocated': size or 0})
+    loop, mounted = [], []
+    def call(*args):
+        if args[0] == 'losetup':
+            s = (path / 'image').stat()
+            loop.append({'name': '/dev/loop3', 'maj:min': '7:3', 'back-file': str(path / 'image'), 'back-ino': s.st_ino,
+                         'back-maj:min': '%d:%d' % (os.major(s.st_dev), os.minor(s.st_dev))})
+        if args[0] == 'mount': mounted.append({'id': '42', 'source': '/dev/loop3', 'device': '7:3', 'root': '/', 'filesystem': 'ext4',
+                                             'point': str(path / 'mount'), 'options': 'rw,nosuid,nodev,noexec', 'super_options': 'rw,data=ordered'})
+        return ''
+    monkeypatch.setattr(subject, 'call', call); monkeypatch.setattr(subject, 'loops', lambda image: loop); monkeypatch.setattr(subject, 'mounts', lambda target: mounted)
+    original_save = subject.save; calls = []; acknowledged = []
+    def save(fd, data):
+        calls.append(data['stage'])
+        if len(calls) == checkpoint: raise OSError('manifest persistence failure')
+        original_save(fd, data); acknowledged.append(json.loads((path / 'manifest.json').read_text()))
+    monkeypatch.setattr(subject, 'save', save); fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with pytest.raises(OSError, match='manifest persistence'): subject.setup(fd, run, 'allocation', 501, 1000)
+        if acknowledged:
+            current = json.loads((path / 'manifest.json').read_text())
+            assert current == acknowledged[-1] and current['run'] == run
+            if 'backing' in current: assert current['backing']['identity'] == subject.identity((path / 'image').stat())
+            if 'loop' in current: assert current['loop'] == loop[0]
+        else: assert not (path / 'manifest.json').exists() and not (path / 'image').exists()
+    finally: os.close(fd)
+
+
+def complete_ext4_proof(run, profile='allocation', attempt=0, token='c' * 32):
+    """Portable complete report fixture; actual allocation evidence is separate."""
+    def sample(family, outputs):
+        allocations = []
+        for output in outputs:
+            name, logical = output if isinstance(output, tuple) else (output, 1)
+            allocations.append({'output': name, 'logical': logical, 'allocated': ((logical + 4095) // 4096) * 2 * 4096 + 3 * 4096,
+                                'inodes': 1, 'volume': [os.makedev(7, 3), '65787434', b'/dev/loop3'.hex()]})
+        return {'family': family, 'logical_bytes': 4096, 'physical_bytes': 4096, 'new_inodes': 1,
+                'blocks_delta': 4096, 'free_bytes_delta': 4096, 'free_inodes_delta': 1,
+                'additional_peak': sum(a['allocated'] for a in allocations), 'required_inodes': len(allocations) + 2,
+                'reserve': 4096, 'allocations': allocations}
+    recreation = {'attempt': attempt, 'sentinel': {'device': os.makedev(7, 3), 'inode': 123, 'sha256': 'a' * 64}}
+    rows = {'recreation': recreation}
+    if profile == 'allocation':
+        outputs = ['complete-index', 'index-lock-overlap', 'generated-tree:root', 'worktree-control:HEAD', 'commit-object',
+                   'ref-atomic-output', 'ref-lock-overlap', 'full-reflog-copy-append', 'reflog-atomic-overlap']
+        sizes = [0, 1, 4095, 4096, 4097, 1024**2] + [1] * 96
+        outputs += [('stream-spool:' + str(i), size) for i, size in enumerate(sizes)]
+        outputs += [('loose-blob:' + str(i), size + 32) for i, size in enumerate(sizes)]
+        rows['loose-index-worktree-save'] = {'measurements': [sample(family, outputs) for family in
+            ('loose-spool-fanout', 'complete-index-lock-trees', 'worktree-admin-materialization-save-ref-reflog')],
+            'snapshot_count': 1, 'forecast_count': 1, 'phase_rescans': 0, 'selected_entries': 102, 'unselected_entries': 1,
+            'existing_reflog': {**sample('existing-complete-reflog-copy-append-ref-lock', ['full-reflog-copy-append', 'reflog-atomic-overlap']), 'retained_log_bytes': 4096}}
+        rows['controls'] = {'measurements': [sample('full-old-new-control-temp-diff', ['full-prospective-operation-state', 'full-pending-control', 'exact-diff-artifact'])],
+                            'prior_control_retained_during_replace': True, 'full_pending_failure_envelope': True}
+        rows['independent-copies'] = sample('two-independent-copies-metadata-replacement', ['independent-copy:first', 'independent-copy:second', 'exact-encoded-metadata:source', 'replacement-temporary:oid'])
+        rows['repack'] = {**sample('all-object-kinds-old-pack-new-pack-index-full-temp', ['new-pack-old-packs-retained', 'pack-index', 'pack-temporary-overlap']),
+                          'objects': 5, 'kinds': ['blob', 'tree', 'commit', 'tag'], 'unreachable': True,
+                          'argv': ['pack-objects', '--window=0', '--depth=0', '--no-reuse-object', '--no-reuse-delta']}
+        boundaries = ['artifact_written', 'artifact_fsynced', 'artifact_replaced', 'state_written', 'state_fsynced', 'state_replaced',
+                      'artifact-fsync', 'state-fsync', 'state-directory-fsync-after-replace']
+        rows['short-eio'] = {'positive_short_bytes': 8193, 'zero_progress_refused': True, 'copy_sink_eio_preserved': True,
+                            'owner_persistence': [{'boundary': b, 'first_error_preserved': True, 'prior_revision': 0,
+                                'published_revision': int(b in {'state_replaced', 'state-directory-fsync-after-replace'})} for b in boundaries],
+                            'materialization_sink_eio': {'first_error_preserved': True, 'copy_blob_entered': True,
+                                'selected_path': 'homeassistant/file', 'sink_path': '/fixture/tree/homeassistant/file',
+                                'partial_bytes': 4096, 'expected_size': 1024**2, 'partial_sha256': 'a' * 64,
+                                'reached_bytes': [65536], 'addressed_recovery': []}}
+    elif profile == 'bytes':
+        rows['byte-enospc'] = {'kernel_errno': 28, 'written_bytes': 1024**2, 'state_preserved': True, 'recovered_resources': [],
+            'failures': [{'boundary': b, 'errno': 28, 'error': 'No space left on device'} for b in
+                ('preview-payload', 'blob-payload', 'materialization', 'state-atomic-publication-after-durable-artifact')]}
+    else:
+        rows['inode-enospc'] = {'kernel_errno': 28, 'state_preserved': True, 'recovered_resources': [],
+                               'observed_total_inodes': 128, 'created_inodes': 63, 'remaining_bytes': 60 * 1024**2}
+    return {'schema': 1, 'status': 'passed', 'run': run, 'profile': profile, 'attempt': attempt, 'attempt_token': token,
+            'device': '7:3', 'filesystem': 'ext4', 'quantum': 4096, 'total_inodes': 128, 'rows': rows}
+
+
+@pytest.mark.parametrize('profile', ['allocation', 'bytes', 'inodes'])
+@pytest.mark.parametrize('mutation', ['none', 'missing', 'extra', 'list', 'empty', 'wrong-row-type', 'marker-only', 'wrong-profile', 'wrong-attempt', 'wrong-token', 'false-bound', 'wrong-device'])
+def test_ext4_proof_validates_complete_current_substantive_matrix(profile, mutation):
+    subject = wrapper(); proof = complete_ext4_proof('a' * 32, profile)
+    key = next(k for k in proof['rows'] if k != 'recreation')
+    if mutation == 'missing': proof['rows'].pop(key)
+    elif mutation == 'extra': proof['rows']['foreign'] = {}
+    elif mutation == 'list': proof['rows'] = list(proof['rows'])
+    elif mutation == 'empty': proof['rows'] = {}
+    elif mutation == 'wrong-row-type': proof['rows'][key] = []
+    elif mutation == 'marker-only': proof['rows'][key] = {'passed': True}
+    elif mutation == 'wrong-profile': proof['profile'] = 'foreign'
+    elif mutation == 'wrong-attempt': proof['attempt'] = True
+    elif mutation == 'wrong-token': proof['attempt_token'] = 'old'
+    elif mutation == 'wrong-device': proof['rows']['recreation']['sentinel']['device'] = os.makedev(8, 1)
+    elif mutation == 'false-bound':
+        if profile == 'allocation': proof['rows'][key]['measurements'][0]['additional_peak'] = 0
+        elif profile == 'bytes': proof['rows'][key]['failures'][0]['errno'] = 5
+        else: proof['rows'][key]['remaining_bytes'] = 0
+    kwargs = dict(run_id='a' * 32, profile=profile, attempt=0, token='c' * 32, fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}})
+    if mutation == 'none': assert subject.validate_ext4_proof(proof, **kwargs) is proof
+    else:
+        with pytest.raises(subject.Refused): subject.validate_ext4_proof(proof, **kwargs)
+
+
+@pytest.mark.parametrize('mutation', ['none', 'stale-attempt', 'stale-token', 'sentinel', 'retained-matrix'])
+def test_ext4_recreation_requires_fresh_publication_and_preserved_observed_sentinel(mutation):
+    subject = wrapper(); previous = complete_ext4_proof('a' * 32)
+    current = complete_ext4_proof('a' * 32, attempt=1, token='d' * 32)
+    if mutation == 'stale-attempt': current = previous
+    elif mutation == 'stale-token': current['attempt_token'] = 'c' * 32
+    elif mutation == 'sentinel': current['rows']['recreation']['sentinel']['inode'] += 1
+    elif mutation == 'retained-matrix': current['rows']['repack']['objects'] += 1
+    kwargs = dict(run_id='a' * 32, profile='allocation', attempt=1, token='d' * 32, fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}}, previous=previous)
+    if mutation == 'none': subject.validate_ext4_proof(current, **kwargs)
+    else:
+        with pytest.raises(subject.Refused): subject.validate_ext4_proof(current, **kwargs)
+
+
+@pytest.mark.parametrize('boundary', ['write', 'file-fsync', 'replace', 'directory-fsync'])
+@pytest.mark.parametrize('cleanup_fault', ['unlink', 'close'])
+def test_ext4_manifest_primary_errors_survive_secondary_cleanup(boundary, cleanup_fault, tmp_path, monkeypatch):
+    import errno
+    subject = ext4_helper(); fd = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original = b'{"acknowledged":"old"}'
+    manifest = tmp_path / 'manifest.json'; manifest.write_bytes(original)
+    first = OSError(errno.EIO, 'primary ' + boundary)
+    second = OSError(errno.EACCES, 'secondary ' + cleanup_fault)
+    real_write, real_fsync, real_replace, real_unlink, real_close = os.write, os.fsync, os.replace, os.unlink, os.close
+    def write(target, data):
+        if boundary == 'write': raise first
+        return real_write(target, data)
+    def fsync(target):
+        if boundary == 'directory-fsync' and target == fd or boundary == 'file-fsync' and target != fd: raise first
+        return real_fsync(target)
+    def replace(*args, **kw):
+        if boundary == 'replace': raise first
+        return real_replace(*args, **kw)
+    def unlink(name, **kw):
+        if cleanup_fault == 'unlink': raise second
+        return real_unlink(name, **kw)
+    def close(target):
+        real_close(target)
+        if cleanup_fault == 'close' and target != fd: raise second
+    monkeypatch.setattr(subject.os, 'write', write); monkeypatch.setattr(subject.os, 'fsync', fsync)
+    monkeypatch.setattr(subject.os, 'replace', replace); monkeypatch.setattr(subject.os, 'unlink', unlink); monkeypatch.setattr(subject.os, 'close', close)
+    try:
+        with pytest.raises(OSError) as caught: subject.save(fd, {'acknowledged': 'new'})
+        assert caught.value is first
+        assert len(first.cleanup_errors) == 1 and str(second) in first.cleanup_errors[0]
+        payload = subject.error_payload(first)
+        assert payload['error'] == str(first) and payload['errno'] == errno.EIO and payload['cleanup_errors'] == list(first.cleanup_errors)
+        if boundary == 'directory-fsync': assert json.loads(manifest.read_text()) == {'acknowledged': 'new'}
+        else:
+            assert manifest.read_bytes() == original
+            if cleanup_fault == 'unlink': assert (tmp_path / 'manifest.tmp').exists()
+    finally: real_close(fd)
+
+
+def test_ext4_helper_failure_diagnostics_survive_process_boundary(monkeypatch):
+    subject = wrapper(); payload = {'error': '[Errno 5] primary manifest fsync failure', 'type': 'OSError', 'errno': 5,
+                                   'cleanup_errors': ['temporary unlink: [Errno 13] secondary denied']}
+    monkeypatch.setattr(subject, 'invoke', lambda *a, **k: completed(stderr=('EXT4_FAILURE ' + json.dumps(payload) + '\ncolima exit status 1').encode(), code=1))
+    with pytest.raises(subject.Refused) as caught: subject.ext4_guest('setup', 'a' * 32)
+    assert str(caught.value) == payload['error'] and caught.value.guest_failure == payload
+    assert subject.failure_payload(caught.value)['cleanup_errors'] == payload['cleanup_errors']
+
+
+def test_ext4_report_write_preserves_replace_error_after_temporary_unlink_failure(tmp_path, monkeypatch):
+    import errno
+    subject = wrapper(); first = OSError(errno.EIO, 'primary report replace'); second = OSError(errno.EACCES, 'secondary report unlink')
+    monkeypatch.setattr(subject.os, 'replace', lambda *a: (_ for _ in ()).throw(first))
+    original_unlink = Path.unlink
+    def unlink(path, *a, **k):
+        if '.tmp-' in path.name: raise second
+        return original_unlink(path, *a, **k)
+    monkeypatch.setattr(subject.Path, 'unlink', unlink)
+    with pytest.raises(OSError) as caught: subject.write_report(tmp_path / 'report.json', {'status': 'failed'})
+    assert caught.value is first and first.cleanup_errors[0]['failure']['error'] == str(second)
+    assert list(tmp_path.glob('report.json.tmp-*')) and not (tmp_path / 'report.json').exists()
+
+
+def test_ext4_linux_sentinel_device_is_compared_as_guest_evidence_not_host_decoded(monkeypatch):
+    subject = wrapper(); proof = complete_ext4_proof('a' * 32)
+    proof['rows']['recreation']['sentinel']['device'] = 1795
+    for row in proof['rows'].values():
+        samples = row.get('measurements', [row]) + ([row['existing_reflog']] if 'existing_reflog' in row else [])
+        for sample in samples:
+            for allocation in sample.get('allocations', []): allocation['volume'][0] = 1795
+    monkeypatch.setattr(subject.os, 'major', lambda *a: pytest.fail('host decoded guest st_dev'))
+    monkeypatch.setattr(subject.os, 'minor', lambda *a: pytest.fail('host decoded guest st_dev'))
+    subject.validate_ext4_proof(proof, run_id='a' * 32, profile='allocation', attempt=0, token='c' * 32,
+                                fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': 1795, 'loop': {'name': '/dev/loop3'}})
+
+
+@pytest.mark.parametrize('owner', ['private_dir', 'backing', 'load'])
+def test_ext4_adjacent_descriptor_finalizers_preserve_active_failure(owner, tmp_path, monkeypatch):
+    import errno
+    subject = ext4_helper(); first = OSError(errno.EIO, 'primary descriptor observation'); second = OSError(errno.EACCES, 'secondary descriptor close')
+    image = tmp_path / 'image'; image.write_bytes(b'owned')
+    (tmp_path / 'manifest.json').write_text('{"schema":1}')
+    parent = os.open(tmp_path, os.O_RDONLY | os.O_DIRECTORY)
+    original_close = os.close
+    monkeypatch.setattr(subject.os, 'fstat', lambda fd: (_ for _ in ()).throw(first))
+    def close(fd): original_close(fd); raise second
+    monkeypatch.setattr(subject.os, 'close', close)
+    try:
+        with pytest.raises(OSError) as caught:
+            if owner == 'private_dir': subject.private_dir(tmp_path)
+            elif owner == 'backing': subject.backing(image)
+            else: subject.load(parent, 'a' * 32)
+        assert caught.value is first and len(first.cleanup_errors) == 1 and str(second) in first.cleanup_errors[0]
+    finally: original_close(parent)
+
+
+@pytest.mark.parametrize('mutation', ['volume', 'boundary-family', 'capacity-term', 'phase-rescan', 'journal-only-sink', 'partial-empty', 'publication-undo'])
+def test_ext4_allocation_rows_cannot_substitute_weaker_proof(mutation):
+    subject = wrapper(); proof = complete_ext4_proof('a' * 32)
+    scope = proof['rows']['loose-index-worktree-save']
+    if mutation == 'volume': scope['measurements'][0]['allocations'][0]['volume'] = [99, 'tmpfs', 'foreign']
+    elif mutation == 'boundary-family': scope['measurements'][0]['allocations'][-1]['output'] = 'foreign'
+    elif mutation == 'capacity-term': scope['measurements'][0]['required_inodes'] -= 1
+    elif mutation == 'phase-rescan': scope['phase_rescans'] = 1
+    elif mutation == 'journal-only-sink': proof['rows']['short-eio']['materialization_sink_eio']['sink_path'] = '/fixture/journal.tmp'
+    elif mutation == 'partial-empty': proof['rows']['short-eio']['materialization_sink_eio']['partial_bytes'] = 0
+    else: proof['rows']['short-eio']['owner_persistence'][-1]['published_revision'] = 0
+    with pytest.raises(subject.Refused): subject.validate_ext4_proof(proof, run_id='a' * 32, profile='allocation', attempt=0, token='c' * 32,
+        fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}})
+
+
+def ext4_allocation_samples(proof):
+    rows = proof['rows']; scope = rows['loose-index-worktree-save']
+    return scope['measurements'] + [scope['existing_reflog']] + rows['controls']['measurements'] + [rows['independent-copies'], rows['repack']]
+
+
+@pytest.mark.parametrize('family', range(7))
+@pytest.mark.parametrize('field', ['logical_bytes', 'physical_bytes', 'new_inodes', 'blocks_delta', 'free_bytes_delta', 'free_inodes_delta'])
+def test_ext4_each_nonempty_family_requires_each_observed_demand(field, family):
+    subject = wrapper(); proof = complete_ext4_proof('a' * 32)
+    ext4_allocation_samples(proof)[family][field] = 0
+    with pytest.raises(subject.Refused):
+        subject.validate_ext4_proof(proof, run_id='a' * 32, profile='allocation', attempt=0, token='c' * 32,
+            fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}})
+
+
+@pytest.mark.parametrize('fault', ['all-zero', 'physical-inflated', 'sub-quantum-blocks', 'sub-quantum-free', 'logical-above-physical', 'held-phase-decrease', 'missing-full-log'])
+def test_ext4_observation_terms_must_be_consistent(fault):
+    subject = wrapper(); proof = complete_ext4_proof('a' * 32); samples = ext4_allocation_samples(proof)
+    if fault == 'all-zero':
+        for row in samples:
+            for field in ('logical_bytes', 'physical_bytes', 'new_inodes', 'blocks_delta', 'free_bytes_delta', 'free_inodes_delta'): row[field] = 0
+    elif fault == 'physical-inflated': samples[0]['physical_bytes'] *= 2
+    elif fault == 'sub-quantum-blocks': samples[0]['blocks_delta'] = 512
+    elif fault == 'sub-quantum-free': samples[0]['free_bytes_delta'] = 512
+    elif fault == 'logical-above-physical': samples[0]['logical_bytes'] = samples[0]['physical_bytes'] + 1
+    elif fault == 'held-phase-decrease':
+        for key in ('physical_bytes', 'blocks_delta', 'free_bytes_delta'): samples[0][key] *= 2
+    else: samples[3]['retained_log_bytes'] = samples[3]['logical_bytes'] + 1
+    with pytest.raises(subject.Refused):
+        subject.validate_ext4_proof(proof, run_id='a' * 32, profile='allocation', attempt=0, token='c' * 32,
+            fixture={'mount': {'device': '7:3'}, 'total_inodes': 128, 'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}})
+
+
+@pytest.mark.parametrize('body_error', [False, True])
+@pytest.mark.parametrize('boundaries', [('container',), ('guest',), ('host',), ('descriptor',), ('report',),
+                                       ('guest', 'descriptor', 'report'), ('host', 'descriptor', 'report'), ('container', 'descriptor', 'report')])
+def test_ext4_all_finalizers_preserve_primary_and_independent_structured_failures(body_error, boundaries, tmp_path, monkeypatch):
+    import copy
+    import errno
+    subject = wrapper(); runs = tmp_path / 'runs'; runs.mkdir(); events = []; reports = []; environment = {}; run = []
+    attrs = {'ROOT': tmp_path, 'HERE': tmp_path, 'RUNS': runs, 'snapshot_input': lambda p: {'total': 10},
+             'copy_input': lambda src, dst, **k: dst.mkdir(), 'capacity': lambda *a: 10**10, 'make_context': lambda: b'',
+             'load_toolchain': lambda c: None, 'installed': lambda: None, 'ready': lambda: {}, 'verify_source': lambda p: None,
+             'guest_platform': lambda: 'linux/arm64', 'fingerprint': lambda c: 'fixture', 'image_present': lambda i: True,
+             'verify_image_arch': lambda *a: None, 'endpoint_info': lambda: {'Name': 'colima-ha-ops-dev'}}
+    for key, value in attrs.items(): monkeypatch.setattr(subject, key, value)
+    monkeypatch.setattr(subject.shutil, 'which', lambda n: '/usr/bin/' + n)
+    fixture = {'mount_path': '/guest/mount', 'mount': {'device': '7:3'}, 'total_inodes': 128,
+               'mount_device_number': os.makedev(7, 3), 'loop': {'name': '/dev/loop3'}}
+    errors = {}
+    for phase in (*boundaries, 'body'):
+        error = OSError(errno.EIO, 'primary ' + phase)
+        error.cleanup_errors = ({'phase': phase + ' temporary', 'failure': {'error': 'secondary ' + phase, 'type': 'PermissionError', 'errno': errno.EACCES, 'debt': 'owned ' + phase + '.tmp'}},)
+        if phase == 'guest': error.guest_failure = {'error': str(error), 'type': 'OSError', 'errno': errno.EIO, 'cleanup_errors': list(error.cleanup_errors)}
+        errors[phase] = error
+    def fail(phase):
+        events.append(phase)
+        if phase in boundaries: raise errors[phase]
+    def guest(action, *args):
+        if action == 'cleanup': fail('guest')
+        return fixture if action in {'setup', 'observe'} else {'status': 'absent'}
+    monkeypatch.setattr(subject, 'ext4_guest', guest)
+    def remove(name, *args):
+        if name != 'container': fail('container')
+    monkeypatch.setattr(subject, 'remove_owned', remove)
+    actual_owned = subject.OwnedDirectory
+    class Owned:
+        def __init__(self, path): self.inner = actual_owned(path)
+        def remove(self): fail('host'); self.inner.remove()
+        def close(self): self.inner.close(); fail('descriptor')
+    monkeypatch.setattr(subject, 'OwnedDirectory', Owned)
+    def docker(*args, **kwargs):
+        if args[0] == 'create':
+            run.append(args[args.index('--label') + 1].split('=')[1])
+            environment.update(value.split('=', 1) for i, value in enumerate(args) if i and args[i-1] == '--env')
+            return completed(b'container')
+        if args[0] == 'container':
+            info = ext4_inspection(); info['Config']['Labels']['ha-ops.dev.run'] = run[0]
+            info['Config']['User'] = str(os.getuid()) + ':' + str(os.getgid()); current = next(runs.iterdir())
+            for row in info['Mounts']:
+                if row['Destination'] in {'/workspace/input', '/workspace/output'}: row['Source'] = str(current / Path(row['Destination']).name)
+            return completed(json.dumps([info]).encode())
+        if args[0] == 'wait':
+            if body_error: raise errors['body']
+            path = next(runs.iterdir()) / 'output' / Path(environment['HA_OPS_EXT4_REPORT']).name
+            path.write_text(json.dumps(complete_ext4_proof(run[0], token=environment['HA_OPS_EXT4_TOKEN'])))
+            return completed(b'0')
+        return completed(b'imageid') if args[0] == 'image' else completed()
+    monkeypatch.setattr(subject, 'docker', docker)
+    def report(path, value): reports.append(copy.deepcopy(value)); fail('report')
+    monkeypatch.setattr(subject, 'write_report', report)
+    with pytest.raises(subject.Refused) as caught: subject.ext4_run(Path('.'), ['fixture'], report=tmp_path / 'report.json')
+    expected = errors['body'] if body_error else errors[boundaries[0]]
+    assert caught.value.__cause__ is expected
+    assert caught.value.report['failure']['error'] == str(expected)
+    assert caught.value.report['failure']['errno'] == errno.EIO
+    assert caught.value.report['body_failure'] == (subject.failure_payload(errors['body']) if body_error else None)
+    for phase in boundaries:
+        assert str(errors[phase]) in str(caught.value) and 'secondary ' + phase in str(caught.value) and 'owned ' + phase + '.tmp' in str(caught.value)
+        if phase != 'report':
+            assert 'secondary ' + phase in json.dumps(reports[-1]) and 'owned ' + phase + '.tmp' in json.dumps(reports[-1])
+    assert events[0] == 'container'
+    if 'container' in boundaries: assert 'guest' not in events and 'host' not in events
+    elif 'guest' in boundaries: assert 'host' not in events
+    if 'guest' in events: assert events.index('container') < events.index('guest')
+    if 'report' not in boundaries: assert reports[-1]['status'] == 'failed'
+
+
+def test_ext4_subprocess_diagnostics_preserve_stderr_stdout_and_status():
+    subject = wrapper(); error = subprocess.CalledProcessError(7, ['docker', 'inspect', 'owned'], output=b'partial output', stderr=b'exact owned refusal')
+    payload = subject.failure_payload(error)
+    assert payload['returncode'] == 7 and payload['cmd'] == error.cmd
+    assert payload['stdout'] == 'partial output' and payload['stderr'] == 'exact owned refusal'
+
+
+@pytest.mark.parametrize('phase', ['container', 'guest'])
+def test_ext4_explicit_cleanup_cli_keeps_structured_debt_and_container_fence(phase, monkeypatch, capsys):
+    import errno
+    subject = wrapper(); events = []
+    error = OSError(errno.EIO, 'primary ' + phase)
+    error.cleanup_errors = ({'phase': 'temporary unlink', 'failure': {'error': 'secondary unlink denied', 'errno': errno.EACCES, 'debt': 'owned manifest.tmp'}},)
+    monkeypatch.setattr(subject.sys, 'argv', ['ha_ops_dev', 'cleanup', '--ext4', '--run', 'a' * 32])
+    monkeypatch.setattr(subject, 'endpoint_info', lambda: {})
+    def remove(*args):
+        events.append('container')
+        if phase == 'container': raise error
+    def guest(*args): events.append('guest'); raise error
+    monkeypatch.setattr(subject, 'remove_owned', remove); monkeypatch.setattr(subject, 'ext4_guest', guest)
+    monkeypatch.setattr(subject, 'cleanup_run', lambda *args: pytest.fail('host cleanup after guest/container refusal'))
+    assert subject.main() == 1
+    stderr = capsys.readouterr().err
+    assert str(error) in stderr and 'secondary unlink denied' in stderr and 'owned manifest.tmp' in stderr
+    assert '"errno": 5' in stderr and '"errno": 13' in stderr
+    assert events[:2] == ['container', 'container']
+    assert ('guest' in events) == (phase == 'guest')

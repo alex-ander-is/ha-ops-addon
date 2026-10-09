@@ -777,17 +777,349 @@ def generic_run(input_path, command, recreate=False):
             owned.close()
 
 
+EXT4_HELPER = HERE / "ext4_fixture.py"
+EXT4_SIZES = {"allocation": 256 * 1024**2, "bytes": 256 * 1024**2, "inodes": 64 * 1024**2}
+
+
+EXT4_ROWS = {
+    'allocation': {'loose-index-worktree-save', 'controls', 'independent-copies', 'repack', 'short-eio', 'recreation'},
+    'bytes': {'byte-enospc', 'recreation'}, 'inodes': {'inode-enospc', 'recreation'},
+}
+
+
+def validate_ext4_proof(proof, *, run_id, profile, attempt, token, fixture, previous=None):
+    """Validate measured obligations and the current publication, not its flag."""
+    def require(condition, message):
+        if not condition: raise Refused('Ext4 proof invalid: ' + message)
+    def integer(value, minimum=0):
+        return type(value) is int and value >= minimum
+    def measurement(row, family, outputs=()):
+        require(isinstance(row, dict) and row.get('family') == family, 'measurement family ' + family)
+        for name in ('physical_bytes', 'logical_bytes', 'new_inodes', 'additional_peak', 'required_inodes', 'reserve'):
+            require(integer(row.get(name)), 'measurement integer ' + name)
+        for name in ('blocks_delta', 'free_bytes_delta', 'free_inodes_delta'):
+            require(type(row.get(name)) is int, 'measurement delta ' + name)
+        # Every held family here produces nonempty regular files and new
+        # inodes. Forecast membership cannot stand in for observed demand.
+        quantum = proof['quantum']
+        require(row['logical_bytes'] > 0 and row['new_inodes'] > 0 and row['free_inodes_delta'] > 0,
+                'empty produced byte/inode evidence ' + family)
+        require(row['blocks_delta'] >= quantum and row['free_bytes_delta'] >= quantum and
+                row['blocks_delta'] % quantum == 0 and row['free_bytes_delta'] % quantum == 0,
+                'empty or inconsistent allocated observation ' + family)
+        require(row['physical_bytes'] == max(0, row['blocks_delta'], row['free_bytes_delta']) and
+                row['logical_bytes'] <= row['physical_bytes'], 'inconsistent physical demand')
+        require(row['physical_bytes'] <= row['additional_peak'] and
+                max(row['new_inodes'], row['free_inodes_delta']) <= row['required_inodes'], 'forecast overrun')
+        allocations = row.get('allocations')
+        require(isinstance(allocations, list) and allocations, 'allocation terms absent')
+        for allocation in allocations:
+            require(isinstance(allocation, dict) and isinstance(allocation.get('output'), str) and
+                    all(integer(allocation.get(k)) for k in ('logical', 'allocated', 'inodes')), 'allocation terms malformed')
+        expected_volume = [fixture['mount_device_number'], '65787434', fixture['loop']['name'].encode().hex()]
+        require(all(a.get('volume') == expected_volume for a in allocations), 'forecast volume differs from actual ext4')
+        require(row['physical_bytes'] % 512 == 0 and all(a['logical'] <= a['allocated'] for a in allocations), 'physical allocation terms')
+        require(sum(a['allocated'] for a in allocations) == row['additional_peak'] and
+                sum(a['inodes'] for a in allocations) + 2 * len({json.dumps(a.get('volume')) for a in allocations}) == row['required_inodes'], 'forecast terms inconsistent')
+        names = [a['output'] for a in allocations]
+        require(all(any(n.startswith(prefix) for n in names) for prefix in outputs), 'mandatory recipe terms absent')
+    def recovery(rows):
+        require(isinstance(rows, list), 'addressed recovery list')
+        for row in rows:
+            require(isinstance(row, dict) and row.get('status') in {'removed', 'absent', 'debt'}, 'addressed recovery outcome')
+            require(all(isinstance(row.get(k), str) and re.fullmatch(r'[0-9a-f-]{36}', row[k]) for k in ('resource_id', 'owner', 'operation')), 'addressed recovery identity')
+            require(isinstance(row.get('errors'), list), 'addressed recovery diagnostics')
+            if row['status'] == 'debt':
+                retained = row.get('retained')
+                require(row['errors'] and isinstance(retained, dict) and retained.get('resource_id') == row['resource_id'] and
+                        retained.get('owner') == row['owner'] and retained.get('operation') == row['operation'], 'unaddressed retained debt')
+    require(isinstance(proof, dict), 'report object')
+    require(type(proof.get('schema')) is int and proof['schema'] == 1 and proof.get('status') == 'passed' and proof.get('run') == run_id and
+            proof.get('profile') == profile and type(proof.get('attempt')) is int and proof['attempt'] == attempt and
+            proof.get('attempt_token') == token, 'current attempt identity')
+    require(proof.get('filesystem') == 'ext4' and proof.get('device') == fixture['mount']['device'] and
+            proof.get('quantum') == 4096 and proof.get('total_inodes') == fixture['total_inodes'], 'mounted profile')
+    rows = proof.get('rows')
+    require(isinstance(rows, dict) and set(rows) == EXT4_ROWS[profile] and all(isinstance(r, dict) for r in rows.values()), 'exact mandatory row set')
+    recreation = rows['recreation']; sentinel = recreation.get('sentinel')
+    require(type(recreation.get('attempt')) is int and recreation['attempt'] == attempt and
+            isinstance(sentinel, dict) and set(sentinel) == {'device', 'inode', 'sha256'} and
+            integer(sentinel.get('device'), 1) and integer(sentinel.get('inode'), 1) and
+            isinstance(sentinel.get('sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', sentinel['sha256']), 'fresh recreation sentinel')
+    require(sentinel['device'] == fixture['mount_device_number'], 'sentinel device differs from ext4')
+    if previous is not None:
+        require(attempt == previous['attempt'] + 1 and sentinel == previous['rows']['recreation']['sentinel'], 'recreated sentinel persistence')
+        require(all(row == previous['rows'][name] for name, row in rows.items() if name != 'recreation'), 'retained matrix changed on recreation')
+    if profile == 'allocation':
+        scope = rows['loose-index-worktree-save']; samples = scope.get('measurements')
+        require(isinstance(samples, list) and len(samples) == 3, 'complete held scope phases')
+        families = ('loose-spool-fanout', 'complete-index-lock-trees', 'worktree-admin-materialization-save-ref-reflog')
+        recipe = ('stream-spool:', 'loose-blob:', 'complete-index', 'index-lock-overlap', 'generated-tree:',
+                  'worktree-control:', 'commit-object', 'ref-atomic-output', 'ref-lock-overlap', 'full-reflog-copy-append', 'reflog-atomic-overlap')
+        for sample, family in zip(samples, families): measurement(sample, family, recipe)
+        sizes = [a['logical'] for a in samples[0]['allocations'] if a['output'].startswith('stream-spool:')]
+        require(len(sizes) == scope.get('selected_entries') and {0, 1, 4095, 4096, 4097, 1024**2} <= set(sizes) and sizes.count(1) >= 96 and
+                sum(a['output'].startswith('loose-blob:') for a in samples[0]['allocations']) == len(sizes), 'complete selected boundary/tiny recipe')
+        require(all(all(later[k] >= earlier[k] for k in ('logical_bytes', 'physical_bytes', 'blocks_delta',
+                'free_bytes_delta', 'new_inodes', 'free_inodes_delta')) for earlier, later in zip(samples, samples[1:])),
+                'held scope observations decreased between phases')
+        require(all(all(sample[k] == samples[0][k] for k in ('additional_peak', 'required_inodes', 'reserve', 'allocations')) for sample in samples), 'scope forecast replaced between phases')
+        require(type(scope.get('snapshot_count')) is int and scope['snapshot_count'] == 1 and type(scope.get('forecast_count')) is int and scope['forecast_count'] == 1 and type(scope.get('phase_rescans')) is int and scope['phase_rescans'] == 0 and
+                integer(scope.get('selected_entries'), 102) and integer(scope.get('unselected_entries'), 1), 'scope/phase coverage')
+        existing = scope.get('existing_reflog'); measurement(existing, 'existing-complete-reflog-copy-append-ref-lock', ('full-reflog-copy-append', 'reflog-atomic-overlap'))
+        require(integer(existing.get('retained_log_bytes'), 1) and existing['logical_bytes'] >= existing['retained_log_bytes'], 'full existing reflog absent')
+        controls = rows['controls']; samples = controls.get('measurements')
+        require(isinstance(samples, list) and len(samples) == 1 and controls.get('prior_control_retained_during_replace') is True and
+                controls.get('full_pending_failure_envelope') is True, 'full control overlap')
+        measurement(samples[0], 'full-old-new-control-temp-diff', ('full-prospective-operation-state', 'full-pending-control', 'exact-diff-artifact'))
+        copies = rows['independent-copies']; measurement(copies, 'two-independent-copies-metadata-replacement', ('independent-copy:', 'exact-encoded-metadata:', 'replacement-temporary:'))
+        require(sum(a['output'].startswith('independent-copy:') for a in copies['allocations']) == 2, 'two independent copy recipes')
+        repack = rows['repack']; measurement(repack, 'all-object-kinds-old-pack-new-pack-index-full-temp', ('new-pack-old-packs-retained', 'pack-index', 'pack-temporary-overlap'))
+        require(integer(repack.get('objects'), 5) and repack.get('kinds') == ['blob', 'tree', 'commit', 'tag'] and repack.get('unreachable') is True and
+                repack.get('argv') == ['pack-objects', '--window=0', '--depth=0', '--no-reuse-object', '--no-reuse-delta'], 'complete no-reuse repack profile')
+        faults = rows['short-eio']; persistence = faults.get('owner_persistence')
+        expected = {'artifact_written', 'artifact_fsynced', 'artifact_replaced', 'state_written', 'state_fsynced', 'state_replaced',
+                    'artifact-fsync', 'state-fsync', 'state-directory-fsync-after-replace'}
+        require(faults.get('positive_short_bytes') == 8193 and faults.get('zero_progress_refused') is True and faults.get('copy_sink_eio_preserved') is True and
+                isinstance(persistence, list) and len(persistence) == len(expected) and all(isinstance(r, dict) for r in persistence) and
+                {r.get('boundary') for r in persistence} == expected, 'mandatory short/persistence faults')
+        for row in persistence:
+            require(row.get('first_error_preserved') is True and integer(row.get('prior_revision')) and integer(row.get('published_revision')), 'first persistence failure evidence')
+            increment = 1 if row['boundary'] in {'state_replaced', 'state-directory-fsync-after-replace'} else 0
+            require(row['published_revision'] == row['prior_revision'] + increment, 'publication reconciliation evidence')
+        materialization = faults.get('materialization_sink_eio')
+        require(isinstance(materialization, dict) and materialization.get('first_error_preserved') is True and materialization.get('copy_blob_entered') is True and
+                materialization.get('selected_path') == 'homeassistant/file' and integer(materialization.get('partial_bytes'), 1) and
+                integer(materialization.get('expected_size'), materialization['partial_bytes'] + 1) and
+                isinstance(materialization.get('sink_path'), str) and materialization['sink_path'].endswith('/tree/homeassistant/file') and
+                isinstance(materialization.get('partial_sha256'), str) and re.fullmatch(r'[0-9a-f]{64}', materialization['partial_sha256']) and
+                isinstance(materialization.get('reached_bytes'), list) and len(materialization['reached_bytes']) == 1 and
+                integer(materialization['reached_bytes'][0], materialization['partial_bytes']), 'actual selected materialization sink')
+        recovery(materialization.get('addressed_recovery'))
+    else:
+        row = rows['byte-enospc' if profile == 'bytes' else 'inode-enospc']
+        require(row.get('kernel_errno') == 28 and row.get('state_preserved') is True, 'kernel failure/preservation evidence')
+        recovery(row.get('recovered_resources'))
+        if profile == 'bytes':
+            require(integer(row.get('written_bytes'), 1) and row['written_bytes'] <= EXT4_SIZES[profile], 'bounded byte exhaustion')
+            failures = row.get('failures'); expected = {'preview-payload', 'blob-payload', 'materialization', 'state-atomic-publication-after-durable-artifact'}
+            require(isinstance(failures, list) and len(failures) == 4 and all(isinstance(r, dict) for r in failures) and
+                    {r.get('boundary') for r in failures} == expected, 'mandatory byte failure boundaries')
+            require(all(r.get('errno') == 28 and isinstance(r.get('error'), str) and r['error'] for r in failures), 'actual byte ENOSPC errors')
+        else:
+            require(row.get('observed_total_inodes') == fixture['total_inodes'] and integer(row.get('created_inodes'), 1) and
+                    row['created_inodes'] <= fixture['total_inodes'] + 8 and integer(row.get('remaining_bytes'), 16 * 1024**2), 'isolated inode exhaustion with free bytes')
+    return proof
+
+
+def failure_payload(error):
+    payload = {'error': str(error), 'type': type(error).__name__, 'errno': getattr(error, 'errno', None),
+               'cleanup_errors': list(getattr(error, 'cleanup_errors', ())), 'guest_failure': getattr(error, 'guest_failure', None)}
+    for name in ('filename', 'filename2', 'failure', 'report_failure', 'guest_process'):
+        value = getattr(error, name, None)
+        if value is not None: payload[name] = os.fspath(value) if isinstance(value, Path) else value
+    if isinstance(error, subprocess.SubprocessError):
+        for name in ('cmd', 'returncode', 'timeout', 'stdout', 'stderr'):
+            value = getattr(error, name, None)
+            if value is not None: payload[name] = value.decode(errors='replace') if isinstance(value, bytes) else value
+    return payload
+
+
+def ext4_guest(action, run_id, profile="allocation"):
+    if not re.fullmatch(r"[0-9a-f]{32}", run_id) or profile not in EXT4_SIZES:
+        raise Refused("Exact ext4 run identity/profile required")
+    # The source is sent over stdin, never installed into the guest or image.
+    environment = os.environ.copy()
+    for key in ("COLIMA_HOME", "COLIMA_PROFILE", "LIMA_HOME"):
+        environment.pop(key, None)
+    result = invoke(["colima", "ssh", "--profile", PROFILE, "--", "sudo", "-n",
+                     "/usr/bin/python3", "-", action, "--run", run_id, "--profile", profile,
+                     "--uid", str(os.getuid()), "--gid", str(os.getgid())],
+                    input=EXT4_HELPER.read_bytes(), env=environment, timeout=180, check=False)
+    if result.returncode:
+        stderr = result.stderr.decode(errors="replace")
+        payload = None
+        for line in stderr.splitlines():
+            if line.startswith('EXT4_FAILURE '):
+                try: payload = json.loads(line[len('EXT4_FAILURE '):])
+                except ValueError: pass
+        error = Refused(payload['error'] if payload else stderr.strip())
+        error.guest_failure = payload
+        error.errno = payload.get('errno') if payload else None
+        error.guest_process = {'returncode': result.returncode, 'stdout': result.stdout.decode(errors='replace'), 'stderr': stderr}
+        error.cleanup_errors = tuple(payload.get('cleanup_errors', ())) if payload else ()
+        raise error
+    return json.loads(result.stdout)
+
+
+def verify_ext4_container(inspected, container_id, run_id, source, output, fixture, user):
+    if inspected.get("Id") != container_id or inspected.get("Config", {}).get("Labels", {}).get("ha-ops.dev.run") != run_id:
+        raise Refused("Created ext4 container identity or owner changed")
+    config, host = inspected["Config"], inspected["HostConfig"]
+    if config.get("User") != user or user.split(":")[0] == "0":
+        raise Refused("Ext4 application must run as the exact nonroot user")
+    if host.get("Privileged") or host.get("Devices") or host.get("CapAdd") or set(host.get("CapDrop") or ()) != {"ALL"}:
+        raise Refused("Ext4 application privilege boundary failed")
+    if "no-new-privileges" not in (host.get("SecurityOpt") or ()) or not host.get("ReadonlyRootfs") or host.get("NetworkMode") != "none":
+        raise Refused("Ext4 application security boundary failed")
+    rows = inspected.get("Mounts", [])
+    mounts = {row["Destination"]: row for row in rows}
+    expected = {"/workspace/input": (str(source), False), "/workspace/output": (str(output), True),
+                "/workspace/ext4": (fixture["mount_path"], True)}
+    if len(rows) != 3 or set(mounts) != set(expected) or any(
+        mounts[key].get("Type") != "bind" or mounts[key].get("Source") != path or mounts[key].get("RW") != rw or
+        mounts[key].get("Propagation") != "rprivate" for key, (path, rw) in expected.items()):
+        raise Refused("Exact private ext4 container mounts failed")
+
+
+def ext4_run(input_path, command, *, profile="allocation", recreate=False, report=None):
+    if not command or os.getuid() == 0 or profile not in EXT4_SIZES:
+        raise Refused("Ext4 needs a command, bounded profile and nonroot application UID")
+    input_source = ROOT / input_path
+    snapshot = snapshot_input(input_source)
+    capacity(HERE, HOST_RESERVE + RUN_HEADROOM + EXT4_SIZES[profile] + snapshot["total"])
+    no_symlinks(RUNS); RUNS.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    run_dir = RUNS / run_id
+    run_dir.mkdir(mode=0o700)
+    owned = OwnedDirectory(run_dir)
+    names, first, failures = [], None, []
+    cleanup_causes = []
+    def cleanup_failure(phase, error):
+        failures.append({'phase': phase, 'failure': failure_payload(error)})
+        cleanup_causes.append(error)
+    result = {"status": "started", "run_id": run_id, "profile": profile, "containers": []}
+    setup_attempted = False
+    try:
+        source, output = run_dir / "input", run_dir / "output"
+        copy_input(input_source, source, expected=snapshot); output.mkdir(mode=0o700)
+        # This opt-in route requires the reusable VM/image; it never builds or
+        # downloads dependencies as an incidental part of a disk proof.
+        missing = [tool for tool in ("colima", "docker") if not shutil.which(tool)]
+        if missing: raise Refused("Ext4 requires existing tools; no installation attempted: " + ", ".join(missing))
+        context = make_context(); load_toolchain(context); installed()
+        measurements = ready()
+        for path in (source, output): verify_source(path)
+        target_platform = guest_platform()
+        image = "ha-ops-dev:" + fingerprint(context)
+        if not image_present(image): raise Refused("Ext4 requires the existing reusable image; run setup separately")
+        verify_image_arch(image, target_platform)
+        image_id = docker("image", "inspect", image, "--format", "{{.Id}}").stdout.decode().strip()
+        result.update(local_environment=measurements, image=image, image_id=image_id,
+                      guest_preflight=ext4_guest("preflight", run_id, profile))
+        setup_attempted = True
+        fixture = ext4_guest("setup", run_id, profile)
+        result["fixture"] = fixture
+        user = str(os.getuid()) + ":" + str(os.getgid())
+        previous = None
+        for attempt in range(2 if recreate else 1):
+            attempt_token = uuid.uuid4().hex
+            proof_name = 'ext4-proof-' + attempt_token + '.json'
+            prior_name = 'ext4-prior-' + attempt_token + '.json'
+            proof_path = output / proof_name
+            if proof_path.exists(): raise Refused('Unexpected current-attempt report already exists')
+            if previous is not None: write_report(output / prior_name, previous)
+            observed = ext4_guest("observe", run_id, profile)
+            if observed != fixture: raise Refused("Ext4 identity changed before container creation")
+            name = "ha-ops-dev-" + run_id + "-ext4-" + str(attempt)
+            names.append(name)
+            args = ["create", "--name", name, "--label", "ha-ops.dev.run=" + run_id,
+                    "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", user,
+                    "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                    "--mount", f"type=bind,source={source},target=/workspace/input,readonly,bind-propagation=rprivate",
+                    "--mount", f"type=bind,source={output},target=/workspace/output,bind-propagation=rprivate",
+                    "--mount", f"type=bind,source={fixture['mount_path']},target=/workspace/ext4,bind-propagation=rprivate",
+                    "--env", "HA_OPS_EXT4_ROOT=/workspace/ext4", "--env", "HA_OPS_EXT4_PROFILE=" + profile,
+                    "--env", "HA_OPS_EXT4_RUN=" + run_id, "--env", "HA_OPS_EXT4_DEVICE=" + fixture["mount"]["device"],
+                    "--env", "HA_OPS_EXT4_REPORT=/workspace/output/" + proof_name,
+                    "--env", "HA_OPS_EXT4_PRIOR_REPORT=/workspace/output/" + prior_name,
+                    "--env", "HA_OPS_EXT4_TOKEN=" + attempt_token,
+                    "--env", "HA_OPS_EXT4_ATTEMPT=" + str(attempt), "--workdir", "/workspace/input",
+                    "--platform", target_platform, image, *command]
+            container_id = docker(*args).stdout.decode().strip()
+            inspected = json.loads(docker("container", "inspect", container_id).stdout)[0]
+            verify_ext4_container(inspected, container_id, run_id, source, output, fixture, user)
+            result["containers"].append({"id": container_id, "name": name, "security": inspected["HostConfig"], "mounts": inspected["Mounts"]})
+            docker("start", container_id)
+            code = int(docker("wait", container_id, timeout=1800).stdout.strip())
+            logs = docker("logs", container_id)
+            sys.stdout.buffer.write(logs.stdout); sys.stderr.buffer.write(logs.stderr)
+            if proof_path.exists():
+                proof = json.loads(proof_path.read_text())
+                result.setdefault("proofs", []).append(proof)
+            else:
+                proof = None
+            if code:
+                result["command_failure_logs"] = (logs.stdout + logs.stderr)[-65536:].decode(errors="replace")
+                raise Refused("Ext4 proof command failed with exit " + str(code))
+            if proof is None: raise Refused("Ext4 proof report is absent")
+            validate_ext4_proof(proof, run_id=run_id, profile=profile, attempt=attempt, token=attempt_token, fixture=fixture, previous=previous)
+            previous = proof
+            remove_owned(container_id, run_id)
+        if docker("image", "inspect", image, "--format", "{{.Id}}").stdout.decode().strip() != image_id:
+            raise Refused("Reusable image identity changed")
+    except BaseException as error:
+        first = error
+    finally:
+        # Try every exact removal independently; backing is retained if even
+        # one absence is not proven. No unmount below a surviving container.
+        for name in names:
+            try: remove_owned(name, run_id)
+            except BaseException as error: cleanup_failure("container " + name, error)
+        if not failures and setup_attempted:
+            try:
+                result["cleanup"] = ext4_guest("cleanup", run_id, profile)
+                result["cleanup_repeat"] = ext4_guest("cleanup", run_id, profile)
+                result["image_id_after_cleanup"] = docker("image", "inspect", image, "--format", "{{.Id}}").stdout.decode().strip()
+                if result["image_id_after_cleanup"] != image_id: raise Refused("Reusable image changed during cleanup")
+                result["vm_after_cleanup"] = endpoint_info().get("Name")
+            except BaseException as error: cleanup_failure("guest fixture", error)
+        if not failures:
+            try: owned.remove()
+            except BaseException as error: cleanup_failure("host fixture", error)
+        try: owned.close()
+        except BaseException as error: cleanup_failure("host descriptor", error)
+    body_failure = failure_payload(first) if first is not None else None
+    if first is None and cleanup_causes:
+        first = cleanup_causes[0]
+    result.update(status="failed" if first is not None else "passed", error=str(first) if first is not None else None,
+                  cleanup_errors=failures, failure=failure_payload(first) if first is not None else None,
+                  body_failure=body_failure)
+    # Completion is published only after the exact cleanup verification.
+    try: write_report(report or LOCAL / ("ext4-" + profile + "-report.json"), result)
+    except BaseException as error:
+        cleanup_failure("report persistence", error)
+        if first is None: first = error
+        result.update(status="failed", error=str(first), failure=failure_payload(first),
+                      report_failure=failure_payload(error))
+    if first is not None:
+        diagnostics = {key: result.get(key) for key in ('error', 'failure', 'body_failure', 'cleanup_errors', 'report_failure')}
+        refused = Refused("Ext4 incomplete: " + json.dumps(diagnostics, sort_keys=True))
+        refused.failure = result['failure']
+        refused.cleanup_errors = tuple(failures)
+        refused.report_failure = result.get('report_failure')
+        refused.report = result
+        raise refused from first
+    return 0
+
+
 def write_report(path, payload):
     if path is None:
         return
     path = no_symlinks(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    first = None
     try:
         temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
         os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    except BaseException as error:
+        first = error
+    try: temporary.unlink(missing_ok=True)
+    except BaseException as error:
+        if first is None: first = error
+        else: first.cleanup_errors = tuple(getattr(first, 'cleanup_errors', ())) + ({'phase': 'report temporary unlink', 'failure': failure_payload(error)},)
+    if first is not None: raise first
 
 
 def cleanup_run(run_id, fixture, owned=None):
@@ -884,9 +1216,13 @@ def main():
     run = commands.add_parser("run")
     run.add_argument("--input", required=True, type=Path)
     run.add_argument("--recreate", action="store_true", help="Repeat command in a new container with the same output bind")
+    run.add_argument("--ext4", action="store_true", help="Use the bounded guest-native ext4 fixture")
+    run.add_argument("--ext4-profile", choices=EXT4_SIZES, default="allocation")
+    run.add_argument("--report", type=Path)
     run.add_argument("program", nargs=argparse.REMAINDER)
     clean = commands.add_parser("cleanup")
     clean.add_argument("--run", required=True)
+    clean.add_argument("--ext4", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "setup":
@@ -895,6 +1231,10 @@ def main():
             print(json.dumps(topology(args.report), indent=2, sort_keys=True))
         elif args.command == "run":
             program = args.program[1:] if args.program[:1] == ["--"] else args.program
+            if args.ext4:
+                return ext4_run(args.input, program, profile=args.ext4_profile, recreate=args.recreate, report=args.report)
+            if args.report or args.ext4_profile != "allocation":
+                raise Refused("Ext4 options require --ext4")
             return generic_run(args.input, program, recreate=args.recreate)
         elif args.command == "status":
             if not shutil.which("colima"):
@@ -931,9 +1271,23 @@ def main():
             if not args.run or any(char not in "0123456789abcdef" for char in args.run) or len(args.run) != 32:
                 raise Refused("Cleanup requires an exact 32-character run ID")
             endpoint_info()
+            if args.ext4:
+                cleanup_failures, cleanup_primary = [], None
+                for attempt in range(2):
+                    try: remove_owned("ha-ops-dev-" + args.run + "-ext4-" + str(attempt), args.run)
+                    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
+                        if cleanup_primary is None: cleanup_primary = error
+                        cleanup_failures.append({'phase': 'container attempt ' + str(attempt), 'failure': failure_payload(error)})
+                if cleanup_failures:
+                    refused = Refused("Ext4 container cleanup failed: " + json.dumps(cleanup_failures, sort_keys=True))
+                    refused.cleanup_errors = tuple(cleanup_failures)
+                    refused.failure = failure_payload(cleanup_primary)
+                    raise refused from cleanup_primary
+                ext4_guest("cleanup", args.run)
             cleanup_run(args.run, RUNS / args.run)
     except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
-        print(f"Local runner refused: {error}", file=sys.stderr)
+        diagnostic = "; diagnostics=" + json.dumps(failure_payload(error), sort_keys=True) if getattr(args, "ext4", False) else ""
+        print(f"Local runner refused: {error}{diagnostic}", file=sys.stderr)
         return 1
     return 0
 
