@@ -145,6 +145,28 @@ which is the Colima VM on macOS. See the upstream [Colima configuration][1],
 [3]: https://docs.docker.com/engine/storage/bind-mounts/
 [4]: https://docs.docker.com/build/concepts/context/#local-tarballs
 
+## Metadata candidate evaluation
+
+The development image pins etckeeper `1.18.20-1`, Metastore `1.1.2-4+b1`,
+acl/libacl1 `2.3.1-3` and libbsd0 `0.11.7-2`. Etckeeper is extracted under
+`/opt/metadata-tools` without maintainer scripts, package-manager hooks or
+initializing `/etc`; this is an evaluation dependency only. Python inspects
+binary xattrs without installing attr. Rebuilding through `setup` needs the
+normal dependency/build-network approval and retains older reusable images.
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_metadata_evaluation.py
+```
+
+This root fixture uses generic runner `/tmp` tmpfs with existing narrowly
+bounded capabilities, network none and a read-only root. It verifies actual
+tools, deleted-inode Git revert, independent Git transport, exact readback,
+selection coupling and candidate defects. The output bind and nonroot ext4
+profile are not metadata proof substitutes. Missing Linux requirements fail;
+macOS skips are collection evidence only. See [observed candidate results and
+remaining limits](metadata-evaluation.md); passing known-gap tests do not mean
+full restoration. No production adapter or candidate selection is implemented.
+
 ## Guest-native ext4 qualification
 
 The opt-in ext4 route reuses the running VM and its existing fingerprinted

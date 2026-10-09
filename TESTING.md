@@ -246,6 +246,33 @@ independent recovery pin plus owner fencing across container replacement. Observ
 fixtures; these tests do not verify future Git/live adapters or activate native
 Save, Apply or migration. See [the state contract](ha-ops/docs/native-operation-state.md).
 
+## Metadata candidate evaluation
+
+```sh
+python3 -m pytest -q ha-ops/tests/test_metadata_evaluation.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_metadata_evaluation.py
+```
+
+The first command runs three portable invalid-outcome guards and explicitly
+skips the 19 real-tool cases on macOS. Linux
+collection requires the approved pinned development image, root/CAP_CHOWN and
+CAP_FOWNER, `/tmp` tmpfs, real etckeeper/Metastore and ACL/xattr support; missing
+requirements fail rather than skip. Do not count host skips as Linux evidence.
+Use generic `run`, not the nonroot ext4 profile or output bind. The fixture
+installs nothing and uses only owned disposable trees with independent readback.
+
+The [candidate report](dev/virtualization/metadata-evaluation.md) distinguishes
+ordinary exact restoration from deliberately asserted candidate gaps, including
+Metastore owner-only special-bit loss and silent partial apply. It covers local
+revert, an independent publisher/bare remote/destination and fresh restoring
+clone, whole-manifest selection coupling, canonical-index preservation and
+same/different-path conflicts. Positive clean merging requires success, no
+unmerged stages/conflict markers and readback of both merged modes; injected
+fatal refusal, unresolved stages and text conflict cannot count as a clean pass.
+This group evaluates tools only; it does not
+verify or activate native Save/Apply. Fixture directories and containers are
+removed on success or failure by their respective owners.
+
 ## Inventory review and parallelism
 
 The October 2026 review covered all eight Python test files and both browser
