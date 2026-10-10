@@ -1,11 +1,14 @@
 # Native-tree metadata candidate evaluation (step 6.7)
 
-Neither upstream candidate is ready to become the native Save/Apply adapter.
-Etckeeper restores basic ownership and full permission bits but omits ACL/xattr.
-Metastore restores the ordinary complete Linux fixture, including ACL/xattr,
-but loses executable special bits in an owner-only change and silently reports
-success for several incomplete operations. Choosing Metastore remains a separate
-user decision. This evaluation does not implement step 6.8 or change App code.
+The accepted MVP decision (2026-10-10) is to choose Etckeeper and exclude
+Metastore from further consideration because of its fundamental restore bug:
+an owner-only change can clear setuid/setgid, changing stored mode 06750 to
+0750 while reporting success. Etckeeper restores ownership, full permission
+bits and required parent-directory metadata in the executed fixtures.
+ACL/xattr support and extensions to Etckeeper for them are outside the MVP
+scope; the current HA setup does not use them. The broader comparison below
+remains historical evidence, not an MVP requirement. This evaluation does not
+implement step 6.8 or change App code.
 
 ## Executed environment and package applicability
 
@@ -101,8 +104,9 @@ are names resolved by destination NSS; the same name can map to a different UID.
 POSIX ACL xattrs retain raw numeric principals. Different NSS, ext4, live HA,
 SELinux, security/capability namespaces and unsupported filesystems remain
 unverified. The measured privilege-denied ACL/xattr case is not a measurement
-of a filesystem returning EOPNOTSUPP. Missing support must fail a future
-adapter's capability gate; no silent downgrade is acceptable.
+of a filesystem returning EOPNOTSUPP. Missing support for required MVP metadata
+must fail a future adapter's capability gate; no silent downgrade is acceptable.
+ACL/xattr capability is not an MVP requirement.
 
 Whole-tree capture cannot represent independent per-path selection by staging A
 plus the fresh shared manifest: the test materializes the isolated candidate
@@ -115,23 +119,24 @@ That basic-attribute proof is experimental, not a production record parser,
 security boundary, full ACL/xattr selection proof or native adapter. Production
 selection still needs a canonical per-path representation and safe reconstruction.
 
-## Proposed review behavior and decision
+## Accepted MVP decision and planned review behavior
 
-Readable versioned per-path data remains the reference direction for step 6.8,
-explicitly extended beyond etckeeper for ownership, all mode bits, required
-parents, access/default ACL and xattrs. Metastore is useful evidence for Linux
-ACL/xattr restoration, but its binary merge format, identity mapping and silent
-partial success need adaptation before adoption. Neither unchanged upstream
-hook belongs in NativeGit, which deliberately disables repository hooks and
-live checkout effects. Existing NativeGit/Inventory/OperationStore do not
-implement exact metadata restoration.
+Step 6.8 will use Etckeeper for a versioned, repository-only metadata adapter
+covering owner/group, all permission bits and required parent directories.
+Metastore is excluded because the demonstrated owner-change bug breaks exact
+permission restoration while reporting success. Its ACL/xattr coverage does
+not change that decision. ACL/xattr implementation and Etckeeper extensions
+for them are outside the MVP scope and are not planned by this evaluation.
+Per-path selection and safe restoration still require integration: unchanged
+upstream hooks cannot run in NativeGit, which deliberately disables repository
+hooks and live checkout effects. Existing NativeGit/Inventory/OperationStore
+do not implement exact metadata restoration.
 
 A future UI should show per-path before/ours/theirs metadata facets beside
-content: owner/group, full mode, access/default ACL, xattr names and reviewed
-values, plus required-parent rows. Content and metadata need atomic review.
-Unresolved, unsupported, identity or permission failures must block completion;
-secret-bearing xattrs need review before publication. A shared binary choice
-cannot substitute for path-level resolution. No UI changes are part of 6.7.
+content: owner/group and full mode, plus required-parent rows. Content and MVP
+metadata need atomic review. Unresolved conflicts and failures in required
+MVP metadata, identity or permissions must block completion. No ACL/xattr UI
+or implementation is required for the MVP. No UI changes are part of 6.7.
 
 ## Reproduce
 
