@@ -322,3 +322,28 @@ redundancy is demonstrated at the same boundary. Check stable collection and
 run focused groups independently after moving imports or fixtures. Run the
 full suite for scheduling/isolation changes, and avoid rerunning it immediately
 before an authorized push when the unchanged hook will run the same gate.
+
+## Dormant fixed native metadata adapter
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_metadata.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_metadata.py
+```
+
+Both commands are required for step 6.8. The generic existing Linux image uses
+root-capable `/tmp` for exact numeric UID/GID/full `07777` and required-parent
+proofs; do not substitute the nonroot ext4 profile, output APFS bind or live HA.
+Host skips explicitly exclude privileged Linux proofs. The group uses only
+owned disposable trees and local bare-remote Git fixtures, no network,
+installation or executable repository manifests. It proves absent-object
+historical revert, independent no-hardlinks destination/fresh clone restoration,
+owner-only special-bit retention, selection/parent review and isolated-index
+composition, semantic SHA1/SHA256 baseline ordering, all metadata-delta/review
+revalidation, both file/directory replacements and candidate-local failure
+between removal/addition, strict malformed-data refusal, no-follow race/type/link/mount
+fences, partial-effect reporting and low descriptor limits. Input is tracked Git
+objects plus validated data; expected stat snapshots are assertion-only.
+The completed 6.6 ext4 qualification is reused rather than rerun. Wrapper cleanup
+failure makes Linux evidence incomplete. See the [adapter contract and risk
+map](ha-ops/docs/native-metadata.md). The foreman's final whole-suite gate remains
+separate; avoid duplicating it immediately before an unchanged pre-push hook.
