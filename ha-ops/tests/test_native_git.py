@@ -702,7 +702,7 @@ def assert_dormant_import_contour(sources):
                     continue
                 # Only this named dormant observational peer may reuse NativeGit.
                 # Neither adapter may become an ordinary app entrypoint import.
-                assert name == "native_disk.py" and module == "native_git", (name, module)
+                assert name in ("native_disk.py", "native_preview.py") and module == "native_git", (name, module)
 
 
 @pytest.mark.parametrize("module", ["native_git", "native_disk", "native_git.helpers", "native_disk.helpers", "app.native_git", "app.native_disk", "app.native_git.helpers", "app.native_disk.helpers"])
@@ -725,6 +725,7 @@ def test_dormant_import_sentinel_detects_package_imported_aliases(module, packag
 
 def test_dormant_import_sentinel_allows_only_named_observational_peer():
     assert_dormant_import_contour({"native_disk.py": "def observe():\n    from native_git import NativeGit"})
+    assert_dormant_import_contour({"native_preview.py": "def observe():\n    from native_git import NativeGit"})
     with pytest.raises(AssertionError):
         assert_dormant_import_contour({"another_dormant.py": "from native_git import NativeGit"})
 

@@ -398,15 +398,28 @@ def test_dormancy_and_no_executable_manifest():
             assert not any(a.name in ("subprocess", "pwd", "grp") for a in getattr(node, "names", ()))
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             assert node.func.id not in ("eval", "exec")
-    for path in source.parent.glob("*.py"):
-        if path == source:
-            continue
-        t = ast.parse(path.read_text())
-        for node in ast.walk(t):
-            if isinstance(node, ast.ImportFrom):
-                assert (node.module or "").split(".")[-1] != "native_metadata"
+    assert_metadata_dormancy({p.name: p.read_text() for p in source.parent.glob("*.py") if p != source})
+
+
+def assert_metadata_dormancy(sources):
+    for name, source in sources.items():
+        for node in ast.walk(ast.parse(source)):
             if isinstance(node, ast.Import):
-                assert all(a.name.split(".")[-1] != "native_metadata" for a in node.names)
+                modules = [part for alias in node.names for part in alias.name.split(".")]
+            elif isinstance(node, ast.ImportFrom):
+                modules = (node.module or "").split(".") + [part for alias in node.names for part in alias.name.split(".")]
+            else:
+                continue
+            if "native_metadata" in modules:
+                assert name == "native_preview.py", name
+
+
+@pytest.mark.parametrize("name", ["server.py", "another_dormant.py"])
+@pytest.mark.parametrize("source", ["import app.native_metadata as alias", "from app import native_metadata as alias", "from .native_metadata import Record", "def lazy():\n    from ..app import native_metadata as alias"])
+def test_metadata_dormancy_allows_only_exact_preview_peer(name, source):
+    assert_metadata_dormancy({"native_preview.py": source})
+    with pytest.raises(AssertionError):
+        assert_metadata_dormancy({name: source})
 
 
 @pytest.fixture

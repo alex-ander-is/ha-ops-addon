@@ -9,10 +9,17 @@ import os
 import re
 import stat
 import subprocess
+import sys
 
 
 class Blocked(ValueError):
     """An input cannot safely produce a complete diagnostic."""
+
+
+def _has_cleanup_debt(error):
+    """Diagnostic conversion is safe only after all owned resources are settled."""
+    return bool(getattr(error, "cleanup_errors", ()) or
+                getattr(error, "pending_children", ()))
 
 
 def path_bytes(value):
@@ -248,14 +255,29 @@ def _open_absolute_directory(path):
                 continue
             before = os.stat(part, dir_fd=fd, follow_symlinks=False)
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            if _identity(before) != _identity(os.fstat(child)):
-                os.close(child)
-                raise Blocked("changed-directory")
-            os.close(fd)
-            fd = child
+            # The new child is owned before fstat or parent handoff can fail.
+            try:
+                if _identity(before) != _identity(os.fstat(child)):
+                    raise Blocked("changed-directory")
+            except BaseException as primary:
+                try:
+                    os.close(child)
+                except BaseException as cleanup:
+                    primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("child-fd-close:fd=%d:" % child + type(cleanup).__name__ + ":" + str(cleanup),)
+                raise
+            parent, fd = fd, child
+            try:
+                os.close(parent)
+            except BaseException as primary:
+                # close may have succeeded before raising; never retry its fd.
+                primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("parent-handoff-close:fd=%d:" % parent + type(primary).__name__ + ":" + str(primary),)
+                raise
         return fd
-    except BaseException:
-        os.close(fd)
+    except BaseException as primary:
+        try:
+            os.close(fd)
+        except BaseException as cleanup:
+            primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("parent-fd-close:fd=%d:" % fd + type(cleanup).__name__ + ":" + str(cleanup),)
         raise
 
 
@@ -274,14 +296,29 @@ def _directory_at(root_fd, path, *, before_open=None):
                 before_open(relative)
             before = os.stat(part, dir_fd=fd, follow_symlinks=False)
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            if _identity(before) != _identity(os.fstat(child)):
-                os.close(child)
-                raise Blocked("changed-directory")
-            os.close(fd)
-            fd = child
+            # The new child is owned before fstat or parent handoff can fail.
+            try:
+                if _identity(before) != _identity(os.fstat(child)):
+                    raise Blocked("changed-directory")
+            except BaseException as primary:
+                try:
+                    os.close(child)
+                except BaseException as cleanup:
+                    primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("child-fd-close:fd=%d:" % child + type(cleanup).__name__ + ":" + str(cleanup),)
+                raise
+            parent, fd = fd, child
+            try:
+                os.close(parent)
+            except BaseException as primary:
+                # close may have succeeded before raising; never retry its fd.
+                primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("parent-handoff-close:fd=%d:" % parent + type(primary).__name__ + ":" + str(primary),)
+                raise
         return fd
-    except BaseException:
-        os.close(fd)
+    except BaseException as primary:
+        try:
+            os.close(fd)
+        except BaseException as cleanup:
+            primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("parent-fd-close:fd=%d:" % fd + type(cleanup).__name__ + ":" + str(cleanup),)
         raise
 
 
@@ -300,9 +337,33 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
             _validate_mount(mount)
         if len({m.id for m in mounts}) != len(mounts):
             raise Blocked("duplicate-mount-id")
-    except Blocked:
+    except Blocked as exc:
+        if _has_cleanup_debt(exc):
+            raise
         issue = Issue(b"", "invalid-mount-evidence")
         return Inventory(scope, (), (issue,), topology_verified, (issue,))
+    def close_owned(fd):
+        # Preserve a propagating primary even if this later close also fails.
+        # A close failure itself is addressed debt, never a plain Issue.
+        _, primary, trace = sys.exc_info()
+        owner_frame = sys._getframe(1)
+        # An enclosing caller's handled exception is not this operation's
+        # primary. Only a traceback through this exact inventory frame counts.
+        while trace is not None and trace.tb_frame is not owner_frame:
+            trace = trace.tb_next
+        if trace is None:
+            primary = None
+        try:
+            os.close(fd)
+        except BaseException as cleanup:
+            debt = ("inventory-fd-close:fd=%d:" % fd + type(cleanup).__name__ + ":" + str(cleanup),)
+            target = primary if primary is not None else cleanup
+            target.cleanup_errors = tuple(getattr(target, "cleanup_errors", ())) + debt + (
+                tuple(getattr(cleanup, "cleanup_errors", ())) if cleanup is not target else ())
+            if cleanup is not target and getattr(cleanup, "pending_children", ()):
+                target.pending_children = tuple(getattr(target, "pending_children", ())) + tuple(cleanup.pending_children)
+            if primary is None:
+                raise
     confirmed = frozenset(confirmed_mounts)
     entries, issues, blockers, observations = [], [], [], []
     established = {}
@@ -359,6 +420,8 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
     try:
         root_fd = _open_absolute_directory(root)
     except (OSError, Blocked) as exc:
+        if _has_cleanup_debt(exc):
+            raise
         item = Issue(b"", "root-unavailable:" + type(exc).__name__)
         return Inventory(scope, (), (item,), topology_verified, (item,))
     try:
@@ -388,6 +451,8 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                 try:
                     after_children[name] = _observation(os.stat(name, dir_fd=fd, follow_symlinks=False))
                 except OSError as exc:
+                    if _has_cleanup_debt(exc):
+                        raise
                     issue(path, "incomplete-or-changed:" + str(exc), unknown_or_relevant(path, exc))
             previous = dict(children)
             if current_names != names:
@@ -425,13 +490,17 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                             and filesystem_path(left, alias_path) == filesystem_path(right, canonical_path)
                             and left.id in confirmed and right.id in confirmed)
             finally:
-                os.close(canonical_fd)
+                close_owned(canonical_fd)
             if not alias_ok:
                 issue(b"config", "unconfirmed-config-alias")
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
+            if _has_cleanup_debt(exc):
+                raise
             if alias_present:
                 issue(b"config", "unconfirmed-config-alias")
-        except (OSError, Blocked):
+        except (OSError, Blocked) as exc:
+            if _has_cleanup_debt(exc):
+                raise
             issue(b"config", "unconfirmed-config-alias")
         pending = [(b"", root_info)]
         while pending:
@@ -450,6 +519,8 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                     try:
                         info = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     except OSError as exc:
+                        if _has_cleanup_debt(exc):
+                            raise
                         issue(path, "incomplete-or-changed:" + str(exc), unknown_or_relevant(path, exc))
                         continue
                     directory_observations.append((name, _observation(info)))
@@ -477,6 +548,8 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                 observations.append((directory, _observation(expected), names, tuple(directory_observations)))
                 check_directory(fd, directory, _observation(expected), names, directory_observations)
             except (OSError, Blocked) as exc:
+                if _has_cleanup_debt(exc):
+                    raise
                 # Acquisition/identity protects every required parent, even
                 # after recovery. Listing protects selected folder membership;
                 # exact leaves retain independent proof below.
@@ -484,7 +557,7 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                       (chosen(directory) if directory else False) if identity_validated else required(directory))
             finally:
                 if fd is not None:
-                    os.close(fd)
+                    close_owned(fd)
         # Recheck namespace membership after traversal, including scanned ancestors.
         for directory, identity, names, children in observations:
             fd = None
@@ -495,12 +568,14 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                     raise Blocked("changed-directory")
                 identity_validated = True
                 check_directory(fd, directory, identity, names, children)
-            except (OSError, Blocked):
+            except (OSError, Blocked) as exc:
+                if _has_cleanup_debt(exc):
+                    raise
                 issue(directory, "changed-directory",
                       (chosen(directory) if directory else False) if identity_validated else required(directory))
             finally:
                 if fd is not None:
-                    os.close(fd)
+                    close_owned(fd)
         # Prove required prefixes and exact selections without sibling listing.
         # Never reset an observation already established by the broad scan.
         needed = {p for path in scope for p in
@@ -542,10 +617,12 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                                              info.st_nlink, mount.id, True, None, policy.warnings(path, info.st_size)))
                         seen.add(path)
             except (OSError, Blocked) as exc:
+                if _has_cleanup_debt(exc):
+                    raise
                 issue(path, "selected-path-unavailable:" + str(exc), True)
             finally:
                 if fd is not None:
-                    os.close(fd)
+                    close_owned(fd)
         # A fallback must prove its newly acquired prefixes remain the same
         # namespace, as well as retaining every earlier selected observation.
         for path in sorted(needed):
@@ -561,20 +638,24 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                 if after != before:
                     issue(path, "changed-entry", relevant_observation(path, before, after))
             except (OSError, Blocked) as exc:
+                if _has_cleanup_debt(exc):
+                    raise
                 issue(path, "selected-path-unavailable:" + str(exc), True)
             finally:
                 if fd is not None:
-                    os.close(fd)
+                    close_owned(fd)
         fresh = _open_absolute_directory(root)
         try:
             if _identity(os.fstat(fresh)) != _identity(root_info):
                 issue(b"", "changed-root", True)
         finally:
-            os.close(fresh)
+            close_owned(fresh)
     except (OSError, Blocked) as exc:
+        if _has_cleanup_debt(exc):
+            raise
         issue(b"", "incomplete-or-changed:" + str(exc), True)
     finally:
-        os.close(root_fd)
+        close_owned(root_fd)
     return Inventory(scope, tuple(sorted(entries, key=lambda e: e.path)), tuple(blockers), topology_verified, tuple(issues))
 
 
