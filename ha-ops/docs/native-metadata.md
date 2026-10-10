@@ -199,3 +199,11 @@ transport without old inode/recovery-sidecar inputs. Test oracles are assertions
 only. The existing completed ext4 prerequisite is reused; generic root-capable
 Linux `/tmp` qualifies stored ownership/bits here. Host Linux skips do not count
 as that evidence. See [TESTING.md](../../TESTING.md) for focused commands.
+
+The dormant Save peer also reuses `select` and `stage_candidate` (step 6.10).
+Its fresh manifest is a complete remote-plus-selected hybrid, not a new complete
+live snapshot. `stage_candidate(..., admission=...)` requires the capability
+stored on that exact issued private index and passes its same operation/owner to
+the generated manifest stream. The default `None` retains the original standalone
+primitive contract. This adds no format change, Apply restoration or production
+entrypoint. See [native Save](native-save.md).

@@ -357,3 +357,30 @@ and [restic repository code](https://github.com/restic/restic/blob/master/intern
 They support retaining working space and distinguishing stored/current objects
 from future writes, but do not provide HA Ops/Git executor upper bounds. No
 code, policy floor or dependency was copied.
+
+## Dormant Save candidate recipe (step 6.10)
+
+`project('candidate', snapshot, Evidence(...))` is distinct from publication Save.
+It requires exact `candidate_manifest` bytes, complete `candidate_final` paths,
+selected descriptor Sources and independent selected `candidate_removals`
+absence. It excludes commits/refs/reflogs, materialization, external controls,
+recovery and network artifacts. Its only durable control envelope is derived
+from the actual bounded NativeGit journal/owner contract; no dummy ledger exists.
+The generated manifest adds one qualified spool/blob/fanout to the selected
+resource counts/size/total bounds and pending-control reserve.
+
+Initial E0 remote, E1 removal-intermediate and E2 selected/manifest-final layouts
+all contribute their exact v2/checksum/TREE bounds. The private index and full
+index.lock each use the maximum, including deletion-heavy cases whose final tree
+is much smaller. Generated final tree/subtree outputs and retained old baseline
+storage are counted separately. NativeGit pins the admitted index/compression
+profile. `core.worktree`, if present, must resolve exactly to the fixed native
+root; arbitrary local worktree routing still refuses.
+
+Only the actual active issuer-registered candidate Admission can qualify an
+exact NativeGit adapter/root/executor/operation/owner. The registration ends with
+the guard; copied/inactive or swapped Plan values refuse. Owner receipts occur
+immediately after normal resource publication and outside its journal lock.
+The existing one-snapshot bounded phase checks/frozen floor and the documented
+pre-first-observation lock-history limitation remain. Lock-close failures retain
+primary exceptions and addressed debt. See [native Save](native-save.md).

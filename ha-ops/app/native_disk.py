@@ -330,6 +330,9 @@ class Evidence:
     incoming: Source | None = None
     incoming_index: Source | None = None
     executor: str = "git-native-disk-v1"
+    candidate_manifest: bytes | None = None
+    candidate_removals: tuple[bytes, ...] = ()
+    candidate_final: tuple[bytes, ...] = ()
     ref: bytes | None = None
     reflog_entry: bytes | None = None
 
@@ -366,7 +369,11 @@ class Evidence:
         object.__setattr__(self, "controls", tuple(self.controls))
         if any(not isinstance(c, Control) for c in self.controls):
             raise Blocked("exact-control-required")
-        for field in ("commit", "reflog_entry"):
+        for field in ("candidate_removals", "candidate_final"):
+            object.__setattr__(self, field, tuple(path_bytes(p) for p in getattr(self, field)))
+            if len(set(getattr(self, field))) != len(getattr(self, field)):
+                raise Blocked("duplicate-candidate-path")
+        for field in ("commit", "reflog_entry", "candidate_manifest"):
             value = getattr(self, field)
             if value is not None:
                 if not isinstance(value, (bytes, bytearray, memoryview)):
@@ -474,6 +481,7 @@ class NativeDisk:
         self._plan_refs = {}
         self._snapshots = weakref.WeakValueDictionary()
         self._active_operation = None
+        self._candidate_admission = None
 
     @property
     def layout_digest(self):
@@ -984,8 +992,8 @@ class NativeDisk:
         binding = self._state_binding(state)
         if binding is not None and binding[3:5] != (plan.evidence.operation_id, plan.evidence.owner_id):
             raise Blocked("competing-operation-state")
-        selection = plan.kind in ("initial_selection", "scope", "save", "migration")
-        counts = {"index": int(selection), "spool": len(plan.evidence.selected) if selection else 0, "worktree": int(selection and plan.evidence.materialize)}
+        selection = plan.kind in ("initial_selection", "scope", "save", "migration", "candidate")
+        counts = {"index": int(selection), "spool": len(plan.evidence.selected) + int(plan.kind == "candidate") if selection else 0, "worktree": int(selection and plan.evidence.materialize)}
         journal = None
         try:
             journal = self._control(self.root + b"/data/native/git-resources/journal.json")
@@ -1013,7 +1021,8 @@ class NativeDisk:
                         state_limit,
                         self._state_shape(state) if state is not None else None,
                         tuple((rid, _digest(record)) for rid, record in journal["records"].items()) if journal else (),
-                        self._index_bound, tuple(sorted(s.size for _, s in plan.evidence.selected)),
+                        self._index_bound, tuple(sorted([s.size for _, s in plan.evidence.selected] +
+                            ([len(plan.evidence.candidate_manifest)] if plan.kind == "candidate" else []))),
                         tuple(sorted(self._materialized_sizes.items())),
                         self._state_binding(prospective) if prospective is not None else None,
                         self._state_shape(prospective) if prospective is not None else None)
@@ -1185,7 +1194,9 @@ class NativeDisk:
                    GIT_NO_LAZY_FETCH="1", GIT_TERMINAL_PROMPT="0", GIT_LITERAL_PATHSPECS="1")
         options = ["core.hooksPath=" + os.devnull, "core.fsmonitor=false", "core.attributesFile=" + os.devnull,
                    "core.untrackedCache=false", "core.splitIndex=false", "gc.auto=0", "maintenance.auto=false",
-                   "diff.external=", "protocol.allow=never", "submodule.recurse=false", "core.sparseCheckout=false"]
+                   "diff.external=", "protocol.allow=never", "submodule.recurse=false", "core.sparseCheckout=false",
+                   "index.version=2", "index.threads=1", "index.sparse=false",
+                   "core.compression=-1", "core.looseCompression=-1"]
         cmd = ["git", "--no-pager", "--literal-pathspecs", "--git-dir=" + os.fsdecode(metadata),
                "--work-tree=" + os.fsdecode(self.root)]
         for option in options:
@@ -1253,6 +1264,11 @@ class NativeDisk:
             key, _, value = field.partition(b"\n")
             routing = re.fullmatch(rb"remote\.[^.]+\.(url|fetch|pushurl)", key.lower()) or re.fullmatch(
                 rb"branch\.[^.]+\.(remote|merge|pushremote)", key.lower())
+            if key.lower() == b"core.worktree":
+                route = os.path.abspath(os.path.join(self.root + b"/data/native/repository.git", value))
+                if route != self.root:
+                    raise Blocked("unsupported-git-worktree-routing")
+                continue  # Both NativeGit and accounting pin this exact root.
             if key.lower() not in permitted and not routing:
                 raise Blocked("unsupported-git-config:" + repr(key))
             if key.lower() == b"extensions.objectformat":
@@ -1426,7 +1442,7 @@ class NativeDisk:
             if state_bound:
                 v = add(b"data/native-operations", state_bound, "full-prospective-operation-state")
                 generated_controls[v.key] = state_bound
-            if not evidence.controls:
+            if not evidence.controls and kind != "candidate":
                 raise Blocked("exact-prospective-control-envelope-required")
             for control in evidence.controls:
                 if not isinstance(control, Control) or not isinstance(control.payload, bytes):
@@ -1438,10 +1454,42 @@ class NativeDisk:
                     generated_controls[v.key] = max(generated_controls.get(v.key, 0), self._state_envelope(value))
                 add(control.target, len(control.payload), "full-pending-control", proof=("bytes", control.payload))
                 provenance.append(("full-control", control.target, control.operation_id, control.owner_id, hashlib.sha256(control.payload).hexdigest()))
-            if kind in ("initial_selection", "scope", "save", "migration"):
+            if kind in ("initial_selection", "scope", "save", "migration", "candidate"):
                 width, config = self._profile()
                 entries = set(self._entries(evidence.base_tree, width))
                 provenance.append(("git-config", config, "base-tree", evidence.base_tree))
+                initial_entries = set(entries)
+                if kind == "candidate":
+                    if (evidence.base_tree is None or evidence.candidate_manifest is None or
+                            evidence.controls or evidence.materialize or evidence.commit is not None or
+                            evidence.ref is not None or evidence.reflog_entry is not None or
+                            evidence.copies or evidence.metadata or evidence.replacements or evidence.diff or
+                            evidence.incoming or evidence.incoming_index):
+                        raise Blocked("exact-candidate-only-recipe-required")
+                    removed = set(evidence.candidate_removals)
+                    if not removed <= entries or removed & {p for p, _ in evidence.selected}:
+                        raise Blocked("qualified-candidate-removals-required")
+                    for path in removed:
+                        self._require_absent(self.root + b"/" + path)
+                    from native_metadata import MANIFEST_PATH, decode, encode
+                    from native_inventory import Policy
+                    policy = Policy(repository_files=(MANIFEST_PATH,))
+                    manifest = decode(evidence.candidate_manifest, width=width * 2, policy=policy)
+                    if encode(manifest, width=width * 2, policy=policy) != evidence.candidate_manifest:
+                        raise Blocked("canonical-candidate-manifest-required")
+                    final_entries = (entries - removed) | {p for p, _ in evidence.selected}
+                    if final_entries != set(evidence.candidate_final):
+                        raise Blocked("exact-candidate-final-layout-required")
+                    if {r.path for r in manifest.entries if r.kind == "file"} != final_entries - {MANIFEST_PATH, b".gitignore"}:
+                        raise Blocked("candidate-manifest-layout-mismatch")
+                    entries = final_entries
+                    size = len(evidence.candidate_manifest)
+                    add(b"data/native/git-resources", size, "generated-manifest-spool")
+                    add(b"data/native/repository.git/objects", _loose("blob", size), "generated-manifest-blob")
+                    add(b"data/native/repository.git/objects", 0, "generated-manifest-fanout", directory=True)
+                    provenance.append(("candidate-layouts", tuple(sorted(initial_entries)),
+                                       tuple(sorted(initial_entries - removed)), tuple(sorted(entries)),
+                                       hashlib.sha256(evidence.candidate_manifest).hexdigest()))
                 for path, s in evidence.selected:
                     path_bytes(path)
                     size = source(s)
@@ -1475,7 +1523,7 @@ class NativeDisk:
                     self._require_absent(self.root + b"/data/native/git-resources/journal.json", dict(snapshot.observations))
                     journal = {"schema": 1, "root": root_id, "metadata": meta_id,
                                "storage": [ri.st_dev, 2**64 - 1, 0o700], "records": {}}
-                for i, resource_kind in enumerate(["spool"] * len(evidence.selected) + ["index"]):
+                for i, resource_kind in enumerate(["spool"] * (len(evidence.selected) + int(kind == "candidate")) + ["index"]):
                     hex_id = hashlib.sha256((evidence.operation_id + ":disk:" + str(i)).encode()).hexdigest()[:32]
                     rid = "-".join((hex_id[:8], hex_id[8:12], hex_id[12:16], hex_id[16:20], hex_id[20:]))
                     marker = {"resource": rid, "operation": evidence.operation_id, "owner": evidence.owner_id, "binding": binding}
@@ -1539,8 +1587,15 @@ class NativeDisk:
                 base = 12 + width + sum(_round(42 + width + len(p) + 1, 8) for p in entries)
                 cache = 8 + sum(len(p.rsplit(b"/", 1)[-1]) + 1 + 2 * len(str(len(entries))) + 3 + width for p in nodes)
                 self._index_bound = base + cache
+                if kind == "candidate":
+                    def index_bound(paths):
+                        parents = {b""} | {b"/".join(p.split(b"/")[:i]) for p in paths for i in range(1, len(p.split(b"/")))}
+                        return (12 + width + sum(_round(42 + width + len(p) + 1, 8) for p in paths) +
+                                8 + sum(len(p.rsplit(b"/", 1)[-1]) + 1 + 2 * len(str(len(paths))) + 3 + width for p in parents))
+                    self._index_bound = max(index_bound(paths) for paths in
+                        (initial_entries, initial_entries - set(evidence.candidate_removals), entries))
                 for label in ("complete-index", "index-lock-overlap"):
-                    add(b"data/native/git-resources", base + cache, label)
+                    add(b"data/native/git-resources", self._index_bound, label)
                 for path, children in nodes.items():
                     tree_size = sum((5 if directory else 6) + 1 + len(name) + 1 + width
                                     for name, directory in children.items())
@@ -1955,6 +2010,7 @@ class NativeDisk:
         if not local.acquire(blocking=False):
             raise Blocked("nested-or-competing-guard")
         fd = None
+        primary = None
         try:
             with _directory(os.path.dirname(lockpath)) as parent:
                 fd = os.open(os.path.basename(lockpath), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
@@ -1970,24 +2026,50 @@ class NativeDisk:
                 try:
                     admission.revalidate()
                     self._active_operation = plan.evidence.operation_id
+                    self._candidate_admission = admission if plan.kind == "candidate" else None
                     # Consumption is one-shot only after a successful entry.
                     self._contexts.pop(id(plan), None)
                     yield admission
+                except BaseException as exc:
+                    primary = exc
+                    raise
                 finally:
-                    admission._close()
-                    self._active_operation = None
+                    try:
+                        admission._close()
+                    except BaseException as cleanup:
+                        if primary is None:
+                            raise
+                        primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + (
+                            "admission-context-close:path=%r:%s" % (lockpath, cleanup),)
+                    finally:
+                        self._active_operation = None
+                        self._candidate_admission = None
+        except BaseException as exc:
+            primary = exc
+            raise
         finally:
-            if fd is not None:
-                os.close(fd)  # kernel releases flock, including process death
-            local.release()
+            try:
+                if fd is not None:
+                    os.close(fd)  # kernel releases flock, including process death
+            except BaseException as cleanup:
+                if primary is None:
+                    primary = Blocked("admission-lock-close-debt")
+                    primary.cleanup_errors = ("admission-lock-close:fd=%d:path=%r:%s" % (fd, lockpath, cleanup),)
+                    raise primary from cleanup
+                primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + (
+                    "admission-lock-close:fd=%d:path=%r:%s" % (fd, lockpath, cleanup),)
+            finally:
+                local.release()
 
 
 class Admission:
-    __slots__ = ("_disk", "_baseline", "_fd", "_path", "_identity", "_active", "_last_snapshot", "_current", "_namespace", "_artifact_cache", "_created_files", "_context", "_owner_binding", "_owner_seen", "_owner_locks", "_owner_controls")
+    __slots__ = ("_disk", "_baseline", "_fd", "_path", "_identity", "_active", "_last_snapshot", "_current", "_namespace", "_artifact_cache", "_created_files", "_context", "_owner_binding", "_owner_seen", "_owner_locks", "_owner_controls", "_candidate_git", "_issued_plan")
 
     def __init__(self, disk, plan, fd, path, identity):
         self._disk, self._baseline, self._fd, self._path, self._identity = disk, plan, fd, path, identity
         self._active = True
+        self._candidate_git = None
+        self._issued_plan = plan
         self._last_snapshot = disk._contexts[id(plan)].snapshot if disk._contexts[id(plan)] else None
         self._current = None
         self._namespace = dict(plan.namespace)
@@ -2009,6 +2091,25 @@ class Admission:
     active = property(lambda self: self._active)
     last_snapshot = property(lambda self: self._last_snapshot)
     current = property(lambda self: self._current)
+
+    def qualify_candidate(self, git, operation_id, owner_id):
+        """Issuer-registered active capability; copied/constructed values grant nothing."""
+        from native_git import NativeGit
+        if (type(self) is not Admission or self.disk._candidate_admission is not self or
+                not self.active or self.plan is not self._issued_plan or
+                self.disk._plans.get(id(self.plan)) is not self.plan or
+                self.disk._active_operation != operation_id or
+                self.plan.kind != "candidate" or self.plan.evidence.executor != "git-native-disk-v1" or
+                (operation_id, owner_id) != (self.plan.evidence.operation_id, self.plan.evidence.owner_id) or
+                not isinstance(git, NativeGit) or git.root != self.disk.root or
+                git.metadata != self.disk.root + b"/data/native/repository.git" or
+                git.resources_root != self.disk.root + b"/data/native/git-resources" or
+                self._candidate_git is not None and self._candidate_git is not git):
+            raise Blocked("issued-active-candidate-admission-required")
+        if self._candidate_git is None:
+            self._candidate_git = git
+        self.revalidate()
+        return self
 
     def _close(self):
         self._active = False

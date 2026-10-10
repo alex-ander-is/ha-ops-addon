@@ -7,6 +7,7 @@ from functools import wraps
 import base64
 import fcntl
 import hashlib
+import io
 import json
 import math
 import os
@@ -102,6 +103,7 @@ class ResourceHandle:
     owner_id: str
     kind: str
     _binding: str
+    _admission: object = None
 
 
 @dataclass(frozen=True)
@@ -396,7 +398,9 @@ class NativeGit:
             env["GIT_INDEX_FILE"] = os.fsdecode(index)
         options = ["core.hooksPath=" + os.devnull, "core.fsmonitor=false", "core.attributesFile=" + os.devnull,
                    "core.untrackedCache=false", "core.splitIndex=false", "gc.auto=0", "maintenance.auto=false",
-                   "diff.external=", "protocol.allow=never", "submodule.recurse=false", "core.sparseCheckout=false"]
+                   "diff.external=", "protocol.allow=never", "submodule.recurse=false", "core.sparseCheckout=false",
+                   "index.version=2", "index.threads=1", "index.sparse=false",
+                   "core.compression=-1", "core.looseCompression=-1"]
         argv = ["git", "--no-pager", "--literal-pathspecs", "--git-dir=" + os.fsdecode(self.metadata),
                 "--work-tree=" + os.fsdecode(worktree or self.root)]
         for option in options:
@@ -487,6 +491,45 @@ class NativeGit:
         if actual not in (b"blob", b"tree", b"commit", b"tag") or (kind and actual not in (kind if isinstance(kind, tuple) else (kind,))):
             raise InvalidInput("unexpected-object-type")
         return oid
+
+    def resolve_tree(self, source_oid):
+        """Resolve this exact local commit/tree, independently checking its raw hash."""
+        return self.resolve_tree_source(source_oid)[1]
+
+    def resolve_tree_source(self, source_oid):
+        """Retain the validated original type separately from its complete tree."""
+        self._object(source_oid, (b"commit", b"tree"))
+        kind = self._run(("cat-file", "-t", source_oid)).strip()
+        sink = io.BytesIO()
+        self._copy_object(source_oid, kind, sink)
+        if kind == b"tree":
+            tree = source_oid
+        else:
+            first = sink.getvalue().split(b"\n", 1)[0]
+            if not first.startswith(b"tree "):
+                raise InvalidInput("malformed-commit-tree")
+            tree = _oid(first[5:].decode("ascii"), self._config())
+        self._object(tree, b"tree")
+        sink = io.BytesIO()
+        self._copy_object(tree, b"tree", sink)
+        self._tree_routes(tree)
+        self.tree_entries(tree)
+        return kind, tree
+
+    def _candidate(self, admission, operation_id, owner_id):
+        from native_disk import Admission
+        if type(admission) is not Admission:
+            raise InvalidInput("issued-candidate-admission-required")
+        admission.qualify_candidate(self, operation_id, owner_id)
+        return admission
+
+    def _candidate_handle(self, handle):
+        if not isinstance(handle, ResourceHandle):
+            raise InvalidInput("private-issued-resource-handle-required")
+        if handle._admission is not None:
+            if handle.resource_id not in self._active or self._active[handle.resource_id][1] is not handle:
+                raise InvalidInput("closed-or-foreign-resource-handle")
+            self._candidate(handle._admission, handle.operation_id, handle.owner_id)
 
     def _tree_routes(self, oid):
         self._object(oid, (b"tree", b"commit"))
@@ -681,7 +724,7 @@ class NativeGit:
         return self._copy_object(oid, b"blob", destination)
 
     def _copy_object(self, oid, kind, destination):
-        if kind not in (b"blob", b"tree"):
+        if kind not in (b"blob", b"tree", b"commit"):
             raise InvalidInput("unsupported-exact-stream-object-kind")
         self._object(oid, kind)
         declared = self._run(("cat-file", "-s", oid))
@@ -738,7 +781,8 @@ class NativeGit:
         self._loose_route(oid)
         code, _ = self._raw(("cat-file", "-e", oid), accepted=(0, 1))
         if code == 0:
-            self._verify_stored_object(oid, kind)
+            return self._verify_stored_object(oid, kind)
+        return None
 
     def _selection(self, paths):
         result, seen = [], set()
@@ -789,6 +833,7 @@ class NativeGit:
                 yield None
                 return
             fd = os.open(lockpath, os.O_RDWR | (os.O_CREAT if create else 0) | os.O_NOFOLLOW, 0o600)
+            primary = None
             try:
                 identity = _identity(lockpath)
                 if identity[2] != 0o600:
@@ -806,9 +851,24 @@ class NativeGit:
                 else:
                     journal = {"schema": 1, "root": self._root_id, "metadata": self._meta_id, "storage": self._storage_id, "records": {}}
                 yield journal
+                if (_identity(lockpath) != identity or
+                        [os.fstat(fd).st_dev, os.fstat(fd).st_ino, stat.S_IMODE(os.fstat(fd).st_mode)] != identity):
+                    raise InvalidInput("replaced-journal-lock-before-release")
+            except BaseException as exc:
+                primary = exc
+                raise
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                failure = primary
+                for action in (lambda: fcntl.flock(fd, fcntl.LOCK_UN), lambda: os.close(fd)):
+                    try:
+                        action()
+                    except BaseException as cleanup:
+                        if failure is None:
+                            failure = cleanup
+                        failure.cleanup_errors = tuple(getattr(failure, "cleanup_errors", ())) + (
+                            "journal-lock-release:fd=%d:path=%r:%s" % (fd, lockpath, cleanup),)
+                if primary is None and failure is not None:
+                    raise failure
 
     def _validate_journal(self, journal):
         if (not isinstance(journal, dict) or set(journal) != {"schema", "root", "metadata", "storage", "records"}
@@ -1016,11 +1076,13 @@ class NativeGit:
                 raise InvalidInput("foreign-resource-marker")
 
     @contextmanager
-    def _resource(self, kind, operation_id, owner_id):
+    def _resource(self, kind, operation_id, owner_id, *, admission=None):
         _uuid(operation_id)
         _uuid(owner_id)
+        if admission is not None:
+            self._candidate(admission, operation_id, owner_id)
         rid, lease = str(uuid.uuid4()), None
-        handle = ResourceHandle(rid, operation_id, owner_id, kind, self._binding())
+        handle = ResourceHandle(rid, operation_id, owner_id, kind, self._binding(), admission)
         original = None
         try:
             with self._journal(create=True) as journal:
@@ -1048,6 +1110,9 @@ class NativeGit:
                 record["phase"] = "allocated"
                 self._publish(journal)
                 self._active[rid] = (lease, handle)
+            # No qualification callback runs under the owner journal lock.
+            if admission is not None:
+                self._candidate_handle(handle)
             yield handle
         except BaseException as exc:
             original = exc
@@ -1058,18 +1123,31 @@ class NativeGit:
                 result = self._cleanup(rid, owner_id, operation_id, held_lease=lease)
                 if result.cleanup_errors:
                     if original is not None:
-                        original.cleanup_errors = tuple(getattr(original, "cleanup_errors", ())) + result.cleanup_errors
+                        original.cleanup_errors = tuple(getattr(original, "cleanup_errors", ())) + tuple(
+                            "resource-cleanup:resource=%s:path=%r:%s" % (rid, self._resource_path(rid), error)
+                            for error in result.cleanup_errors)
                     else:
                         raise CleanupDebt(result)
             except BaseException as cleanup:
                 if original is not None:
-                    original.cleanup_errors = tuple(getattr(original, "cleanup_errors", ())) + (str(cleanup),)
+                    original.cleanup_errors = tuple(getattr(original, "cleanup_errors", ())) + (
+                        "resource-cleanup:resource=%s:path=%r:%s" % (rid, self._resource_path(rid), cleanup),) + tuple(getattr(cleanup, "cleanup_errors", ()))
                 else:
+                    original = cleanup
                     raise
             finally:
                 if lease is not None:
-                    fcntl.flock(lease, fcntl.LOCK_UN)
-                    os.close(lease)
+                    close_failure = original
+                    for action in (lambda: fcntl.flock(lease, fcntl.LOCK_UN), lambda: os.close(lease)):
+                        try:
+                            action()
+                        except BaseException as cleanup:
+                            if close_failure is None:
+                                close_failure = GitFailure("resource-lease-release-debt")
+                            close_failure.cleanup_errors = tuple(getattr(close_failure, "cleanup_errors", ())) + (
+                                "resource-lease-release:resource=%s:fd=%d:%s" % (rid, lease, cleanup),)
+                    if original is None and close_failure is not None:
+                        raise close_failure
 
     def _index(self, handle, *, initialize=False):
         with self._journal() as journal:
@@ -1100,33 +1178,39 @@ class NativeGit:
         self._capture(handle)
 
     @contextmanager
-    def isolated_index(self, base_tree_oid, *, operation_id, owner_id):
+    def isolated_index(self, base_tree_oid, *, operation_id, owner_id, admission=None):
         if base_tree_oid is not None:
             self._object(base_tree_oid, b"tree")
             self._tree_routes(base_tree_oid)
-        with self._resource("index", operation_id, owner_id) as handle:
+        with self._resource("index", operation_id, owner_id, admission=admission) as handle:
             index = self._index(handle, initialize=True)
             command = ("read-tree", "--empty") if base_tree_oid is None else ("read-tree", base_tree_oid)
             self._run(command, index=index)
             self._acknowledge_index_effect(handle)
+            self._candidate_handle(handle)
             yield handle
 
     @_serialized_index
     def update_index(self, handle, entries=(), *, removals=()):
+        self._candidate_handle(handle)
         entries = tuple(entries)
         selected = self._selection([e.path for e in entries] + list(removals))
         width = self._config()
+        prior = {e.path:e for e in self.index_entries(handle)} if handle._admission is not None else {}
         payload = bytearray()
         for entry in entries:
             if not isinstance(entry, IndexEntry) or entry.mode not in _REGULAR_MODES or entry.stage != 0:
                 raise InvalidInput("regular-stage-zero-entry-required")
             self._object(entry.oid, b"blob")
+            if prior.get(entry.path) == entry:
+                continue  # Preserve valid cache trees for metadata-only leaves.
             payload.extend(entry.mode + b" " + _oid(entry.oid, width).encode() + b"\t" + entry.path + b"\0")
         for path in selected[len(entries):]:
             payload.extend(b"0 " + b"0" * width + b"\t" + path + b"\0")
         index = self._index(handle)
         self._run(("update-index", "-z", "--index-info"), index=index, input=bytes(payload))
         self._acknowledge_index_effect(handle)
+        self._candidate_handle(handle)
 
     def _planned_trees(self, entries):
         root = {}
@@ -1164,6 +1248,7 @@ class NativeGit:
 
     @_serialized_index
     def write_tree(self, handle, *, allowed_paths):
+        self._candidate_handle(handle)
         allowed = set(self._selection(allowed_paths))
         entries = self.index_entries(handle)
         seen = set()
@@ -1187,15 +1272,38 @@ class NativeGit:
         for oid, expected_size in destinations:
             if self._verify_stored_object(oid, b"tree").size != expected_size:
                 raise GitFailure("tree-write-size-mismatch")
+        self._candidate_handle(handle)
         return actual
 
-    def write_blob_stream(self, producer):
-        with self._resource("spool", str(uuid.uuid4()), str(uuid.uuid4())) as handle:
+    def write_blob_stream(self, producer, *, operation_id=None, owner_id=None, admission=None):
+        if admission is None and (operation_id is not None or owner_id is not None):
+            raise InvalidInput("candidate-owner-requires-admission")
+        if admission is not None:
+            self._candidate(admission, operation_id, owner_id)
+        else:
+            operation_id, owner_id = str(uuid.uuid4()), str(uuid.uuid4())
+        with self._resource("spool", operation_id, owner_id, admission=admission) as handle:
             path = os.path.join(self._resource_path(handle.resource_id), b"spool")
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             size = 0
+            # Publish the empty O_EXCL leaf before any producer bytes. Its held
+            # descriptor and canonical graph are checked outside the journal.
+            try:
+                if admission is not None:
+                    self._capture_paths(handle, (b"spool",))
+                    item = self._record_file(self._resource_path(handle.resource_id), b"spool")
+                    info = os.fstat(fd)
+                    if item[:3] != [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)]:
+                        raise InvalidInput("replaced-empty-spool")
+                    self._candidate_handle(handle)
+            except BaseException as primary:
+                try:
+                    os.close(fd)
+                except BaseException as cleanup:
+                    primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("spool-acquisition-close:" + repr(path) + ":" + str(cleanup),)
+                raise
             with self._capture_after(handle):
-                with os.fdopen(fd, "wb") as stream:
+                with self._spool_stream(fd, path) as stream:
                     if hasattr(producer, "read"):
                         def chunks():
                             while data := producer.read(CHUNK):
@@ -1212,6 +1320,7 @@ class NativeGit:
                         size += len(data)
                     stream.flush()
                     os.fsync(stream.fileno())
+            self._candidate_handle(handle)
             # Git's no-filter blob identity permits validating the exact future leaf
             # before hash-object can write (or reuse) it.
             digest = hashlib.sha256() if self._config() == 64 else hashlib.sha1()
@@ -1219,7 +1328,12 @@ class NativeGit:
             with open(path, "rb") as stream:
                 while chunk := stream.read(CHUNK):
                     digest.update(chunk)
-            self._preflight_object_write(digest.hexdigest(), b"blob")
+            existing = self._preflight_object_write(digest.hexdigest(), b"blob")
+            if admission is not None and existing is not None:
+                if existing.size != size:
+                    raise GitFailure("blob-reuse-size-mismatch")
+                self._candidate_handle(handle)
+                return existing  # Avoid Git freshening a frozen local dependency.
             with open(path, "rb") as stream:
                 output = self._run(("hash-object", "-w", "--stdin", "--no-filters"), stdin=stream)
             oid = _oid(output.decode("ascii").rstrip("\n"), self._config())
@@ -1227,7 +1341,31 @@ class NativeGit:
                 raise GitFailure("blob-write-object-id-mismatch")
             if self._verify_stored_object(oid, b"blob").size != size:
                 raise GitFailure("blob-write-size-mismatch")
+            self._candidate_handle(handle)
             return BlobResult(oid, size)
+
+    @contextmanager
+    def _spool_stream(self, fd, path):
+        primary, stream = None, None
+        try:
+            stream = os.fdopen(fd, "wb")
+            yield stream
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            try:
+                stream.close() if stream is not None else os.close(fd)
+            except BaseException as cleanup:
+                if primary is None:
+                    cleanup.cleanup_errors = tuple(getattr(cleanup, "cleanup_errors", ())) + (
+                        "spool-close:fd=%d:path=%r:%s" % (fd, path, cleanup),)
+                    if stream is not None:
+                        cleanup.pending_streams = tuple(getattr(cleanup, "pending_streams", ())) + (stream,)
+                    raise
+                primary.cleanup_errors = tuple(getattr(primary, "cleanup_errors", ())) + ("spool-close:fd=%d:path=%r:%s" % (fd, path, cleanup),)
+                if stream is not None:
+                    primary.pending_streams = tuple(getattr(primary, "pending_streams", ())) + (stream,)
 
     def _admin_binding(self, handle):
         root = self._resource_path(handle.resource_id)

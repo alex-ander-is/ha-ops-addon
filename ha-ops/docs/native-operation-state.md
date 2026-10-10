@@ -250,3 +250,9 @@ Sources used: [Python 3.12 flock](https://docs.python.org/3.12/library/fcntl.htm
 The architecture also compared [Terraform saved plans](https://developer.hashicorp.com/terraform/cli/commands/plan)
 as an example of binding later execution to an explicitly reviewed candidate;
 no Terraform code or execution assumptions were adopted.
+
+Step 6.10's dormant `native_save.Candidate` is a separate in-memory tree handoff,
+not a persisted candidate or worker in this store. It creates no operation-state
+schema/approval/publication record and pins no ref. Its unreferenced Git objects
+may be collected. Step 6.11 needs its own explicit publication intent, exact
+object/reachability checks and recovery boundary; see [native Save](native-save.md).

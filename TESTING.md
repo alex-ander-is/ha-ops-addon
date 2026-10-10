@@ -347,3 +347,28 @@ The completed 6.6 ext4 qualification is reused rather than rerun. Wrapper cleanu
 failure makes Linux evidence incomplete. See the [adapter contract and risk
 map](ha-ops/docs/native-metadata.md). The foreman's final whole-suite gate remains
 separate; avoid duplicating it immediately before an unchanged pre-push hook.
+
+## Dormant selected native Save (step 6.10)
+
+`ha-ops/tests/test_native_save.py` is the focused candidate group. Its real
+allocation/ownership/exact byte-path cases require Linux; host skips do not
+establish operational admission. Reuse the running local VM and cached image;
+no live HA query, setup or download is part of this test command:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  python3 -m pytest -p no:cacheprovider -n 2 ha-ops/tests/test_native_save.py
+```
+
+The wrapper uses isolated fixtures and its own cleanup. Candidate coverage spans
+remote-plus-selected full trees/metadata, A/B/C and explicit B, SHA-1/SHA-256,
+unselected churn, stale/reentrant/session authority, foreign canonical staging,
+one-snapshot disk receipts/physical peak/index v2, deletion-heavy and manifest
+forecasting, profile/capacity refusal, IO/interruption and addressed cleanup debt.
+Correction regressions additionally prove issued versus final parent disclosure,
+exact COMMIT/TREE provenance, reviewed orphan/ancestor absence and shared-parent
+survival, and first/last-byte growth without excess spooling under one Plan.
+Adjacent changed primitive seams use `test_native_git.py`,
+`test_native_metadata.py`, `test_native_preview.py`, `test_native_disk.py` and
+`test_native_operations.py`. These focused checks retain the separate foreman
+whole-repository/release-readiness gate. See [the candidate contract](ha-ops/docs/native-save.md).

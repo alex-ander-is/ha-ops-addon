@@ -334,7 +334,7 @@ def merge(base, ours, theirs, *, width=40, policy=None):
     return Merge(tuple(result[p] for p in sorted(result)), tuple(sorted(conflicts, key=lambda c: c.path)))
 
 
-def stage_candidate(git, handle, selection, *, entries=(), removals=(), width=40):
+def stage_candidate(git, handle, selection, *, entries=(), removals=(), width=40, admission=None):
     """Caller owns the isolated handle; return only a completely audited tree.
 
     A failed private-index update must be discarded by exiting its owner context.
@@ -342,6 +342,8 @@ def stage_candidate(git, handle, selection, *, entries=(), removals=(), width=40
     """
     if git.policy.repository_files != (MANIFEST_PATH,):
         raise Blocked("exact-manifest-policy-exception-required")
+    if admission is not handle._admission:
+        raise Blocked("candidate-admission-handle-mismatch")
     entries, removals = tuple(entries), tuple(removals)
     current = {e.path: e for e in git.index_entries(handle)}
     if MANIFEST_PATH not in current:
@@ -363,7 +365,9 @@ def stage_candidate(git, handle, selection, *, entries=(), removals=(), width=40
         current[e.path] = e
     validate(selection.manifest, tuple(current.values()), width=width, policy=git.policy)
     payload = encode(selection.manifest, width=width, policy=git.policy)
-    blob = git.write_blob_stream(io.BytesIO(payload))
+    blob = (git.write_blob_stream(io.BytesIO(payload), operation_id=handle.operation_id,
+                owner_id=handle.owner_id, admission=admission) if admission is not None
+            else git.write_blob_stream(io.BytesIO(payload)))
     manifest_entry = replace(current[MANIFEST_PATH], mode=b"100644", oid=blob.oid, stage=0)
     # NativeGit forbids simultaneous ancestor/descendant selections. Removing
     # old leaves first admits both reviewed Git shape transitions privately.

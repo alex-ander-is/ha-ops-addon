@@ -273,3 +273,29 @@ upstream documentation: [environment and routing](https://raw.githubusercontent.
 [Git storage routes](https://raw.githubusercontent.com/git/git/v2.39.5/Documentation/gitrepository-layout.txt),
 and [lazy-fetch suppression implementation](https://raw.githubusercontent.com/git/git/v2.39.5/promisor-remote.c).
 No new dependency or production runtime activation is introduced.
+
+## Dormant selected Save qualification (step 6.10)
+
+`resolve_tree(source_oid)` verifies the raw exact local commit/tree identity,
+resolves its tree header and validates the full tree before returning a tree OID.
+`resolve_tree_source(source_oid)` performs the same validation and returns the
+original `commit`/`tree` kind alongside the resolved tree OID; Save captures
+both without inferring a publication parent from a direct tree.
+The exact streaming verifier admits commit objects internally for this seam.
+
+The optional `admission` on `isolated_index`, and explicit
+`operation_id`/`owner_id`/`admission` on `write_blob_stream`, accept only an actual
+issuer-registered active candidate Admission. The issued index stores that exact
+capability; normal owner graph publication precedes its receipt outside the
+journal lock, before read-tree. Empty spool O_EXCL publication/receipt precedes
+content. Completed spool, index and tree effects use the same frozen authority.
+No caller callback/boolean or copied capability grants resource ownership.
+Unqualified existing callers retain their separate resource contract.
+
+Commands now pin `index.version=2`, `index.threads=1`, `index.sparse=false` and
+default `core.compression=-1`/`core.looseCompression=-1`, in addition to existing
+sanitization. The candidate's NativeDisk profile refuses unsupported local
+settings before resources. Qualified verified existing blobs are reused without
+Git timestamp freshening; identical selected index entries preserve cache-tree
+validity for metadata-only changes. Spool/lease close failures preserve original
+exceptions plus addressed debt. See [native Save](native-save.md).

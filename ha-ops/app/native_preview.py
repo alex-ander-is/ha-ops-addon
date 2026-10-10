@@ -375,16 +375,18 @@ def _live_file(binding, path, width, sink=None):
         h = hashlib.sha1() if width == 40 else hashlib.sha256()
         h.update(b'blob ' + str(size).encode() + b'\0')
         count, binary = 0, False
-        while True:
-            data = os.read(fd, CHUNK)
-            if not data:
-                break
+        while count < size:
+            if metadata._stat(before) != metadata._stat(os.fstat(fd)):
+                raise Stale('changed-live-content')
+            data = os.read(fd, min(CHUNK, size - count))
+            if not data or len(data) > size - count or metadata._stat(before) != metadata._stat(os.fstat(fd)):
+                raise Stale('changed-live-content')
             count += len(data)
             h.update(data)
             binary |= b'\0' in data
             if sink is not None:
                 _write(sink, data)
-        if count != size or metadata._stat(before) != metadata._stat(os.fstat(fd)):
+        if os.read(fd, 1) or count != size or metadata._stat(before) != metadata._stat(os.fstat(fd)):
             raise Stale('changed-live-content')
         record = metadata.Record(path, 'file', before.st_uid, before.st_gid,
                                  stat.S_IMODE(before.st_mode), h.hexdigest())
@@ -586,6 +588,7 @@ class NativePreview:
         self.scratch_root, self.timeout = os.fsencode(scratch_root), timeout
         self._lock = threading.Lock()
         self._generation = 0
+        self._review_binding = None
         self._snapshot = self._observed = self._draft = self._review = None
 
     @property
@@ -664,6 +667,15 @@ class NativePreview:
     def _active(self, path, source):
         return (path != b'.gitignore' and path not in self.binding.policy.repository_files
                 and any(beneath(path, p) for p in source.scope))
+
+    @staticmethod
+    def _live_records(observed):
+        """Manifest closure plus observed leafless directory route attributes."""
+        records = observed.live_manifest.by_path
+        for path, info in observed.routes:
+            if path and info[2] == stat.S_IFDIR:
+                records.setdefault(path, metadata.Record(path, 'directory', info[4], info[5], info[3], None))
+        return records
 
     def _observe_once(self, source, width):
         issues = []
@@ -900,13 +912,10 @@ class NativePreview:
             live = dict(observed.live)
             before, after = (remote, live) if direction == 'save' else (live, remote)
             remote_records = observed.remote_manifest.by_path if observed.remote_manifest else {}
-            live_records = observed.live_manifest.by_path
+            live_records = self._live_records(observed)
             # Existing necessary parents remain observed even when their active
             # leaf is absent. Do not treat missing manifest closure as physical
             # directory deletion, and never traverse excluded sibling content.
-            for path, info in observed.routes:
-                if path and info[2] == stat.S_IFDIR:
-                    live_records.setdefault(path, metadata.Record(path, 'directory', info[4], info[5], info[3], None))
             bmap, amap = (remote_records, live_records) if direction == 'save' else (live_records, remote_records)
             known_leaves = {q for q, r in remote_records.items() if r.kind == 'file'} | set(live)
             parents = []
@@ -1028,8 +1037,63 @@ class NativePreview:
                 blockers.extend(p.issues)
                 if p.path not in draft.approved_parents:
                     blockers.append('explicit-parent-review-required:' + encode_path(p.path))
+            self._review_binding = (self.binding, self.git, self.git.policy)
             self._review = Review(draft, selected, parents, tuple(sorted(set(blockers))))
             return self._review
+
+    def _candidate_fence(self, review):
+        """Only issued selected live states/routes, plus complete source freshness."""
+        if type(review) is not Review or self._review is not review or review.draft is not self._draft:
+            raise Stale('current-issued-ready-save-review-required')
+        snapshot = self._current(review.draft.snapshot_id)
+        if (self._review is not review or review.draft is not self._draft or
+                review.draft.generation != self._generation or snapshot.direction != 'save' or
+                not review.ready or not review.selected or
+                self._review_binding != (self.binding, self.git, self.git.policy)):
+            raise Stale('current-issued-ready-save-review-required')
+        source, width = self._source()
+        if source != snapshot.source:
+            raise Stale('candidate-source-binding-changed')
+        original_routes = dict(self._observed.routes)
+        records = self._live_records(self._observed)
+        for row in review.selected:
+            actual, routes = _live_file(self.binding, row.path, width)
+            if actual != row.after or any(original_routes.get(p) != v for p, v in routes):
+                raise Stale('selected-live-state-or-route-changed')
+        needed = metadata.ancestors(r.path for r in review.selected if r.after is not None)
+        needed |= set(review.draft.approved_parents)
+        for path in sorted(needed):
+            expected = records.get(path)
+            # An approved pruned parent may itself be independently absent.
+            # Required surviving live parents always have present records.
+            with _route(self.binding, path, 'directory', absent=expected is None) as (fd, routes):
+                if fd is None:
+                    actual = None
+                else:
+                    info = os.fstat(fd)
+                    actual = metadata.Record(path, 'directory', info.st_uid, info.st_gid,
+                                             stat.S_IMODE(info.st_mode), None)
+                if actual != records.get(path) or any(original_routes.get(p) != v for p, v in routes):
+                    raise Stale('necessary-reviewed-parent-changed')
+        final, final_width = self._source()
+        if final != source or final_width != width:
+            raise Stale('candidate-source-changed-during-fence')
+        return self._observed
+
+    @contextmanager
+    def candidate_context(self, review):
+        """Dormant Save peer holds session authority until effects and teardown end.
+
+        Review remains diagnostic for every other consumer. This exact issued
+        handle is accepted only under this session lock; no serialized replay.
+        Unselected live churn does not cause a whole-source reobservation here.
+        """
+        with self._call():
+            if type(review) is not Review:
+                raise Stale('issued-review-required')
+            observed = self._candidate_fence(review)
+            yield observed
+            self._candidate_fence(review)
 
     def view_file(self, snapshot_id, byte_path, destination):
         with self._call():
