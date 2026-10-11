@@ -299,3 +299,8 @@ settings before resources. Qualified verified existing blobs are reused without
 Git timestamp freshening; identical selected index entries preserve cache-tree
 validity for metadata-only changes. Spool/lease close failures preserve original
 exceptions plus addressed debt. See [native Save](native-save.md).
+
+
+## Dormant exact publication primitives
+
+NativeGit remains local-only. Exact raw commit verification/write, targeted object/ref durability and ref-lock pin deletion require the issued publication Admission. A bounded publication-local context validates controls once and rechecks captured route/descriptor identities thereafter. The separately dormant NativePublication owns all outgoing CLI transport; see [publication contract](native-publication.md).

@@ -2088,3 +2088,85 @@ def test_retired_publication_capsule_matches_minimal_original_baseline(tmp_path)
 
 if __name__ == "__main__" and sys.argv[1:] == ["--container-recreation"]:
     container_recreation_probe()
+
+# Publication identity has a lossless byte grammar independent of display labels.
+@pytest.mark.parametrize('raw', [b'a', b'homeassistant/a\\b\xff', b'/'.join([b'x'*200]*6),
+    b'/'.join([b'x'*170,b'y'*170,b'z'*170]), b'a/\x01', b'a\x01/z'])
+def test_publication_byte_codec_roundtrip_and_component_membership(raw):
+    token = native.encode_native_path(raw)
+    assert native.decode_native_path(token) == raw
+    assert token == 'nb1/' + '/'.join(p.hex() for p in raw.split(b'/'))
+    assert native.native_membership(token, native.encode_native_path(raw.split(b'/')[0]))
+    assert not native.native_membership(native.encode_native_path(b'ab'), native.encode_native_path(b'a'))
+
+@pytest.mark.parametrize('raw', [b'/', b'/tmp/\xff\\x', b'/' + b'/'.join([b'x'*200]*6)])
+def test_publication_absolute_codec_has_no_display_ceiling(raw):
+    token = native.encode_native_path(raw, absolute=True)
+    assert native.decode_native_path(token, absolute=True) == raw
+    assert native.encode_native_path(b'/', absolute=True) == '/nb1'
+
+@pytest.mark.parametrize('token', ['nb1', 'nb1/', 'nb1/AA', 'nb1/0', 'nb1/00', 'nb1/2f',
+    'nb1/2e', 'nb1/2e2e', 'nb1/61/', 'nb1//61', 'nb2/61', 'nb1/ 61', 'nb1/\u00e9'])
+def test_publication_codec_rejects_aliases(token):
+    with pytest.raises(native.InvalidState): native.decode_native_path(token)
+
+def publication_identity(raw=b'homeassistant/a\\\xff'):
+    value = identity()
+    value['execution_policy'] = 'native-publication-v1'
+    value['root']['path'] = native.encode_native_path(b'/', absolute=True)
+    value['scope']['allowlist'] = [native.encode_native_path(raw.split(b'/')[0])]
+    value['paths'] = [dict(value['paths'][0], path=native.encode_native_path(raw))]
+    return value
+
+def test_publication_owner_profile_long_identity_decisions_retention(store):
+    raw = b'/'.join([b'x'*200]*6)
+    value = publication_identity(raw)
+    native.validate_identity(value, 'save')
+    producer=mock.Mock()
+    before=store.read()
+    for route in (lambda:store.preview(before['revision'],'save',value,b'byte identities'),
+                  lambda:store.preview_stream(before['revision'],'save',value,producer)):
+        with pytest.raises(native.Conflict,match='native publication'): route()
+    producer.assert_not_called()
+    assert store.read()==before
+    assert native.decode_native_path(value['paths'][0]['path'])==raw
+    wrong = copy.deepcopy(value); wrong['execution_policy']='inert-v1'
+    with pytest.raises(native.InvalidState): native.validate_identity(wrong,'save')
+    old = identity(); old['paths'][0]['path'] = raw.decode()
+    with pytest.raises(native.InvalidState): native.validate_identity(old,'save')
+    native.validate_identity(identity(),'save')
+
+def test_publication_codec_context_cannot_be_transplanted(store):
+    value=publication_identity()
+    store.preview(0,'save',identity(),b'legacy')
+    state=store.read()
+    legacy=value
+    record=copy.deepcopy(next(iter(state['records'].values())))
+    record['identity']=legacy; record['identity_digest']=native.digest(legacy)
+    state['records'][record['id']]=record
+    (store.data_root/'native-operations/state.json').write_bytes(native.canonical(state))
+    with pytest.raises(native.InvalidState): store.read()
+
+def test_native_scope_validation_decodes_each_token_once(monkeypatch):
+    paths = [native.encode_native_path(('root%06d' % i).encode()) for i in range(10000)]
+    calls=[]; original=native.decode_native_path
+    monkeypatch.setattr(native,'decode_native_path',lambda token,**kw:(calls.append(token),original(token,**kw))[1])
+    native._scope({'revision':0,'exclude_digest':'a'*64,'allowlist':paths},'native-bytes-v1')
+    assert len(calls) == len(paths)
+    with pytest.raises(native.InvalidState,match='redundant'):
+        native._scope({'revision':0,'exclude_digest':'a'*64,'allowlist':sorted([
+            native.encode_native_path(b'a-'),native.encode_native_path(b'a'),native.encode_native_path(b'a/x')])},'native-bytes-v1')
+
+
+def test_r2_generic_owner_legacy_positive_controls(store):
+    record=seed(store);worker=claim(store,record)
+    store.checkpoint(store.read()['revision'],worker['id'],worker['epoch'],'effect_started',observed(record['identity']))
+    store.recovery_pin(store.read()['revision'],None,record['id'],record['identity_digest'])
+    state=store.read();store.recovery_pin(state['revision'],state['recovery'])
+    store.checkpoint(store.read()['revision'],worker['id'],worker['epoch'],'completed',evidence=dict(record['identity']['effect'],marker=worker['marker']))
+    another=store.preview(store.read()['revision'],'save',identity(),b'legacy fresh')
+    store.cancel(store.read()['revision'],another['id'])
+    store.compact(store.read()['revision']);store.lifecycle(store.read()['revision'],'R2 legacy update',{})
+    assert store.read()['workers'][worker['id']]['phase']=='completed'
+    assert store.refresh()['worker'] is None and store.upgrade(store.read()['revision'])['active'] is None
+    assert store.accounting()['artifact_bytes']>0

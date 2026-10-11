@@ -55,6 +55,21 @@ class CleanupDebt(GitFailure):
         self.result = result
 
 
+def _close_owned(resources, primary=None):
+    """Close distinct owned resources once, without replacing the first fault."""
+    active = primary
+    for address, close in resources:
+        try:
+            close()
+        except BaseException as error:
+            if primary is None:
+                primary = error
+            primary.cleanup_errors = tuple(getattr(primary, 'cleanup_errors', ())) + (
+                address + ':' + str(error),)
+    if active is None and primary is not None:
+        raise primary
+
+
 @dataclass(frozen=True)
 class StatusEntry:
     kind: bytes
@@ -88,6 +103,43 @@ class TreeEntry:
 class RefSnapshot:
     name: str
     oid: str | None
+
+
+@dataclass(frozen=True)
+class PinRetirement:
+    issuer: object
+    prepared: object
+    admission: object
+    progress: int
+    current: bytes
+    name: str
+    oid: str | None
+
+
+@dataclass(frozen=True)
+class PublicationResource:
+    issuer: object
+    prepared: object
+    admission: object
+    current: bytes
+    slot: str
+    token: str
+    descriptor: int
+    parent: int
+    path: bytes
+    payload: bytes
+
+
+def publication_resource_token(info,parent):
+    from native_disk import _observation, _identity
+    values=_observation(info)+_identity(parent)
+    if any(type(value) is not int or not 0<=value<2**64 for value in values):
+        raise InvalidInput('publication-resource-stat-overflow')
+    token=''.join(format(value,'016x') for value in values)
+    from native_operations import _publication_resources,PUBLICATION_RESOURCE_SLOTS,PUBLICATION_RESOURCE_EMPTY
+    resources=dict.fromkeys(PUBLICATION_RESOURCE_SLOTS,PUBLICATION_RESOURCE_EMPTY);resources['commit']=token
+    _publication_resources(resources)
+    return token
 
 
 @dataclass(frozen=True)
@@ -318,6 +370,7 @@ class NativeGit:
         self._root_id = _identity(self.root, directory=True)
         self._meta_id = _identity(self.metadata, directory=True)
         self._active = {}
+        self._publication_profile = None
         self._storage_id = _identity(self.resources_root, directory=True) if os.path.lexists(self.resources_root) else None
         with _MUTEX_GUARD:
             self._mutex = _MUTEXES.setdefault(self.resources_root, threading.RLock())
@@ -392,7 +445,10 @@ class NativeGit:
         return env
 
     def _argv(self, command, *, index=None, worktree=None):
-        self._validate_metadata()
+        if self._publication_profile is None:
+            self._validate_metadata()
+        else:
+            self._publication_routes()
         env = self._environment()
         if index is not None:
             env["GIT_INDEX_FILE"] = os.fsdecode(index)
@@ -413,6 +469,7 @@ class NativeGit:
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         selector, output, error = selectors.DefaultSelector(), bytearray(), bytearray()
         pending = memoryview(input or b"")
+        close_attempted = set()
         deadline = time.monotonic() + self.timeout
         try:
             for stream in (process.stdout, process.stderr):
@@ -423,6 +480,7 @@ class NativeGit:
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE)
                 else:
+                    close_attempted.add(process.stdin)
                     process.stdin.close()
             while selector.get_map():
                 left = deadline - time.monotonic()
@@ -437,6 +495,7 @@ class NativeGit:
                             pending = memoryview(b"")
                         if not pending:
                             selector.unregister(key.fileobj)
+                            close_attempted.add(key.fileobj)
                             key.fileobj.close()
                         continue
                     chunk = os.read(key.fd, CHUNK)
@@ -458,12 +517,15 @@ class NativeGit:
             process.wait()
             raise
         finally:
-            selector.close()
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream is not None:
-                    stream.close()
+            _close_owned([('git-selector-close',selector.close)]+[
+                ('git-'+label+'-close',stream.close)
+                for label,stream in (('stdin',process.stdin),('stdout',process.stdout),('stderr',process.stderr))
+                if stream is not None and stream not in close_attempted],__import__('sys').exc_info()[1])
 
     def _config(self):
+        if self._publication_profile is not None:
+            self._publication_routes()
+            return self._publication_profile[0]
         _, output = self._raw(("config", "--null", "--local", "--no-includes", "--list"))
         width = 40
         for token in _tokens(output):
@@ -618,6 +680,9 @@ class NativeGit:
         return name
 
     def _packed_ref_storage(self, width):
+        if self._publication_profile is not None:
+            self._publication_routes()
+            return self._publication_profile[2]
         packed = os.path.join(self.metadata, b"packed-refs")
         if not os.path.lexists(packed):
             return {}
@@ -767,9 +832,9 @@ class NativeGit:
             process.wait()
             raise
         finally:
-            selector.close()
-            process.stdout.close()
-            process.stderr.close()
+            _close_owned((('git-object-selector-close',selector.close),
+                ('git-object-stdout-close',process.stdout.close),
+                ('git-object-stderr-close',process.stderr.close)),__import__('sys').exc_info()[1])
 
     def _verify_stored_object(self, oid, kind):
         class Discard:
@@ -2037,3 +2102,455 @@ class NativeGit:
                         os.close(fd)
             return {"active": active, "unresolved": len(journal["records"]) - active, "temporary_bytes": total,
                     "admin_bytes": admin_total, "errors": tuple(errors)}
+
+
+    def _publication_routes(self):
+        width, proofs, packed = self._publication_profile
+        if _identity(self.root,directory=True) != self._root_id or _identity(self.metadata,directory=True) != self._meta_id:
+            raise InvalidInput("publication-anchor-replaced")
+        for path,before in proofs:
+            _components(os.path.dirname(path),missing=True)
+            current=os.lstat(path) if os.path.lexists(path) else None
+            identity=None if current is None else (current.st_dev,current.st_ino,current.st_mode,current.st_size,current.st_mtime_ns,current.st_ctime_ns)
+            if identity != before:
+                raise InvalidInput("publication-qualified-route-changed")
+
+    @contextmanager
+    def publication_local(self):
+        """One initial profile/ref qualification; all later checks are targeted."""
+        if self._publication_profile is not None:
+            raise InvalidInput("nested-publication-profile")
+        width=self._config()
+        packed=self._packed_ref_storage(width)
+        proofs=[]
+        for relative in (b"config",b"packed-refs",b"commondir",b"gitdir",b"config.worktree",
+                         b"objects/info/alternates",b"objects/info/http-alternates",b"shallow",b"info/grafts"):
+            path=self.metadata+b"/"+relative
+            info=os.lstat(path) if os.path.lexists(path) else None
+            if relative not in (b"config",b"packed-refs") and info is not None:
+                raise InvalidInput("unsupported-publication-object-routing")
+            proofs.append((path,None if info is None else (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)))
+        self._publication_profile=(width,tuple(proofs),packed)
+        try: yield self
+        finally: self._publication_profile=None
+
+    def exact_commit(self, oid):
+        sink=io.BytesIO()
+        self._copy_object(oid,b"commit",sink)
+        raw=sink.getvalue()
+        tree,parents=parse_commit(raw,self._config())
+        return raw,tree,parents
+
+    def verified_graph(self, tip, target, *, maximum=10000):
+        """No fetch; a complete exact parent graph or an explicit failure."""
+        _oid(tip,self._config()); _oid(target,self._config())
+        pending,seen,edges=[tip],set(),[]
+        while pending:
+            oid=pending.pop()
+            if oid in seen: continue
+            if len(seen)>=maximum:
+                raise InvalidInput("commit-graph-budget-exhausted")
+            raw,tree,parents=self.exact_commit(oid)
+            seen.add(oid); edges.append((oid,tuple(parents)))
+            if oid == target:
+                return True,tuple(edges)
+            pending.extend(parent for parent in parents if parent not in seen)
+        return False,tuple(edges)
+
+    def write_exact_commit(self, raw, *, admission):
+        prepared=admission.plan.evidence.publication
+        admission.qualify_publication(prepared)
+        from native_publication import validate_intent
+        intent=validate_intent(prepared.artifact)
+        if self.root != intent.candidate.binding.root or raw != intent.raw_commit:
+            raise InvalidInput("exact-prepared-commit-required")
+        from native_operations import _parse
+        worker=_parse(prepared._current)['workers'][prepared.operation_id]
+        if prepared.purpose!='publication' or worker['phase']!='effect_started' or worker['publication_attempt']!='not-sent':
+            raise InvalidInput('commit creation outside initial unsent publication')
+        parse_commit(raw,self._config())
+        existing=self._preflight_object_write(intent.commit_oid,b"commit")
+        if existing is None:
+            output=self._run(("hash-object","-t","commit","--stdin","-w"),input=raw)
+            if output != intent.commit_oid.encode()+b"\n":
+                raise GitFailure("exact-commit-write-result-mismatch")
+            self._verify_stored_object(intent.commit_oid,b"commit")
+            admission.acknowledge_publication_commit(intent.commit_oid)
+        self.harden_object(intent.commit_oid,admission=admission)
+        return intent.commit_oid
+
+    def harden_object(self, oid, *, admission):
+        admission.qualify_publication(admission.plan.evidence.publication)
+        loose=self.metadata+b"/objects/"+oid[:2].encode()+b"/"+oid[2:].encode()
+        routes=[loose] if os.path.lexists(loose) else [path for path,source in admission._context.dependencies
+            if source is not None and path.startswith(self.metadata+b"/objects/pack/")]
+        if not routes:
+            raise InvalidInput("durable-object-storage-unavailable")
+        for path in routes:
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                info=os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise InvalidInput("durable-regular-object-required")
+                os.fsync(fd)
+            finally:
+                primary=__import__('sys').exc_info()[1]
+                try: os.close(fd)
+                except BaseException as secondary:
+                    if primary is None: raise
+                    primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-object-close:'+os.fsdecode(path)+':'+str(secondary),)
+            self._fsync(os.path.dirname(path))
+        self._fsync(self.metadata+b"/objects")
+
+    def qualify_publication_signature(self,signature):
+        from native_publication import Signature
+        if type(signature) is not Signature: raise InvalidInput('exact-publication-signature-required')
+        signature.__post_init__()
+        argv,env=self._argv(('var','GIT_COMMITTER_IDENT'))
+        env.update(GIT_COMMITTER_NAME=signature.name,GIT_COMMITTER_EMAIL=signature.email,
+            GIT_COMMITTER_DATE='@%d %s' % (signature.timestamp,signature.timezone))
+        result=subprocess.run(argv,cwd=self.root,env=env,stdin=subprocess.DEVNULL,capture_output=True,timeout=self.timeout)
+        if result.returncode or result.stderr or result.stdout!=signature.raw()+b'\n':
+            raise InvalidInput('publication-signature-not-exact-Git-serialization')
+
+    def publication_harden_local(self,intent,*,admission):
+        """A visible C skips mutation, never exact descriptor/parent durability."""
+        prepared=admission.plan.evidence.publication; admission.qualify_publication(prepared)
+        if self.read_ref(intent.local_ref).oid!=intent.commit_oid: raise RefConflict('already-C-hardening-ref-conflict')
+        sources=dict(admission._context.dependencies)
+        sources.update((source.path,source) for source in admission._context.sources)
+        for path,proof in admission.plan.output_files:
+            if proof is not None and proof[0]=='source-append': sources[path]=proof[1]
+        from native_disk import _observation
+        ref=self.metadata+b'/'+intent.local_ref.encode()
+        route=ref if os.path.lexists(ref) else self.metadata+b'/packed-refs'
+        paths=[(route,None)]+[(self.root+b'/'+relative,payload) for relative,payload in intent.reflogs]
+        for path,payload in paths:
+            admission.qualify_publication(prepared)
+            fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+            try:
+                source=sources.get(path)
+                expected=admission._created_files.get(path) or (source.observation if source is not None else None)
+                info=os.fstat(fd)
+                if expected is None or _observation(info)!=expected or _observation(os.stat(path,follow_symlinks=False))!=expected:
+                    raise InvalidInput('publication-local-durability-descriptor-changed:'+os.fsdecode(path))
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1: raise InvalidInput('publication-local-durability-regular-required')
+                # GC may legitimately expire/canonicalize historical entries.
+                # The exact current captured descriptor/layout is hardened;
+                # the retained owner proof, not an expired tail, binds the CAS.
+                os.fsync(fd)
+            finally:
+                primary=__import__('sys').exc_info()[1]
+                try: os.close(fd)
+                except BaseException as secondary:
+                    if primary is None: raise
+                    primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-local-hardening-close:'+os.fsdecode(path)+':'+str(secondary),)
+            self._fsync(os.path.dirname(path))
+        self._fsync(self.metadata)
+        if self.read_ref(intent.local_ref).oid!=intent.commit_oid: raise RefConflict('already-C-hardening-readback-conflict')
+
+    def publication_ref(self, name, oid, *, expected_old, admission, committer=None):
+        prepared=admission.plan.evidence.publication
+        admission.qualify_publication(prepared)
+        from native_publication import validate_intent
+        intent=validate_intent(prepared.artifact)
+        if prepared.purpose=="abandon": raise InvalidInput("abandonment-cannot-advance-ref")
+        allowed={intent.tree_pin:(intent.candidate.tree_oid,None),intent.commit_pin:(intent.commit_oid,None),
+                 intent.local_ref:(intent.commit_oid,intent.expected_local)}
+        if allowed.get(name) != (oid,expected_old):
+            raise InvalidInput("unprepared-publication-ref-effect")
+        from native_operations import _parse
+        worker=_parse(prepared._current)['workers'][prepared.operation_id]
+        if name==intent.local_ref:
+            confirmation=worker['publication_confirmation']
+            if worker['phase'] not in ('effect_started','recovery_required') or confirmation is None or (confirmation['owner'],confirmation['epoch'])!=(worker['owner'],worker['epoch']) or not any(
+                    entry[0] is prepared and entry[1]==prepared._current and entry[2].startswith('proved_')
+                    for entry in getattr(prepared.store,'_publication_compiled',())):
+                raise InvalidInput('persisted current positive publication proof required')
+        elif worker['phase'] not in ('effect_started','recovery_required') or worker['publication_attempt']!='not-sent':
+            raise InvalidInput('pin creation outside initial unsent preparation')
+        before=self.read_ref(name)
+        if before.oid != expected_old:
+            raise RefConflict("publication-ref-expectation-conflict")
+        self._ref_name(name); self._object(oid)
+        command=("update-ref","--no-deref",name,oid,expected_old or "0"*self._config())
+        argv,env=self._argv(('-c','core.logAllRefUpdates=false',*command))
+        if committer is not None:
+            env.update(GIT_COMMITTER_NAME=committer.name,GIT_COMMITTER_EMAIL=committer.email,
+                       GIT_COMMITTER_DATE="@%d %s" % (committer.timestamp,committer.timezone))
+        try:
+            result=subprocess.run(argv,cwd=self.root,env=env,stdin=subprocess.DEVNULL,
+                                  capture_output=True,timeout=self.timeout)
+            if result.returncode or result.stdout or result.stderr:
+                raise GitFailure("publication-ref-command-not-acknowledged",stderr=result.stderr[:CHUNK])
+        except BaseException as error:
+            try: after=self.read_ref(name)
+            except BaseException: after=None
+            raise RefUncertain(before,after,error) from error
+        admission.acknowledge_publication_ref(name,oid)
+        path=self.metadata+b"/"+name.encode()
+        fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try: os.fsync(fd)
+        finally:
+            primary=__import__('sys').exc_info()[1]
+            try: os.close(fd)
+            except BaseException as secondary:
+                if primary is None: raise
+                primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-ref-close:'+name+':'+str(secondary),)
+        self._fsync(os.path.dirname(path)); self._fsync(self.metadata)
+        if name==intent.local_ref:
+            for relative,_ in intent.reflogs:
+                log=self.root+b'/'+relative
+                admission.qualify_publication(prepared)
+                from native_disk import _observation
+                descriptor=os.open(log,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+                try:
+                    observed=admission._created_files.get(log)
+                    if observed is None or _observation(os.fstat(descriptor))!=observed or _observation(os.stat(log,follow_symlinks=False))!=observed:
+                        raise InvalidInput('publication-reflog-durability-descriptor-changed')
+                    os.fsync(descriptor)
+                finally:
+                    primary=__import__('sys').exc_info()[1]
+                    try: os.close(descriptor)
+                    except BaseException as secondary:
+                        if primary is None: raise
+                        primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-reflog-close:'+os.fsdecode(log)+':'+str(secondary),)
+                self._fsync(os.path.dirname(log))
+        if self.read_ref(name).oid != oid:
+            raise RefUncertain(before,self.read_ref(name),GitFailure("publication-ref-readback-changed"))
+        return RefSnapshot(name,oid)
+
+    def publication_retirement_proof(self,prepared,admission,progress):
+        admission.qualify_publication(prepared)
+        from native_publication import validate_intent
+        from native_operations import _parse,_publication_abandonment_cleanup
+        intent=validate_intent(prepared.artifact); state=_parse(prepared._current)
+        worker=state['workers'][prepared.operation_id]
+        if worker['phase'] not in ('completed','failed') or progress!=worker['publication_cleanup']+1 or progress not in (1,2,3,4):
+            raise InvalidInput('exact terminal retirement step required')
+        name,expected=(intent.commit_pin,intent.commit_oid) if progress<=2 else (intent.tree_pin,intent.candidate.tree_oid)
+        actual=self.read_ref(name).oid
+        if progress%2:
+            allowed_absence=_publication_abandonment_cleanup(state,worker)
+            if actual!=expected and not (actual is None and allowed_absence): raise RefConflict('owned pin unavailable before retirement')
+        else:
+            ack=getattr(self,'_publication_cleanup_ack',None)
+            if actual is not None or ack!=(prepared,admission,prepared._current,name):
+                raise RefConflict('issuer acknowledged pin/lock durability required')
+            self._publication_cleanup_ack=None
+        proof=PinRetirement(self,prepared,admission,progress,prepared._current,name,actual)
+        self._pin_retirement=(proof,tuple(getattr(proof,k) for k in PinRetirement.__dataclass_fields__))
+        return proof
+
+    def qualify_publication_retirement(self,proof,prepared,admission,progress):
+        issued=getattr(self,'_pin_retirement',None)
+        if issued is None or proof is not issued[0] or tuple(getattr(proof,k) for k in PinRetirement.__dataclass_fields__)!=issued[1] or \
+                (proof.issuer,proof.prepared,proof.admission,proof.progress,proof.current)!=(self,prepared,admission,progress,prepared._current):
+            raise InvalidInput('issued unchanged pin retirement required')
+        admission.qualify_publication(prepared)
+        if self.read_ref(proof.name).oid!=proof.oid: raise RefConflict('retirement pin changed')
+        self._pin_retirement=None
+        return proof
+
+    def publication_resource_proof(self,prepared,admission,slot,descriptor,parent,path,payload):
+        admission.qualify_publication(prepared)
+        created=getattr(self,'_publication_lock_creation',None)
+        if created!=(prepared,admission,slot,descriptor,parent,path,payload):
+            raise InvalidInput('exclusive issued publication lock required')
+        from native_publication import validate_intent
+        from native_operations import _parse
+        intent=validate_intent(prepared.artifact);worker=_parse(prepared._current)['workers'][prepared.operation_id]
+        pin=intent.commit_pin if slot.startswith('commit') else intent.tree_pin
+        expected=self.metadata+b'/'+(b'packed-refs.lock' if slot.endswith('-packed') else pin.encode()+b'.lock')
+        if slot not in ('commit','commit-packed','tree','tree-packed') or worker['phase'] not in ('completed','failed') or worker['publication_cleanup']!=(1 if slot.startswith('commit') else 3) or path!=expected:
+            raise InvalidInput('exact authorized publication resource route required')
+        wanted=admission.publication_packed_effect(pin)[1] if slot.endswith('-packed') else (intent.commit_oid if slot=='commit' else intent.candidate.tree_oid).encode()+b'\n'
+        from native_disk import _observation
+        if payload!=wanted or admission._created_files.get(path)!=_observation(os.fstat(descriptor)):
+            raise InvalidInput('exact admitted publication resource bytes required')
+        info=os.fstat(descriptor); token=publication_resource_token(info,os.fstat(parent))
+        if publication_resource_token(os.stat(os.path.basename(path),dir_fd=parent,follow_symlinks=False),os.fstat(parent))!=token:
+            raise RefConflict('publication resource path replaced')
+        if info.st_size!=len(payload) or os.pread(descriptor,len(payload)+1,0)!=payload:
+            raise RefConflict('publication resource payload changed')
+        proof=PublicationResource(self,prepared,admission,prepared._current,slot,token,descriptor,parent,path,payload)
+        self._publication_resource=(proof,tuple(getattr(proof,k) for k in PublicationResource.__dataclass_fields__))
+        return proof
+
+    def qualify_publication_resource(self,proof,prepared,admission):
+        issued=getattr(self,'_publication_resource',None)
+        if issued is None or proof is not issued[0] or tuple(getattr(proof,k) for k in PublicationResource.__dataclass_fields__)!=issued[1] or (proof.prepared,proof.admission,proof.current)!=(prepared,admission,prepared._current):
+            raise InvalidInput('issued unchanged publication resource required')
+        admission.qualify_publication(prepared)
+        if publication_resource_token(os.fstat(proof.descriptor),os.fstat(proof.parent))!=proof.token or publication_resource_token(os.stat(os.path.basename(proof.path),dir_fd=proof.parent,follow_symlinks=False),os.fstat(proof.parent))!=proof.token or os.pread(proof.descriptor,len(proof.payload)+1,0)!=proof.payload:
+            raise RefConflict('issued publication resource changed')
+        self._publication_resource=None;self._publication_lock_creation=None
+        return proof
+
+    def _publication_lock(self,slot,path,payload,parent,admission):
+        from native_operations import _parse,PUBLICATION_RESOURCE_EMPTY
+        prepared=admission.plan.evidence.publication
+        token=_parse(prepared._current)['workers'][prepared.operation_id]['publication_resources'][slot]
+        if os.path.lexists(path):
+            if token==PUBLICATION_RESOURCE_EMPTY: raise RefConflict('unknown publication lock preserved:'+os.fsdecode(path))
+            fd=os.open(os.path.basename(path),os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            try:
+                if publication_resource_token(os.fstat(fd),os.fstat(parent))!=token or publication_resource_token(os.stat(os.path.basename(path),dir_fd=parent,follow_symlinks=False),os.fstat(parent))!=token or os.pread(fd,len(payload)+1,0)!=payload:
+                    raise RefConflict('foreign publication lock preserved:'+os.fsdecode(path))
+                admission.acknowledge_publication_lock(slot,path,fd,parent,token,payload)
+            except BaseException as primary:
+                _close_owned((('publication-lock-close:'+os.fsdecode(path),lambda:os.close(fd)),),primary)
+                raise
+            return fd
+        if token!=PUBLICATION_RESOURCE_EMPTY:
+            return None # acknowledged deletion may have preceded its owner ACK
+        fd=os.open(os.path.basename(path),os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+        try:
+            offset=0
+            while offset<len(payload):
+                written=os.write(fd,payload[offset:offset+65536])
+                if written<=0: raise OSError('short publication lock write')
+                offset+=written
+            os.fsync(fd);os.fsync(parent)
+            admission.record_file_creation(path[len(self.root)+1:],fd)
+            self._publication_lock_creation=(prepared,admission,slot,fd,parent,path,payload)
+            proof=self.publication_resource_proof(prepared,admission,slot,fd,parent,path,payload)
+            prepared.store.publication_resource(prepared,admission,proof)
+        except BaseException as primary:
+            _close_owned((('publication-lock-close:'+os.fsdecode(path),lambda:os.close(fd)),),primary)
+            raise
+        return fd
+
+    def publication_delete_pin(self,name,*,expected_old,admission):
+        """Retire exact owned resources; absence is never a durability ACK."""
+        prepared=admission.plan.evidence.publication;self._publication_cleanup_ack=None
+        admission.qualify_publication(prepared)
+        from native_publication import validate_intent
+        from native_disk import _observation
+        from native_operations import _parse,PUBLICATION_RESOURCE_EMPTY,_publication_abandonment_cleanup
+        intent=validate_intent(prepared.artifact)
+        allowed={intent.tree_pin:intent.candidate.tree_oid,intent.commit_pin:intent.commit_oid}
+        if allowed.get(name)!=expected_old: raise InvalidInput('only owned publication pin may be deleted')
+        state=_parse(prepared._current);worker=state['workers'][prepared.operation_id]
+        if worker['phase'] not in ('completed','failed') or worker['publication_cleanup']!=(1 if name==intent.commit_pin else 3):
+            raise InvalidInput('durable own pin retirement authorization required')
+        slot='commit' if name==intent.commit_pin else 'tree'
+        route=self.metadata+b'/'+name.encode('ascii');lock=route+b'.lock';payload=expected_old.encode()+b'\n'
+        descriptor=parent=None;primary=None
+        try:
+            packed_effect=admission.publication_packed_effect(name)
+            parent=os.open(os.path.dirname(route),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            actual=self.read_ref(name).oid
+            if actual is not None and actual!=expected_old: raise RefConflict('owned publication pin changed')
+            if actual is None and worker['publication_resources'][slot]==PUBLICATION_RESOURCE_EMPTY and not _publication_abandonment_cleanup(state,worker):
+                raise RefConflict('unexplained absent publication resource')
+            if actual is None and worker['publication_resources'][slot]==PUBLICATION_RESOURCE_EMPTY and os.path.lexists(lock):
+                raise RefConflict('unknown publication lock preserved:'+os.fsdecode(lock))
+            if actual is not None or os.path.lexists(lock):
+                descriptor=self._publication_lock(slot,lock,payload,parent,admission)
+                if descriptor is None and actual is not None: raise RefConflict('recorded publication lock missing before pin effect')
+            observed=admission._created_files.get(route)
+            if observed is None:
+                source=next((source for path,source in admission._context.dependencies if path==route),None)
+                observed=source.observation if source is not None else None
+            if observed is not None and actual is not None:
+                fd=os.open(os.path.basename(route),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                try:
+                    if _observation(os.fstat(fd))!=observed or os.read(fd,66)!=payload or _observation(os.stat(os.path.basename(route),dir_fd=parent,follow_symlinks=False))!=observed:
+                        raise RefConflict('owned publication pin replaced')
+                finally:
+                    _close_owned((('publication-pin-read-close:'+name,lambda:os.close(fd)),),__import__('sys').exc_info()[1])
+            if packed_effect is not None: self._publication_retire_packed(name,packed_effect,admission)
+            elif os.path.lexists(self.metadata+b'/packed-refs.lock'):
+                raise RefConflict('remaining packed publication lock preserved')
+            # Current packed source and both parents must be hardened even when
+            # an interrupted replace/unlink left no pin or lock to delete.
+            packed=self.metadata+b'/packed-refs'
+            if os.path.lexists(packed):
+                stream=open(packed,'rb')
+                try:
+                    packed_observed=admission.publication_packed_hardening(stream.fileno());os.fsync(stream.fileno())
+                    if packed_observed!=_observation(os.fstat(stream.fileno())) or packed_observed!=_observation(os.stat(packed,follow_symlinks=False)): raise RefConflict('packed publication source replaced during hardening')
+                finally:
+                    _close_owned((('publication-packed-hardening-close:'+name,stream.close),),__import__('sys').exc_info()[1])
+            self._fsync(self.metadata)
+            if actual is not None and observed is not None:
+                if _observation(os.stat(os.path.basename(route),dir_fd=parent,follow_symlinks=False))!=observed: raise RefConflict('owned publication pin replaced')
+                os.unlink(os.path.basename(route),dir_fd=parent)
+            os.fsync(parent)
+            if descriptor is not None:
+                token=_parse(prepared._current)['workers'][prepared.operation_id]['publication_resources'][slot]
+                if publication_resource_token(os.fstat(descriptor),os.fstat(parent))!=token or publication_resource_token(os.stat(os.path.basename(lock),dir_fd=parent,follow_symlinks=False),os.fstat(parent))!=token:
+                    raise RefConflict('owned publication lock replaced before deletion')
+                os.unlink(os.path.basename(lock),dir_fd=parent)
+            os.fsync(parent)
+            admission.acknowledge_publication_pin_deletion(name)
+        except BaseException as error:
+            primary=error;error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('publication-pin-deletion:'+name+':lock='+os.fsdecode(lock),)
+            raise
+        finally:
+            _close_owned([('publication-pin-'+label+'-close:'+name,lambda fd=fd:os.close(fd))
+                for label,fd in (('lock',descriptor),('parent',parent)) if fd is not None],primary)
+        self._publication_cleanup_ack=(prepared,admission,prepared._current,name)
+
+    def _publication_retire_packed(self,name,effect,admission):
+        """Own pin only, exact captured bytes, held packed lock, atomic replace."""
+        from native_disk import _observation
+        before,payload,observed=effect
+        parent=descriptor=current=None; primary=None
+        path=self.metadata+b'/packed-refs'; lock=path+b'.lock'
+        try:
+            parent=os.open(self.metadata,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            current=os.open(b'packed-refs',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+            if _observation(os.fstat(current))!=observed:
+                raise RefConflict('owned packed publication source changed')
+            from native_publication import validate_intent
+            intent=validate_intent(admission.plan.evidence.publication.artifact)
+            slot=('commit' if name==intent.commit_pin else 'tree')+'-packed'
+            descriptor=self._publication_lock(slot,lock,payload,parent,admission)
+            if descriptor is None: raise RefConflict('recorded packed lock missing before replace')
+            if _observation(os.fstat(current))!=observed or _observation(os.stat(b'packed-refs',dir_fd=parent,follow_symlinks=False))!=observed:
+                raise RefConflict('owned packed publication source replaced')
+            if _observation(os.fstat(descriptor))!=admission._created_files[lock] or _observation(os.stat(b'packed-refs.lock',dir_fd=parent,follow_symlinks=False))!=admission._created_files[lock]:
+                raise RefConflict('owned packed publication lock replaced')
+            os.replace(b'packed-refs.lock',b'packed-refs',src_dir_fd=parent,dst_dir_fd=parent)
+            os.fsync(parent)
+            receipt=admission.acknowledge_publication_packed(name,payload)
+            width,proofs,packed=self._publication_profile
+            # Receipt independently verified exact file bytes and descriptor.
+            info=os.fstat(descriptor)
+            if _observation(info)!=receipt: raise RefConflict('owned packed publication receipt changed')
+            identity=(info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+            remaining=dict(packed); remaining.pop(name.encode('ascii'))
+            self._publication_profile=(width,tuple((p,identity if p==path else old) for p,old in proofs),remaining)
+        except BaseException as error:
+            primary=error
+            error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('publication-packed-retirement:'+name+':lock='+os.fsdecode(lock),)
+            raise
+        finally:
+            _close_owned([('publication-packed-'+label+'-close:'+name,lambda fd=fd:os.close(fd))
+                for label,fd in (('source',current),('lock',descriptor),('parent',parent)) if fd is not None],primary)
+
+
+def parse_commit(raw,width):
+    if type(raw) is not bytes or b"\0" in raw or b"\n\n" not in raw:
+        raise InvalidInput("malformed-exact-commit")
+    header=raw.split(b"\n\n",1)[0].split(b"\n")
+    if not header or not header[0].startswith(b"tree "):
+        raise InvalidInput("malformed-exact-commit-tree")
+    try:
+        tree=_oid(header[0][5:].decode("ascii"),width)
+        parents=[]; ended=False
+        for line in header[1:]:
+            if line.startswith(b"parent "):
+                if ended: raise InvalidInput("misplaced-commit-parent")
+                parents.append(_oid(line[7:].decode("ascii"),width))
+            else:
+                ended=True
+                if line.startswith(b"tree ") or not line:
+                    raise InvalidInput("malformed-exact-commit-header")
+        if sum(line.startswith(b"author ") for line in header)!=1 or sum(line.startswith(b"committer ") for line in header)!=1:
+            raise InvalidInput("exact-commit-identities-required")
+    except UnicodeError as exc:
+        raise InvalidInput("malformed-exact-commit-id") from exc
+    return tree,tuple(parents)

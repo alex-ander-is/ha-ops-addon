@@ -372,3 +372,69 @@ Adjacent changed primitive seams use `test_native_git.py`,
 `test_native_metadata.py`, `test_native_preview.py`, `test_native_disk.py` and
 `test_native_operations.py`. These focused checks retain the separate foreman
 whole-repository/release-readiness gate. See [the candidate contract](ha-ops/docs/native-save.md).
+
+
+## Dormant native publication (6.11)
+
+Run portable codec/owner and focused transport checks with bytecode/cache disabled:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_operations.py ha-ops/tests/test_native_publication.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -n 2 ha-ops/tests/test_native_publication.py
+```
+
+The latter uses only the existing qualified local profile, disposable tmpfs Git
+repositories and individually owned executable receiver-hook directories under
+`/workspace/output`. It does not contact configured remotes or live HA. Host
+skips do not qualify native allocation. Final repository checks remain the
+foreman's separate gate. See [contract and proof limits](ha-ops/docs/native-publication.md).
+
+Native publication has a separate physical allocation proof in the existing
+opt-in ext4 matrix. Reuse the same cached VM/image; the wrapper checks host/guest
+capacity, creates only its dedicated bounded loop fixture outside the application
+container, and removes its exact mount/backing/loop/container afterwards:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --ext4 --input . -- python3 -m pytest -p no:cacheprovider -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -n 1 ha-ops/tests/test_native_publication.py -k tmpfs_actual_allocation
+```
+
+The `loose-index-worktree-save` matrix row retains its original semantics and
+adds distinct `native_publication` measurements for SHA-1/SHA-256 loose publication
+and post-GC packed-pin cleanup. `NATIVE_PUBLICATION_EXT4` stdout includes actual
+logical bytes, allocated blocks, free-space/inode deltas, checkpoint peak and
+qualified plan. This new proof does not inherit step 6.6 success. The isolated
+single-worker tmpfs run also checks physical statvfs deltas; parallel tmpfs tests
+attribute actual owned blocks/inodes and label shared statvfs deltas as telemetry.
+Measurements are checkpoint observations, not a power-loss or external-writer
+simulation. The existing matrix/schema and wrapper remain unchanged.
+
+
+The 6.11 R1 regression contour covers interrupted own-pin retirement (including
+GC and packed refs), persisted actual refusal before unpinning, already-C
+ref/reflog/parent hardening without another CAS/append, prior cleanup-debt
+retention, durable recovery-ID replay, native cleanup-owner lifecycle takeover,
+fixed 128-push/16-settlement boundaries and exact installed Git signature
+serialization. Ledger-boundary inputs are canonical owner grammar fixtures;
+actual settlement uses the real Linux Git/owner/Disk path. They do not represent
+128 real transport attempts. Resource qualification must rerun the distinct
+publication tmpfs/ext4 measurements after native state/receipt recipe changes.
+
+
+The 6.11 R2 primitive closure tests exercise actual SHA1/SHA256 own loose and
+packed cleanup boundaries: lock creation before ownership persistence, issued
+resource record, pin/lock unlink, ref-parent durability, packed replacement and
+parent durability, resource acknowledgment and descriptor close. Reopen and
+lifecycle must retain addressed debt under persistent failure, settle only exact
+recorded own resources, and preserve foreign bytes, first proof and command IDs.
+Generic canonical mutation tests enumerate native refusals and positive legacy
+controls. The adjacent inventory/metadata/Git AST guards allow exact reviewed
+native peer imports while retaining negative production-import sentinels.
+
+Resource grammar changes must rerun the isolated single-worker tmpfs allocation
+cases and the existing opt-in ext4 publication proof command above. Both include
+the four fixed native resource slots and all exact resource/control recipe states;
+shared xdist statvfs deltas are telemetry, while isolated physical deltas and the
+owned block/inode inventory are asserted independently. The ext4 mandatory matrix
+and wrapper schema remain unchanged; publication measurements are a separate
+nested proof, not inherited from an unrelated matrix row.

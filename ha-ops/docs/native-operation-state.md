@@ -256,3 +256,46 @@ not a persisted candidate or worker in this store. It creates no operation-state
 schema/approval/publication record and pins no ref. Its unreferenced Git objects
 may be collected. Step 6.11 needs its own explicit publication intent, exact
 object/reachability checks and recovery boundary; see [native Save](native-save.md).
+
+
+## Native publication profile extension
+
+The registered native-publication-v1 profile selects the lossless native-bytes-v1 path codec and extends only its worker/checkpoint grammar with publication_attempt. not-sent -> possible is monotone, persisted before push and retained through lifecycle/history/capsules. Legacy schema-2 worker grammar is unchanged; old generic readers refuse this extension. Pure preparation fixes real UUIDs, canonical intent and state bytes before admission; only the preparing issuer may accept them. A publication-specific proven refusal terminates narrowly, preserving generic transitions. See [publication contract](native-publication.md).
+
+Native publication also retains strict fixed-width observed outcome commitments.
+The first positive `publication_outcome` on checkpoints is immutable after its
+one-way native-only same-phase insertion; the worker's separate
+`publication_confirmation` binds the latest positive observation to the current
+owner/epoch before completion. Readback has no invented push transcript. Exact
+owner recipe compilation consumes producer-qualified proof authority, then
+validates actual canonical bytes; accounting placeholders never authorize writes.
+
+
+The native publication profile additionally records monotone terminal cleanup
+progress 0..4 and a fixed cleanup owner/epoch. Terminal lifecycle takeover changes
+only that cleanup authority/current global epoch, preserving original worker
+ownership and historical proof checkpoints. Current retained recovery-slot
+binding permits explicit own-pin cleanup; it grants no transport/local CAS.
+Native-only request-version-3 recovery receipts remain bound to generation,
+operation, original intent and request owner/epoch through reopen/lifecycle.
+The fixed profile permits 128 push receipts plus 16 settlement receipts per
+retained operation. A full push bucket leaves settlement reserve available;
+each exhausted bucket refuses before effects. Settlement exhaustion is an
+explicit bounded availability limit. Compaction removes receipts only when the
+operation retires, after which recovery of that operation is unavailable.
+All recipe states include these exact canonical fields and added checkpoint
+bytes before the sole disk snapshot; no caller-supplied numeric ceiling applies.
+
+
+Native publication canonical mutation closure also fences every generic
+Preview/create, Review, claim, checkpoint, cancel and recovery-pin route. Terminal
+native cleanup progress below 4 requires its exact canonical recovery slot; slot
+release is an issued specialized transition. Completion requires confirmation
+from the worker's current owner/epoch, independently of historical first proof.
+Four fixed 176-character native resource slots retain actual own-lock descriptor
+and parent identities before destructive cleanup. They are compiled only from
+issuer-qualified actual descriptors into exact prospective byte recipes. Generic
+lifecycle/retention never reset them or command IDs; historical proofs stay
+immutable. Unknown creation-before-record locks remain addressed fail-closed debt.
+Legacy generic worker/command grammar is unchanged. See the publication contract
+for the precise ownership, parent durability and physical resource ACK boundary.

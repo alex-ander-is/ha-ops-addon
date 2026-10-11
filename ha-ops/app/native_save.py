@@ -28,6 +28,19 @@ def _digest(value):
     return hashlib.sha256(repr(value).encode('utf-8')).hexdigest()
 
 
+def _authority_snapshot(value):
+    """Detached exact typed fields, including nested frozen dataclasses."""
+    from dataclasses import fields, is_dataclass
+    kind=type(value)
+    if value is None or kind in (bytes,str,int,bool): return kind,value
+    if is_dataclass(value) and not isinstance(value,type):
+        return kind,tuple((field.name,_authority_snapshot(getattr(value,field.name))) for field in fields(value))
+    if kind in (tuple,list): return kind,tuple(_authority_snapshot(item) for item in value)
+    if kind in (set,frozenset): return kind,tuple(sorted((_authority_snapshot(item) for item in value),key=repr))
+    if kind is dict: return kind,tuple(sorted(((_authority_snapshot(key),_authority_snapshot(item)) for key,item in value.items()),key=repr))
+    raise Blocked('unsupported-publication-authority-field')
+
+
 def _blob(payload, width):
     return hashlib.new('sha1' if width == 40 else 'sha256',
                        b'blob ' + str(len(payload)).encode() + b'\0' + payload).hexdigest()
@@ -95,6 +108,7 @@ class NativeSave:
         if not isinstance(preview, NativePreview) or type(disk) is not NativeDisk:
             raise Blocked('native-preview-and-disk-required')
         self.preview, self.disk = preview, disk
+        self._publication_receipt = None
 
     @contextmanager
     def _stream(self, row, observed):
@@ -226,4 +240,33 @@ class NativeSave:
                 hashlib.sha256(payload).hexdigest(), selected_digest,
                 _digest((tree, baseline_tree, remote_kind, selected_digest, manifest_oid)),
                 remote_kind, review.parents)
+        self._publication_receipt = (result, review, preview, disk, preview.git, binding, preview.git.policy, preview._generation)
+        self._publication_snapshot=_authority_snapshot((result,review,binding,preview.git.policy))
         return result
+
+    @contextmanager
+    def publication_context(self, candidate, review):
+        """One live issuer grant, consumed before effects; no closing old-ref fence."""
+        receipt = self._publication_receipt
+        preview = self.preview
+        if (receipt is None or receipt[0] is not candidate or receipt[1] is not review or
+                receipt[2] is not preview or receipt[3] is not self.disk or
+                receipt[4] is not preview.git or receipt[5] is not preview.binding or
+                receipt[6] is not preview.git.policy or receipt[7] != preview._generation):
+            raise Stale('issued-current-candidate-and-review-required')
+        if _authority_snapshot((candidate,review,preview.binding,preview.git.policy))!=self._publication_snapshot:
+            raise Stale('issued-publication-authority-fields-changed')
+        with preview._call():
+            observed = preview._candidate_fence(review)
+            # The caller may validate without consuming, but every accepted
+            # operation clears this exact in-memory grant before its first effect.
+            yield observed
+
+    def consume_publication(self, candidate, review):
+        receipt = self._publication_receipt
+        if receipt is None or receipt[0] is not candidate or receipt[1] is not review:
+            raise Stale('publication-grant-already-consumed')
+        if _authority_snapshot((candidate,review,self.preview.binding,self.preview.git.policy))!=self._publication_snapshot:
+            raise Stale('issued-publication-authority-fields-changed')
+        self.preview._candidate_fence(review)
+        self._publication_receipt = None

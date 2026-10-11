@@ -335,6 +335,7 @@ class Evidence:
     candidate_final: tuple[bytes, ...] = ()
     ref: bytes | None = None
     reflog_entry: bytes | None = None
+    publication: object | None = None
 
     def __post_init__(self):
         # A frozen dataclass does not freeze caller-owned lists/buffers. Capture
@@ -466,6 +467,7 @@ class _Context:
     materialized_sizes: tuple
     prospective_owner: tuple | None
     prospective_shape: str | None
+    publication_states: tuple = ()
 
 
 class NativeDisk:
@@ -880,12 +882,15 @@ class NativeDisk:
                 self._relevant_oids.add(oid)
         packed_refs = {}
         if dependencies[metadata + b"/packed-refs"] is not None and self._oid_width is not None:
-            packed_data, source, _ = self._read_regular(metadata + b"/packed-refs", limit=self.limits.git_bytes)
+            if plan.kind=='publication' and self._publication_packed is not None:
+                packed_data,source,packed_refs=self._publication_packed
+            else:
+                packed_data, source, _ = self._read_regular(metadata + b"/packed-refs", limit=self.limits.git_bytes)
+                packed_refs = self._packed_ref_structure(packed_data, self._oid_width)
             if source != dependencies[metadata + b"/packed-refs"]:
                 raise Blocked("changed-packed-ref-during-projection")
             # Validate all structure before selecting rows, including when a
             # relevant loose override exists. Object reads stay targeted.
-            packed_refs = self._packed_ref_structure(packed_data, self._oid_width)
             # The owner validates every packed/peeled object before any loose
             # override. Qualify that finite set once, then bind its storage.
             self._qualify_local_objects(oid for pair in packed_refs.values() for oid in pair if oid is not None)
@@ -904,6 +909,11 @@ class NativeDisk:
                 direct_oid(data)
         if plan.evidence.ref is not None:
             direct_ref(plan.evidence.ref)
+        if plan.kind == "publication":
+            from native_publication import validate_intent
+            intent = validate_intent(plan.evidence.publication.artifact)
+            for pin in (intent.tree_pin, intent.commit_pin):
+                direct_ref(pin.encode("ascii"))
         head = metadata + b"/HEAD"
         if dependencies[head] is not None:
             data, _, _ = self._read_regular(head)
@@ -923,7 +933,8 @@ class NativeDisk:
                         if observed is not None and stat.S_ISREG(observed[2]) and
                         beneath(path, metadata + b"/objects")}
         loose = {metadata + b"/objects/" + oid[:2] + b"/" + oid[2:] for oid in self._relevant_oids}
-        packed_needed = bool(loose - object_files.keys())
+        future_objects = {path for path,proof in plan.output_files if proof is not None and proof[0] == "git-object"}
+        packed_needed = bool(loose - object_files.keys() - future_objects)
         for path, source in object_files.items():
             if (plan.kind == "repack" or path in loose or
                     (packed_needed and beneath(path, metadata + b"/objects/pack"))):
@@ -1007,14 +1018,23 @@ class NativeDisk:
             for record in journal["records"].values():
                 counts[record["kind"]] += 1
         prospective = None
-        for control in plan.evidence.controls:
-            value = _control_json(control.payload)
-            if isinstance(value, dict) and "workers" in value and value["active"] is not None:
-                if prospective is not None and prospective != value:
-                    raise Blocked("multiple-prospective-worker-envelopes")
-                prospective = value
-        state_limit = max(self._state_envelope(state) if state is not None else 0,
-                          self._state_envelope(prospective) if prospective is not None else 0)
+        publication_states = ()
+        if plan.kind == "publication":
+            prepared = plan.evidence.publication
+            prepared.check()
+            publication_states = tuple(value for _, value in prepared.states)
+            prospective = prepared.state("accepted")
+            state_limit = max([len(value) for value in publication_states] +
+                              ([len(__import__("native_operations").canonical(state))] if state is not None else [0]))
+        else:
+            for control in plan.evidence.controls:
+                value = _control_json(control.payload)
+                if isinstance(value, dict) and "workers" in value and value["active"] is not None:
+                    if prospective is not None and prospective != value:
+                        raise Blocked("multiple-prospective-worker-envelopes")
+                    prospective = value
+            state_limit = max(self._state_envelope(state) if state is not None else 0,
+                              self._state_envelope(prospective) if prospective is not None else 0)
         return _Context(snapshot, tuple(cache.items()), tuple(sources), tuple(sorted(routes.items())),
                         tuple(sorted(dependencies.items())), tuple(sorted(memberships.items())), tuple(sorted(owner_locks.items())), tuple(sorted(mount_proofs.items())), tuple(sorted(counts.items())),
                         self._resource_bound, self._resource_entry_bound, binding,
@@ -1025,7 +1045,7 @@ class NativeDisk:
                             ([len(plan.evidence.candidate_manifest)] if plan.kind == "candidate" else []))),
                         tuple(sorted(self._materialized_sizes.items())),
                         self._state_binding(prospective) if prospective is not None else None,
-                        self._state_shape(prospective) if prospective is not None else None)
+                        self._state_shape(prospective) if prospective is not None else None, publication_states)
 
     def _category(self, path):
         relative = path[len(self.root) + 1:]
@@ -1366,6 +1386,16 @@ class NativeDisk:
                 tuple((v.key, v.mounts, v.quantum, v.filesystem) for v in snapshot.volumes)):
             raise Blocked("incomparable-growth-snapshot")
         artifact_cache = {}
+        publication = evidence.publication if isinstance(evidence, Evidence) else None
+        if kind == "publication":
+            from native_operations import PreparedPublication
+            if type(publication) is not PreparedPublication:
+                raise Blocked("issued-publication-preparation-required")
+            publication.check()
+            if (publication.operation_id, publication.owner_id) != (evidence.operation_id, evidence.owner_id):
+                raise Blocked("publication-owner-binding-required")
+        elif publication is not None:
+            raise Blocked("publication-recipe-required")
         if not isinstance(kind, str):
             raise Blocked("immutable-operation-kind-required")
         if not isinstance(evidence, Evidence) or not evidence.operation_id or not evidence.owner_id:
@@ -1380,12 +1410,13 @@ class NativeDisk:
         self._index_bound = 0
         self._materialized_sizes = {}
         self._profile_source = None
+        self._publication_packed = None
         self._oid_width = None
         self._relevant_oids = set()
         try:
             state = self._control(self.root + b"/data/native-operations/state.json")
             self._validate_operation_state(state, artifact_cache)
-            state_bound = self._state_envelope(state)
+            state_bound = len(__import__("native_operations").canonical(state)) if kind == "publication" else self._state_envelope(state)
         except FileNotFoundError as exc:
             state_bound = 0
             try:
@@ -1447,11 +1478,14 @@ class NativeDisk:
             for control in evidence.controls:
                 if not isinstance(control, Control) or not isinstance(control.payload, bytes):
                     raise Blocked("exact-control-serialization-required")
-                self._bind_control(control, evidence, artifact_cache)
+                if kind == "publication":
+                    self._bind_publication_control(control, evidence, artifact_cache)
+                else:
+                    self._bind_control(control, evidence, artifact_cache)
                 value = _control_json(control.payload)
                 if isinstance(value, dict) and "workers" in value:
-                    v = add(b"data/native-operations", self._state_envelope(value), "full-prospective-worker-state")
-                    generated_controls[v.key] = max(generated_controls.get(v.key, 0), self._state_envelope(value))
+                    v = add(b"data/native-operations", (len(control.payload) if kind == "publication" else self._state_envelope(value)), "full-prospective-worker-state")
+                    generated_controls[v.key] = max(generated_controls.get(v.key, 0), (len(control.payload) if kind == "publication" else self._state_envelope(value)))
                 add(control.target, len(control.payload), "full-pending-control", proof=("bytes", control.payload))
                 provenance.append(("full-control", control.target, control.operation_id, control.owner_id, hashlib.sha256(control.payload).hexdigest()))
             if kind in ("initial_selection", "scope", "save", "migration", "candidate"):
@@ -1630,6 +1664,83 @@ class NativeDisk:
                         log_size = 0
                     add(log_path, log_size + len(evidence.reflog_entry), "full-reflog-copy-append", file_target=True, proof=("bytes", evidence.reflog_entry) if not log_size else ("source-append", existing_log, evidence.reflog_entry))
                     add(log_path + b".lock", log_size + len(evidence.reflog_entry), "reflog-atomic-overlap", file_target=True, proof=("bytes", evidence.reflog_entry) if not log_size else ("source-append", existing_log, evidence.reflog_entry))
+            elif kind == "publication":
+                from native_publication import validate_intent, packed_pin_removal
+                intent = validate_intent(publication.artifact)
+                from native_operations import _parse
+                terminal=publication.purpose=='recovery' and _parse(publication.initial)['workers'][publication.operation_id]['phase'] in ('completed','failed')
+                expected_tree=intent.candidate.baseline_tree_oid if terminal else intent.candidate.tree_oid
+                if (evidence.selected or evidence.materialize or evidence.copies or evidence.metadata or
+                        evidence.replacements or evidence.diff or evidence.incoming or evidence.incoming_index or
+                        evidence.candidate_manifest is not None or evidence.base_tree != expected_tree or
+                        evidence.commit != intent.raw_commit or evidence.ref != intent.local_ref.encode("ascii")):
+                    raise Blocked("exact-publication-only-recipe-required")
+                width, config = self._profile()
+                if publication.purpose!='abandon' and not terminal: self._entries(evidence.base_tree,width)
+                provenance.append(("git-config",config,"publication",hashlib.sha256(publication.artifact).hexdigest()))
+                for name,template in publication.states:
+                    if not publication.is_outcome_recipe(name): continue
+                    value=_control_json(template)
+                    try: self._validate_operation_state(value,artifact_cache,prospective=publication)
+                    except FileNotFoundError:
+                        if publication._initial_bytes is not None: raise
+                        from native_operations import _publication_graph
+                        _publication_graph(publication.store,value,None,publication.artifact)
+                    # Fixed-size strict ASCII slots determine an exact serialized
+                    # extent. This template is an accounting input, never an
+                    # authorized control output or an observed refusal.
+                    state_target=b'data/native-operations/state.json'
+                    add(state_target,len(template),'publication-outcome-recipe:'+name,file_target=True,
+                        proof=('publication-outcome-recipe',name,len(template)))
+                    v=add(b'data/native-operations',len(template),'publication-outcome-atomic-overlap:'+name)
+                    generated_controls[v.key]=max(generated_controls.get(v.key,0),len(template))
+                commit_oid = intent.commit_oid.encode()
+                if not terminal:
+                    self._relevant_oids.add(commit_oid)
+                    object_path=b"data/native/repository.git/objects/"+commit_oid[:2]+b"/"+commit_oid[2:]
+                    # The exact raw bytes feed hash-object's stdin. There is no disk
+                    # spool/index/worktree or guessed outgoing-pack allocation.
+                    add(object_path,_loose("commit",len(evidence.commit)),"publication-loose-commit",file_target=True,
+                        proof=("git-object",b"commit",intent.commit_oid,intent.raw_commit))
+                    add(b"data/native/repository.git/objects",_loose("commit",len(evidence.commit)),"publication-object-atomic-overlap")
+                for name, oid in ((intent.tree_pin,intent.candidate.tree_oid),(intent.commit_pin,intent.commit_oid),
+                                  (intent.local_ref,intent.commit_oid)):
+                    relative=b"data/native/repository.git/"+name.encode("ascii")
+                    self._git(["check-ref-format",name])
+                    add(relative,width*2+1,"publication-ref:"+name,file_target=True,proof=("bytes",oid.encode()+b"\n"))
+                    add(relative+b".lock",width*2+1,"publication-ref-lock:"+name,file_target=True,proof=("bytes",oid.encode()+b"\n"))
+                packed_relative=b'data/native/repository.git/packed-refs'
+                packed_source=self._optional_source(self.root+b'/'+packed_relative,dict(snapshot.observations))
+                if packed_source is not None:
+                    packed_raw, actual_source, _=self._read_regular(packed_source.path,limit=self.limits.git_bytes)
+                    if actual_source!=packed_source: raise Blocked('changed-packed-ref-during-projection')
+                    packed_refs=self._packed_ref_structure(packed_raw,width*2)
+                    self._publication_packed=(packed_raw,packed_source,packed_refs)
+                    variants=[((),packed_raw)]
+                    pins=((intent.commit_pin,intent.commit_oid),(intent.tree_pin,intent.candidate.tree_oid))
+                    for name,oid in pins:
+                        if name.encode() not in packed_refs: continue
+                        if packed_refs[name.encode()]!=(oid.encode(),None):
+                            raise Blocked('unexpected-packed-publication-pin')
+                        for removed,raw in tuple(variants):
+                            variants.append((removed+(name,),packed_pin_removal(raw,name,oid)))
+                    if len(variants)>1:
+                        proof=('publication-packed',packed_source,tuple(variants))
+                        size=max(len(raw) for _,raw in variants)
+                        add(packed_relative,size,'publication-packed-retained-atomic-output',file_target=True,proof=proof)
+                        add(packed_relative+b'.lock',size,'publication-packed-lock-overlap',file_target=True,proof=proof)
+                for relative, payload in intent.reflogs:
+                    source_path=self.root+b"/"+relative
+                    existing=self._optional_source(source_path,dict(snapshot.observations))
+                    previous_size=source(existing) if existing is not None else 0
+                    proof=("source-append",existing,payload) if existing is not None else ("bytes",payload)
+                    add(relative,previous_size+len(payload),"publication-reflog",file_target=True,proof=proof)
+                    add(relative+b".lock",previous_size+len(payload),"publication-reflog-lock",file_target=True,proof=proof)
+                artifact_target=b"data/native-operations/artifacts/"+hashlib.sha256(publication.artifact).hexdigest().encode()+b".diff"
+                add(artifact_target,len(publication.artifact),"publication-immutable-intent",file_target=True,proof=("bytes",publication.artifact))
+                add(b"data/native-operations/artifacts",len(publication.artifact),"publication-artifact-atomic-overlap")
+                add(b"data/native-operations/lock",0,"publication-owner-lock",file_target=True,proof=("bytes",b""))
+                add(b"data/native-operations",max(len(value) for _,value in publication.states),"publication-state-atomic-overlap")
             elif kind == "repack":
                 width, config = self._profile()
                 objects = self._objects(width)
@@ -1793,7 +1904,7 @@ class NativeDisk:
                 setattr(observer, field, [info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)])
             observer._validate_journal(value)
 
-    def _validate_operation_state(self, value, cache):
+    def _validate_operation_state(self, value, cache, prospective=None):
         from native_operations import NativeOperationStore
         route = {}
         with _directory(self.root + b"/data/native-operations", observations=route) as state_root, _directory(self.root + b"/data/native-operations/artifacts", observations=route) as artifacts:
@@ -1806,6 +1917,13 @@ class NativeDisk:
                     # artifact reader with a bounded, context-local proof.
                     from native_operations import _hash
                     _hash(key)
+                    if prospective is not None and key == hashlib.sha256(prospective.artifact).hexdigest():
+                        if size != len(prospective.artifact):
+                            raise Blocked("prospective-artifact-size-mismatch")
+                        try:
+                            os.stat(key + ".diff",dir_fd=directory,follow_symlinks=False)
+                        except FileNotFoundError:
+                            return size
                     if time.monotonic() >= deadline:
                         raise Blocked("artifact-verification-deadline")
                     name = key + ".diff"
@@ -1842,6 +1960,23 @@ class NativeDisk:
                     finally:
                         os.close(fd)
             Observer(os.fsdecode(self.root + b"/data"))._validate(value, artifacts)
+
+    def _bind_publication_control(self, control, evidence, cache):
+        from native_operations import _parse, _publication_graph
+        prepared = evidence.publication.check()
+        if (control.target.path != b"data/native-operations/state.json" or
+                control.payload not in dict(prepared.states).values() or
+                (control.operation_id,control.owner_id) != (prepared.operation_id,prepared.owner_id)):
+            raise Blocked("exact-issued-publication-state-required")
+        value = _parse(control.payload)
+        try:
+            self._validate_operation_state(value,cache,prospective=prepared)
+        except FileNotFoundError:
+            # No initial store: canonical graph validator permits only this exact
+            # independently hashed prospective intent, not absent history.
+            if prepared._initial_bytes is not None:
+                raise
+            _publication_graph(prepared.store,value,None,prepared.artifact)
 
     def _bind_control(self, control, evidence, cache):
         value = _control_json(control.payload)
@@ -2026,7 +2161,7 @@ class NativeDisk:
                 try:
                     admission.revalidate()
                     self._active_operation = plan.evidence.operation_id
-                    self._candidate_admission = admission if plan.kind == "candidate" else None
+                    self._candidate_admission = admission if plan.kind in ("candidate", "publication") else None
                     # Consumption is one-shot only after a successful entry.
                     self._contexts.pop(id(plan), None)
                     yield admission
@@ -2063,12 +2198,19 @@ class NativeDisk:
 
 
 class Admission:
-    __slots__ = ("_disk", "_baseline", "_fd", "_path", "_identity", "_active", "_last_snapshot", "_current", "_namespace", "_artifact_cache", "_created_files", "_context", "_owner_binding", "_owner_seen", "_owner_locks", "_owner_controls", "_candidate_git", "_issued_plan")
+    __slots__ = ("_disk", "_baseline", "_fd", "_path", "_identity", "_active", "_last_snapshot", "_current", "_namespace", "_artifact_cache", "_created_files", "_context", "_owner_binding", "_owner_seen", "_owner_locks", "_owner_controls", "_candidate_git", "_issued_plan", "_publication_preimages")
 
     def __init__(self, disk, plan, fd, path, identity):
         self._disk, self._baseline, self._fd, self._path, self._identity = disk, plan, fd, path, identity
         self._active = True
         self._candidate_git = None
+        self._publication_preimages = {}
+        if plan.kind == "publication":
+            for path,proof in plan.output_files:
+                if proof is not None and proof[0] == "source-append":
+                    self._publication_preimages[path] = disk._read_regular(proof[1].path)[0]
+                elif proof is not None and proof[0]=='publication-packed' and not path.endswith(b'.lock'):
+                    self._publication_preimages[path]=proof[2][0][1]
         self._issued_plan = plan
         self._last_snapshot = disk._contexts[id(plan)].snapshot if disk._contexts[id(plan)] else None
         self._current = None
@@ -2110,6 +2252,247 @@ class Admission:
             self._candidate_git = git
         self.revalidate()
         return self
+
+    def qualify_publication(self, prepared, *, failure_checkpoint=False):
+        if (type(self) is not Admission or not self.active or self.disk._candidate_admission is not self or
+                self.plan is not self._issued_plan or self.disk._plans.get(id(self.plan)) is not self.plan or
+                self.plan.kind != "publication" or self.plan.evidence.publication is not prepared or
+                self.disk._active_operation != prepared.operation_id or
+                (self.plan.evidence.operation_id,self.plan.evidence.owner_id) != (prepared.operation_id,prepared.owner_id)):
+            raise Blocked("issued-active-publication-admission-required")
+        prepared.check()
+        if failure_checkpoint:
+            # This grants only the already projected canonical recovery state,
+            # never more Git effects or adoption of the conflicting dependency.
+            from native_operations import _parse
+            worker=_parse(prepared._current)['workers'][prepared.operation_id]
+            if worker['phase']!='effect_started': raise Blocked('failure-checkpoint-phase-required')
+            from native_publication import validate_intent
+            intent=validate_intent(prepared.artifact)
+            self._check_namespace(except_path=self.disk.root+b'/data/native/repository.git/'+intent.local_ref.encode())
+            for path,identity in self._context.routes:
+                with _directory(path) as fd:
+                    if _identity(os.fstat(fd))!=identity: raise Blocked('failure-checkpoint-proof-route-changed')
+            if _identity(os.fstat(self._fd))!=self._identity or _identity(os.stat(self._path,follow_symlinks=False))!=self._identity:
+                raise Blocked('failure-checkpoint-reserve-owner-changed')
+            for relative in (b'data/native-operations/state.json',b'data/native-operations/lock',
+                    b'data/native-operations/artifacts/'+hashlib.sha256(prepared.artifact).hexdigest().encode()+b'.diff'):
+                path=self.disk.root+b'/'+relative
+                source=self.disk.source(path)
+                if source.observation!=self._created_files.get(path):
+                    raise Blocked('failure-checkpoint-owner-route-changed')
+        else:
+            self.revalidate()
+        return self
+
+    def create_publication_directories(self,prepared):
+        """Own planned parent creation before any Git/owner implicit mkdir."""
+        self.qualify_publication(prepared)
+        for path in sorted(self.plan.future_directories,key=lambda p:(p.count(b'/'),p)):
+            if self._namespace.get(path) is not None: continue
+            self._check_namespace()
+            with _directory(os.path.dirname(path)) as parent:
+                # An unexpected competing mkdir is never adopted.
+                os.mkdir(os.path.basename(path),0o700,dir_fd=parent)
+                fd=os.open(os.path.basename(path),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+                try:
+                    os.fsync(fd); os.fsync(parent)
+                    self.record_directory_creation(path[len(self.disk.root)+1:],fd)
+                finally:
+                    primary=__import__('sys').exc_info()[1]
+                    try: os.close(fd)
+                    except BaseException as secondary:
+                        if primary is None: raise
+                        primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-directory-close:'+os.fsdecode(path)+':'+str(secondary),)
+
+    def acknowledge_publication_owner(self, prepared, payload):
+        if self.plan.kind != "publication" or self.plan.evidence.publication is not prepared or not self.active:
+            raise Blocked("foreign-publication-owner-receipt")
+        prepared.check()
+        prepared.qualify_payload(payload)
+        if payload != prepared._current or (payload not in self._context.publication_states and
+                not self._publication_compiled_payload(prepared,payload)):
+            raise Blocked("unprepared-publication-owner-receipt")
+        outputs = [(b"data/native-operations/state.json",payload),
+                   (b"data/native-operations/artifacts/" + hashlib.sha256(prepared.artifact).hexdigest().encode() + b".diff",prepared.artifact),
+                   (b"data/native-operations/lock",b"")]
+        self._publication_outputs(outputs)
+        self.revalidate()
+
+    def _publication_compiled_payload(self,prepared,payload):
+        compiled=next((entry for entry in getattr(prepared.store,'_publication_compiled',()) if entry[:2]==(prepared,payload)),None)
+        if compiled is None: return False
+        template=dict(prepared.states).get(compiled[2])
+        return template in self._context.publication_states and len(payload)==len(template)
+
+    def qualify_publication_outcome(self,prepared,payload):
+        """Before-write grant for the sole owner's exact issued compilation."""
+        self.qualify_publication(prepared)
+        prepared.qualify_payload(payload)
+        if not self._publication_compiled_payload(prepared,payload):
+            raise Blocked('unadmitted-compiled-publication-outcome')
+        from native_operations import _parse
+        self.disk._validate_operation_state(_parse(payload),self._artifact_cache,prospective=prepared)
+
+    def _publication_outputs(self, outputs):
+        """Composite receipt after one acknowledged sole-writer effect.
+
+        Every new descriptor/byte route is independently verified before any
+        receipt is installed; original forecast demand is never reclaimed.
+        """
+        if self.plan.kind != "publication" or not self.active:
+            raise Blocked("publication-receipt-required")
+        pending_files, pending_directories = {}, {}
+        planned = dict(self.plan.output_files)
+        for relative,payload in outputs:
+            path = self.disk.root+b"/"+path_bytes(relative)
+            if path not in planned:
+                raise Blocked("unplanned-publication-output")
+            with _directory(os.path.dirname(path)) as parent:
+                fd=os.open(os.path.basename(path),os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                try:
+                    info=os.fstat(fd)
+                    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                        raise Blocked("regular-publication-output-required")
+                    if (self._created_files.get(path)==_observation(info) and payload is not None and
+                            planned[path][0]=='bytes' and planned[path][1]==payload):
+                        # An unchanged issued immutable descriptor needs no second stream.
+                        pending_files[path]=(_observation(info),_identity(info))
+                        continue
+                    actual,source,_=self.disk._read_regular(path)
+                    if payload is not None and actual != payload:
+                        raise Blocked("publication-output-byte-mismatch")
+                    proof=planned[path]
+                    if proof[0]=='publication-packed' and actual not in tuple(raw for _,raw in proof[2]):
+                        raise Blocked('unprepared-packed-publication-output')
+                    if payload is None and proof[0] == "git-object":
+                        import zlib
+                        raw=zlib.decompress(actual)
+                        if raw != proof[1]+b" "+str(len(proof[3])).encode()+b"\0"+proof[3]:
+                            raise Blocked("publication-object-byte-mismatch")
+                    elif payload is None and proof[0] == "source-append":
+                        previous=proof[1]
+                        # Retain the exact preimage commitment captured before CAS.
+                        old=self._publication_preimages.get(path)
+                        if old is None or actual != old+proof[2]:
+                            raise Blocked("publication-reflog-byte-mismatch")
+                    if _observation(info) != source.observation or _observation(os.stat(os.path.basename(path),dir_fd=parent,follow_symlinks=False)) != source.observation:
+                        raise Blocked("publication-output-descriptor-changed")
+                    pending_files[path]=(source.observation,_identity(info))
+                finally:
+                    primary=__import__('sys').exc_info()[1]
+                    try: os.close(fd)
+                    except BaseException as secondary:
+                        if primary is None: raise
+                        primary.cleanup_errors=tuple(getattr(primary,'cleanup_errors',()))+('publication-output-close:'+os.fsdecode(path)+':'+str(secondary),)
+        for path in self.plan.future_directories:
+            if path in self._namespace and self._namespace[path] is None and _optional_stat(path):
+                raise Blocked('unacknowledged-publication-directory')
+        for path,identity in pending_directories.items(): self._namespace[path]=identity
+        for path,(observed,identity) in pending_files.items():
+            self._namespace[path]=identity; self._created_files[path]=observed
+
+    def acknowledge_publication_ref(self, name, oid):
+        relative=b"data/native/repository.git/"+name.encode("ascii")
+        self._publication_outputs([(relative,oid.encode()+b"\n")])
+        # Local branch updates may append only the exact frozen reflog entries.
+        from native_publication import validate_intent
+        intent=validate_intent(self.plan.evidence.publication.artifact)
+        if name == intent.local_ref:
+            for route,_ in intent.reflogs:
+                self._publication_outputs([(route,None)])
+        self.revalidate()
+
+    def acknowledge_publication_lock(self,slot,path,descriptor,parent,token,payload):
+        """Reopened lock adoption requires the canonical exact stat commitment."""
+        prepared=self.plan.evidence.publication;self.qualify_publication(prepared)
+        from native_operations import _parse,PUBLICATION_RESOURCE_EMPTY
+        from native_publication import validate_intent
+        from native_git import publication_resource_token
+        intent=validate_intent(prepared.artifact)
+        routes={'commit':intent.commit_pin,'tree':intent.tree_pin}
+        expected=self.disk.root+b'/data/native/repository.git/'+(b'packed-refs.lock' if slot.endswith('-packed') else routes[slot].encode()+b'.lock')
+        resources=_parse(prepared._current)['workers'][prepared.operation_id]['publication_resources']
+        if path!=expected or token==PUBLICATION_RESOURCE_EMPTY or resources.get(slot)!=token or publication_resource_token(os.fstat(descriptor),os.fstat(parent))!=token or publication_resource_token(os.stat(os.path.basename(path),dir_fd=parent,follow_symlinks=False),os.fstat(parent))!=token or os.pread(descriptor,len(payload)+1,0)!=payload:
+            raise Blocked('exact canonical publication lock receipt required')
+        if path not in dict(self.plan.output_files): raise Blocked('unadmitted recovered publication lock')
+        self._namespace[path]=_identity(os.fstat(descriptor));self._created_files[path]=_observation(os.fstat(descriptor))
+        self.revalidate()
+
+    def acknowledge_publication_pin_deletion(self,name,held=()):
+        from native_publication import validate_intent
+        intent=validate_intent(self.plan.evidence.publication.artifact)
+        if name not in (intent.tree_pin,intent.commit_pin):
+            raise Blocked("only exact owned publication pins may be retired")
+        path=self.disk.root+b"/data/native/repository.git/"+name.encode("ascii")
+        if _optional_stat(path):
+            raise Blocked("publication-pin-deletion-unacknowledged")
+        self._namespace[path]=None
+        self._created_files.pop(path,None)
+        # A recovered pin was an original dependency; its acknowledged deletion
+        # has an explicit absence receipt, not a missing-source exemption.
+        self._publication_preimages[path]=None
+        lock=path+b'.lock'
+        if _optional_stat(lock): raise Blocked('publication-pin-lock-deletion-unacknowledged')
+        if _optional_stat(self.disk.root+b'/data/native/repository.git/packed-refs.lock'): raise Blocked('packed-publication-lock-deletion-unacknowledged')
+        # An interrupted deletion can already have removed both resources. The
+        # caller still must execute parent durability and the actual absence ACK;
+        # canonical authorization alone never issues the retirement capability.
+        self._namespace[lock]=None; self._created_files.pop(lock,None)
+        self._publication_preimages[lock]=None
+        self.revalidate()
+
+    def acknowledge_publication_commit(self, oid):
+        relative=b"data/native/repository.git/objects/"+oid[:2].encode()+b"/"+oid[2:].encode()
+        self._publication_outputs([(relative,None)])
+        self.revalidate()
+
+    def publication_packed_hardening(self,descriptor):
+        """Fence the exact current packed bytes/descriptor before durability."""
+        self.qualify_publication(self.plan.evidence.publication)
+        path=self.disk.root+b'/data/native/repository.git/packed-refs'
+        source=next((source for route,source in self._context.dependencies if route==path),None)
+        observed=self._created_files.get(path,source.observation if source is not None else None)
+        payload=self._publication_preimages.get(path)
+        if payload is None:
+            captured=self.disk._publication_packed
+            if captured is None or captured[1]!=source: raise Blocked('captured packed hardening source required')
+            payload=captured[0]
+        if observed is None or _observation(os.fstat(descriptor))!=observed or _observation(os.stat(path,follow_symlinks=False))!=observed or os.pread(descriptor,len(payload)+1,0)!=payload:
+            raise Blocked('captured packed hardening bytes changed')
+        return observed
+
+    def publication_packed_effect(self,name):
+        """Exact pre-admitted transition; no post-effect packed scan."""
+        self.qualify_publication(self.plan.evidence.publication)
+        path=self.disk.root+b'/data/native/repository.git/packed-refs'
+        proof=dict(self.plan.output_files).get(path)
+        if proof is None or proof[0]!='publication-packed': return None
+        before=self._publication_preimages[path]
+        for removed,raw in proof[2]:
+            if raw==before and name not in removed:
+                wanted=set(removed)|{name}
+                matches=[value for keys,value in proof[2] if set(keys)==wanted]
+                if len(matches)!=1: continue
+                return before,matches[0],self._created_files.get(path,proof[1].observation)
+        return None
+
+    def acknowledge_publication_packed(self,name,payload):
+        path=self.disk.root+b'/data/native/repository.git/packed-refs'
+        # The old descriptor intentionally disappears at atomic replacement.
+        # Install only the exact precompiled transition after independent read.
+        proof=dict(self.plan.output_files).get(path)
+        if proof is None or proof[0]!='publication-packed': raise Blocked('packed-publication-proof-required')
+        before=self._publication_preimages[path]
+        valid=any(raw==before and name not in removed and any(set(keys)==set(removed)|{name} and value==payload
+                  for keys,value in proof[2]) for removed,raw in proof[2])
+        if not valid: raise Blocked('unprepared-packed-publication-transition')
+        lock=path+b'.lock'
+        if lock not in self._created_files or _optional_stat(lock): raise Blocked('packed-publication-lock-retirement-required')
+        self._publication_outputs([(b'data/native/repository.git/packed-refs',payload)])
+        self._publication_preimages[path]=payload
+        self._namespace[lock]=None; self._created_files.pop(lock)
+        return self._created_files[path]
 
     def _close(self):
         self._active = False
@@ -2169,6 +2552,8 @@ class Admission:
                             h.update(chunk)
                     if proof[0] == "bytes":
                         valid = info.st_size == len(proof[1]) and digest(fd) == hashlib.sha256(proof[1]).hexdigest()
+                    elif proof[0]=='publication-packed':
+                        valid=digest(fd) in tuple(hashlib.sha256(raw).hexdigest() for _,raw in proof[2])
                     elif proof[0] == "blob":
                         valid = info.st_size == proof[2] and digest(fd, b"blob " + str(proof[2]).encode() + b"\0",
                             "sha1" if len(proof[1]) == 40 else "sha256") == proof[1]
@@ -2228,11 +2613,17 @@ class Admission:
             except OSError as exc:
                 raise Blocked("unavailable-object-membership-route:" + repr(path)) from exc
         for source in context.sources:
+            if source.path in self._created_files:
+                continue
             if self.disk.source(source.path) != source:
                 raise Blocked("stale-source-evidence")
         for path, source in context.dependencies:
             if path in self._created_files:
                 continue  # the exact output receipt replaced an absent dependency
+            if path in self._publication_preimages and self._publication_preimages[path] is None:
+                if self.disk._optional_source(path) is not None:
+                    raise Blocked("retired-publication-pin-reappeared")
+                continue
             try:
                 current = self.disk._optional_source(path, {path: source.observation} if source is not None else None)
             except Blocked as exc:
@@ -2307,6 +2698,22 @@ class Admission:
 
     def _validate_state(self, state):
         context = self._context
+        if self.plan.kind == "publication":
+            from native_operations import canonical
+            prepared = self.plan.evidence.publication
+            prepared.check()
+            if state is None:
+                if prepared._initial_bytes is not None:
+                    raise Blocked("publication-owner-state-disappeared")
+                return
+            payload = canonical(state)
+            if payload != prepared.initial:
+                prepared.qualify_payload(payload)
+            if payload != prepared.initial and payload not in context.publication_states and not self._publication_compiled_payload(prepared,payload):
+                raise Blocked("publication-owner-lifecycle-fenced")
+            if prepared._used and payload != prepared._current:
+                raise Blocked("unacknowledged-publication-owner-transition")
+            return
         binding = self.disk._state_binding(state)
         if self._owner_seen and binding != self._owner_binding:
             raise Blocked("operation-owner-lifecycle-fenced")

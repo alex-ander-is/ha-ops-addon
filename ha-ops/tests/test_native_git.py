@@ -698,23 +698,25 @@ def assert_dormant_import_contour(sources):
             else:
                 continue
             for module in modules:
-                if module not in ("native_git", "native_disk"):
+                if module not in ("native_git", "native_disk", "native_publication"):
                     continue
                 # Only this named dormant observational peer may reuse NativeGit.
                 # Neither adapter may become an ordinary app entrypoint import.
                 assert (name, module) in (("native_disk.py", "native_git"), ("native_preview.py", "native_git"),
                     ("native_save.py", "native_git"), ("native_save.py", "native_disk"),
-                    ("native_git.py", "native_disk")), (name, module)
+                    ("native_git.py", "native_disk"), ("native_operations.py", "native_git"), ("native_publication.py", "native_git"),
+                    ("native_publication.py", "native_disk"), ("native_operations.py", "native_publication"),
+                    ("native_git.py", "native_publication"), ("native_disk.py", "native_publication")), (name, module)
 
 
-@pytest.mark.parametrize("module", ["native_git", "native_disk", "native_git.helpers", "native_disk.helpers", "app.native_git", "app.native_disk", "app.native_git.helpers", "app.native_disk.helpers"])
+@pytest.mark.parametrize("module", ["native_publication", "app.native_publication", "native_git", "native_disk", "native_git.helpers", "native_disk.helpers", "app.native_git", "app.native_disk", "app.native_git.helpers", "app.native_disk.helpers"])
 @pytest.mark.parametrize("syntax", ["import {module} as alias", "from {module} import Adapter"])
 def test_dormant_import_sentinel_detects_production_imports(module, syntax):
     with pytest.raises(AssertionError):
         assert_dormant_import_contour({"server.py": syntax.format(module=module)})
 
 
-@pytest.mark.parametrize("module", ["native_git", "native_disk"])
+@pytest.mark.parametrize("module", ["native_git", "native_disk", "native_publication"])
 @pytest.mark.parametrize("package", ["app", ".", "..app"])
 @pytest.mark.parametrize("nested", [False, True])
 def test_dormant_import_sentinel_detects_package_imported_aliases(module, package, nested):

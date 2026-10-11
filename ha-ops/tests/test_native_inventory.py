@@ -1,3 +1,4 @@
+import ast
 """Inert byte-path scope contracts; real Git and Linux topology fixtures."""
 import dataclasses
 import hashlib
@@ -1022,9 +1023,26 @@ def test_special_metadata_leaves_and_races_are_rejected_or_bounded(tmp_path, mon
 def test_no_production_import_or_legacy_policy_dependency():
     app = Path(__file__).resolve().parents[1] / "app"
     assert "EXPORT_EXCLUDES" not in (app / "native_inventory.py").read_text()
-    for file in app.glob("*.py"):
-        if file.name != "native_inventory.py":
-            assert "import native_inventory" not in file.read_text()
+    assert_inventory_dormancy({p.name:p.read_text() for p in app.glob('*.py') if p.name!='native_inventory.py'})
+
+
+def assert_inventory_dormancy(sources):
+    peers={'native_metadata.py','native_disk.py','native_preview.py','native_save.py','native_git.py','native_publication.py'}
+    for name,source in sources.items():
+        for node in ast.walk(ast.parse(source)):
+            if isinstance(node,ast.Import):
+                modules=[part for alias in node.names for part in alias.name.split('.')]
+            elif isinstance(node,ast.ImportFrom):
+                modules=(node.module or '').split('.')+[part for alias in node.names for part in alias.name.split('.')]
+            else: continue
+            if 'native_inventory' in modules: assert name in peers,name
+
+
+@pytest.mark.parametrize('name',['server.py','another_dormant.py'])
+@pytest.mark.parametrize('source',['import app.native_inventory as alias','from app import native_inventory as alias','from .native_inventory import Policy','def lazy():\n    from ..app import native_inventory as alias'])
+def test_inventory_dormancy_exact_reviewed_peers(name,source):
+    assert_inventory_dormancy({'native_publication.py':source})
+    with pytest.raises(AssertionError): assert_inventory_dormancy({name:source})
 
 
 @pytest.mark.parametrize('acquisition,replacement', [(1,'directory'), (1,'symlink'), (2,'symlink')])

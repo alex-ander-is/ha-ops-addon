@@ -124,11 +124,10 @@ No constructor/import/reopen allocates, replays, resumes or clears debt. Git
 objects are durable content-addressed bytes but are unreferenced and may be
 GC'd; this step does not promise reboot-safe object reachability.
 
-Step 6.11 must separately validate exact objects/type/hash and source freshness,
-establish durable reachability, construct one exact commit/publication intent,
-publish before local ref advancement and reconcile CAS/ambiguous acknowledgments.
-The dormant tree descriptor carries its expected remote parent and identity; no
-publication or NativeOperationStore schema change is implemented here.
+Step 6.11 now uses the separately dormant [NativePublication](native-publication.md)
+with this exact live issuance receipt. It revalidates complete objects, pins one
+exact commit/intent and proves remote publication before local expected-old CAS.
+Candidate construction remains separate and does not itself publish or persist consent.
 
 ## Proofs
 

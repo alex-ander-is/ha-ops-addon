@@ -279,6 +279,22 @@ def test_existing_reflog_complete_atomic_overlap(proof):
     report['rows']['loose-index-worktree-save']['existing_reflog'] = {**result, 'retained_log_bytes': len(original_log)}
 
 
+def test_native_publication_physical_boundaries(proof,monkeypatch):
+    only(proof,'allocation'); parent,report=proof
+    from test_native_publication import publication_allocation_measurement
+    results=[]
+    for object_format in ('sha1','sha256'):
+        for packed in (False,True):
+            directory=parent/('publication-'+object_format+('-packed' if packed else '-loose')); directory.mkdir()
+            with monkeypatch.context() as patch:
+                results.append(publication_allocation_measurement(directory,object_format,observe,measured,patch,packed=packed))
+    # Keep the existing mandatory matrix and its prior proofs unchanged. This
+    # distinct nested measurement is independently asserted above and retained
+    # in the existing durable report and stdout.
+    report['rows']['loose-index-worktree-save']['native_publication']=results
+    print('NATIVE_PUBLICATION_EXT4 '+json.dumps(results,default=lambda value:value.hex() if isinstance(value,bytes) else str(value)))
+
+
 def identity():
     scope = {'revision': 0, 'allowlist': ['homeassistant'], 'exclude_digest': 'a' * 64}
     root = {'path': '/', 'device': 1, 'inode': 2, 'mount_digest': 'b' * 64, 'topology_digest': 'c' * 64}

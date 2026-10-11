@@ -384,3 +384,14 @@ immediately after normal resource publication and outside its journal lock.
 The existing one-snapshot bounded phase checks/frozen floor and the documented
 pre-first-observation lock-history limitation remain. Lock-close failures retain
 primary exceptions and addressed debt. See [native Save](native-save.md).
+
+
+## Exact publication admission
+
+The publication recipe accepts only the issuer-bound canonical PreparedPublication, actual immutable intent and exact prospective state bytes. It projects C/owner/pin/ref/reflog outputs without rebuilding candidate indexes or guessing outgoing pack demand. Own directory and byte/descriptor replacement receipts preserve the initial floor. A narrowly restricted pre-admitted recovery-state checkpoint can survive a changed local ref, but never changed owner/root/routes or foreign output and never authorize success. See [publication contract](native-publication.md).
+
+Native publication future outcome recipes derive exact canonical extents from
+fixed ASCII OID/hash slots before the single snapshot. Placeholder controls are
+accounting inputs, excluded from ordinary output grants. Only owner-issued
+compiled bytes from an exact qualified proof pass Admission; measured extent,
+owner graph, source binding and every retained historical commitment remain exact.
