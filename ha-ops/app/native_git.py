@@ -15,6 +15,7 @@ import re
 import selectors
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -53,6 +54,22 @@ class CleanupDebt(GitFailure):
     def __init__(self, result):
         super().__init__("resource-cleanup-debt", cleanup_errors=result.cleanup_errors)
         self.result = result
+
+
+@dataclass(frozen=True)
+class TransportDispositionReview:
+    issuer: object
+    resource_id: str
+    operation_id: str
+    owner_id: str
+    binding: str
+    record_digest: str
+    entries: bytes
+
+    @property
+    def observed_entries(self):
+        """Detached diagnostic membership, never inferred object ownership."""
+        return json.loads(self.entries)
 
 
 def _close_owned(resources, primary=None):
@@ -370,6 +387,7 @@ class NativeGit:
         self._root_id = _identity(self.root, directory=True)
         self._meta_id = _identity(self.metadata, directory=True)
         self._active = {}
+        self._transport_review = None
         self._publication_profile = None
         self._storage_id = _identity(self.resources_root, directory=True) if os.path.lexists(self.resources_root) else None
         with _MUTEX_GUARD:
@@ -947,21 +965,45 @@ class NativeGit:
                 raise InvalidInput("invalid-journal-anchor-identity")
         for rid, record in journal["records"].items():
             _uuid(rid)
-            if not isinstance(record, dict) or set(record) != {"operation", "owner", "kind", "phase", "root", "lease", "entries", "admin", "errors"}:
+            allowed={"operation", "owner", "kind", "phase", "root", "lease", "entries", "admin", "errors"}
+            if isinstance(record,dict) and record.get('kind')=='transport' and 'disposition' in record:allowed.add('disposition')
+            if isinstance(record,dict) and record.get('kind')=='transport' and 'writer' in record:allowed.add('writer')
+            if not isinstance(record, dict) or set(record) != allowed:
                 raise InvalidInput("invalid-resource-record")
             _uuid(record["operation"])
             _uuid(record["owner"])
-            if record["kind"] not in ("index", "worktree", "spool") or record["phase"] not in ("intent", "allocated", "creating", "ready", "debt"):
+            if record["kind"] not in ("index", "worktree", "spool", "transport") or record["phase"] not in ("intent", "allocated", "creating", "ready", "debt"):
                 raise InvalidInput("invalid-resource-phase")
             for identity in (record["root"], record["lease"]):
                 if identity is not None and (not isinstance(identity, list) or len(identity) != 3 or any(type(i) is not int or i < 0 for i in identity)):
                     raise InvalidInput("invalid-resource-identity")
             if not isinstance(record["entries"], dict) or not isinstance(record["errors"], list) or any(not isinstance(e, str) for e in record["errors"]):
                 raise InvalidInput("invalid-resource-record")
+            if 'writer' in record and (type(record['writer']) is not int or not 0<record['writer']<2**31):
+                raise InvalidInput('invalid-transport-writer')
             for name, item in record["entries"].items():
                 _decode(name)
                 if not isinstance(item, list) or len(item) != 4 or any(type(i) is not int or i < 0 for i in item[:3]) or not isinstance(item[3], str) or (item[3] != "directory" and not re.fullmatch(r"[0-9a-f]{64}", item[3])):
                     raise InvalidInput("invalid-entry-identity")
+            if record.get('disposition') is not None:
+                receipt=record['disposition']
+                if record['kind']!='transport' or type(receipt) is not dict or set(receipt)!={'command_id','review_digest','entries','removed','finalizing'}:
+                    raise InvalidInput('invalid-transport-disposition')
+                _uuid(receipt['command_id'])
+                if type(receipt['review_digest']) is not str or not re.fullmatch('[0-9a-f]{64}',receipt['review_digest']) or type(receipt['entries']) is not dict or type(receipt['removed']) is not list or type(receipt['finalizing']) is not bool:
+                    raise InvalidInput('invalid-transport-disposition')
+                if len(receipt['removed'])!=len(set(receipt['removed'])) or not set(receipt['removed'])<=set(receipt['entries']):
+                    raise InvalidInput('invalid-transport-disposition-progress')
+                for name,item in receipt['entries'].items():
+                    _decode(name)
+                    if type(item) is not list or len(item)!=4 or any(type(n) is not int or not 0<=n<2**64 for n in item[:3]) or type(item[3]) is not str or item[3]!='directory' and not re.fullmatch('[0-9a-f]{64}',item[3]):
+                        raise InvalidInput('invalid-transport-disposition-entry')
+                from native_publication import transport_family
+                transport_family(receipt['entries'],disposition=True)
+                if _encode(b'owner.json') not in receipt['entries']:
+                    raise InvalidInput('missing-transport-disposition-marker')
+                if receipt['review_digest']!=self._transport_disposition_digest(rid,record,receipt):
+                    raise InvalidInput('transport-disposition-integrity-mismatch')
             admin = record["admin"]
             if admin is not None:
                 if (record["kind"] != "worktree" or not isinstance(admin, dict) or set(admin) != {"name", "identity", "entries"}
@@ -1093,6 +1135,9 @@ class NativeGit:
                 raise InvalidInput("unknown-index-resource-entry")
             if record["kind"] == "spool" and not names <= {b"owner.json", b"spool"}:
                 raise InvalidInput("unknown-spool-resource-entry")
+            if record['kind']=='transport':
+                from native_publication import transport_family
+                transport_family(current)
             self._sync_snapshot(self._resource_path(handle.resource_id), current)
             record["entries"] = current
             record["phase"] = phase
@@ -1108,7 +1153,13 @@ class NativeGit:
             raise
         finally:
             try:
-                self._capture(handle)
+                if original is not None and getattr(original,'unreaped_network_group',None) is not None:
+                    with self._journal() as journal:
+                        record=self._handle_record(handle,journal)
+                        record['errors'].append('unreaped-network-group:'+str(original.unreaped_network_group))
+                        record['phase']='debt';self._publish(journal)
+                else:
+                    self._capture(handle)
             except BaseException as exc:
                 if original is None:
                     raise
@@ -1926,6 +1977,7 @@ class NativeGit:
                 raise InvalidInput("resource-binding-mismatch")
             root, leasepath = self._resource_path(rid), self._lease_path(rid)
             try:
+                self._transport_writer_stopped(record)
                 if (held_lease is not None and record["kind"] == "worktree" and
                         any(error.startswith("materialization-refused:") for error in record["errors"])):
                     raise InvalidInput("refused-materialization-requires-addressed-recovery")
@@ -1942,6 +1994,9 @@ class NativeGit:
                         raise InvalidInput("replaced-resource-lease")
                 elif lease is None and os.path.lexists(root):
                     raise InvalidInput("missing-resource-lease")
+                if record.get('disposition') is not None:
+                    self._cleanup_transport_disposition(journal,rid,record)
+                    return CleanupResult(rid,'removed')
                 if os.path.lexists(root):
                     self._check_owner(rid, record)
                     self._mount_guard(root)
@@ -1997,6 +2052,19 @@ class NativeGit:
                             record["entries"].pop(encoded)
                         except BaseException as exc:
                             errors.append(path.decode("ascii", "backslashreplace") + ":" + str(exc))
+                    if record['kind']=='transport':
+                        for encoded,item in sorted(tuple(record['entries'].items()),
+                                key=lambda row:_decode(row[0]).count(b'/'),reverse=True):
+                            if item[3]!='directory': continue
+                            path=_decode(encoded)
+                            try:
+                                with self._parent_fd(root,path) as (parent,name):
+                                    observed=os.stat(name,dir_fd=parent,follow_symlinks=False)
+                                    if [observed.st_dev,observed.st_ino,stat.S_IMODE(observed.st_mode)]!=item[:3]:
+                                        raise InvalidInput('replaced-transport-directory')
+                                    os.rmdir(name,dir_fd=parent);os.fsync(parent)
+                                record['entries'].pop(encoded)
+                            except BaseException as exc:errors.append(repr(path)+':'+str(exc))
                     if not errors:
                         self._verify_snapshot(root, record["entries"])
                         if set(map(_decode, record["entries"])) != {b"owner.json"}:
@@ -2023,7 +2091,8 @@ class NativeGit:
                 if ownlease:
                     fcntl.flock(lease, fcntl.LOCK_UN)
                     os.close(lease)
-            record["phase"], record["errors"] = "debt", errors
+            record["phase"], record["errors"] = "debt", list(dict.fromkeys(
+                [error for error in record['errors'] if error.startswith('unreaped-network-group:')]+errors))
             journal["records"][rid] = record
             try:
                 self._publish(journal)
@@ -2036,6 +2105,228 @@ class NativeGit:
         _uuid(owner_id)
         _uuid(operation_id)
         return self._cleanup(resource_id, owner_id, operation_id)
+
+    @contextmanager
+    def _transport_review_lease(self,rid,record):
+        if record['kind']!='transport' or record['lease'] is None or record['root'] is None:
+            raise InvalidInput('addressed-transport-ownership-required')
+        path=self._lease_path(rid);fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+        primary=None
+        try:
+            if _identity(path)!=record['lease'] or [os.fstat(fd).st_dev,os.fstat(fd).st_ino,stat.S_IMODE(os.fstat(fd).st_mode)]!=record['lease']:
+                raise InvalidInput('replaced-transport-review-lease')
+            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError as error:raise InvalidInput('transport-review-resource-busy') from error
+            self._transport_writer_stopped(record)
+            self._check_owner(rid,record);self._mount_guard(self._resource_path(rid))
+            yield fd
+        except BaseException as error:primary=error;raise
+        finally:_close_owned([('transport-review-unlock',lambda:fcntl.flock(fd,fcntl.LOCK_UN)),('transport-review-close',lambda:os.close(fd))],primary)
+
+    @staticmethod
+    def _transport_writer_stopped(record):
+        if record.get('writer') is not None:
+            NativeGit._network_group_quiet(record['writer'])
+        for error in record['errors']:
+            if error.startswith('unreaped-network-group:'):
+                group=error.removeprefix('unreaped-network-group:')
+                if not group.isdecimal() or int(group)<=0:raise InvalidInput('invalid-network-writer-debt')
+                NativeGit._network_group_quiet(int(group))
+
+    @staticmethod
+    def _network_group_quiet(group):
+        try:os.killpg(group,0)
+        except ProcessLookupError:return
+        if sys.platform!='linux':raise InvalidInput('transport-unreaped-writer-busy')
+        # A failed Git helper can remain an adopted zombie under container PID
+        # 1. It cannot write or fork. Never mistake a live/stopped/unreadable
+        # member for such a harmless terminated process.
+        deadline=time.monotonic()+1
+        for _ in range(2):
+            seen=0
+            with os.scandir('/proc') as entries:
+                for entry in entries:
+                    if not entry.name.isdecimal():continue
+                    seen+=1
+                    if seen>10000 or time.monotonic()>deadline:raise InvalidInput('transport-writer-observation-budget')
+                    try:
+                        with open(entry.path+'/stat','rb') as stream:raw=stream.read(4096)
+                    except FileNotFoundError:continue
+                    fields=raw.rsplit(b')',1)[1].split()
+                    if len(fields)<4:raise InvalidInput('transport-writer-observation-invalid')
+                    if int(fields[2])==group and fields[0] not in (b'Z',b'X'):
+                        raise InvalidInput('transport-unreaped-writer-busy')
+
+    def _transport_writer_started(self,handle,group):
+        """Persist exact group before releasing its incoming-write gate."""
+        if type(group) is not int or not 0<group<2**31:raise InvalidInput('invalid-transport-writer')
+        with self._journal() as journal:
+            record=self._handle_record(handle,journal)
+            if record['kind']!='transport' or record.get('writer') is not None:raise InvalidInput('transport-writer-already-issued')
+            record['writer']=group;self._publish(journal)
+
+    def review_transport_disposition(self,rid,*,operation_id,owner_id):
+        """Explicit read-only review of current leaves, including unacknowledged data."""
+        for value in (rid,operation_id,owner_id):_uuid(value)
+        with self._journal() as journal:
+            record=journal['records'].get(rid) if journal else None
+            if record is None or (record['operation'],record['owner'])!=(operation_id,owner_id):
+                raise InvalidInput('transport-disposition-resource-unavailable')
+            if record.get('disposition') is not None:raise InvalidInput('transport-disposition-already-authorized; explicit settlement required')
+            with self._transport_review_lease(rid,record):
+                current=self._transport_disposition_snapshot(self._resource_path(rid))
+                from native_publication import transport_family
+                transport_family(current,disposition=True)
+                if self._transport_disposition_snapshot(self._resource_path(rid))!=current:raise InvalidInput('transport-disposition-membership-changed')
+                payload=json.dumps(current,sort_keys=True,separators=(',',':')).encode()
+                fingerprint=hashlib.sha256(json.dumps(record,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+                review=TransportDispositionReview(self,rid,operation_id,owner_id,self._binding(),fingerprint,payload)
+                self._transport_review=(review,tuple(getattr(review,name) for name in review.__dataclass_fields__))
+                return review
+
+    def discard_reviewed_transport(self,review,*,command_id):
+        """One explicit issuer-bound disposition; durable authorization precedes unlink."""
+        _uuid(command_id)
+        issued=self._transport_review
+        if type(review) is not TransportDispositionReview or issued is None or review is not issued[0] or review.issuer is not self or tuple(getattr(review,name) for name in review.__dataclass_fields__)!=issued[1] or review.binding!=self._binding():
+            raise InvalidInput('issued-current-transport-disposition-required')
+        self._transport_review=None
+        with self._journal() as journal:
+            record=journal['records'].get(review.resource_id) if journal else None
+            if record is None or (record['operation'],record['owner'])!=(review.operation_id,review.owner_id) or record.get('disposition') is not None or hashlib.sha256(json.dumps(record,sort_keys=True,separators=(',',':')).encode()).hexdigest()!=review.record_digest:
+                raise InvalidInput('transport-disposition-review-stale')
+            with self._transport_review_lease(review.resource_id,record) as lease:
+                entries=json.loads(review.entries)
+                if self._transport_disposition_snapshot(self._resource_path(review.resource_id))!=entries:raise InvalidInput('transport-disposition-membership-changed')
+                receipt={'command_id':command_id,'review_digest':'',
+                         'entries':entries,'removed':[],'finalizing':False}
+                receipt['review_digest']=self._transport_disposition_digest(review.resource_id,record,receipt)
+                prospective=json.loads(json.dumps(journal))
+                prospective['records'][review.resource_id]['disposition']=receipt
+                prospective['records'][review.resource_id]['phase']='debt'
+                payload=json.dumps(prospective,sort_keys=True,separators=(',',':')).encode()
+                # This is a separate explicit local settlement, not another
+                # snapshot inside a publication. Charge exact atomic journal
+                # overlap plus its control reserve before authorizing deletion.
+                capacity=os.statvfs(self.resources_root);q=capacity.f_frsize or capacity.f_bsize
+                required=4*((len(payload)+q-1)//q*q)+4*q
+                if capacity.f_bavail*q<required or capacity.f_favail<2:
+                    raise InvalidInput('transport-disposition-control-capacity-insufficient')
+                record['disposition']=receipt
+                record['phase']='debt'
+                self._publish(journal)
+                self._cleanup_transport_disposition(journal,review.resource_id,record)
+        return CleanupResult(review.resource_id,'removed')
+
+    def _transport_disposition_snapshot(self,root):
+        """Read current descriptors/hashes, allowing only namespace-closed links."""
+        entries={};links={};counts={}
+        def observation(info):return (info.st_dev,info.st_ino,info.st_mode,info.st_size,info.st_nlink,info.st_mtime_ns,info.st_ctime_ns)
+        for parent,dirs,files in os.walk(root,followlinks=False):
+            for name in dirs:
+                path=os.path.relpath(os.path.join(parent,name),root)
+                entries[_encode(path)]=self._record_file(root,path,directory=True)
+            for name in files:
+                path=os.path.relpath(os.path.join(parent,name),root)
+                with self._parent_fd(root,path) as (parent_fd,leaf):
+                    fd=os.open(leaf,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent_fd)
+                    try:
+                        before=os.fstat(fd)
+                        if not stat.S_ISREG(before.st_mode):raise InvalidInput('unsafe-transport-disposition-leaf')
+                        h=hashlib.sha256()
+                        while chunk:=os.read(fd,CHUNK):h.update(chunk)
+                        if observation(os.fstat(fd))!=observation(before) or observation(os.stat(leaf,dir_fd=parent_fd,follow_symlinks=False))!=observation(before):
+                            raise InvalidInput('transport-disposition-leaf-changed')
+                        entries[_encode(path)]=[before.st_dev,before.st_ino,stat.S_IMODE(before.st_mode),h.hexdigest()]
+                        key=(before.st_dev,before.st_ino);counts[key]=counts.get(key,0)+1;links[key]=before.st_nlink
+                    finally:os.close(fd)
+        if counts!=links:raise InvalidInput('transport-disposition-outside-hardlink')
+        from native_publication import transport_family
+        transport_family(entries,disposition=True)
+        return entries
+
+    def _transport_disposition_digest(self,rid,record,receipt):
+        """Seal immutable authorization, independently of resumable progress.
+
+        This detects inconsistent persisted inputs; it is not authentication
+        against a writer able to replace the entire journal and its digest.
+        """
+        payload={'schema':'transport-disposition-v1','binding':self._binding(),
+                 'storage':self._storage_id,'resource':rid,
+                 'operation':record['operation'],'owner':record['owner'],
+                 'root':record['root'],'lease':record['lease'],
+                 'command_id':receipt['command_id'],'entries':receipt['entries']}
+        return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+    def _cleanup_transport_disposition(self,journal,rid,record):
+        """Delete user-authorized observations, without relabeling them as owned."""
+        receipt=record['disposition'];root=self._resource_path(rid);marker=_encode(b'owner.json')
+        if receipt['review_digest']!=self._transport_disposition_digest(rid,record,receipt):
+            raise InvalidInput('transport-disposition-integrity-mismatch')
+        if not os.path.lexists(root):
+            if not receipt['finalizing']:raise InvalidInput('transport-disposition-root-disappeared')
+        else:
+            if _identity(root,directory=True)!=record['root']:raise InvalidInput('transport-disposition-root-replaced')
+            self._mount_guard(root)
+            if not receipt['finalizing']:self._check_owner(rid,record)
+            current=self._transport_disposition_snapshot(root)
+            expected={name:item for name,item in receipt['entries'].items() if name not in receipt['removed']}
+            for name,item in current.items():
+                if expected.get(name)!=item:raise InvalidInput('transport-disposition-membership-changed')
+            # An absent authorized leaf may be a killed unlink. Its exact
+            # parent is hardened before absence becomes a durable progress ACK.
+            for name in list(expected):
+                if name in current:continue
+                if name==marker and not receipt['finalizing']:raise InvalidInput('transport-disposition-marker-disappeared')
+                parent=os.path.dirname(root+b'/'+_decode(name))
+                while not os.path.lexists(parent):parent=os.path.dirname(parent)
+                self._fsync(parent);receipt['removed'].append(name);self._publish(journal)
+            ordered=sorted((name for name in receipt['entries'] if name not in receipt['removed'] and name!=marker),
+                key=lambda name:(receipt['entries'][name][3]=='directory',-_decode(name).count(b'/'),name))
+            for name in ordered:
+                self._check_owner(rid,record)
+                remaining={key:item for key,item in receipt['entries'].items() if key not in receipt['removed']}
+                if self._transport_disposition_snapshot(root)!=remaining:raise InvalidInput('transport-disposition-membership-changed')
+                item=receipt['entries'][name];path=_decode(name)
+                with self._parent_fd(root,path) as (parent,leaf):
+                    prefix=os.path.dirname(path)
+                    approved=record['root'] if not prefix else receipt['entries'][_encode(prefix)][:3]
+                    if [os.fstat(parent).st_dev,os.fstat(parent).st_ino,stat.S_IMODE(os.fstat(parent).st_mode)]!=approved:
+                        raise InvalidInput('transport-disposition-parent-replaced')
+                    if item[3]=='directory':
+                        observed=os.stat(leaf,dir_fd=parent,follow_symlinks=False)
+                        if [observed.st_dev,observed.st_ino,stat.S_IMODE(observed.st_mode)]!=item[:3]:raise InvalidInput('transport-disposition-directory-replaced')
+                        os.rmdir(leaf,dir_fd=parent)
+                    else:
+                        observed=os.stat(leaf,dir_fd=parent,follow_symlinks=False)
+                        count=sum(other[:2]==item[:2] for other in remaining.values() if other[3]!='directory')
+                        if [observed.st_dev,observed.st_ino,stat.S_IMODE(observed.st_mode)]!=item[:3] or observed.st_nlink!=count:
+                            raise InvalidInput('transport-disposition-leaf-replaced')
+                        os.unlink(leaf,dir_fd=parent)
+                    self._fsync(root);os.fsync(parent)
+                receipt['removed'].append(name);self._publish(journal)
+            if not receipt['finalizing']:
+                receipt['finalizing']=True;self._publish(journal)
+            if os.path.lexists(root+b'/owner.json'):
+                self._unlink_file(root,b'owner.json',receipt['entries'][marker]);self._fsync(root)
+            if os.listdir(root):raise InvalidInput('transport-disposition-foreign-final-entry')
+            if _identity(root,directory=True)!=record['root']:raise InvalidInput('transport-disposition-root-replaced')
+            os.rmdir(root);self._fsync(self.resources_root)
+        lease=self._lease_path(rid)
+        if os.path.lexists(lease):
+            if _identity(lease)!=record['lease']:raise InvalidInput('transport-disposition-lease-replaced')
+            os.unlink(lease);self._fsync(self.resources_root)
+        del journal['records'][rid];self._publish(journal)
+
+    @contextmanager
+    def publication_transport_resource(self,prepared,admission):
+        """One canonical owned scratch family, strictly after issued admission."""
+        admission.qualify_publication(prepared)
+        if not admission.plan.network_cap:
+            raise InvalidInput('admitted-network-family-required')
+        with self._resource('transport',prepared.operation_id,prepared.owner_id) as handle:
+            admission.revalidate()
+            yield handle,self._resource_path(handle.resource_id)
 
     def resources(self):
         with self._journal() as journal:

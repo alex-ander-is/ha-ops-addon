@@ -45,6 +45,31 @@ def transport_intent(transport,parent,oid):
         destination=transport.destination,candidate=SimpleNamespace(remote=SimpleNamespace(remote_oid=parent)),commit_oid=oid)
 
 
+@pytest.mark.skipif(sys.platform!='linux',reason='Actual terminal publication admission')
+@pytest.mark.parametrize('object_format',['sha1','sha256'])
+def test_terminal_cleanup_needs_no_remote_authentication_or_graph(tmp_path,monkeypatch,object_format):
+    rig,ep,t,r,s,c,o,x,kw=publication_fixture(tmp_path,object_format=object_format)
+    def cut(point):
+        if point=='publication-completed': raise KeyboardInterrupt('before terminal retirement')
+    o.fault=cut
+    with pytest.raises(KeyboardInterrupt) as error: x.publish(c,r,**kw)
+    op=error.value.operation_id
+    before=o.read();worker=before['workers'][op]
+    assert worker['phase']=='completed' and before['recovery'] is not None
+    o.fault=lambda point:None
+    def unavailable(*args,**kwargs): raise AssertionError('terminal cleanup must remain offline')
+    monkeypatch.setattr(t,'advertise',unavailable)
+    monkeypatch.setattr(t,'reachability',unavailable)
+    monkeypatch.setattr(t,'push',unavailable)
+    grant=x.approve_recovery(op,expected_revision=before['revision'],command_id=str(uuid.uuid4()),pending_effect='cleanup')
+    assert grant.observation is None
+    assert x.resume(grant)['status']=='completed'
+    final=o.read()
+    assert final['recovery'] is None and final['active'] is None
+    assert final['workers'][op]['publication_outcome']==worker['publication_outcome']
+    assert rig.adapter.read_ref(kw['local_ref']).oid==worker['publication_outcome']['tip']
+
+
 @pytest.mark.parametrize('object_format',['sha1','sha256'])
 def test_real_transport_push_exact_parent_and_complete_graph(tmp_path,object_format):
     rig,endpoint,transport=fixture(tmp_path,object_format)

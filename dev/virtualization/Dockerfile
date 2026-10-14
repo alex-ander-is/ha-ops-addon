@@ -5,13 +5,17 @@ ARG ETCKEEPER_DEB_VERSION=1.18.20-1
 ARG METASTORE_DEB_VERSION=1.1.2-4+b1
 ARG ACL_DEB_VERSION=2.3.1-3
 ARG LIBBSD_DEB_VERSION=0.11.7-2
+ARG OPENSSH_DEB_VERSION=1:9.2p1-2+deb12u10
+ARG OPENSSL_DEB_VERSION=3.0.22-1~deb12u1
 # Extract etckeeper without running its maintainer scripts or initializing /etc.
 RUN apt-get update \
     && apt-cache show "etckeeper=${ETCKEEPER_DEB_VERSION}" >/dev/null \
     && apt-get install -y --no-install-recommends "git=${GIT_DEB_VERSION}" "rsync=${RSYNC_DEB_VERSION}" \
        "metastore=${METASTORE_DEB_VERSION}" "acl=${ACL_DEB_VERSION}" \
        "libacl1=${ACL_DEB_VERSION}" "libbsd0=${LIBBSD_DEB_VERSION}" \
-    && mkdir -p /opt/metadata-tools /tmp/etckeeper-package \
+       "openssh-client=${OPENSSH_DEB_VERSION}" "openssh-server=${OPENSSH_DEB_VERSION}" \
+       "openssl=${OPENSSL_DEB_VERSION}" \
+    && mkdir -p /opt/metadata-tools /tmp/etckeeper-package /run/sshd \
     && cd /tmp/etckeeper-package \
     && apt-get download "etckeeper=${ETCKEEPER_DEB_VERSION}" \
     && dpkg-deb --extract etckeeper_*.deb /opt/metadata-tools \

@@ -1,14 +1,16 @@
 """Dormant exact native publication. Constructors and diagnostics have no effects.
 
 Only an issued NativeSave Candidate/original Review or a fresh one-attempt
-recovery grant can execute. The only qualified transport currently is a local
-bare endpoint; auth/network transports require their own endpoint qualification.
+recovery grant can execute. Local bare endpoints and dormant pinned Linux
+SSH/HTTPS have separate route/resource profiles. Production activation remains
+outside this module; network qualification must not be inferred from a stub.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager,nullcontext
 from dataclasses import dataclass, fields, is_dataclass
 import hashlib
+import base64
 import io
 import os
 import re
@@ -18,6 +20,9 @@ import stat
 import subprocess
 import time
 import uuid
+import resource
+import sys
+from urllib.parse import urlsplit
 
 import native_metadata as metadata
 import native_preview as preview
@@ -152,7 +157,7 @@ def _candidate_identity(candidate,commit_oid,endpoint,destination,local_ref,expe
                     'topology_digest':digest(_encode(candidate.binding))},
             'paths':sorted(paths,key=lambda p:p['path']),
             'effect':{'before':digest([candidate.remote.remote_oid,expected_local]),
-                      'after':digest([commit_oid,encode_native_path(endpoint,absolute=True),destination,local_ref])}}
+                      'after':digest([commit_oid,_endpoint_document(endpoint),destination,local_ref])}}
     validate_identity(result,'save')
     return result
 
@@ -163,7 +168,7 @@ def _intent_bytes(candidate,review,raw,author,committer,message,transport,local_
            'candidate':_encode(candidate),'review':_encode(review),'commit':raw.hex(),
            'commit_oid':object_id(b'commit',raw,candidate.object_format),'author':_encode(author),
            'committer':_encode(committer),'message':message.hex(),
-           'endpoint':encode_native_path(transport.endpoint,absolute=True),'endpoint_identity':list(transport.endpoint_identity),
+           'endpoint':_endpoint_document(transport.endpoint),'endpoint_identity':list(transport.endpoint_identity),
            'destination':transport.destination,'local_ref':local_ref,'expected_local':expected_local,
            'tree_pin':prefix+'/tree','commit_pin':prefix+'/commit','namespace':namespace,'identity':identity,
            'reflogs':[[encode_native_path(route),data.hex()] for route,data in reflogs],
@@ -190,7 +195,7 @@ def validate_intent(payload, *, identity=None, namespace=None):
              value['commit_oid']==object_id(b'commit',raw,candidate.object_format), 'immutable commit mismatch')
     tree,parents=parse_commit(raw,40 if candidate.object_format=='sha1' else 64)
     _require(tree==candidate.tree_oid and parents==(candidate.remote.remote_oid,), 'exact single reviewed parent required')
-    endpoint=decode_native_path(value['endpoint'],absolute=True)
+    endpoint=_endpoint_bytes(value['endpoint'])
     for key in ('destination','local_ref','tree_pin','commit_pin'): _qualified_ref(value[key])
     _require(value['destination'].startswith('refs/heads/'), 'explicit destination branch required')
     width=40 if candidate.object_format=='sha1' else 64
@@ -216,7 +221,13 @@ def validate_intent(payload, *, identity=None, namespace=None):
              'exact candidate byte identity mapping required')
     if identity is not None: _require(identity==owner_identity,'prepared publication identity mismatch')
     if namespace is not None: _require(namespace==ns,'prepared publication namespace mismatch')
-    _require(type(value['endpoint_identity']) is list and len(value['endpoint_identity'])==3 and all(type(n) is int for n in value['endpoint_identity']), 'endpoint descriptor required')
+    if type(value['endpoint']) is dict:
+        _require(value['endpoint_identity']==['native-network-route-v1',digest(value['endpoint'])],
+                 'exact network endpoint commitment required')
+        _require(NetworkRoute.from_document(value['endpoint']).destination==value['destination'],
+                 'network route branch mismatch')
+    else:
+        _require(type(value['endpoint_identity']) is list and len(value['endpoint_identity'])==3 and all(type(n) is int for n in value['endpoint_identity']), 'endpoint descriptor required')
     _require(type(value['reflogs']) is list,'exact reflogs required')
     reflogs=[]
     for route,data in value['reflogs']:
@@ -246,6 +257,126 @@ class PushOutcome:
     request: tuple
     kind: str
     transcript_digest: str
+
+
+@dataclass(frozen=True)
+class NetworkRoute:
+    """Credential-free direct route, not a network execution capability.
+
+    Only explicit direct SSH/HTTPS destinations are represented. SSH aliases,
+    proxy commands and URL rewrite profiles require separate qualification.
+    Parsing and checking options perform no filesystem/network operations.
+    """
+    scheme: str
+    host: str
+    port: int
+    path: str
+    user: str | None
+    destination: str
+    relative: bool = False
+
+    @classmethod
+    def from_options(cls,options):
+        _require(type(options) is dict,'current configured options required')
+        url=options.get('repo_url');branch=options.get('repo_branch')
+        _require(type(url) is str and url and not any(c.isspace() or ord(c)<32 or c=='\\' for c in url),
+                 'explicit network destination required')
+        _require(type(branch) is str and branch,'explicit configured branch required')
+        destination=_qualified_ref(branch if branch.startswith('refs/heads/') else 'refs/heads/'+branch)
+        _require(destination.startswith('refs/heads/'),'network destination must be a branch')
+        relative=False
+        if '://' not in url:
+            match=re.fullmatch(r'([A-Za-z0-9._-]+)@([A-Za-z0-9.-]+):([A-Za-z0-9._/-]+)',url)
+            _require(match is not None,'unsupported network route spelling')
+            user,host,path=match.groups();scheme='ssh';port=22;relative=not path.startswith('/')
+        else:
+            try:
+                parsed=urlsplit(url)
+                scheme=parsed.scheme.lower();host=parsed.hostname;port=parsed.port
+                user=parsed.username if scheme=='ssh' else None
+            except ValueError as error: raise InvalidState('invalid network destination') from error
+            _require(scheme in ('ssh','https') and host is not None and
+                     not parsed.query and not parsed.fragment,'supported direct SSH/HTTPS route required')
+            _require(scheme!='ssh' or parsed.password is None,'SSH URL password is unsupported')
+            path=parsed.path;port=(22 if scheme=='ssh' else 443) if port is None else port
+        _require(type(host) is str and host.isascii() and
+                 re.fullmatch(r'[A-Za-z0-9.-]+|[0-9A-Fa-f:]+',host) is not None and
+                 ('.' in host or ':' in host or host.lower()=='localhost'),
+                 'direct hostname required; SSH aliases need qualification')
+        _require(type(port) is int and 1<=port<=65535,'valid explicit destination port required')
+        _require(re.fullmatch(r'/?[A-Za-z0-9._/-]+',path) is not None and
+                 all(part not in ('.','..') for part in path.split('/')) and
+                 (scheme!='https' or path.startswith('/')),'unsupported remote repository path')
+        _require(user is None or re.fullmatch(r'[A-Za-z0-9._-]+',user) is not None,
+                 'unsupported explicit SSH user')
+        _require(scheme!='ssh' or user is not None,'explicit SSH user required')
+        return cls(scheme,host.lower(),port,path,user,destination,relative)
+
+    def document(self):
+        return {'profile':'native-network-route-v1','scheme':self.scheme,'host':self.host,
+                'port':self.port,'path':self.path,'user':self.user,
+                'destination':self.destination,'relative':self.relative}
+
+    def wire(self):
+        host='['+self.host+']' if ':' in self.host else self.host
+        if self.relative:
+            _require(self.scheme=='ssh' and self.port==22,'qualified relative SSH route required')
+            return self.user+'@'+host+':'+self.path
+        return self.scheme+'://'+('' if self.user is None else self.user+'@')+host+':'+str(self.port)+self.path
+
+    @classmethod
+    def from_document(cls,value):
+        _fields(value,'profile scheme host port path user destination relative')
+        _require(value['profile']=='native-network-route-v1' and type(value['relative']) is bool,
+                 'qualified network endpoint profile required')
+        route=cls(**{key:entry for key,entry in value.items() if key!='profile'})
+        try: checked=cls.from_options({'repo_url':route.wire(),'repo_branch':route.destination})
+        except (TypeError,ValueError) as error: raise InvalidState('invalid network endpoint document') from error
+        _require(checked.document()==value,'canonical direct network endpoint required')
+        return checked
+
+    def check(self,options):
+        if type(self) is not NetworkRoute or NetworkRoute.from_options(options)!=self:
+            raise PublicationError('configured network route changed')
+        return self
+
+
+def _endpoint_document(endpoint):
+    if endpoint.startswith(b'{'):
+        value=_parse(endpoint)
+        _require(canonical(value)==endpoint,'canonical network endpoint bytes required')
+        return NetworkRoute.from_document(value).document()
+    return encode_native_path(endpoint,absolute=True)
+
+
+def _endpoint_bytes(value):
+    if type(value) is dict: return canonical(NetworkRoute.from_document(value).document())
+    return decode_native_path(value,absolute=True)
+
+
+def transport_family(entries,*,disposition=False):
+    """Pinned kept-pack namespace; never adopts an unexpected leaf/family."""
+    names={base64.b64decode(name,validate=True):item for name,item in entries.items()}
+    fixed={b'owner.json',b'HEAD',b'config',b'objects',b'objects/pack',b'refs'}
+    packs=[];shallows=[]
+    for name,item in names.items():
+        if name in fixed:
+            expected_directory=name in (b'objects',b'objects/pack',b'refs')
+            _require((item[3]=='directory')==expected_directory,'network resource kind changed')
+            continue
+        _require(item[3]!='directory','unexpected network resource directory')
+        if re.fullmatch(rb'objects/pack/(?:pack-[0-9a-f]{40}(?:[0-9a-f]{24})?\.(?:pack|idx|keep)|tmp_(?:pack|idx)_[A-Za-z0-9]{6})',name):
+            packs.append(name)
+        elif re.fullmatch(rb'shallow_[A-Za-z0-9]{6}',name):shallows.append(name)
+        else:raise PublicationError('unqualified transport scratch leaf')
+    _require(len(packs)<=(5 if disposition else 3) and len(shallows)<=1,'transport scratch family cardinality exceeded')
+    pack_ids={(names[name][0],names[name][1]) for name in packs if name.endswith(b'.pack') or b'/tmp_pack_' in name}
+    index_ids={(names[name][0],names[name][1]) for name in packs if name.endswith(b'.idx') or b'/tmp_idx_' in name}
+    _require(len(pack_ids)<=1 and len(index_ids)<=1 and
+             (disposition or sum(name.endswith(b'.pack') or b'/tmp_pack_' in name for name in packs)<=1 and
+              sum(name.endswith(b'.idx') or b'/tmp_idx_' in name for name in packs)<=1) and
+             sum(name.endswith(b'.keep') for name in packs)<=1,'duplicate transport pack family')
+    return names
 
 
 class GitCLITransport:
@@ -443,6 +574,175 @@ class GitCLITransport:
         return outcome
 
 
+class NetworkGitCLITransport(GitCLITransport):
+    """Pinned Linux network peer; graph allocation needs the active owner guard."""
+    def __init__(self,git,options,generated_key_path,generated_pub_path,*,known_hosts=None,
+                 askpass=None,ca_file=None,timeout=30,max_output=8*1024*1024,max_commits=10000):
+        _require(type(git) is NativeGit and sys.platform=='linux','qualified Linux native source required')
+        _require(type(timeout) in (int,float) and 0<timeout<=300 and type(max_output) is int and
+                 max_output>=1024 and type(max_commits) is int and max_commits>0,'bounded network work profile required')
+        self.git=git;self.options=options;self.route=NetworkRoute.from_options(options)
+        self.endpoint=canonical(self.route.document());self.endpoint_identity=('native-network-route-v1',digest(self.route.document()))
+        self.destination=self.route.destination;self.object_format='sha1' if git._config()==40 else 'sha256'
+        self.timeout,self.max_output,self.max_commits=timeout,max_output,max_commits
+        self.generated_key_path,self.generated_pub_path=generated_key_path,generated_pub_path
+        self.known_hosts,self.askpass,self.ca_file=known_hosts,askpass,ca_file
+        self._outcome=None;self._outcome_snapshot=None;self._admitted=None;self._scratch=None;self._scratch_profile=None
+        self._source_binding=(git.root,git.metadata,git.policy)
+        self._binding=(git,options,canonical(self.route.document()),self.endpoint,self.endpoint_identity,self.destination,timeout,max_output,max_commits,
+                       generated_key_path,generated_pub_path,known_hosts,askpass,ca_file)
+        observed=[]
+        for path in (git.metadata+b'/config',known_hosts,askpass,ca_file):
+            if path is None:continue
+            path=os.fsencode(path)
+            try:_identity(path);observation=_observation(os.lstat(path))
+            except FileNotFoundError:observation=None
+            observed.append((path,observation))
+        self._route_binding=tuple(observed)
+        version=subprocess.run(['/usr/bin/git','--version'],capture_output=True,timeout=5,env=git._environment())
+        _require(version.returncode==0 and version.stdout==b'git version 2.39.5\n' and not version.stderr,
+                 'qualified pinned Linux Git required')
+
+    def _check(self):
+        if (self.git,self.options,canonical(self.route.document()),self.endpoint,self.endpoint_identity,self.destination,self.timeout,self.max_output,self.max_commits,
+            self.generated_key_path,self.generated_pub_path,self.known_hosts,self.askpass,self.ca_file)!=self._binding:
+            raise PublicationError('network transport binding changed')
+        self.route.check(self.options)
+        if (self.git.root,self.git.metadata,self.git.policy)!=self._source_binding:
+            raise PublicationError('network source binding changed')
+        for path,observed in self._route_binding:
+            try:current=_observation(os.lstat(path))
+            except FileNotFoundError:current=None
+            if current!=observed:raise PublicationError('qualified network control source changed')
+        if self._scratch is not None:
+            for path,payload in self._scratch_profile:
+                with open(path,'rb') as stream:
+                    if stream.read(len(payload)+1)!=payload:raise PublicationError('network scratch profile changed')
+
+    @contextmanager
+    def admitted(self,prepared,admission):
+        self._check();admission.qualify_publication(prepared)
+        if self._admitted is not None or not admission.plan.network_cap:
+            raise PublicationError('one active admitted network envelope required')
+        self._admitted=(prepared,admission)
+        try:yield
+        finally:self._admitted=None
+
+    def _command(self,args,*,endpoint=False):
+        self._check()
+        from git_auth import publication_auth
+        if self._admitted is not None:self._admitted[1].qualify_publication(self._admitted[0])
+        root=self._scratch if endpoint else self.git.metadata
+        if root is None:raise PublicationError('independent admitted graph repository required')
+        argv=['/usr/bin/git','--no-pager','--git-dir='+os.fsdecode(root)]
+        for option in ('core.fsmonitor=false','gc.auto=0','maintenance.auto=false','fetch.writeCommitGraph=false',
+            'pack.writeReverseIndex=false','fetch.unpackLimit=0','transfer.unpackLimit=0','fetch.fsckObjects=true',
+            'fetch.uriprotocols=','protocol.version=0','http.followRedirects=false','http.sslVerify=true','http.proxy=',
+            'credential.helper=','push.negotiate=false','push.followTags=false','push.autoSetupRemote=false',
+            'push.useForceIfIncludes=false','push.pushOption=','push.gpgSign=false','submodule.recurse=false',
+            'protocol.allow=never','protocol.'+self.route.scheme+'.allow=always','core.attributesFile='+os.devnull):
+            argv+=['-c',option]
+        wire=self.route.wire()
+        argv+=[wire if arg==os.fsdecode(self.endpoint) else arg for arg in args]
+        cap=self._admitted[1].plan.network_cap if endpoint and args and args[0]=='fetch' else None
+        def limits():
+            resource.setrlimit(resource.RLIMIT_CORE,(0,0))
+            if cap is not None:resource.setrlimit(resource.RLIMIT_FSIZE,(cap,cap))
+        with publication_auth(self.options,self.generated_key_path,self.generated_pub_path,
+                              known_hosts=self.known_hosts,askpass=self.askpass,ca_file=self.ca_file) as auth:
+            process=None;selector=selectors.DefaultSelector();out=bytearray();err=bytearray();primary=None;gate=[]
+            try:
+                command=argv;fds=auth.pass_fds
+                if cap is not None:
+                    read_gate,write_gate=os.pipe();gate=[read_gate,write_gate]
+                    launcher='import os,sys;fd=int(sys.argv[1]);token=os.read(fd,1);os.close(fd);os.execv(sys.argv[2],sys.argv[2:]) if token==b"1" else os._exit(125)'
+                    command=[sys.executable,'-I','-S','-c',launcher,str(read_gate),*argv]
+                    fds=(*fds,read_gate)
+                process=subprocess.Popen(command,cwd=self.git.root,env=auth.environment,stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True,pass_fds=fds,preexec_fn=limits)
+                if cap is not None:
+                    os.close(read_gate);gate.remove(read_gate)
+                    self.git._transport_writer_started(self._scratch_handle,process.pid)
+                    if os.write(write_gate,b'1')!=1:raise PublicationError('network writer gate short write')
+                    os.close(write_gate);gate.remove(write_gate)
+                for stream in (process.stdout,process.stderr):
+                    os.set_blocking(stream.fileno(),False);selector.register(stream,selectors.EVENT_READ)
+                deadline=time.monotonic()+self.timeout
+                while selector.get_map():
+                    left=deadline-time.monotonic()
+                    if left<=0:raise PublicationError('network transport deadline exceeded')
+                    for key,_ in selector.select(min(left,.1)):
+                        chunk=os.read(key.fd,65536)
+                        if not chunk:selector.unregister(key.fileobj);continue
+                        buffer=out if key.fileobj is process.stdout else err
+                        if len(buffer)+len(chunk)>(self.max_output if buffer is out else 65536):
+                            raise PublicationError('network transport output budget exhausted')
+                        buffer.extend(chunk)
+                process.wait(timeout=max(.001,deadline-time.monotonic()))
+                return process.returncode,bytes(out),bytes(err)
+            except BaseException as error:
+                primary=error;error.started=process is not None
+                if process is not None:
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    except BaseException as cleanup:
+                        error.unreaped_network_group=process.pid
+                        error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('network-owned-group:'+str(process.pid)+':'+type(cleanup).__name__,)
+                    try:process.wait(timeout=5)
+                    except BaseException as cleanup:
+                        error.unreaped_network_group=process.pid
+                        error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('network-owned-wait:'+str(process.pid)+':'+type(cleanup).__name__,)
+                raise
+            finally:
+                closes=[('network-selector-close',selector.close)]
+                closes.extend(('network-write-gate-close',lambda fd=fd:os.close(fd)) for fd in gate)
+                if process is not None:closes.extend(('network-pipe-close:'+label,stream.close)
+                    for label,stream in (('stdout',process.stdout),('stderr',process.stderr)))
+                _close_owned(closes,primary)
+
+    def _push_kind(self,intent,code,out,error):
+        display=self.route.wire()
+        if self.route.scheme=='ssh':display=display.replace(self.route.user+'@','',1)
+        prefix=b'To '+display.encode()+b'\n'
+        if out.startswith(prefix):out=b'To '+self.endpoint+b'\n'+out[len(prefix):]
+        return super()._push_kind(intent,code,out,error)
+
+    def _commit(self,oid):
+        code,kind,error=self._command(('cat-file','-t',oid),endpoint=True)
+        if code or error or kind!=b'commit\n':raise PublicationError('independently fetched commit unavailable')
+        code,raw,error=self._command(('cat-file','commit',oid),endpoint=True)
+        if code or error or object_id(b'commit',raw,self.object_format)!=oid:
+            raise PublicationError('independent fetched commit hash mismatch')
+        return raw,parse_commit(raw,40 if self.object_format=='sha1' else 64)
+
+    def reachability(self,observation,target):
+        self._check()
+        if self._admitted is None:raise PublicationError('network graph allocation before admission forbidden')
+        prepared,admission=self._admitted
+        with self.git.publication_transport_resource(prepared,admission) as (handle,root):
+            for name in (b'objects',b'objects/pack',b'refs'):os.mkdir(root+b'/'+name,0o700)
+            config=b'[core]\nrepositoryformatversion = '+(b'1' if self.object_format=='sha256' else b'0')+b'\nbare = true\n'
+            if self.object_format=='sha256':config+=b'[extensions]\nobjectformat = sha256\n'
+            payloads=((root+b'/config',config),(root+b'/HEAD',b'ref: refs/heads/unborn\n'))
+            for path,payload in payloads:
+                fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+                try:
+                    if os.write(fd,payload)!=len(payload):raise PublicationError('network scratch control short write')
+                    os.fsync(fd)
+                finally:os.close(fd)
+            self._scratch,self._scratch_profile,self._scratch_handle=root,payloads,handle
+            try:
+                self.git._capture(handle);admission.revalidate()
+                with self.git._capture_after(handle):
+                    code,out,error=self._command(('fetch','--keep','--no-tags','--no-write-fetch-head',
+                        '--no-auto-maintenance','--no-recurse-submodules','--no-progress',
+                        os.fsdecode(self.endpoint),observation.oid),endpoint=True)
+                    if code:raise PublicationError('bounded independent graph fetch unavailable')
+                admission.revalidate()
+                return super().reachability(observation,target)
+            finally:self._scratch=None;self._scratch_profile=None;self._scratch_handle=None
+
+
 def validate_candidate(git,candidate,review):
     """Independent remote-plus-selection reconstruction and full object proof."""
     width=40 if candidate.object_format=='sha1' else 64
@@ -532,7 +832,7 @@ class RecoveryApproval:
     epoch: int
     namespace: tuple
     intent_digest: str
-    observation: Advertisement
+    observation: Advertisement | None
     pending_effect: str
     command_id: str
 
@@ -563,11 +863,12 @@ def packed_pin_removal(raw,name,expected):
 class NativePublication:
     def __init__(self,saver,store,transport):
         _require(type(saver) is save.NativeSave and isinstance(store,NativeOperationStore) and
-                 type(transport) is GitCLITransport,'exact dormant publication peers required')
+                 type(transport) in (GitCLITransport,NetworkGitCLITransport),'exact dormant publication peers required')
         self.saver,self.store,self.transport=saver,store,transport
         self._binding=(saver,store,transport,saver.preview,saver.preview.git,saver.disk,saver.preview.binding)
         self._recovery=None; self._refusal=None; self._commands=set(); self._recovery_snapshot=None; self._refusal_snapshot=None
         self._proof=None; self._proof_snapshot=None
+        self._disposition=None
 
     def _check(self):
         if (self.saver,self.store,self.transport,self.saver.preview,self.saver.preview.git,
@@ -681,7 +982,8 @@ class NativePublication:
         if command_id in self._commands:
             return {'status':'duplicate-diagnostics-only'}
         git=self.saver.preview.git; prepared=None; admission=None
-        with git.publication_local(),self.saver.publication_context(candidate,review):
+        network=type(self.transport) is NetworkGitCLITransport
+        with git.publication_local(),self.saver.publication_context(candidate,review,preserve_unconsumed=network):
             git.qualify_publication_signature(author); git.qualify_publication_signature(committer)
             proved=validate_candidate(git,candidate,review)
             observation=self.transport.advertise()
@@ -689,7 +991,12 @@ class NativePublication:
             _qualified_ref(local_ref)
             if git.read_ref(local_ref).oid!=expected_local: raise PublicationError('local expectation changed before acceptance')
             raw=commit_bytes(candidate,author,committer,message); commit_oid=object_id(b'commit',raw,candidate.object_format)
-            found,parent_graph=self.transport.reachability(observation,commit_oid)
+            if network:
+                # Prediction only: the independently fetched complete R graph
+                # must match this fixed commitment before owner acceptance.
+                found,edges=git.verified_graph(observation.oid,commit_oid,maximum=self.transport.max_commits)
+                parent_graph=digest(_encode(edges))
+            else:found,parent_graph=self.transport.reachability(observation,commit_oid)
             if found: raise PublicationError('candidate commit is already in original parent graph')
             identity=_candidate_identity(candidate,commit_oid,self.transport.endpoint,self.transport.destination,local_ref,expected_local)
             reflogs=self._reflogs(local_ref,expected_local,commit_oid,committer)
@@ -698,8 +1005,13 @@ class NativePublication:
             prepared=self.store.prepare_publication(expected_revision,identity,factory,
                 {encode_native_path(row.path):'ha' for row in candidate.selected},str(uuid.uuid4()),command_id)
             intent=validate_intent(prepared.artifact)
-            with self._admission(prepared,intent) as admission:
+            with self._admission(prepared,intent) as admission, (self.transport.admitted(prepared,admission) if network else nullcontext()):
                 try:
+                    if network:
+                        admission.create_publication_directories(prepared,transport_only=True)
+                        independent_found,independent_graph=self.transport.reachability(observation,commit_oid)
+                        if independent_found or independent_graph!=parent_graph:
+                            raise PublicationError('independent original network graph mismatch')
                     self.saver.consume_publication(candidate,review)
                     self._commands.add(command_id)
                     admission.create_publication_directories(prepared)
@@ -775,6 +1087,47 @@ class NativePublication:
                 'instance_id':state['instance_id'],'generation':record['generation'],'pins':pins,'local_oid':local,
                 'recovery_pin':state['recovery'],'execution_authority':False}
 
+    def transport_debts(self):
+        """Read-only addressed scratch diagnostics, including pre-acceptance debt."""
+        self._check()
+        return tuple(row for row in self.saver.preview.git.resources() if row['kind']=='transport')
+
+    def settle_transport_resource(self,resource_id,*,operation_id,owner_id):
+        """Fresh explicit local settlement; never connects or publishes.
+
+        Initial graph failure can precede a native worker. Its canonical Git
+        resource record remains the authority for exact owner/operation cleanup.
+        No recovered command or lifecycle event calls this entry point.
+        """
+        self._check()
+        for value in (resource_id,operation_id,owner_id):_id(value)
+        row=next((row for row in self.transport_debts() if row['resource_id']==resource_id),None)
+        if row is None:raise PublicationError('addressed transport resource unavailable')
+        if (row['owner'],row['operation'],row['phase'])!=(owner_id,operation_id,'debt'):
+            raise PublicationError('exact unresolved transport ownership required')
+        return self.saver.preview.git.recover_resource(resource_id,owner_id=owner_id,operation_id=operation_id)
+
+    def _disposition_lifecycle(self):
+        from native_operations import _publication_observe
+        with _publication_observe(self.store) as (root,artifacts):
+            raw=None if root is None else self.store._read_file(root,'state.json')
+        return (self.store.owner,None if raw is None else hashlib.sha256(raw).hexdigest())
+
+    def review_transport_disposition(self,resource_id,*,operation_id,owner_id):
+        """Read exact unknown-leaf membership for a new explicit discard decision."""
+        self._check()
+        review=self.saver.preview.git.review_transport_disposition(resource_id,operation_id=operation_id,owner_id=owner_id)
+        self._disposition=(review,self._disposition_lifecycle())
+        return review
+
+    def approve_transport_disposition(self,review,*,command_id):
+        """Explicit user approval of this exact review; no publication authority."""
+        self._check();_id(command_id)
+        if self._disposition is None or self._disposition[0] is not review or self._disposition[1]!=self._disposition_lifecycle():
+            raise PublicationError('issued-current-transport-disposition-review-required')
+        self._disposition=None
+        return self.saver.preview.git.discard_reviewed_transport(review,command_id=command_id)
+
     def approve_recovery(self,operation_id,*,expected_revision,command_id,pending_effect='reconcile'):
         """Called only for a current explicit user action; one live attempt."""
         self._check(); _id(command_id)
@@ -787,7 +1140,10 @@ class NativePublication:
         worker=_parse(prepared.initial)['workers'][operation_id]
         if (worker['phase'] in ('completed','failed')) != (pending_effect=='cleanup'):
             raise PublicationError('pending recovery effect does not match worker')
-        observation=self.transport.advertise()
+        # Terminal retirement is authorized by the stored result and exact
+        # local owner/pin receipts. Expired credentials or an unavailable
+        # receiver cannot prevent settling those already completed effects.
+        observation=None if pending_effect=='cleanup' else self.transport.advertise()
         authority=worker['publication_cleanup_owner'] if worker['phase'] in ('completed','failed') else {'owner':worker['owner'],'epoch':worker['epoch']}
         approval=RecoveryApproval(self,prepared,operation_id,authority['epoch'],prepared.namespace,
             hashlib.sha256(prepared.artifact).hexdigest(),observation,pending_effect,command_id)
@@ -808,7 +1164,8 @@ class NativePublication:
         self._recovery=None; self._commands.add(approval.command_id)
         git=self.saver.preview.git
         with git.publication_local():
-            if self.transport.advertise()!=approval.observation: raise PublicationError('remote observation changed; approve a new attempt')
+            if approval.pending_effect!='cleanup' and self.transport.advertise()!=approval.observation:
+                raise PublicationError('remote observation changed; approve a new attempt')
             if approval.pending_effect not in ('abandon','cleanup'):
                 validate_candidate(git,intent.candidate,intent.review)
                 git.exact_commit(intent.commit_oid)
@@ -819,7 +1176,8 @@ class NativePublication:
                     worker['publication_cleanup']>=retired_at or _publication_abandonment_cleanup(state,worker))
                 if observed!=oid and not (observed is None and (approval.pending_effect=='abandon' or authorized_absence)):
                     raise PublicationError('missing or changed acknowledged publication pin:'+name)
-            with self._admission(prepared,intent) as admission:
+            with self._admission(prepared,intent) as admission, (self.transport.admitted(prepared,admission)
+                    if type(self.transport) is NetworkGitCLITransport and approval.pending_effect!='cleanup' else nullcontext()):
                 try:
                     admission.create_publication_directories(prepared)
                     self.store.publication_command(prepared,admission)

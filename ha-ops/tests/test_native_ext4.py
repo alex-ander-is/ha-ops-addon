@@ -603,3 +603,51 @@ def test_container_recreation(proof):
         evidence = json.loads(outside.read_text())
         assert evidence == {'inode': path.stat().st_ino, 'device': path.stat().st_dev, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
     report['rows']['recreation'] = {'attempt': int(os.environ['HA_OPS_EXT4_ATTEMPT']), 'sentinel': evidence}
+
+
+def test_network_publication_ext4_frozen_physical_peak(proof,monkeypatch):
+    only(proof,'allocation')
+    parent,report=proof
+    target=parent/'network-publication-https'
+    target.mkdir()
+    from test_native_network_publication import test_network_tmpfs_physical_peak_fits_single_frozen_forecast
+    samples=test_network_tmpfs_physical_peak_fits_single_frozen_forecast(target,monkeypatch)
+    report['rows']['loose-index-worktree-save']['network_publication']={
+        'protocol':'authenticated-https','filesystem':'ext4','same_frozen_forecast':True,
+        'measurements':samples,'physical_peak':max(row[0] for row in samples),
+        'new_inode_peak':max(row[1] for row in samples)}
+
+
+def test_network_graph_fetch_real_kernel_enospc_after_admission(proof,monkeypatch):
+    only(proof,'bytes');parent,report=proof
+    from test_native_network_publication import native_network_fixture
+    import native_publication as publication
+    target=parent/'network-enospc';target.mkdir()
+    filler=parent/'network-owned-filler'
+    with native_network_fixture(target,'https') as (rig,receiver,t,r,s,c,o,x,kw):
+        original=t._command;writer_started=rig.adapter._transport_writer_started;reached=[]
+        def fill_after_writer_receipt(handle,group):
+            writer_started(handle,group)
+            if reached:return
+            written=0
+            with filler.open('xb',buffering=0) as stream:
+                for _ in range(256*MIB//4096):
+                    try:written+=stream.write(b'F'*4096)
+                    except OSError as error:
+                        assert error.errno==errno.ENOSPC;reached.append(written);break
+                else:pytest.fail('bounded fixture did not reach ENOSPC')
+        def fetch(args,**kwargs):
+            try:return original(args,**kwargs)
+            finally:
+                if filler.exists():filler.unlink()
+        monkeypatch.setattr(rig.adapter,'_transport_writer_started',fill_after_writer_receipt)
+        monkeypatch.setattr(t,'_command',fetch)
+        with pytest.raises(publication.PublicationError,match='graph fetch unavailable'):x.publish(c,r,**kw)
+        assert reached and not (rig.root/'data/native-operations/state.json').exists()
+        assert rig.adapter.read_ref(kw['local_ref']).oid==kw['expected_local']
+        for row in x.transport_debts():
+            grant=x.review_transport_disposition(row['resource_id'],operation_id=row['operation'],owner_id=row['owner'])
+            x.approve_transport_disposition(grant,command_id=str(uuid.uuid4()))
+        assert x.publish(c,r,**kw)['status']=='completed'
+        report['rows']['byte-enospc']['network_fetch']={'kernel_enospc':True,'written_bytes':reached[0],
+            'before_acceptance':True,'same_candidate_retry':True}

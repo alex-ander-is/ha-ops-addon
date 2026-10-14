@@ -245,7 +245,7 @@ class NativeSave:
         return result
 
     @contextmanager
-    def publication_context(self, candidate, review):
+    def publication_context(self, candidate, review, *, preserve_unconsumed=False):
         """One live issuer grant, consumed before effects; no closing old-ref fence."""
         receipt = self._publication_receipt
         preview = self.preview
@@ -256,11 +256,27 @@ class NativeSave:
             raise Stale('issued-current-candidate-and-review-required')
         if _authority_snapshot((candidate,review,preview.binding,preview.git.policy))!=self._publication_snapshot:
             raise Stale('issued-publication-authority-fields-changed')
+        deferred=None
         with preview._call():
             observed = preview._candidate_fence(review)
             # The caller may validate without consuming, but every accepted
             # operation clears this exact in-memory grant before its first effect.
-            yield observed
+            try:yield observed
+            except BaseException as error:
+                if not preserve_unconsumed or self._publication_receipt is not receipt:
+                    raise
+                # Transport/admission failed before candidate consumption.
+                # Recheck the actual local selection while still serialized;
+                # only an unchanged local review may retain its issuer grant.
+                try:
+                    preview._candidate_fence(review)
+                    if _authority_snapshot((candidate,review,preview.binding,preview.git.policy))!=self._publication_snapshot:
+                        raise Stale('issued-publication-authority-fields-changed')
+                except BaseException as secondary:
+                    error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('unconsumed-review-requalification:'+type(secondary).__name__,)
+                    raise error
+                deferred=error
+        if deferred is not None:raise deferred
 
     def consume_publication(self, candidate, review):
         receipt = self._publication_receipt

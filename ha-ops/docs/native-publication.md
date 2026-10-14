@@ -3,9 +3,10 @@
 `NativePublication` is an explicit dormant caller of `NativeSave`, the canonical
 `NativeOperationStore`, `NativeDisk` and local-only `NativeGit`. Production Save,
 Apply, startup and UI do not import it. It writes no live configuration or
-canonical index. The supported outgoing transport is an explicitly supplied
-local bare repository; SSH/HTTPS/authentication and implicit fetch are outside
-this qualification.
+canonical index. Local bare publication has its established qualification.
+The dormant pinned Linux SSH/HTTPS implementation and its remaining acceptance
+gates are documented in [network publication](native-network-publication.md).
+That implementation is not activated in production.
 
 ## Authority and exact bytes
 
@@ -14,7 +15,7 @@ same Save/Preview/Git/Disk session can start. A nonblocking publication session
 holds the selected-source fence through acceptance and the final pre-send
 check, without applying the obsolete original-remote fence after publication.
 Copies, restored diagnostic bytes, pins and lifecycle ownership are not grants.
-Detached typed snapshots bind every Candidate, original Review and nested binding/policy field at issuance. Same-object mutation cannot preserve authority by recomputing a valid subset or digest. Consumption clears the live receipt before the first owned allocation.
+Detached typed snapshots bind every Candidate, original Review and nested binding/policy field at issuance. Same-object mutation cannot preserve authority by recomputing a valid subset or digest. Consumption clears the live receipt before accepted operation effects. Network graph scratch is separately admitted and settled before acceptance; it cannot consume the review merely by failing to obtain the original graph.
 
 Full raw-hash verification reconstructs the remote-plus-selected tree and
 manifest, including unselected dependencies. The original source must be a

@@ -439,6 +439,7 @@ class Plan:
     namespace: tuple = ()
     future_directories: tuple = ()
     output_files: tuple = ()
+    network_cap: int = 0
 
     @property
     def supported(self):
@@ -458,6 +459,7 @@ class _Context:
     resource_counts: tuple
     resource_bytes: int
     resource_entries: int
+    network_cap: int
     owner_binding: tuple | None
     state_bytes: int
     state_shape: str | None
@@ -1004,7 +1006,8 @@ class NativeDisk:
         if binding is not None and binding[3:5] != (plan.evidence.operation_id, plan.evidence.owner_id):
             raise Blocked("competing-operation-state")
         selection = plan.kind in ("initial_selection", "scope", "save", "migration", "candidate")
-        counts = {"index": int(selection), "spool": len(plan.evidence.selected) + int(plan.kind == "candidate") if selection else 0, "worktree": int(selection and plan.evidence.materialize)}
+        counts = {"index": int(selection), "spool": len(plan.evidence.selected) + int(plan.kind == "candidate") if selection else 0, "worktree": int(selection and plan.evidence.materialize),
+                  'transport':int(bool(plan.network_cap))}
         journal = None
         try:
             journal = self._control(self.root + b"/data/native/git-resources/journal.json")
@@ -1012,7 +1015,7 @@ class NativeDisk:
         except FileNotFoundError:
             self._require_absent(self.root + b"/data/native/git-resources/journal.json", initial_observations, routes)
         if journal:
-            if not selection:
+            if not selection and not plan.network_cap:
                 self._resource_bound = len(json.dumps(journal, sort_keys=True, separators=(",", ":")).encode())
                 self._resource_entry_bound = max([3] + [len(r["entries"]) for r in journal["records"].values()])
             for record in journal["records"].values():
@@ -1037,7 +1040,7 @@ class NativeDisk:
                               self._state_envelope(prospective) if prospective is not None else 0)
         return _Context(snapshot, tuple(cache.items()), tuple(sources), tuple(sorted(routes.items())),
                         tuple(sorted(dependencies.items())), tuple(sorted(memberships.items())), tuple(sorted(owner_locks.items())), tuple(sorted(mount_proofs.items())), tuple(sorted(counts.items())),
-                        self._resource_bound, self._resource_entry_bound, binding,
+                        self._resource_bound, self._resource_entry_bound,plan.network_cap,binding,
                         state_limit,
                         self._state_shape(state) if state is not None else None,
                         tuple((rid, _digest(record)) for rid, record in journal["records"].items()) if journal else (),
@@ -1411,6 +1414,7 @@ class NativeDisk:
         self._materialized_sizes = {}
         self._profile_source = None
         self._publication_packed = None
+        network_cap=0
         self._oid_width = None
         self._relevant_oids = set()
         try:
@@ -1741,6 +1745,75 @@ class NativeDisk:
                 add(b"data/native-operations/artifacts",len(publication.artifact),"publication-artifact-atomic-overlap")
                 add(b"data/native-operations/lock",0,"publication-owner-lock",file_target=True,proof=("bytes",b""))
                 add(b"data/native-operations",max(len(value) for _,value in publication.states),"publication-state-atomic-overlap")
+                if intent.endpoint.startswith(b'{') and not terminal:
+                    # Pinned protocol-v0 kept-pack execution has one pack, one
+                    # index, one bounded keep message, and one shallow temp.
+                    # The kernel cap applies to every writer/child. It is not
+                    # a total budget: all three variable file extents are held.
+                    destination=b'data/native/git-resources'
+                    volume,_=self._destination(destination,mounts)
+                    original=next((v for v in snapshot.volumes if v.key==volume.key),None)
+                    available=min(volume.available,original.available) if original is not None else volume.available
+                    add(destination,512,'network-transport-keep')
+                    for name in ('objects','objects/pack','refs'):
+                        add(destination,0,'network-transport-directory:'+name,directory=True)
+                    add(destination,0,'network-pack-promote-name-overlap',directory=True)
+                    add(destination,0,'network-index-promote-name-overlap',directory=True)
+                    add(destination,512,'network-transport-config')
+                    add(destination,128,'network-transport-head')
+                    # Exact canonical resource envelope uses uint64 descriptor
+                    # bounds and the longest permitted pack/hash filenames.
+                    with _directory(self.root) as root_fd,_directory(self.root+b'/data/native/repository.git') as meta_fd:
+                        ri,mi=os.fstat(root_fd),os.fstat(meta_fd)
+                        root_id=[ri.st_dev,ri.st_ino,stat.S_IMODE(ri.st_mode)]
+                        meta_id=[mi.st_dev,mi.st_ino,stat.S_IMODE(mi.st_mode)]
+                    binding=hashlib.sha256(self.root+b'\0'+self.root+b'/data/native/repository.git'+repr((root_id,meta_id)).encode()).hexdigest()
+                    try:
+                        journal=self._control(self.root+b'/data/native/git-resources/journal.json')
+                        self._validate_resource_journal(journal)
+                    except FileNotFoundError:
+                        journal={'schema':1,'root':root_id,'metadata':meta_id,'storage':[ri.st_dev,2**64-1,0o700],'records':{}}
+                    if any(record['kind']=='transport' for record in journal['records'].values()):
+                        raise Blocked('prior-transport-scratch-requires-explicit-settlement')
+                    rid='ffffffff-ffff-4fff-8fff-ffffffffffff'
+                    marker={'resource':rid,'operation':evidence.operation_id,'owner':evidence.owner_id,'binding':binding}
+                    add(destination,len(json.dumps(marker,sort_keys=True).encode()),'network-resource-marker')
+                    add(destination,0,'network-resource-lease')
+                    add(destination,0,'network-resource-root',directory=True)
+                    file_record=[ri.st_dev,2**64-1,0o600,'f'*64]
+                    names=(b'owner.json',b'HEAD',b'config',b'objects/pack/pack-'+b'f'*(width*2)+b'.pack',
+                           b'objects/pack/pack-'+b'f'*(width*2)+b'.idx',b'objects/pack/pack-'+b'f'*(width*2)+b'.keep',b'shallow_XXXXXX')
+                    entries={base64.b64encode(name).decode():file_record for name in names}
+                    for name in (b'objects',b'objects/pack',b'refs'):
+                        entries[base64.b64encode(name).decode()]=[ri.st_dev,2**64-1,0o700,'directory']
+                    journal['records'][rid]={'operation':evidence.operation_id,'owner':evidence.owner_id,'kind':'transport',
+                        'phase':'allocated','root':[ri.st_dev,2**64-1,0o700],'lease':[ri.st_dev,2**64-1,0o600],
+                        'entries':entries,'admin':None,'errors':[],'writer':2**31-1}
+                    self._resource_entry_bound=max([3]+[len(record['entries']) for record in journal['records'].values()])
+                    self._resource_bound=len(json.dumps(journal,sort_keys=True,separators=(',',':')).encode())
+                    v=add(destination,self._resource_bound,'network-resource-journal')
+                    generated_controls[v.key]=max(generated_controls.get(v.key,0),self._resource_bound)
+                    if not _optional_stat(self.root+b'/data/native/git-resources/journal.lock'):
+                        add(destination,0,'network-resource-journal-lock')
+                    # All fixed publication/control/journal extents are now
+                    # known. Allocate the remaining admitted physical capacity
+                    # equally to the three independently capped writer files.
+                    # Ext4's existing allocator charges one metadata block per
+                    # data block and two fixed extent/admin blocks per file.
+                    volume=volumes[v.key];q=volume.quantum
+                    control=max([generated_controls.get(v.key,0)]+[len(control.payload) for control in evidence.controls
+                        if self._destination(control.target.path,mounts,file_target=control.target.kind=='file')[0].key==v.key])
+                    prior=next((p for p in previous.volumes if p.key==v.key),None) if previous else None
+                    growth=max(0,prior.available-volume.available,volume.allocated-prior.allocated) if prior else 0
+                    reserve=_round(volume.largest_control,q)+_round(control,q)+q+growth
+                    fixed=sum(row.allocated for row in allocations if row.volume==v.key)
+                    _,missing=self._destination(destination,mounts)
+                    factor=2 if volume.filesystem==b'ext4' else 1
+                    overhead=3*q*(1+len(missing)+(2 if factor==2 else 0))
+                    network_cap=max(0,(volume.available-fixed-reserve-overhead)//(3*factor)//q*q)
+                    if network_cap<q:raise InsufficientSpace('network-transfer-capacity-insufficient')
+                    for name in ('pack','index','shallow-temporary'):
+                        add(destination,network_cap,'network-transport-'+name)
             elif kind == "repack":
                 width, config = self._profile()
                 objects = self._objects(width)
@@ -1841,7 +1914,7 @@ class NativeDisk:
                     tuple(decisions), tuple(dict.fromkeys(unknown)), tuple(provenance),
                     tuple((key, sum(a.allocated for a in allocations if a.volume == key)) for key in sorted({a.volume for a in allocations}, key=repr)),
                     tuple(sorted((path, identity) for path, identity in namespace.items() if beneath(path, self.root))),
-                    tuple(sorted(future_directories)), tuple(sorted(output_files.items())))
+                    tuple(sorted(future_directories)), tuple(sorted(output_files.items())),network_cap)
         try:
             self._contexts[id(plan)] = self._compile_context(plan, snapshot, artifact_cache, mounts) if plan.supported else None
         except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
@@ -2260,6 +2333,8 @@ class Admission:
                 self.disk._active_operation != prepared.operation_id or
                 (self.plan.evidence.operation_id,self.plan.evidence.owner_id) != (prepared.operation_id,prepared.owner_id)):
             raise Blocked("issued-active-publication-admission-required")
+        if self.plan.network_cap!=self._context.network_cap:
+            raise Blocked('issued-network-transfer-cap-changed')
         prepared.check()
         if failure_checkpoint:
             # This grants only the already projected canonical recovery state,
@@ -2285,10 +2360,11 @@ class Admission:
             self.revalidate()
         return self
 
-    def create_publication_directories(self,prepared):
+    def create_publication_directories(self,prepared,*,transport_only=False):
         """Own planned parent creation before any Git/owner implicit mkdir."""
         self.qualify_publication(prepared)
         for path in sorted(self.plan.future_directories,key=lambda p:(p.count(b'/'),p)):
+            if transport_only and not beneath(self.disk.root+b'/data/native/git-resources',path):continue
             if self._namespace.get(path) is not None: continue
             self._check_namespace()
             with _directory(os.path.dirname(path)) as parent:
@@ -2677,6 +2753,17 @@ class Admission:
             elif record["kind"] == "spool":
                 allowed = name in (b"owner.json", b"spool")
                 bound = max(context.spool_sizes, default=0)
+            elif record['kind']=='transport':
+                from native_publication import transport_family
+                transport_family(record['entries'])
+                allowed=True;bound=self.plan.network_cap
+                if identity[3]=='directory':
+                    with _directory(resource+b'/'+name) as fd:info=os.fstat(fd)
+                    if identity[:3]!=[info.st_dev,info.st_ino,stat.S_IMODE(info.st_mode)]:
+                        raise Blocked('network-resource-directory-replaced')
+                    continue
+                if name in (b'HEAD',b'config'):bound=512
+                elif name.endswith(b'.keep'):bound=512
             else:
                 allowed = name in (b"owner.json", b"tree/.git") or name in directories or (name.startswith(b"tree/") and name[5:] in sizes)
                 bound = sizes.get(name[5:], 0)

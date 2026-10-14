@@ -2665,7 +2665,7 @@ class ServerTests(unittest.TestCase):
             env = {}
             server.git_auth.setup_git_ssh_env(env, work, key_text="PRIVATE")
             self.assertIn("manual_deploy_key", env["GIT_SSH_COMMAND"])
-            self.assertEqual((work / "manual_deploy_key").read_text(), "PRIVATE")
+            self.assertEqual((work / "manual_deploy_key").read_text(), "PRIVATE\n")
 
             pub_path.parent.mkdir(parents=True, exist_ok=True)
             key_path.write_text("generated-private")
