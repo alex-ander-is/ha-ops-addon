@@ -76,7 +76,7 @@ def object_id(kind,raw,object_format):
     return hashlib.new(object_format,kind+b' '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
 
 
-_TYPES = {cls.__name__:cls for cls in (save.Candidate,preview.SourceObservation,preview.FileState,
+_TYPES = {cls.__name__:cls for cls in (save.Candidate,save.ScopeReview,save.ScopePolicy,save.HistoricalContext,preview.SourceObservation,preview.FileState,
     preview.PathChange,preview.ParentDetail,preview.Review,preview.Draft,metadata.Record,
     metadata.ParentReview,metadata.Binding,inventory.Policy,inventory.Mount,Signature)}
 
@@ -158,7 +158,14 @@ def _candidate_identity(candidate,commit_oid,endpoint,destination,local_ref,expe
             'paths':sorted(paths,key=lambda p:p['path']),
             'effect':{'before':digest([candidate.remote.remote_oid,expected_local]),
                       'after':digest([commit_oid,_endpoint_document(endpoint),destination,local_ref])}}
-    validate_identity(result,'save')
+    if candidate.active_policy is not None:
+        _require(candidate.active_policy.allowlist==candidate.remote.scope and candidate.active_policy.exclude_digest==candidate.binding.policy.digest,'exact active Save policy required')
+        result['scope']=candidate.active_policy.document()
+    if candidate.scope_review is not None:
+        scope=candidate.scope_review
+        result['direction']='scope';result['scope']=scope.old.document()
+        result['scope_transaction']=dict(old=scope.old.document(),new=scope.new.document())
+    validate_identity(result,result['direction'])
     return result
 
 
@@ -182,7 +189,7 @@ def validate_intent(payload, *, identity=None, namespace=None):
     _fields(value,'schema profile codec candidate review commit commit_oid author committer message endpoint endpoint_identity destination local_ref expected_local tree_pin commit_pin namespace identity reflogs parent_graph_digest')
     _require(canonical(value)==payload and value['schema']==1 and value['profile']=='native-publication-v1' and value['codec']=='native-bytes-v1', 'unsupported publication intent')
     candidate,review=_decode(value['candidate']),_decode(value['review'])
-    _require(type(candidate) is save.Candidate and type(review) is preview.Review and review.ready and
+    _require(type(candidate) is save.Candidate and type(review) is (preview.Review if candidate.scope_review is None else save.ScopeReview) and review.ready and
              candidate.remote_object_kind==b'commit' and candidate.selected==review.selected and
              candidate.issued_parent_reviews==review.parents and candidate.generation==review.draft.generation and
              candidate.snapshot_id==review.draft.snapshot_id and tuple(r.path for r in candidate.selected)==review.draft.selected and
@@ -206,7 +213,7 @@ def validate_intent(payload, *, identity=None, namespace=None):
     _require(type(ns['generation']) is int and ns['generation']>0 and type(ns['epoch']) is int and ns['epoch']>0, 'publication namespace required')
     prefix='refs/ha-ops/native-publication/'+ns['record_id']+'/'+ns['operation_id']
     _require(value['tree_pin']==prefix+'/tree' and value['commit_pin']==prefix+'/commit','owned publication pin names required')
-    validate_identity(value['identity'],'save')
+    validate_identity(value['identity'],'save' if candidate.scope_review is None else 'scope')
     owner_identity=value['identity']
     _require(owner_identity['execution_policy']=='native-publication-v1' and
              decode_native_path(owner_identity['root']['path'],absolute=True)==candidate.binding.root and
@@ -788,6 +795,14 @@ def validate_candidate(git,candidate,review):
     selection=metadata.select(baseline,hybrid,tuple(r.path for r in candidate.selected),
         approved_parents=approvals,width=width,policy=git.policy)
     payload=metadata.encode(selection.manifest,width=width,policy=git.policy)
+    if candidate.scope_review is not None:
+        from native_scope import reconstruct,scope_history_context
+        _require(review.history==scope_history_context(git,candidate.remote.remote_oid,review.old.allowlist,review.new.allowlist,
+            (path for path in review.live_members if any(inventory.beneath(path,p) for p in review.new.allowlist) and
+                not any(inventory.beneath(path,p) for p in review.old.allowlist))),"exact last-managed comparison context required")
+        _require(candidate.scope_review==review,'exact scope descriptor required')
+        selection,payload,scope_expected=reconstruct(git,review,baseline,remote)
+        expected={e.path:e for e in scope_expected}
     oid=object_id(b'blob',payload,candidate.object_format)
     _require(oid==candidate.manifest_oid and hashlib.sha256(payload).hexdigest()==candidate.manifest_digest and
              selection.parents==candidate.reviewed_parents,'exact candidate manifest and parents required')
@@ -798,7 +813,8 @@ def validate_candidate(git,candidate,review):
     _require(sink.getvalue()==payload,'complete candidate manifest bytes mismatch')
     metadata.validate(selection.manifest,expected,width=width,policy=git.policy)
     selection_digest=save._digest((candidate.remote,candidate.remote_object_kind,candidate.binding,review.draft,
-        review.selected,review.parents,selection.parents,candidate.parent_dependencies,candidate.routes,oid))
+        review.selected,review.parents,selection.parents,candidate.parent_dependencies,candidate.routes,oid) +
+        (() if candidate.scope_review is None else (review.old,review.new,review.rules)))
     _require(selection_digest==candidate.selection_digest and candidate.candidate_digest==save._digest((
         candidate.tree_oid,candidate.baseline_tree_oid,candidate.remote_object_kind,selection_digest,oid)), 'complete candidate digest mismatch')
     return tuple(proved)
@@ -1021,7 +1037,7 @@ class NativePublication:
                     git.publication_ref(intent.tree_pin,candidate.tree_oid,expected_old=None,admission=admission)
                     git.write_exact_commit(raw,admission=admission)
                     git.publication_ref(intent.commit_pin,commit_oid,expected_old=None,admission=admission)
-                    self.saver.preview._candidate_fence(review)
+                    self.saver._publication_fence(candidate,review)
                     admission.qualify_publication(prepared)
                     current=self.transport.advertise()
                     if current!=observation:

@@ -866,7 +866,7 @@ class TestDormancyAndNoEffectsR013:
                     modules = [part for a in node.names for part in a.name.split('.')]
                 elif isinstance(node, ast.ImportFrom):
                     modules = (node.module or '').split('.') + [part for a in node.names for part in a.name.split('.')]
-                assert 'native_preview' not in modules or name in ('native_save.py','native_publication.py'), name
+                assert 'native_preview' not in modules or name in ('native_save.py','native_publication.py','native_scope.py'), name
 
     @pytest.mark.parametrize('source', ['import native_preview as alias', 'from app.native_preview import NativePreview',
         'from app import native_preview as alias', 'def lazy():\n    from ..app import native_preview as alias'])

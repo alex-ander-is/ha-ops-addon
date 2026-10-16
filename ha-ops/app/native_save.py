@@ -21,7 +21,7 @@ from native_disk import NativeDisk, Evidence, InsufficientSpace, Blocked as Disk
 from native_git import IndexEntry, TreeEntry
 from native_inventory import Blocked
 import native_metadata as metadata
-from native_preview import NativePreview, SourceObservation, PathChange, ParentDetail, Stale, _route, CHUNK
+from native_preview import NativePreview, SourceObservation, PathChange, ParentDetail, FileState, Stale, _route, CHUNK
 
 
 def _digest(value):
@@ -47,6 +47,93 @@ def _blob(payload, width):
 
 
 @dataclass(frozen=True)
+class ScopePolicy:
+    revision: int
+    allowlist: tuple[bytes, ...]
+    exclude_digest: str
+
+    def __post_init__(self):
+        from native_inventory import normalize_scope
+        if (type(self.revision) is not int or self.revision < 0 or
+                tuple(self.allowlist) != normalize_scope(self.allowlist) or
+                not re.fullmatch('[0-9a-f]{64}', self.exclude_digest)):
+            raise Blocked('exact-normalized-scope-policy-required')
+        object.__setattr__(self, 'allowlist', tuple(self.allowlist))
+
+    def document(self):
+        from native_operations import encode_native_path
+        return dict(revision=self.revision, allowlist=sorted(encode_native_path(p) for p in self.allowlist),
+                    exclude_digest=self.exclude_digest)
+
+
+@dataclass(frozen=True)
+class HistoricalContext:
+    path: bytes
+    commit_oid: str | None
+    tree_oid: str | None
+    state: FileState | None
+    parents: tuple[metadata.Record, ...]
+    content: bytes | None
+    current_present: bool | None = None
+
+    def __post_init__(self):
+        from native_inventory import path_bytes
+        path_bytes(self.path)
+        if self.current_present is not None and type(self.current_present) is not bool:
+            raise Blocked('explicit-history-current-presence-required')
+        object.__setattr__(self,'parents',tuple(self.parents))
+        if self.commit_oid is None:
+            if any(value is not None for value in (self.tree_oid,self.state,self.content)) or self.parents:
+                raise Blocked('explicit-no-managed-history-required')
+        elif (type(self.commit_oid) is not str or type(self.tree_oid) is not str or
+                not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}',self.commit_oid) or
+                not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}',self.tree_oid) or
+                type(self.state) is not FileState or type(self.content) is not bytes):
+            raise Blocked('exact-last-managed-history-required')
+        if self.state is not None and (self.state.record is None or self.state.record.path!=self.path or
+                self.state.record.oid!=self.state.oid or self.state.size!=len(self.content) or
+                _blob(self.content,len(self.state.oid))!=self.state.oid or
+                any(type(parent) is not metadata.Record or parent.kind!='directory' for parent in self.parents)):
+            raise Blocked('last-managed-content-metadata-mismatch')
+
+
+@dataclass(frozen=True)
+class ScopeReview:
+    draft: object
+    selected: tuple[PathChange, ...]
+    parents: tuple[ParentDetail, ...]
+    blockers: tuple[str, ...]
+    old: ScopePolicy
+    new: ScopePolicy
+    rules: bytes
+    observation_digest: str
+    observation_scope: tuple[bytes, ...]
+    live_members: tuple[bytes, ...]
+    history: tuple[HistoricalContext, ...]
+
+    def __post_init__(self):
+        from native_preview import Draft
+        from native_inventory import normalize_scope
+        if (type(self.draft) is not Draft or self.draft.direction != 'scope' or
+                type(self.old) is not ScopePolicy or type(self.new) is not ScopePolicy or
+                self.new.revision != self.old.revision + 1 or type(self.rules) is not bytes or
+                not re.fullmatch('[0-9a-f]{64}', self.observation_digest) or
+                self.observation_digest!=self.draft.source_digest or
+                tuple(self.live_members)!=tuple(sorted(set(self.live_members))) or
+                tuple(self.observation_scope) != normalize_scope(self.old.allowlist+self.new.allowlist)):
+            raise Blocked('exact-scope-review-required')
+        from native_inventory import path_bytes
+        if any(type(row) is not HistoricalContext for row in self.history):raise Blocked('typed-last-managed-context-required')
+        for path in self.live_members:path_bytes(path)
+        for field in ('selected','parents','blockers','observation_scope','live_members','history'):
+            object.__setattr__(self, field, tuple(getattr(self,field)))
+
+    @property
+    def ready(self):
+        return not self.blockers
+
+
+@dataclass(frozen=True)
 class Candidate:
     tree_oid: str
     object_format: str
@@ -66,6 +153,8 @@ class Candidate:
     candidate_digest: str
     remote_object_kind: bytes
     issued_parent_reviews: tuple[ParentDetail, ...]
+    scope_review: ScopeReview | None = None
+    active_policy: ScopePolicy | None = None
 
     def __post_init__(self):
         from dataclasses import replace
@@ -82,6 +171,12 @@ class Candidate:
         for value in (self.manifest_digest, self.selection_digest, self.candidate_digest):
             if type(value) is not str or not re.fullmatch('[0-9a-f]{64}', value):
                 raise Blocked('exact-candidate-digest-required')
+        if self.active_policy is not None and (type(self.active_policy) is not ScopePolicy or
+                self.scope_review is not None or self.active_policy.allowlist!=self.remote.scope or
+                self.active_policy.exclude_digest!=self.binding.policy.digest):
+            raise Blocked('exact-candidate-active-policy-required')
+        if self.scope_review is not None and (type(self.scope_review) is not ScopeReview or self.scope_review.selected != self.selected):
+            raise Blocked('exact-scope-candidate-required')
         selected = tuple(self.selected)
         if any(type(row) is not PathChange for row in selected):
             raise Blocked('typed-candidate-selection-required')
@@ -109,6 +204,7 @@ class NativeSave:
             raise Blocked('native-preview-and-disk-required')
         self.preview, self.disk = preview, disk
         self._publication_receipt = None
+        self._scope_authority = None
 
     @contextmanager
     def _stream(self, row, observed):
@@ -140,8 +236,11 @@ class NativeSave:
             if not completed or metadata._stat(before) != metadata._stat(os.fstat(fd)):
                 raise Stale('selected-stream-not-complete-or-changed')
 
-    def build(self, review):
+    def build(self, review, *, active_policy=None):
         preview, disk = self.preview, self.disk
+        if active_policy is not None and (type(active_policy) is not ScopePolicy or
+                active_policy.exclude_digest!=preview.binding.policy.digest):
+            raise Blocked('exact-active-save-policy-required')
         with preview.candidate_context(review) as observed:
             git, binding = preview.git, preview.binding
             if disk.root != binding.root or git.policy.repository_files != (metadata.MANIFEST_PATH,):
@@ -239,9 +338,10 @@ class NativeSave:
                 review.draft.approved_parents, selection.parents, parents, routes, manifest_oid,
                 hashlib.sha256(payload).hexdigest(), selected_digest,
                 _digest((tree, baseline_tree, remote_kind, selected_digest, manifest_oid)),
-                remote_kind, review.parents)
-        self._publication_receipt = (result, review, preview, disk, preview.git, binding, preview.git.policy, preview._generation)
-        self._publication_snapshot=_authority_snapshot((result,review,binding,preview.git.policy))
+                remote_kind, review.parents, active_policy=active_policy)
+        if active_policy is not None and active_policy.allowlist!=result.remote.scope:
+            raise Stale('active-save-membership-mismatch')
+        self._install_publication(result,review,None)
         return result
 
     @contextmanager
@@ -252,13 +352,16 @@ class NativeSave:
         if (receipt is None or receipt[0] is not candidate or receipt[1] is not review or
                 receipt[2] is not preview or receipt[3] is not self.disk or
                 receipt[4] is not preview.git or receipt[5] is not preview.binding or
-                receipt[6] is not preview.git.policy or receipt[7] != preview._generation):
+                receipt[6] is not preview.git.policy or receipt[7] != preview._generation or
+                receipt[8] is not self._scope_authority):
             raise Stale('issued-current-candidate-and-review-required')
         if _authority_snapshot((candidate,review,preview.binding,preview.git.policy))!=self._publication_snapshot:
             raise Stale('issued-publication-authority-fields-changed')
         deferred=None
         with preview._call():
-            observed = preview._candidate_fence(review)
+            if self._publication_receipt is not receipt or receipt[8] is not self._scope_authority:
+                raise Stale('publication-grant-replaced-or-revoked')
+            observed = self._publication_fence(candidate, review)
             # The caller may validate without consuming, but every accepted
             # operation clears this exact in-memory grant before its first effect.
             try:yield observed
@@ -269,7 +372,7 @@ class NativeSave:
                 # Recheck the actual local selection while still serialized;
                 # only an unchanged local review may retain its issuer grant.
                 try:
-                    preview._candidate_fence(review)
+                    self._publication_fence(candidate, review)
                     if _authority_snapshot((candidate,review,preview.binding,preview.git.policy))!=self._publication_snapshot:
                         raise Stale('issued-publication-authority-fields-changed')
                 except BaseException as secondary:
@@ -280,9 +383,83 @@ class NativeSave:
 
     def consume_publication(self, candidate, review):
         receipt = self._publication_receipt
-        if receipt is None or receipt[0] is not candidate or receipt[1] is not review:
+        if receipt is None or receipt[0] is not candidate or receipt[1] is not review or receipt[8] is not self._scope_authority:
             raise Stale('publication-grant-already-consumed')
         if _authority_snapshot((candidate,review,self.preview.binding,self.preview.git.policy))!=self._publication_snapshot:
             raise Stale('issued-publication-authority-fields-changed')
-        self.preview._candidate_fence(review)
+        self._publication_fence(candidate, review)
         self._publication_receipt = None
+
+
+    def _publication_fence(self, candidate, review):
+        if self._scope_authority is not None:
+            store,token=self._scope_authority
+            if store.scope_authority()!=token:
+                raise Stale('canonical-scope-lifecycle-expired')
+        if candidate.scope_review is None:
+            return self.preview._candidate_fence(review)
+        if type(review) is not ScopeReview or candidate.scope_review is not review:
+            raise Stale('issued-scope-review-required')
+        source, width = self.preview._source()
+        if source != candidate.remote:
+            raise Stale('scope-source-changed')
+        from dataclasses import replace
+        observed = self.preview._observe_once(replace(source,scope=review.observation_scope),width,scope_absence=True)
+        if observed.digest != review.observation_digest or tuple(path for path,_ in observed.live)!=review.live_members:
+            raise Stale('whole-scope-membership-or-content-changed')
+        from native_inventory import beneath
+        includes=lambda path,scope:any(beneath(path,p) for p in scope)
+        expected={path for path,_ in observed.live if includes(path,review.new.allowlist) and not includes(path,review.old.allowlist)}
+        if {row.path for row in review.selected if row.after is not None}!=expected:
+            raise Stale('complete-new-scope-membership-required')
+        live=dict(observed.live)
+        remote={entry.path:entry for entry in observed.remote}
+        records=observed.remote_manifest.by_path
+        for row in review.selected:
+            prior=remote.get(row.path)
+            before=None if prior is None else FileState(prior.oid,records.get(row.path))
+            if row.before!=before or row.after is not None and row.after!=live.get(row.path):
+                raise Stale('exact-scope-leaf-observation-required')
+        fresh=self.preview._live_records(observed)
+        if any(parent.after!=fresh.get(parent.path) for parent in review.parents):
+            raise Stale('exact-scope-parent-observation-required')
+        return observed
+
+    def _issue_scope(self, candidate, review, store=None):
+        if type(candidate) is not Candidate or type(review) is not ScopeReview or candidate.scope_review is not review:
+            raise Blocked('exact-scope-issuance-required')
+        if store is None:raise Stale("canonical-scope-issuer-required")
+        self._revoke_publication()
+        token=store.scope_authority()
+        if token is None:raise Stale("canonical-pending-scope-required")
+        self._scope_authority=(store,token)
+        self._publication_fence(candidate,review)
+        self._install_publication(candidate,review,self._scope_authority)
+        return candidate
+
+
+    def _bind_scope_authority(self,store):
+        receipt=self._publication_receipt
+        try:
+            token=store.scope_authority()
+            if token is None or receipt is None or receipt[0].scope_review is not None or receipt[8] is not None:
+                raise Stale('fresh-ordinary-save-grant-required')
+        except BaseException:
+            self._revoke_publication()
+            raise
+        self._install_publication(receipt[0],receipt[1],(store,token))
+
+    def _revoke_publication(self):
+        # Remove authority to submit before changing any associated binding.
+        self._publication_receipt=None
+        self._publication_snapshot=None
+        self._scope_authority=None
+
+    def _install_publication(self,candidate,review,authority):
+        self._revoke_publication()
+        p=self.preview
+        snapshot=_authority_snapshot((candidate,review,p.binding,p.git.policy))
+        receipt=(candidate,review,p,self.disk,p.git,p.binding,p.git.policy,p._generation,authority)
+        self._scope_authority=authority
+        self._publication_snapshot=snapshot
+        self._publication_receipt=receipt  # Publish the whole grant last.

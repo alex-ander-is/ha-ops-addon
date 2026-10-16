@@ -336,6 +336,8 @@ class Evidence:
     ref: bytes | None = None
     reflog_entry: bytes | None = None
     publication: object | None = None
+    scope_preparation: object | None = None
+    candidate_rules: bytes | None = None
 
     def __post_init__(self):
         # A frozen dataclass does not freeze caller-owned lists/buffers. Capture
@@ -374,7 +376,7 @@ class Evidence:
             object.__setattr__(self, field, tuple(path_bytes(p) for p in getattr(self, field)))
             if len(set(getattr(self, field))) != len(getattr(self, field)):
                 raise Blocked("duplicate-candidate-path")
-        for field in ("commit", "reflog_entry", "candidate_manifest"):
+        for field in ("commit", "reflog_entry", "candidate_manifest", "candidate_rules"):
             value = getattr(self, field)
             if value is not None:
                 if not isinstance(value, (bytes, bytearray, memoryview)):
@@ -1006,7 +1008,7 @@ class NativeDisk:
         if binding is not None and binding[3:5] != (plan.evidence.operation_id, plan.evidence.owner_id):
             raise Blocked("competing-operation-state")
         selection = plan.kind in ("initial_selection", "scope", "save", "migration", "candidate")
-        counts = {"index": int(selection), "spool": len(plan.evidence.selected) + int(plan.kind == "candidate") if selection else 0, "worktree": int(selection and plan.evidence.materialize),
+        counts = {"index": int(selection), "spool": len(plan.evidence.selected) + int(plan.kind == "candidate") + int(plan.evidence.candidate_rules is not None) if selection else 0, "worktree": int(selection and plan.evidence.materialize),
                   'transport':int(bool(plan.network_cap))}
         journal = None
         try:
@@ -1022,7 +1024,13 @@ class NativeDisk:
                 counts[record["kind"]] += 1
         prospective = None
         publication_states = ()
-        if plan.kind == "publication":
+        if plan.evidence.scope_preparation is not None:
+            prepared=plan.evidence.scope_preparation; prepared.check()
+            from native_operations import _parse
+            prospective=_parse(prepared.state)
+            publication_states=(prepared.state,)
+            state_limit=max(len(prepared.initial),len(prepared.state))
+        elif plan.kind == "publication":
             prepared = plan.evidence.publication
             prepared.check()
             publication_states = tuple(value for _, value in prepared.states)
@@ -1045,7 +1053,8 @@ class NativeDisk:
                         self._state_shape(state) if state is not None else None,
                         tuple((rid, _digest(record)) for rid, record in journal["records"].items()) if journal else (),
                         self._index_bound, tuple(sorted([s.size for _, s in plan.evidence.selected] +
-                            ([len(plan.evidence.candidate_manifest)] if plan.kind == "candidate" else []))),
+                            ([len(plan.evidence.candidate_manifest)] if plan.kind == "candidate" else []) +
+                            ([len(plan.evidence.candidate_rules)] if plan.evidence.candidate_rules is not None else []))),
                         tuple(sorted(self._materialized_sizes.items())),
                         self._state_binding(prospective) if prospective is not None else None,
                         self._state_shape(prospective) if prospective is not None else None, publication_states)
@@ -1389,6 +1398,14 @@ class NativeDisk:
                 tuple((v.key, v.mounts, v.quantum, v.filesystem) for v in snapshot.volumes)):
             raise Blocked("incomparable-growth-snapshot")
         artifact_cache = {}
+        scope_preparation=evidence.scope_preparation if isinstance(evidence,Evidence) else None
+        if scope_preparation is not None:
+            from native_operations import PreparedScope
+            if kind not in ("candidate","scope_control") or type(scope_preparation) is not PreparedScope:
+                raise Blocked("issued-scope-candidate-recipe-required")
+            scope_preparation.check()
+            if (evidence.operation_id,evidence.owner_id)!=(scope_preparation.operation_id,scope_preparation.owner_id):
+                raise Blocked("scope-owner-binding-required")
         publication = evidence.publication if isinstance(evidence, Evidence) else None
         if kind == "publication":
             from native_operations import PreparedPublication
@@ -1477,8 +1494,20 @@ class NativeDisk:
             if state_bound:
                 v = add(b"data/native-operations", state_bound, "full-prospective-operation-state")
                 generated_controls[v.key] = state_bound
-            if not evidence.controls and kind != "candidate":
+            if not evidence.controls and kind not in ("candidate","scope_control"):
                 raise Blocked("exact-prospective-control-envelope-required")
+            if scope_preparation is not None:
+                from native_operations import _parse, _publication_graph
+                prospective=_parse(scope_preparation.state)
+                _publication_graph(scope_preparation.store,prospective,None,scope_preparation.artifact,
+                    historical={r['artifact']:r['artifact_size'] for r in _parse(scope_preparation.initial)['records'].values()})
+                for target,payload in ((b'data/native-operations/state.json',scope_preparation.state),
+                        (b'data/native-operations/artifacts/'+hashlib.sha256(scope_preparation.artifact).hexdigest().encode()+b'.diff',scope_preparation.artifact),
+                        (b'data/native-operations/lock',b'')):
+                    add(Target(target,'file'),len(payload),'exact-scope-control',proof=('bytes',payload))
+                v=add(b'data/native-operations',len(scope_preparation.state),'full-scope-state-overlap')
+                generated_controls[v.key]=max(generated_controls.get(v.key,0),len(scope_preparation.state))
+                add(b'data/native-operations/artifacts',len(scope_preparation.artifact),'full-scope-artifact-overlap')
             for control in evidence.controls:
                 if not isinstance(control, Control) or not isinstance(control.payload, bytes):
                     raise Blocked("exact-control-serialization-required")
@@ -1507,8 +1536,11 @@ class NativeDisk:
                     removed = set(evidence.candidate_removals)
                     if not removed <= entries or removed & {p for p, _ in evidence.selected}:
                         raise Blocked("qualified-candidate-removals-required")
-                    for path in removed:
-                        self._require_absent(self.root + b"/" + path)
+                    if scope_preparation is None:
+                        for path in removed:
+                            self._require_absent(self.root + b"/" + path)
+                    elif evidence.candidate_rules is None:
+                        raise Blocked("exact-generated-scope-rules-required")
                     from native_metadata import MANIFEST_PATH, decode, encode
                     from native_inventory import Policy
                     policy = Policy(repository_files=(MANIFEST_PATH,))
@@ -1516,6 +1548,7 @@ class NativeDisk:
                     if encode(manifest, width=width * 2, policy=policy) != evidence.candidate_manifest:
                         raise Blocked("canonical-candidate-manifest-required")
                     final_entries = (entries - removed) | {p for p, _ in evidence.selected}
+                    if scope_preparation is not None:final_entries.add(b".gitignore")
                     if final_entries != set(evidence.candidate_final):
                         raise Blocked("exact-candidate-final-layout-required")
                     if {r.path for r in manifest.entries if r.kind == "file"} != final_entries - {MANIFEST_PATH, b".gitignore"}:
@@ -1525,6 +1558,12 @@ class NativeDisk:
                     add(b"data/native/git-resources", size, "generated-manifest-spool")
                     add(b"data/native/repository.git/objects", _loose("blob", size), "generated-manifest-blob")
                     add(b"data/native/repository.git/objects", 0, "generated-manifest-fanout", directory=True)
+                    if evidence.candidate_rules is not None:
+                        if scope_preparation is None: raise Blocked('scope-rules-require-issued-recipe')
+                        size=len(evidence.candidate_rules)
+                        add(b'data/native/git-resources',size,'generated-scope-rules-spool')
+                        add(b'data/native/repository.git/objects',_loose('blob',size),'generated-scope-rules-blob')
+                        add(b'data/native/repository.git/objects',0,'generated-scope-rules-fanout',directory=True)
                     provenance.append(("candidate-layouts", tuple(sorted(initial_entries)),
                                        tuple(sorted(initial_entries - removed)), tuple(sorted(entries)),
                                        hashlib.sha256(evidence.candidate_manifest).hexdigest()))
@@ -1561,7 +1600,7 @@ class NativeDisk:
                     self._require_absent(self.root + b"/data/native/git-resources/journal.json", dict(snapshot.observations))
                     journal = {"schema": 1, "root": root_id, "metadata": meta_id,
                                "storage": [ri.st_dev, 2**64 - 1, 0o700], "records": {}}
-                for i, resource_kind in enumerate(["spool"] * (len(evidence.selected) + int(kind == "candidate")) + ["index"]):
+                for i, resource_kind in enumerate(["spool"] * (len(evidence.selected) + int(kind == "candidate") + int(evidence.candidate_rules is not None)) + ["index"]):
                     hex_id = hashlib.sha256((evidence.operation_id + ":disk:" + str(i)).encode()).hexdigest()[:32]
                     rid = "-".join((hex_id[:8], hex_id[8:12], hex_id[12:16], hex_id[16:20], hex_id[20:]))
                     marker = {"resource": rid, "operation": evidence.operation_id, "owner": evidence.owner_id, "binding": binding}
@@ -1814,6 +1853,9 @@ class NativeDisk:
                     if network_cap<q:raise InsufficientSpace('network-transfer-capacity-insufficient')
                     for name in ('pack','index','shallow-temporary'):
                         add(destination,network_cap,'network-transport-'+name)
+            elif kind == "scope_control":
+                if scope_preparation is None or evidence.selected or evidence.candidate_manifest is not None:
+                    raise Blocked("exact-scope-control-recipe-required")
             elif kind == "repack":
                 width, config = self._profile()
                 objects = self._objects(width)
@@ -2234,7 +2276,7 @@ class NativeDisk:
                 try:
                     admission.revalidate()
                     self._active_operation = plan.evidence.operation_id
-                    self._candidate_admission = admission if plan.kind in ("candidate", "publication") else None
+                    self._candidate_admission = admission if plan.kind in ("candidate", "publication", "scope_control") else None
                     # Consumption is one-shot only after a successful entry.
                     self._contexts.pop(id(plan), None)
                     yield admission
@@ -2326,6 +2368,36 @@ class Admission:
         self.revalidate()
         return self
 
+    def qualify_scope(self,prepared):
+        from native_operations import PreparedScope
+        if (type(prepared) is not PreparedScope or self.plan.evidence.scope_preparation is not prepared or
+                self.plan.kind not in ('candidate','scope_control') or not self.active or self.plan is not self._issued_plan):
+            raise Blocked('issued-active-scope-admission-required')
+        prepared.check();self.revalidate()
+        return self
+
+    def create_scope_directories(self,prepared):
+        self.qualify_scope(prepared)
+        for path in sorted(self.plan.future_directories,key=lambda p:(p.count(b'/'),p)):
+            if self._namespace.get(path) is not None:continue
+            self._check_namespace()
+            with _directory(os.path.dirname(path)) as parent:
+                os.mkdir(os.path.basename(path),0o700,dir_fd=parent)
+                fd=os.open(os.path.basename(path),os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+                try:
+                    os.fsync(fd);os.fsync(parent)
+                    self.record_directory_creation(path[len(self.disk.root)+1:],fd)
+                finally:os.close(fd)
+
+    def acknowledge_scope(self,prepared):
+        prepared.check()
+        if self.plan.evidence.scope_preparation is not prepared or not prepared.used or prepared.current!=prepared.state:
+            raise Blocked('issued-scope-owner-receipt-required')
+        outputs=[(b'data/native-operations/state.json',prepared.state),
+            (b'data/native-operations/artifacts/'+hashlib.sha256(prepared.artifact).hexdigest().encode()+b'.diff',prepared.artifact),
+            (b'data/native-operations/lock',b'')]
+        self._publication_outputs(outputs);self.revalidate()
+
     def qualify_publication(self, prepared, *, failure_checkpoint=False):
         if (type(self) is not Admission or not self.active or self.disk._candidate_admission is not self or
                 self.plan is not self._issued_plan or self.disk._plans.get(id(self.plan)) is not self.plan or
@@ -2416,7 +2488,7 @@ class Admission:
         Every new descriptor/byte route is independently verified before any
         receipt is installed; original forecast demand is never reclaimed.
         """
-        if self.plan.kind != "publication" or not self.active:
+        if (self.plan.kind != "publication" and self.plan.evidence.scope_preparation is None) or not self.active:
             raise Blocked("publication-receipt-required")
         pending_files, pending_directories = {}, {}
         planned = dict(self.plan.output_files)
@@ -2785,6 +2857,12 @@ class Admission:
 
     def _validate_state(self, state):
         context = self._context
+        if self.plan.evidence.scope_preparation is not None:
+            from native_operations import canonical
+            prepared=self.plan.evidence.scope_preparation;prepared.check()
+            if state is None or canonical(state)!=prepared.current:
+                raise Blocked('scope-owner-lifecycle-fenced')
+            return
         if self.plan.kind == "publication":
             from native_operations import canonical
             prepared = self.plan.evidence.publication

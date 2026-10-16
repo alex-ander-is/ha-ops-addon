@@ -438,3 +438,20 @@ shared xdist statvfs deltas are telemetry, while isolated physical deltas and th
 owned block/inode inventory are asserted independently. The ext4 mandatory matrix
 and wrapper schema remain unchanged; publication measurements are a separate
 nested proof, not inherited from an unrelated matrix row.
+
+## Dormant folder scope transactions (6.13)
+
+`ha-ops/tests/test_native_scope.py` exercises the inactive scope API and its exact
+NativeSave/Disk/store/publication seams. Run it with the adjacent native groups
+in the existing cached Linux environment:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_scope.py
+```
+
+The portable constructor/codec/forecast-interception checks do not substitute for
+actual Linux capacity or publication effects. The supported nonroot ext4 profile
+can run own-UID candidate cases together with `test_native_ext4.py`; the wrapper
+must validate the complete ext4 matrix and cleanup. Arbitrary ownership and
+network scope proofs require the normal Linux profile. See the
+[scope API and lifecycle contract](ha-ops/docs/native-scope.md).

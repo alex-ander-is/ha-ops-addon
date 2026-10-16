@@ -677,7 +677,7 @@ class NativePreview:
                 records.setdefault(path, metadata.Record(path, 'directory', info[4], info[5], info[3], None))
         return records
 
-    def _observe_once(self, source, width):
+    def _observe_once(self, source, width, *, scope_absence=False):
         issues = []
         remote = self.git.tree_entries(source.remote_oid)
         base = self.git.tree_entries(source.base_oid) if source.base_oid else ()
@@ -743,6 +743,12 @@ class NativePreview:
                 if _has_cleanup_debt(exc):
                     raise
                 issues.append(Issue(path, 'parent-unavailable:' + type(exc).__name__ + ':' + str(exc)))
+        if scope_absence:
+            for issue in tuple(issues):
+                if issue.path in source.scope and re.match(r'^selected-path-unavailable:\[Errno 2\](?: |$)',issue.reason):
+                    with _route(self.binding,issue.path,'directory',absent=True) as (fd,seen):
+                        if fd is None and not any(info[2]==stat.S_IFREG for _,info in seen):
+                            proven_absent.add(issue.path);retain_routes(seen)
         lm = metadata.Manifest(tuple(records[p] for p in sorted(records)))
         # Complete live closure may be unavailable, but safe sibling rows survive.
         # Inventory's string diagnostic preserves errno; only its exact ENOENT

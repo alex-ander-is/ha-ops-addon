@@ -92,7 +92,7 @@ def _path(value, absolute=False):
 
 
 # Only explicitly implemented execution profiles select a byte identity codec.
-_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1"}
+_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1", "native-scope-v1": "native-bytes-v1"}
 
 
 def identity_codec(identity):
@@ -667,7 +667,8 @@ class NativeOperationStore:
         self._validate_scope_history(state)
 
     def _validate_v2(self, state, artifacts):
-        _fields(state, "schema revision instance_id updated_at app_version epoch records current workers active commands baseline_record_id baseline_scope active_scope generation retention checkpoint anchors baseline_provenance recovery")
+        _fields(state, "schema revision instance_id updated_at app_version epoch records current workers active commands baseline_record_id baseline_scope active_scope generation retention checkpoint anchors baseline_provenance recovery" + (" scope_pending" if "scope_pending" in state else "") + (" scope_rules_record_id" if "scope_rules_record_id" in state else ""))
+        _validate_scope_pending(state)
         _require(type(state["schema"]) is int and state["schema"] == 2, "unsupported schema")
         _int(state["revision"])
         _int(state["epoch"])
@@ -881,7 +882,7 @@ class NativeOperationStore:
             record = state["records"][worker["record_id"]]
             _require(record["identity"]["scope"] == expected,
                      "worker scope does not follow prior confirmed publication")
-            if record["domain"] == "scope" and worker["phase"] == "completed":
+            if _scope_published(record, worker):
                 # The preceding validators require exact completion evidence.
                 expected = record["identity"]["scope_transaction"]["new"]
                 _require(expected["revision"] not in policies, "duplicate scope publication")
@@ -993,15 +994,15 @@ class NativeOperationStore:
                                       "end_epoch": None, "kind": "baseline", "source": copy.deepcopy(state["baseline_provenance"])}
         for worker in sorted(state["workers"].values(), key=lambda item: item["epoch"]):
             record = state["records"][worker["record_id"]]
-            if record["domain"] != "scope" or worker["phase"] != "completed" or worker["epoch"] <= state["checkpoint"]["through_epoch"]:
+            if not _scope_published(record, worker) or worker["epoch"] <= state["checkpoint"]["through_epoch"]:
                 continue
             old, new = (record["identity"]["scope_transaction"][part] for part in ("old", "new"))
             new_key = digest(new)
             if new_key not in state["anchors"]:
                 old_anchor = state["anchors"].get(digest(old))
                 _require(old_anchor is not None, "publication predecessor unavailable")
-                old_anchor["end_epoch"] = worker["epoch"]
-                state["anchors"][new_key] = {"policy": copy.deepcopy(new), "start_after_epoch": worker["epoch"],
+                old_anchor["end_epoch"] = _worker_end(worker)
+                state["anchors"][new_key] = {"policy": copy.deepcopy(new), "start_after_epoch": _worker_end(worker),
                                              "end_epoch": None, "kind": "publication", "source": self._capsule(record, worker)}
 
     def _validate_provenance(self, state):
@@ -1055,7 +1056,7 @@ class NativeOperationStore:
                 _require(identity_codec(record["identity"]) == codec, "incompatible anchor codec")
                 _require(record["instance_id"] == state["instance_id"] and record["generation"] <= state["generation"] and
                          record["identity"]["scope_transaction"]["new"] == anchor["policy"] and
-                         worker["epoch"] == anchor["start_after_epoch"] <= state["epoch"], "invalid anchor publication")
+                         _worker_end(worker) == anchor["start_after_epoch"] <= state["epoch"], "invalid anchor publication")
             ordered.append(anchor)
         ordered.sort(key=lambda item: item["policy"]["revision"])
         for left, right in zip(ordered, ordered[1:]):
@@ -1084,7 +1085,7 @@ class NativeOperationStore:
             else:
                 _require(start > frontier, "worker crosses frontier")
                 intervals.append((start, end, worker))
-            if record["domain"] == "scope" and worker["phase"] == "completed":
+            if _scope_published(record, worker):
                 new_anchor = state["anchors"].get(digest(record["identity"]["scope_transaction"]["new"]))
                 _require(anchor["end_epoch"] == end, "publisher policy does not close")
                 if new_anchor is not None:
@@ -1098,7 +1099,7 @@ class NativeOperationStore:
             next_epoch = end + 1
             record = state["records"][worker["record_id"]]
             _require(record["identity"]["scope"] == expected, "worker scope does not follow prior confirmed publication")
-            if record["domain"] == "scope" and worker["phase"] == "completed":
+            if _scope_published(record, worker):
                 expected = record["identity"]["scope_transaction"]["new"]
         _require(next_epoch == state["epoch"] + 1, "incomplete claim epoch history")
         active_anchor = anchor_for(state["active_scope"])
@@ -1196,6 +1197,10 @@ class NativeOperationStore:
             pins.add(state["workers"][state["active"]]["record_id"])
         if state["recovery"]:
             pins.add(state["recovery"]["record_id"])
+        if state.get("scope_pending"):
+            pins.add(state["scope_pending"]["record_id"])
+        if state.get("scope_rules_record_id"):
+            pins.add(state["scope_rules_record_id"])
         return pins
 
     def _compact_graph(self, state):
@@ -1203,14 +1208,15 @@ class NativeOperationStore:
         frontier = checkpoint["through_epoch"]
         suffix = sorted((worker for worker in state["workers"].values() if _worker_end(worker) > frontier),
                         key=lambda worker: state["records"][worker["record_id"]]["checkpoints"][0]["epoch"])
-        terminal = [worker for worker in suffix if worker["phase"] in {"completed", "failed", "invalidated"}]
+        terminal = [worker for worker in suffix if worker["phase"] in {"completed", "failed", "invalidated"} and
+                    not _scope_activation_pending(state["records"][worker["record_id"]],worker)]
         folded = terminal[:max(0, len(terminal) - state["retention"])]
         boundary, count, migration = checkpoint["scope"], checkpoint["publications"], checkpoint["migration"]
         for worker in folded:
             record = state["records"][worker["record_id"]]
             frontier = _worker_end(worker)
             if worker["phase"] == "completed":
-                if record["domain"] == "scope":
+                if _scope_published(record, worker):
                     boundary = record["identity"]["scope_transaction"]["new"]
                     count += 1
                 elif record["domain"] == "migration":
@@ -1232,12 +1238,13 @@ class NativeOperationStore:
         suffix = [worker for worker in state["workers"].values() if _worker_end(worker) > frontier]
         keep = self._pins(state) | {worker["record_id"] for worker in suffix}
         _require(set(state["records"]) == keep and
-                 sum(worker["phase"] in {"completed", "failed", "invalidated"} for worker in suffix) <= state["retention"] and
-                 len(state["records"]) <= state["retention"] + 6, "invalid retention partition")
+                 sum(worker["phase"] in {"completed", "failed", "invalidated"} and
+                     not _scope_activation_pending(state["records"][worker["record_id"]],worker) for worker in suffix) <= state["retention"] and
+                 len(state["records"]) <= state["retention"] + 8, "invalid retention partition")
         policies = {digest(record["identity"]["scope"]) for record in state["records"].values()}
         if state["baseline_scope"] is not None:
             policies.update((digest(state["checkpoint"]["scope"]), digest(state["active_scope"])))
-        _require(set(state["anchors"]) == policies and len(policies) <= state["retention"] + 8,
+        _require(set(state["anchors"]) == policies and len(policies) <= state["retention"] + 10,
                  "invalid retained anchor set")
 
     def _sweep(self, directory, state, manifests=False):
@@ -1453,7 +1460,7 @@ class NativeOperationStore:
 
     def preview_stream(self, expected_revision, domain, identity, producer):
         validate_identity(identity, domain)
-        if identity['execution_policy']=='native-publication-v1':
+        if identity['execution_policy'] in ('native-publication-v1','native-scope-v1'):
             raise Conflict('native publication requires issued preparation')
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
@@ -1462,6 +1469,8 @@ class NativeOperationStore:
                 raise Conflict('native publication cleanup unresolved')
             if state["active"]:
                 raise Conflict("native worker unresolved")
+            if domain == "scope" and state.get("scope_pending"):
+                raise Conflict("native scope transaction unresolved")
             if state["active_scope"] is not None and identity["scope"] != state["active_scope"]:
                 raise Conflict("scope change requires completed publication")
             _require(state["schema"] == SCHEMA, "explicit schema upgrade required")
@@ -1516,7 +1525,9 @@ class NativeOperationStore:
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             record = state["records"][record_id]
-            if record['identity']['execution_policy']=='native-publication-v1' or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
+            if state.get("scope_pending") and record["domain"] == "apply":
+                raise Conflict("pending scope blocks Apply")
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication requires issued review')
             if state["active"] or state["current"][record["domain"]] != record_id or record["status"] != "preview":
                 raise Conflict("fresh Preview required")
@@ -1547,7 +1558,9 @@ class NativeOperationStore:
         _hash(approval_binding)
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
-            if record_id in state['records'] and state['records'][record_id]['identity']['execution_policy']=='native-publication-v1':
+            if state.get("scope_pending"):
+                raise Conflict("pending scope requires an issued native operation")
+            if record_id in state['records'] and state['records'][record_id]['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1'):
                 raise Conflict('native publication requires issued claim')
             if state.get('recovery') is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication cleanup unresolved')
@@ -1579,6 +1592,8 @@ class NativeOperationStore:
                 return False, copy.deepcopy(state["workers"][previous["operation_id"]])
             self._cas(state, expected_revision)
             record = state["records"][record_id]
+            if state.get("scope_pending") and record["domain"] == "apply":
+                raise Conflict("pending scope blocks Apply")
             if state["active"] or record["status"] != "reviewed" or state["current"][record["domain"]] != record_id:
                 raise Conflict("native authority unavailable")
             if record["approval"]["binding"] != approval_binding:
@@ -1622,8 +1637,8 @@ class NativeOperationStore:
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             worker, record = self._owned(state, operation_id, epoch)
-            if record['identity']['execution_policy']=='native-publication-v1':
-                raise Conflict('native publication requires issued checkpoint')
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1'):
+                raise Conflict('native publication or scope requires issued checkpoint')
             transitions = {key: phases - {"invalidated"} for key, phases in WORKER_TRANSITIONS.items()}
             transitions["recovery_required"] = {"completed"}
             if phase not in transitions.get(worker["phase"], set()):
@@ -1694,6 +1709,9 @@ class NativeOperationStore:
                 if record['identity']['execution_policy']=='native-publication-v1' and terminal is not None and terminal['phase'] in ('completed','failed'):
                     state['epoch']+=1
                     terminal['publication_cleanup_owner']={'owner':self.owner,'epoch':state['epoch']}
+            if state.get("scope_pending") is not None:
+                state["scope_pending"]["owner"]=self.owner
+                state["scope_pending"]["authority_epoch"]+=1
             state["app_version"] = app_version
             self._commit(root, artifacts, state)
             return self._projection(state)
@@ -1730,7 +1748,9 @@ class NativeOperationStore:
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             record = state["records"][record_id]
-            if record['identity']['execution_policy']=='native-publication-v1' or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
+            if state.get("scope_pending") and record["domain"] == "apply":
+                raise Conflict("pending scope blocks Apply")
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication requires issued cancel')
             if state["active"] or record["status"] not in {"preview", "reviewed", "stale"}:
                 raise Conflict("cannot cancel pending effect")
@@ -1761,6 +1781,10 @@ def _fill_publication_resources(value,prepared,resources):
         original=PUBLICATION_RESOURCE_EMPTY if initial is None else initial['publication_resources'][key]
         _require(target[key]==original and (original==PUBLICATION_RESOURCE_EMPTY or resources[key]==original),'publication resource recipe transplant')
     value['workers'][prepared.operation_id]['publication_resources']=copy.deepcopy(resources)
+    worker=value['workers'][prepared.operation_id];record=value['records'][prepared.record_id]
+    if _scope_published(record,worker):
+        anchor=value['anchors'].get(digest(record['identity']['scope_transaction']['new']))
+        if anchor is not None:anchor['source']=NativeOperationStore._capsule(record,worker)
 
 
 def _worker_end(worker):
@@ -1770,7 +1794,9 @@ def _worker_end(worker):
 def _publication_worker_fields(worker,record):
     names="id record_id owner epoch phase marker evidence outcome binding"
     if record['identity']['execution_policy']=='native-publication-v1':
-        _fields(worker,names+" publication_attempt publication_outcome publication_confirmation publication_cleanup publication_cleanup_owner publication_resources")
+        _fields(worker,names+" publication_attempt publication_outcome publication_confirmation publication_cleanup publication_cleanup_owner publication_resources"+(" publication_scope_activated" if record["domain"]=="scope" else ""))
+        if record["domain"]=="scope":
+            _require(type(worker["publication_scope_activated"]) is bool and (not worker["publication_scope_activated"] or worker["phase"]=="completed" and worker["publication_cleanup"]==4), "invalid scope activation")
         _publication_resources(worker['publication_resources'])
         authority=worker['publication_cleanup_owner']
         _fields(authority,'owner epoch'); _id(authority['owner']); _int(authority['epoch'])
@@ -1881,6 +1907,9 @@ def _fill_publication_outcome(value,operation_id,record_id,outcome,*,first):
         if first and point['publication_outcome']==previous and previous is not None:
             point['publication_outcome']=copy.deepcopy(outcome)
             if point['phase']=='failed': point['evidence']=copy.deepcopy(worker['evidence'])
+    if _scope_published(record,worker):
+        anchor=value['anchors'].get(digest(record['identity']['scope_transaction']['new']))
+        if anchor is not None:anchor['source']=NativeOperationStore._capsule(record,worker)
 
 
 def _compile_publication_outcome(store,prepared,name,outcome,*,proof=None):
@@ -1955,6 +1984,12 @@ def _publication_cleanup_recipes(store,states,terminal,operation_id,record_id,fi
             if slot.endswith('-packed'): resource['revision']+=1
             finalize(resource,stem+'resource-'+slot)
     cleaned=copy.deepcopy(previous); cleaned['recovery']=None
+    record=cleaned['records'][record_id]
+    if record['domain']=='scope' and cleaned['workers'][operation_id]['phase']=='completed':
+        cleaned['workers'][operation_id]['publication_scope_activated']=True
+        cleaned['active_scope']=copy.deepcopy(record['identity']['scope_transaction']['new'])
+        cleaned['scope_pending']=None
+        cleaned['scope_rules_record_id']=record_id
     finalize(cleaned,stem+'finished')
 
 
@@ -2065,7 +2100,9 @@ def _publication_graph(store, state, artifacts, artifact, *, historical=None):
 
 def _prepare_publication(store, expected_revision, identity, artifact_factory, decisions,
                          approval_id, command_id):
-    validate_identity(identity, 'save')
+    domain=identity['direction']
+    _require(domain in ('save','scope'), 'native publication domain required')
+    validate_identity(identity, domain)
     _require(identity['execution_policy'] == 'native-publication-v1', 'publication profile required')
     _approved_decisions(decisions, identity)
     _id(approval_id); _id(command_id)
@@ -2084,6 +2121,11 @@ def _prepare_publication(store, expected_revision, identity, artifact_factory, d
         if initial['active_scope'] is not None and (initial['active_scope'] != identity['scope'] or
                 identity_codec(initial['baseline_provenance']['identity']) != identity_codec(identity)):
             raise Conflict('incompatible publication baseline')
+        if initial.get('scope_pending') is not None:
+            _require(initial['scope_pending']['owner']==store.owner,'canonical scope owner changed; explicit reopen required')
+        if domain=='scope':
+            pending=initial.get('scope_pending')
+            _require(pending is not None and pending['old']==identity['scope'] and pending['new']==identity['scope_transaction']['new'], 'issued pending scope required')
         record_id, operation_id, marker = (str(uuid.uuid4()) for _ in range(3))
         namespace = {'instance_id': initial['instance_id'], 'generation': initial['generation'] + 1,
                      'record_id': record_id, 'operation_id': operation_id, 'owner': store.owner,
@@ -2096,7 +2138,7 @@ def _prepare_publication(store, expected_revision, identity, artifact_factory, d
         _publication_graph(store, initial, artifacts, artifact)
         state = copy.deepcopy(initial)
         state['generation'] += 1; state['epoch'] += 1
-        record = {'id': record_id, 'domain': 'save', 'identity': copy.deepcopy(identity),
+        record = {'id': record_id, 'domain': domain, 'identity': copy.deepcopy(identity),
                   'identity_digest': digest(identity), 'artifact': hashlib.sha256(artifact).hexdigest(),
                   'artifact_size': len(artifact), 'binding_version': 2,
                   'instance_id': state['instance_id'], 'generation': state['generation'],
@@ -2104,9 +2146,9 @@ def _prepare_publication(store, expected_revision, identity, artifact_factory, d
                   'approval': None, 'created_at': timestamp, 'validated_at': timestamp,
                   'checkpoints': [], 'recovery_range': None}
         record['approval'] = {'id': approval_id, 'binding': _binding(record, decisions)}
-        previous = state['current']['save']
+        previous = state['current'][domain]
         if previous: store._invalidate(state['records'][previous])
-        state['records'][record_id] = record; state['current']['save'] = record_id
+        state['records'][record_id] = record; state['current'][domain] = record_id
         if state['baseline_record_id'] is None:
             state['baseline_record_id'] = record_id
             state['baseline_scope'] = copy.deepcopy(identity['scope'])
@@ -2117,6 +2159,7 @@ def _prepare_publication(store, expected_revision, identity, artifact_factory, d
                   'epoch': state['epoch'], 'phase': 'accepted', 'marker': marker,
                   'evidence': None, 'outcome': None, 'binding': record['approval']['binding'],
                   'publication_attempt':'not-sent','publication_outcome':None,'publication_confirmation':None,'publication_cleanup':0,'publication_cleanup_owner':{'owner':store.owner,'epoch':state['epoch']},'publication_resources':dict.fromkeys(PUBLICATION_RESOURCE_SLOTS,PUBLICATION_RESOURCE_EMPTY)}
+        if domain=='scope':worker['publication_scope_activated']=False
         state['workers'][operation_id] = worker; state['active'] = operation_id
         state['commands'][store._command_key(record['generation'], command_id)] = {
             'command_id': command_id, 'generation': record['generation'], 'request_version': 2,
@@ -2472,3 +2515,153 @@ def _prepare_publication_recovery(store,operation_id,expected_revision,*,command
 
 
 NativeOperationStore.prepare_publication_recovery = _prepare_publication_recovery
+
+
+# Scope review storage is a separate issued owner recipe. Its artifact contains
+# all candidate blobs, making durable review independent of Git object pruning.
+def _scope_activation_pending(record,worker):
+    return (record['domain']=='scope' and record['identity']['execution_policy']=='native-publication-v1' and
+            worker['phase']=='completed' and not worker.get('publication_scope_activated',False))
+
+
+def _scope_published(record, worker):
+    if record['domain'] != 'scope' or worker['phase'] != 'completed':
+        return False
+    return (record['identity']['execution_policy'] != 'native-publication-v1' or
+            worker.get('publication_scope_activated') is True and worker.get('publication_cleanup') == 4)
+
+
+def _validate_scope_pending(state):
+    rules=state.get('scope_rules_record_id')
+    if rules is not None:
+        _id(rules)
+        record=state['records'].get(rules)
+        worker=next((w for w in state['workers'].values() if w['record_id']==rules),None)
+        _require(record is not None and worker is not None and _scope_published(record,worker) and
+                 record['identity']['scope_transaction']['new']==state['active_scope'], 'active scope rules lack publication provenance')
+    pending=state.get('scope_pending')
+    if pending is None: return
+    _fields(pending,'id record_id old new candidate_digest owner authority_epoch')
+    _id(pending['owner']);_int(pending['authority_epoch'])
+    _id(pending['id']); _id(pending['record_id']); _hash(pending['candidate_digest'])
+    record=state['records'].get(pending['record_id'])
+    _require(record is not None and record['domain']=='scope' and
+             record['identity']['execution_policy']=='native-scope-v1' and
+             record['status'] in ('preview','stale'), 'missing native scope provenance')
+    current=state['records'].get(state['current']['scope'])
+    _require(current is not None and (current['id']==record['id'] or
+             current['identity']['execution_policy']=='native-publication-v1' and
+             current['identity']['scope_transaction']==record['identity']['scope_transaction']), 'pending scope current provenance mismatch')
+    _require(record['identity']['scope_transaction']==dict(old=pending['old'],new=pending['new']) and
+             state['active_scope']==pending['old'] and
+             record['identity']['effect']['after']==digest([pending['candidate_digest'],record['artifact']]), 'pending scope policy mismatch')
+
+
+class PreparedScope:
+    def __init__(self,store,initial,state,artifact,operation_id):
+        self.store=store; self.initial=canonical(initial); self.state=canonical(state)
+        self.artifact=artifact; self.operation_id=operation_id; self.owner_id=store.owner
+        self.current=self.initial; self.used=False
+        self.seal=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id)
+
+    def check(self):
+        if (getattr(self.store,'_prepared_scope',None) is not self or self.store.owner!=self.owner_id or
+                getattr(self.store,'_scope_snapshot',None)!=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id) or
+                (self.used,self.current)!=getattr(self.store,'_scope_progress',None)):
+            raise Conflict('issued immutable scope preparation required')
+        return self
+
+
+def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,transaction_id=None):
+    validate_identity(identity,'scope')
+    _require(identity['execution_policy']=='native-scope-v1' and type(artifact) is bytes,'native scope profile required')
+    with store.mutex,_publication_observe(store) as (root,artifacts):
+        _require(root is not None,'established native baseline required')
+        initial=_parse(store._read_file(root,'state.json'));store._validate(initial,artifacts)
+        store._cas(initial,expected_revision)
+        _require(initial['active_scope']==identity['scope'] and initial['active'] is None and initial['recovery'] is None,
+                 'settled current baseline required')
+        pending=initial.get('scope_pending')
+        _require(pending is None or pending['id']==transaction_id,'different pending scope transaction')
+        _require(pending is None or pending['owner']==store.owner,'canonical scope owner changed; explicit reopen required')
+        state=copy.deepcopy(initial);record_id=str(uuid.uuid4());timestamp=_now()
+        state['generation']+=1
+        record=dict(id=record_id,domain='scope',identity=copy.deepcopy(identity),identity_digest=digest(identity),
+                    artifact=hashlib.sha256(artifact).hexdigest(),artifact_size=len(artifact),binding_version=2,
+                    instance_id=state['instance_id'],generation=state['generation'],status='preview',decisions={},
+                    approval=None,created_at=timestamp,validated_at=None,checkpoints=[],recovery_range=None)
+        previous=state['current']['scope']
+        if previous:store._invalidate(state['records'][previous])
+        state['records'][record_id]=record;state['current']['scope']=record_id
+        state['scope_pending']=dict(id=transaction_id or str(uuid.uuid4()),record_id=record_id,
+                    old=copy.deepcopy(identity['scope']),new=copy.deepcopy(identity['scope_transaction']['new']),candidate_digest=candidate_digest,
+                    owner=store.owner,authority_epoch=0 if pending is None else pending['authority_epoch']+1)
+        state['revision']+=1;state['updated_at']=timestamp
+        store._maintain_anchors(state);store._compact_graph(state)
+        _publication_graph(store,state,artifacts,artifact)
+        prepared=PreparedScope(store,initial,state,artifact,str(uuid.uuid4()))
+        store._prepared_scope=prepared;store._scope_snapshot=prepared.seal;store._scope_progress=(False,prepared.initial)
+        return prepared
+
+
+def _accept_scope(store,prepared,admission):
+    prepared.check();admission.qualify_scope(prepared)
+    _require(not prepared.used,'scope recipe already consumed')
+    with store._locked() as (root,artifacts):
+        _require(store._read_file(root,'state.json')==prepared.initial,'scope owner fenced')
+        key,size=store._produce_artifact(artifacts,(prepared.artifact,))
+        _require((key,size)==(hashlib.sha256(prepared.artifact).hexdigest(),len(prepared.artifact)),'scope artifact mismatch')
+        store._write(root,'state.json',prepared.state)
+    prepared.used=True;prepared.current=prepared.state;store._scope_progress=(True,prepared.state)
+    admission.acknowledge_scope(prepared)
+    return _parse(prepared.state).get('scope_pending')
+
+
+NativeOperationStore.prepare_scope=_prepare_scope
+NativeOperationStore.accept_scope=_accept_scope
+
+
+def _prepare_scope_transition(store,expected_revision,transaction_id,*,cancel=False):
+    with store.mutex,_publication_observe(store) as (root,artifacts):
+        _require(root is not None,'pending scope required')
+        initial=_parse(store._read_file(root,'state.json'));store._validate(initial,artifacts);store._cas(initial,expected_revision)
+        pending=initial.get('scope_pending')
+        _require(pending is not None and pending['id']==transaction_id,'current pending scope required')
+        _require(initial['active'] is None and initial['recovery'] is None,'publication reconciliation required')
+        record=initial['records'][pending['record_id']]
+        artifact=store._artifact(artifacts,record['artifact'],record['artifact_size'])
+        state=copy.deepcopy(initial)
+        if not cancel:
+            state['scope_pending']['owner']=store.owner
+            state['scope_pending']['authority_epoch']+=1
+            state['records'][pending['record_id']]['status']='preview'
+            state['current']['scope']=pending['record_id']
+            state['revision']+=1;state['updated_at']=_now()
+        if cancel:
+            state['scope_pending']=None
+            state['current']['scope']=None
+            store._invalidate(state['records'][pending['record_id']])
+            state['revision']+=1;state['updated_at']=_now()
+            store._compact_graph(state)
+        _publication_graph(store,state,artifacts,artifact)
+        prepared=PreparedScope(store,initial,state,artifact,str(uuid.uuid4()));store._prepared_scope=prepared
+        store._scope_snapshot=prepared.seal;store._scope_progress=(False,prepared.initial)
+        return prepared
+
+
+NativeOperationStore.prepare_scope_transition=_prepare_scope_transition
+
+
+
+def _scope_authority(store):
+    with store.mutex,_publication_observe(store) as (root,artifacts):
+        if root is None:return None
+        state=_parse(store._read_file(root,'state.json'));store._validate(state,artifacts)
+        pending=state.get('scope_pending')
+        if pending is None:return None
+        if pending['owner']!=store.owner:raise Conflict('canonical scope lifecycle owner changed')
+        return (state['instance_id'],pending['id'],pending['record_id'],pending['candidate_digest'],
+                pending['owner'],pending['authority_epoch'])
+
+
+NativeOperationStore.scope_authority=_scope_authority
