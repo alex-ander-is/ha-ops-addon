@@ -67,13 +67,49 @@ class ScopePolicy:
 
 
 @dataclass(frozen=True)
+class ContentRef:
+    key: str
+    size: int
+    oid: str
+    object_format: str
+    binary: bool
+
+    def __post_init__(self):
+        width={'sha1':40,'sha256':64}.get(self.object_format)
+        if (not re.fullmatch('[0-9a-f]{64}',self.key) or type(self.size) is not int or self.size<0 or
+                width is None or not re.fullmatch('[0-9a-f]{%d}'%width,self.oid) or type(self.binary) is not bool):
+            raise Blocked('exact-content-reference-required')
+
+
+class ContentSink:
+    """Fixed-memory digest/count sink; enforce declared bound before writing."""
+    def __init__(self,size,object_format,target=None):
+        self.size=size;self.object_format=object_format;self.target=target
+        self.raw=hashlib.sha256();self.git=hashlib.new(object_format,b'blob '+str(size).encode()+b'\0')
+        self.count=0;self.binary=False
+    def write(self,chunk):
+        if self.count+len(chunk)>self.size:raise Blocked('content-source-exceeded-measured-bound')
+        self.raw.update(chunk);self.git.update(chunk);self.binary=self.binary or 0 in chunk;self.count+=len(chunk)
+        if self.target is not None:
+            view=memoryview(chunk)
+            while view:
+                count=self.target.write(view)
+                if type(count) is not int or not 0<count<=len(view):raise Blocked('invalid-content-consumer')
+                view=view[count:]
+        return len(chunk)
+    def reference(self):
+        if self.count!=self.size:raise Blocked('content-source-size-changed')
+        return ContentRef(self.raw.hexdigest(),self.count,self.git.hexdigest(),self.object_format,self.binary)
+
+
+@dataclass(frozen=True)
 class HistoricalContext:
     path: bytes
     commit_oid: str | None
     tree_oid: str | None
     state: FileState | None
     parents: tuple[metadata.Record, ...]
-    content: bytes | None
+    content: ContentRef | None
     current_present: bool | None = None
 
     def __post_init__(self):
@@ -88,11 +124,11 @@ class HistoricalContext:
         elif (type(self.commit_oid) is not str or type(self.tree_oid) is not str or
                 not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}',self.commit_oid) or
                 not re.fullmatch('[0-9a-f]{40}|[0-9a-f]{64}',self.tree_oid) or
-                type(self.state) is not FileState or type(self.content) is not bytes):
+                type(self.state) is not FileState or type(self.content) is not ContentRef):
             raise Blocked('exact-last-managed-history-required')
         if self.state is not None and (self.state.record is None or self.state.record.path!=self.path or
-                self.state.record.oid!=self.state.oid or self.state.size!=len(self.content) or
-                _blob(self.content,len(self.state.oid))!=self.state.oid or
+                self.state.record.oid!=self.state.oid or self.state.size!=self.content.size or
+                self.content.oid!=self.state.oid or self.state.binary!=self.content.binary or
                 any(type(parent) is not metadata.Record or parent.kind!='directory' for parent in self.parents)):
             raise Blocked('last-managed-content-metadata-mismatch')
 

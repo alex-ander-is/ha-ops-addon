@@ -76,7 +76,7 @@ def object_id(kind,raw,object_format):
     return hashlib.new(object_format,kind+b' '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
 
 
-_TYPES = {cls.__name__:cls for cls in (save.Candidate,save.ScopeReview,save.ScopePolicy,save.HistoricalContext,preview.SourceObservation,preview.FileState,
+_TYPES = {cls.__name__:cls for cls in (save.Candidate,save.ScopeReview,save.ScopePolicy,save.HistoricalContext,save.ContentRef,preview.SourceObservation,preview.FileState,
     preview.PathChange,preview.ParentDetail,preview.Review,preview.Draft,metadata.Record,
     metadata.ParentReview,metadata.Binding,inventory.Policy,inventory.Mount,Signature)}
 

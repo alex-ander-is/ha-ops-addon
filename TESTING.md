@@ -455,3 +455,15 @@ can run own-UID candidate cases together with `test_native_ext4.py`; the wrapper
 must validate the complete ext4 matrix and cleanup. Arbitrary ownership and
 network scope proofs require the normal Linux profile. See the
 [scope API and lifecycle contract](ha-ops/docs/native-scope.md).
+
+
+The dormant scope content regressions in `test_native_scope.py` qualify v2 binary
+object identity and private descriptors, complete per-file sink review, explicit
+legacy-v1 diagnosis/cancellation, independent pre-effect payload receipt and disk
+projection, interruption before canonical CAS, compaction exclusion, pending-only
+ownership and release. `test_scope_real_content_memory_scaling` uses separate real
+Linux children with fixed path count and 4/24 MiB unchanged, added and historical
+files generated incrementally on disk. It measures Python allocation peaks during
+build, sink review, Git-pruned reopen, publication and interrupted-publication
+cleanup recovery, and bounds growth independently of total content. Execute through
+the existing local Linux wrapper; host-only skips do not qualify these proofs.

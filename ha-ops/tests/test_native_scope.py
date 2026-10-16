@@ -20,6 +20,14 @@ from test_native_save import SaveRig,reviewed,put,A,B,canonical,content
 from test_native_preview import tree_evidence
 
 
+def content_ref(data):
+    sink=scope.ContentSink(len(data),'sha1');sink.write(data);return sink.reference()
+
+
+def review_bytes(owner,section,path,**kwargs):
+    sink=io.BytesIO();owner.copy_review_content(section,path,sink,**kwargs);return sink.getvalue()
+
+
 def fixture(tmp_path,monkeypatch=None,retention=32):
     rig=SaveRig(tmp_path)
     saver=save.NativeSave(rig.preview,disk.NativeDisk(rig.root))
@@ -87,11 +95,11 @@ class TestScope:
         assert store.read()['active_scope']==old and owner.diagnose()['apply_blocked']
         assert pub.validate_candidate(rig.adapter,candidate,review)
         complete=operations._parse(owner.reviewed_diff())
-        assert complete['profile']=='native-scope-review-v1' and complete['excluded_unsaved']
+        assert complete['profile']=='native-scope-review-v2' and complete['excluded_unsaved']
         baseline=dict(pub._decode(complete['baseline_blobs']))
-        assert baseline[metadata.MANIFEST_PATH]==content(rig,candidate.baseline_tree_oid)[metadata.MANIFEST_PATH]
+        assert review_bytes(owner,'baseline',metadata.MANIFEST_PATH)==content(rig,candidate.baseline_tree_oid)[metadata.MANIFEST_PATH]
         assert pub._decode(complete['baseline_missing'])==(b'.gitignore',)
-        assert dict(pub._decode(complete['blobs']))[metadata.MANIFEST_PATH]==actual[metadata.MANIFEST_PATH]
+        assert review_bytes(owner,'final',metadata.MANIFEST_PATH)==actual[metadata.MANIFEST_PATH]
         apply1=owner.fresh_apply_preview();put(rig.root,B,b'new apply observation')
         apply2=owner.fresh_apply_preview()
         assert apply2['snapshot'].snapshot_id!=apply1['snapshot'].snapshot_id and apply2['apply_blocked']
@@ -124,10 +132,10 @@ def test_complete_exclusion_recipe_exists_before_any_effect(tmp_path,monkeypatch
         assert kind=='candidate' and evidence.scope_preparation is not None
         prepared=evidence.scope_preparation
         value=operations._parse(prepared.artifact)
-        assert value['profile']=='native-scope-review-v1'
+        assert value['profile']=='native-scope-review-v2'
         removed=pub._decode(value['removed_before'])
         assert {row[0] for row in removed}=={A,B}
-        assert dict((row[0],row[2]) for row in removed)[A]==b'base\n'
+        assert dict((row[0],row[2]) for row in removed)[A]==content_ref(b'base\n')
         assert set(evidence.candidate_removals)=={A,B}
         assert evidence.candidate_rules and evidence.candidate_manifest
         assert set(evidence.candidate_final)=={b'.gitignore',metadata.MANIFEST_PATH}
@@ -192,13 +200,13 @@ def test_publication_scope_domain_cleanup_activation_and_second_revision(tmp_pat
     assert content(rig,again.tree_oid)[A]==b'initial reviewed divergence'
     historical=next(row for row in again_review.history if row.path==A)
     assert historical.commit_oid==candidate.remote.remote_oid
-    assert historical.content==b'initial publication' and historical.state.record.path==A
+    assert historical.content==content_ref(b'initial publication') and historical.state.record.path==A
     assert {row.path for row in historical.parents}==metadata.ancestors((A,))
     assert next(row for row in again_review.selected if row.path==A).base==historical.state
     assert pub._decode(operations._parse(owner.reviewed_diff())['review']).history==again_review.history
     assert owner.active_rules()==review.rules
     full=operations._parse(owner.reviewed_diff())
-    assert dict(pub._decode(full['baseline_blobs']))[b'.gitignore']==review.rules
+    assert review_bytes(owner,'baseline',b'.gitignore')==review.rules
     owner.lifecycle('refresh')
     store.compact(store.read()['revision'])
     assert owner.active_rules()==review.rules
@@ -429,7 +437,7 @@ def test_last_managed_context_explicit_absence_and_metadata_from_ancestry(tmp_pa
     rows=scope.last_managed_context(rig.adapter,empty,(A,b'homeassistant/never'))
     old=next(row for row in rows if row.path==A)
     never=next(row for row in rows if row.path!=A)
-    assert old.commit_oid==original and old.content==b'base\n'
+    assert old.commit_oid==original and old.content==content_ref(b'base\n')
     assert old.state.record.path==A and {r.path for r in old.parents}==metadata.ancestors((A,))
     assert never.commit_oid is None and never.state is None and never.content is None
     assert not content(rig,empty).get(A)
@@ -444,7 +452,7 @@ def test_last_managed_context_keeps_merge_peers_and_refuses_missing_metadata(tmp
     merge=git(rig.root,'commit-tree',tree,'-p',left,'-p',right,'-m','fixture historical merge').decode().strip()
     rows=scope.last_managed_context(rig.adapter,merge,(A,))
     assert {row.commit_oid for row in rows}=={left,right}
-    assert {row.content for row in rows}=={b'left historical bytes',b'right historical bytes'}
+    assert {row.content for row in rows}=={content_ref(b'left historical bytes'),content_ref(b'right historical bytes')}
     # A tracked leaf without its supported metadata cannot be misreported as
     # never managed or silently borrowed from a different historical revision.
     git(rig.root,'update-ref','HEAD',left)
@@ -477,7 +485,7 @@ def test_reinclusion_context_includes_files_deleted_while_excluded(tmp_path):
         expected_revision=store.read()['revision'])
     historical=next((row for row in again_review.history if row.path==A),None)
     assert historical is not None,'deleted formerly managed leaf is missing from re-inclusion comparison'
-    assert historical.content==b'initial publication' and historical.current_present is False
+    assert historical.content==content_ref(b'initial publication') and historical.current_present is False
     assert A not in content(rig,again.tree_oid),'historical comparison must never restore absent live bytes'
     assert tree_evidence(rig.root/'homeassistant')==live
     exact=owner.reviewed_diff()
@@ -562,3 +570,349 @@ def test_entire_reincluded_folder_absence_keeps_history_without_restoration(tmp_
     reopened,new_review=owner.reopen_review(expected_revision=store.read()['revision'])
     assert new_review.history==again_review.history and owner.reviewed_diff()==exact
     assert not (rig.root/'homeassistant').exists()
+
+
+@pytest.mark.parametrize('change',['size','key','oid','binary','format','mode','symlink','multilink','replace'])
+def test_content_reference_verification_refuses_corruption_before_emission(tmp_path,change):
+    data=b'complete\0binary\xffcontent';ref=content_ref(data)
+    store=operations.NativeOperationStore(tmp_path/'data')
+    directory=tmp_path/'objects';directory.mkdir(mode=0o700)
+    path=directory/(ref.key+'.blob');path.write_bytes(data);path.chmod(0o600)
+    candidate=ref
+    if change=='size':candidate=replace(ref,size=ref.size+1)
+    elif change=='key':path.write_bytes(b'x'*len(data))
+    elif change=='oid':candidate=replace(ref,oid='a'*40)
+    elif change=='binary':candidate=replace(ref,binary=False)
+    elif change=='format':candidate=replace(ref,object_format='sha256',oid='a'*64)
+    elif change=='mode':path.chmod(0o644)
+    elif change=='symlink':
+        foreign=directory/'foreign';path.rename(foreign);path.symlink_to(foreign)
+    elif change=='multilink':os.link(path,directory/'other')
+    fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        with pytest.raises((operations.InvalidState,OSError)):
+            with store._verified_scope_blob(fd,candidate):
+                if change=='replace':
+                    foreign=directory/'new';foreign.write_bytes(data);foreign.chmod(0o600);foreign.replace(path)
+                else:pytest.fail('corrupt object emitted content')
+    finally:os.close(fd)
+
+
+def test_streamed_content_bound_stops_before_target_growth():
+    target=io.BytesIO();sink=scope.ContentSink(3,'sha1',target)
+    sink.write(b'ab')
+    with pytest.raises(Exception,match='bound'):sink.write(b'cd')
+    assert target.getvalue()==b'ab'
+    with pytest.raises(Exception,match='size-changed'):sink.reference()
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Qualified Linux scope transaction')
+@pytest.mark.parametrize('point',['scope_blob_written','scope_blob_fsynced','scope_blob_installed','scope_blob_durable','artifact_fsynced'])
+def test_scope_payload_interruptions_leave_old_authority_and_account_orphans(tmp_path,point):
+    rig,saver,store,owner=fixture(tmp_path)
+    owner.build((),expected_revision=store.read()['revision'])
+    before=store.read();old=owner.reviewed_diff()
+    added=b'addon_configs/new';put(rig.root,added,b'new\0binary\xffpayload')
+    def fault(observed):
+        if observed==point:raise KeyboardInterrupt(point)
+    store.fault=fault
+    with pytest.raises(KeyboardInterrupt):
+        owner.build((b'homeassistant',b'addon_configs'),approved_parents=(b'addon_configs',),expected_revision=before['revision'])
+    store.fault=lambda point:None
+    assert store.read()==before and owner.reviewed_diff()==old
+    assert store.accounting()['artifact_bytes']>=sum(p.stat().st_size for p in (rig.root/'data/native-operations/artifacts').glob('*.blob'))
+    store.compact(store.read()['revision'])
+    assert owner.reviewed_diff()==old
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Actual canonical scope critical section')
+def test_scope_install_excludes_compaction_and_foreign_lock_owners(tmp_path):
+    rig,saver,store,owner=fixture(tmp_path)
+    observations=[]
+    def fault(point):
+        if point!='scope_blob_installed':return
+        with pytest.raises(Exception,match='scope execution owns'):
+            store.compact(store.read()['revision'])
+        other=operations.NativeOperationStore(rig.root/'data')
+        with pytest.raises(operations.Conflict,match='busy'):
+            with operations._publication_observe(other):pass
+        observations.append(point)
+    store.fault=fault
+    owner.build((),expected_revision=store.read()['revision'])
+    assert observations
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Actual Linux payload ownership and complete review')
+def test_complete_payload_review_gc_ownership_and_cancel_release(tmp_path):
+    rig,saver,store,owner=fixture(tmp_path)
+    added=b'addon_configs/new';payload=b'fresh\0binary\xffpayload';put(rig.root,added,payload)
+    candidate,review=owner.build((b'homeassistant',b'addon_configs'),approved_parents=(b'addon_configs',),expected_revision=store.read()['revision'])
+    assert review_bytes(owner,'final',added)==payload
+    assert review_bytes(owner,'baseline',A)==b'initial publication'
+    with pytest.raises(operations.Conflict):review_bytes(owner,'history',added)
+    with pytest.raises(operations.Conflict):review_bytes(owner,'final',b'unknown')
+    objects=rig.root/'data/native-operations/artifacts'
+    refs=set(objects.glob('*.blob'));assert refs
+    owner.lifecycle('update');store.compact(store.read()['revision'])
+    assert refs<=set(objects.glob('*.blob'))
+    from native_topology_helpers import git
+    git(rig.root,'reflog','expire','--expire=now','--all');git(rig.root,'gc','--prune=now')
+    fresh=scope.NativeScope(save.NativeSave(rig.preview,disk.NativeDisk(rig.root)),store)
+    rebuilt,_=fresh.reopen_review(expected_revision=store.read()['revision'])
+    assert rebuilt.tree_oid==candidate.tree_oid and review_bytes(fresh,'final',added)==payload
+    fresh.cancel(expected_revision=store.read()['revision'])
+    store.compact(store.read()['revision'])
+    assert not list(objects.glob('*.blob'))
+
+
+def _write_large(path,size,byte):
+    path.parent.mkdir(parents=True,exist_ok=True)
+    chunk=byte*65536
+    with path.open('wb') as stream:
+        while size:
+            part=chunk[:min(size,len(chunk))];stream.write(part);size-=len(part)
+
+
+def _commit_existing(rig,paths):
+    from native_topology_helpers import git
+    import stat
+    records=[]
+    for path in sorted(paths):
+        info=os.stat(rig.root/os.fsdecode(path))
+        oid=git(rig.root,'hash-object','-w','--',os.fsdecode(path)).decode().strip()
+        records.append(metadata.Record(path,'file',info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode),oid))
+    for path in sorted(metadata.ancestors(paths)):
+        info=os.stat(rig.root/os.fsdecode(path))
+        records.append(metadata.Record(path,'directory',info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode),None))
+    manifest=metadata.Manifest(tuple(sorted(records,key=lambda row:row.path)))
+    put(rig.root,metadata.MANIFEST_PATH,metadata.encode(manifest,width=rig.width,policy=rig.policy))
+    git(rig.root,'read-tree','--empty')
+    git(rig.root,'add','-f','--',*[os.fsdecode(path) for path in paths],os.fsdecode(metadata.MANIFEST_PATH))
+    git(rig.root,'commit','--allow-empty','-m','streamed disposable fixture')
+    return git(rig.root,'rev-parse','HEAD').decode().strip()
+
+
+def _scope_memory_probe(tmp,size):
+    import gc
+    import tracemalloc
+    from native_topology_helpers import git
+    rig,saver,store,owner=fixture(tmp)
+    git(rig.root,'update-ref','HEAD',rig.source.remote_oid)
+    git(rig.root,'read-tree',rig.source.remote_oid)
+    unchanged=B;added=b'addon_configs/history'
+    _write_large(rig.root/os.fsdecode(unchanged),size,b'u')
+    _write_large(rig.root/os.fsdecode(added),size,b'h')
+    _commit_existing(rig,(A,B,added))
+    (rig.root/os.fsdecode(added)).unlink()
+    oid=_commit_existing(rig,(A,B))
+    git(rig.root,'update-ref',rig.source.remote_ref,oid);git(rig.root,'update-ref',rig.source.base_ref,oid)
+    git(rig.root,'push',str(tmp/'receiver.git'),oid+':refs/heads/main')
+    rig.source=replace(rig.source,remote_oid=oid,base_oid=oid)
+    _write_large(rig.root/os.fsdecode(added),size,b'a')
+    gc.collect();tracemalloc.start()
+    peaks={}
+    def peak(name):
+        peaks[name]=tracemalloc.get_traced_memory()[1];tracemalloc.reset_peak()
+    candidate,review=owner.build((b'homeassistant',b'addon_configs'),approved_parents=(b'addon_configs',),expected_revision=store.read()['revision'])
+    peak('build')
+    class Count:
+        size=0
+        def write(self,chunk):self.size+=len(chunk);return len(chunk)
+    for section,path,commit in [('final',added,None),('final',B,None),('baseline',B,None),('history',added,review.history[0].commit_oid)]:
+        sink=Count();owner.copy_review_content(section,path,sink,commit_oid=commit);assert sink.size==size
+    peak('review')
+    owner.lifecycle('restart');store.compact(store.read()['revision'])
+    git(rig.root,'reflog','expire','--expire=now','--all');git(rig.root,'gc','--prune=now')
+    owner=scope.NativeScope(save.NativeSave(rig.preview,disk.NativeDisk(rig.root)),store)
+    candidate,review=owner.reopen_review(expected_revision=store.read()['revision'])
+    peak('reopen')
+    transport=pub.GitCLITransport(rig.adapter,os.fsencode(tmp/'receiver.git'),'refs/heads/main')
+    executor=pub.NativePublication(owner.saver,store,transport)
+    sig=pub.Signature('Memory Fixture','fixture@invalid',1700000005,'+0000')
+    def cut(point):
+        if point=='publication-completed':raise KeyboardInterrupt('memory recovery proof')
+    store.fault=cut
+    try:
+        owner.confirm(candidate,review,executor,author=sig,committer=sig,message=b'bounded content proof\n',local_ref=rig.source.base_ref,
+            expected_local=rig.source.base_oid,command_id=str(uuid.uuid4()),expected_revision=store.read()['revision'])
+        raise AssertionError('recovery cut did not execute')
+    except KeyboardInterrupt as error:operation_id=error.operation_id
+    peak('publication');store.fault=lambda point:None
+    result=owner.recover_publication(executor,operation_id,expected_revision=store.read()['revision'],command_id=str(uuid.uuid4()),pending_effect='cleanup')
+    assert result['status']=='completed';peak('recovery')
+    store.compact(store.read()['revision'])
+    assert not list((rig.root/'data/native-operations/artifacts').glob('*.blob'))
+    tracemalloc.stop()
+    return peaks
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Measured child Linux build/reopen/publication/recovery scaling')
+def test_scope_real_content_memory_scaling(tmp_path):
+    import json
+    import subprocess
+    peaks=[]
+    for megabytes in (4,24):
+        child=tmp_path/str(megabytes);child.mkdir()
+        script='from pathlib import Path;from test_native_scope import _scope_memory_probe;import json;print(json.dumps(_scope_memory_probe(Path('+repr(str(child))+'),'+str(megabytes*1024*1024)+')))'
+        env={**os.environ,'PYTHONPATH':str(Path(__file__).parent)+os.pathsep+str(Path(scope.__file__).parent),'PYTHONDONTWRITEBYTECODE':'1'}
+        result=subprocess.run([sys.executable,'-c',script],env=env,capture_output=True,text=True,timeout=180)
+        assert result.returncode==0,result.stdout+result.stderr
+        peaks.append(json.loads(result.stdout.strip().splitlines()[-1]))
+    print('scope memory peaks:',json.dumps(peaks,sort_keys=True))
+    assert peaks[0].keys()==peaks[1].keys()
+    for phase in peaks[0]:
+        assert peaks[1][phase]<peaks[0][phase]+8*1024*1024,(phase,peaks)
+        assert peaks[1][phase]<20*1024*1024,(phase,peaks)
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Real admitted legacy cancellation')
+def test_legacy_v1_diagnose_cancel_streams_without_readall_and_reopen_refuses(tmp_path,monkeypatch):
+    import hashlib
+    rig,saver,store,owner=fixture(tmp_path)
+    owner.build((),expected_revision=store.read()['revision'])
+    state=store.read();record=state['records'][state['scope_pending']['record_id']]
+    artifacts=rig.root/'data/native-operations/artifacts'
+    temporary=artifacts/'legacy-fixture';h=hashlib.sha256();size=0
+    with temporary.open('wb') as stream:
+        for chunk in (b'{"profile":"native-scope-review-v1","blobs":"',*[b'00'*65536]*160,b'"}'):
+            stream.write(chunk);h.update(chunk);size+=len(chunk)
+    key=h.hexdigest();temporary.rename(artifacts/(key+'.diff'));(artifacts/(key+'.diff')).chmod(0o600)
+    record.update(artifact=key,artifact_size=size)
+    record['identity']['execution_policy']='native-scope-v1'
+    record['identity']['effect']['after']=operations.digest([state['scope_pending']['candidate_digest'],key])
+    record['identity_digest']=operations.digest(record['identity'])
+    with store._locked() as (root,_):store._write(root,'state.json',operations.canonical(state))
+    def forbidden(*args,**kwargs):raise AssertionError('legacy aggregate read')
+    monkeypatch.setattr(store,'_artifact',forbidden)
+    assert owner.diagnose()['transaction']
+    with pytest.raises(operations.Conflict,match='legacy-scope-v1'):
+        owner.reopen_review(expected_revision=state['revision'])
+    with pytest.raises(operations.Conflict,match='legacy-scope-v1'):
+        owner.reviewed_diff()
+    with pytest.raises(operations.Conflict,match='legacy-scope-v1'):
+        owner.last_save_offer()
+    old=owner.active_policy()
+    result=owner.cancel(expected_revision=state['revision'])
+    assert result['transaction'] is None and result['active_policy']==old
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='Actual exact admitted output recipe')
+@pytest.mark.parametrize('refusal',['unknown','shortfall','mutated-receipt','copied-receipt'])
+def test_payload_recipe_refusal_precedes_all_creations(tmp_path,monkeypatch,refusal):
+    import copy
+    rig,saver,store,owner=fixture(tmp_path)
+    state=store.read();before=(rig.root/'data/native-operations/state.json').read_bytes()
+    initial=set((rig.root/'data/native-operations/artifacts').iterdir())
+    real=saver.disk.project
+    def project(kind,snapshot,evidence):
+        prepared=evidence.scope_preparation
+        if refusal=='mutated-receipt':
+            ref,producer=prepared.payloads[0];prepared.payloads=((replace(ref,size=ref.size+1),producer),)+prepared.payloads[1:]
+            with pytest.raises(operations.Conflict):prepared.check()
+            raise disk.Blocked('mutated receipt')
+        if refusal=='copied-receipt':
+            with pytest.raises(operations.Conflict):copy.copy(prepared).check()
+            raise disk.Blocked('copied receipt')
+        plan=real(kind,snapshot,evidence)
+        payloads=[row for row in plan.allocations if row.output=='scope-immutable-content']
+        overlaps=[row for row in plan.allocations if row.output=='scope-content-temp-overlap']
+        assert sum(row.logical for row in payloads)==sum(row[0].size for row in prepared.payloads)
+        assert sum(row.logical for row in overlaps)==sum(row.logical for row in payloads)
+        if refusal=='unknown':return replace(plan,unknown=('fixture capacity unknown',))
+        return replace(plan,decisions=tuple(replace(row,status='insufficient-space') for row in plan.decisions))
+    monkeypatch.setattr(saver.disk,'project',project)
+    original_open=os.open
+    def no_create(path,flags,*args,**kwargs):
+        if flags&os.O_CREAT:pytest.fail('output creation before admitted scope plan')
+        return original_open(path,flags,*args,**kwargs)
+    monkeypatch.setattr(os,'open',no_create)
+    monkeypatch.setattr(os,'mkdir',lambda *a,**k:pytest.fail('mkdir before admitted scope plan'))
+    with pytest.raises((disk.Blocked,disk.InsufficientSpace)):
+        owner.build((),expected_revision=state['revision'])
+    assert (rig.root/'data/native-operations/state.json').read_bytes()==before
+    assert set((rig.root/'data/native-operations/artifacts').iterdir())==initial
+
+
+
+def test_content_sink_memoryview_binary_flag_and_partial_consumer():
+    class Partial:
+        data=bytearray()
+        def write(self,chunk):self.data.extend(chunk[:1]);return 1
+    target=Partial();sink=scope.ContentSink(4,'sha1',target)
+    sink.write(memoryview(b'a\0\xffb'))
+    assert sink.reference()==content_ref(b'a\0\xffb') and bytes(target.data)==b'a\0\xffb'
+
+
+
+def test_unowned_binary_cleanup_needs_digest_identity_and_reports_debt(tmp_path):
+    store=operations.NativeOperationStore(tmp_path/'data')
+    objects=tmp_path/'objects';objects.mkdir(mode=0o700)
+    foreign=objects/('a'*64+'.blob');foreign.write_bytes(b'foreign bytes');foreign.chmod(0o600)
+    good=objects/(content_ref(b'owned orphan').key+'.blob');good.write_bytes(b'owned orphan');good.chmod(0o600)
+    fd=os.open(objects,os.O_RDONLY|os.O_DIRECTORY)
+    try:store._sweep(fd,dict(records={},scope_pending=None))
+    finally:os.close(fd)
+    assert foreign.exists() and not good.exists()
+    assert any('unowned or changed' in error for error in store.cleanup_errors)
+
+
+
+def test_binary_sweep_ignores_read_induced_atime_changes(tmp_path):
+    store=operations.NativeOperationStore(tmp_path/'data')
+    objects=tmp_path/'objects';objects.mkdir(mode=0o700)
+    ref=content_ref(b'valid released binary')
+    path=objects/(ref.key+'.blob');path.write_bytes(b'valid released binary');path.chmod(0o600)
+    os.utime(path,ns=(1,2))
+    fd=os.open(objects,os.O_RDONLY|os.O_DIRECTORY)
+    try:store._sweep(fd,dict(records={},scope_pending=None))
+    finally:os.close(fd)
+    assert not path.exists() and store.cleanup_errors==[]
+
+
+@pytest.mark.parametrize('change',['content','mode','route','link','unlink-failure'])
+def test_binary_sweep_retains_actual_mutation_or_unlink_debt(tmp_path,monkeypatch,change):
+    store=operations.NativeOperationStore(tmp_path/'data')
+    objects=tmp_path/'objects';objects.mkdir(mode=0o700)
+    data=b'valid released binary';ref=content_ref(data)
+    path=objects/(ref.key+'.blob');path.write_bytes(data);path.chmod(0o600)
+    def fault(point):
+        if point!='cleanup_before_unlink':return
+        if change=='content':path.write_bytes(b'x'*len(data))
+        elif change=='mode':path.chmod(0o644)
+        elif change=='route':
+            other=objects/'foreign';other.write_bytes(data);other.chmod(0o600);other.replace(path)
+        elif change=='link':os.link(path,objects/'foreign')
+    store.fault=fault
+    if change=='unlink-failure':
+        original=os.unlink
+        def failed(name,*args,**kwargs):
+            if name==path.name:raise PermissionError('persistent test-owned unlink failure')
+            return original(name,*args,**kwargs)
+        monkeypatch.setattr(os,'unlink',failed)
+    fd=os.open(objects,os.O_RDONLY|os.O_DIRECTORY)
+    try:store._sweep(fd,dict(records={},scope_pending=None))
+    finally:os.close(fd)
+    assert path.exists() and store.cleanup_errors
+
+
+
+def test_binary_sweep_hashes_after_interleaved_same_size_write(tmp_path,monkeypatch):
+    store=operations.NativeOperationStore(tmp_path/'data')
+    objects=tmp_path/'objects';objects.mkdir(mode=0o700)
+    data=b'original binary content';ref=content_ref(data)
+    path=objects/(ref.key+'.blob');path.write_bytes(data);path.chmod(0o600)
+    # Model a filesystem whose timestamps cannot distinguish this immediate
+    # same-size write. Real inode/mode/link/size checks remain effective.
+    original_identity=operations._scope_content_identity
+    times=original_identity(path.stat())[-2:]
+    monkeypatch.setattr(operations,'_scope_content_identity',lambda info:original_identity(info)[:-2]+times)
+    seen=[]
+    def change(point):
+        if point=='cleanup_before_unlink':
+            path.write_bytes(b'x'*len(data));seen.append(point)
+    store.fault=change
+    fd=os.open(objects,os.O_RDONLY|os.O_DIRECTORY)
+    try:store._sweep(fd,dict(records={},scope_pending=None))
+    finally:os.close(fd)
+    assert seen and path.exists()
+    assert any('unowned or changed binary cleanup object' in error for error in store.cleanup_errors)

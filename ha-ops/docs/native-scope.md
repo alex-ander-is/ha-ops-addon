@@ -20,13 +20,40 @@ bytes; history never restores excluded content to the live tree.
 The issued `ScopeReview` identifies old/new policies, complete observed membership,
 parent approval and exact generated ignore bytes. The `.gitignore` contains its
 own re-inclusion, the fixed metadata exception and a canonical scope comment.
-`reviewed_diff()` returns the complete canonical envelope: typed review/candidate,
-all final blob bytes, removed before bytes/metadata, and a separate excluded
-unsaved section including untracked live files. This is intentionally proportional
-to complete reviewed content, without a product-size ceiling. The exact serialized
-artifact and owner-state replacement overlap are included in one admitted plan
-before candidate effects. Durable content is sufficient to reconstruct the same
-Git objects after pruning; unreferenced objects alone are never durable review.
+`reviewed_diff()` returns a metadata-only `native-scope-review-v2` canonical
+envelope: typed review/candidate, final and baseline content references, removed
+before metadata/references, excluded unsaved states and historical context. Each
+`ContentRef` records raw SHA-256, exact size, Git blob identity/format and binary
+flag. Payloads live independently as immutable private `<sha256>.blob` files.
+
+`copy_review_content(section, path, destination, commit_oid=...)` streams one
+complete verified file to a sink. Sections are `final`, `baseline`, `removed`,
+`excluded`, and `history`; historical selection requires the exact commit OID.
+Absent entries remain explicit and have no content to copy. Selection resolves
+only entries of the current canonical pending review. Raw/Git hashes, exact size,
+binary flag, no-follow regular descriptor, private mode, single link, and held
+route identity are verified before emission and after consumption.
+
+Build measures sources through fixed-size digest sinks before any output effect.
+The one admitted plan includes every payload, temporary/final overlap, exact
+metadata/state atomic overlap, entries/inodes and candidate Git resources. The
+issued immutable prepared recipe binds each producer/reference to the operation
+and owner; disk projection independently remeasures it. After admission, a held
+canonical scope lock excludes compaction until durable payload installation,
+streamed candidate materialization and canonical state CAS finish. Output receipts
+verify binary files independently of bounded JSON control readers. Content memory
+is fixed by chunk size plus metadata proportional to path count, without a file
+size ceiling. Durable review survives Git pruning independently of Git objects.
+
+Only the canonical pending scope owns the complete binary closure, including
+history and excluded content. Refresh, restart, update, compaction, publication
+and recovery retain it. Replacement first installs the new closure and then
+switches authority atomically. Completed publication cleanup or explicit cancel
+releases binary ownership; retained history and active-rule provenance keep only
+metadata. Subsequent compaction removes unowned payloads and records unlink errors
+as cleanup debt. Legacy `native-scope-v1` state can be diagnosed and cancelled
+with streaming artifact verification; reopen refuses with an explicit migration
+requirement instead of decoding aggregate content.
 
 `confirm(candidate, review, publication, **confirmation)` requires the exact current
 issued pair and the same NativeSave/store peers. NativePublication independently
@@ -38,7 +65,7 @@ local CAS and required resource retirement. A completed worker with cleanup stil
 pending leaves the old policy active and Apply blocked. Generic store commands
 cannot approve, claim, checkpoint or cancel the issued scope record.
 
-`last_save_offer()` exposes excluded unsaved content. Declining requires no action.
+`last_save_offer()` exposes excluded unsaved path/state/reference rows. Declining requires no action.
 `review_last_save()` creates an ordinary, separate old-scope Save review.
 `confirm_last_save()` is the separate explicit publication confirmation. It retains
 the scope transaction and invalidates its old issuer grant. A fresh source and an
@@ -84,7 +111,7 @@ until disallowed tracked entries have a resolved disposition.
 
 Re-inclusion review also carries typed last-managed comparison context. Explicit
 build walks exact commit parents rooted at the current authoritative remote,
-retaining the nearest managed revision's complete bytes and supported leaf and
+retaining the nearest managed revision's complete content reference and supported leaf and
 required-parent metadata. Equal-distance merge ancestors remain separate contexts;
 paths absent from the entire observed ancestry carry explicit no-history entries.
 Unavailable historical metadata blocks rather than inventing attributes. The

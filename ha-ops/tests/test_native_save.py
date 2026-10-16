@@ -716,11 +716,22 @@ def test_guard_teardown_failure_returns_no_candidate_and_ends_capability(tmp_pat
 
 
 def test_import_and_candidate_nested_values_are_inert_and_immutable(tmp_path,monkeypatch):
-    import importlib
-    def forbidden(*a,**kw):raise AssertionError('import IO')
-    with monkeypatch.context() as context:
-        context.setattr(os,'open',forbidden);context.setattr(subprocess,'Popen',forbidden)
-        importlib.reload(s)
+    # Reloading replaces exact typed codec classes. Prove import inertness in
+    # a child so this test cannot change the shared publication registry peers.
+    original_content_ref=s.ContentRef
+    script="""import importlib, os, subprocess, sys
+sys.path.insert(0, APP_PATH)
+import native_save as module
+def forbidden(*args, **kwargs):
+    raise AssertionError('import IO')
+os.open=forbidden
+subprocess.Popen=forbidden
+importlib.reload(module)
+""".replace('APP_PATH',repr(str(Path(s.__file__).parent)))
+    result=subprocess.run([sys.executable,'-c',script],capture_output=True,text=True,
+        env={**os.environ,'PYTHONDONTWRITEBYTECODE':'1'},timeout=30)
+    assert result.returncode==0,result.stdout+result.stderr
+    assert s.ContentRef is original_content_ref
     # Diagnostic values never grant review authority, even before reset.
     rig=SaveRig(tmp_path);put(rig.root,A,b'changed')
     review=reviewed(rig,(A,))

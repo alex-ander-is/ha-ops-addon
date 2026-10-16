@@ -92,7 +92,7 @@ def _path(value, absolute=False):
 
 
 # Only explicitly implemented execution profiles select a byte identity codec.
-_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1", "native-scope-v1": "native-bytes-v1"}
+_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1", "native-scope-v1": "native-bytes-v1", "native-scope-v2": "native-bytes-v1"}
 
 
 def identity_codec(identity):
@@ -424,6 +424,7 @@ class NativeOperationStore:
 
     @contextmanager
     def _locked(self):
+        _require(getattr(self,'_scope_execution',None) is None,'scope execution owns canonical critical section')
         with self.mutex:
             descriptors = []
             try:
@@ -799,6 +800,7 @@ class NativeOperationStore:
             self._validate_v1(state, artifacts)
         else:
             self._validate_v2(state, artifacts)
+        if artifacts is not None:self._validate_scope_content(state,artifacts)
 
     @staticmethod
     def _validate_history(history, worker, record=None, summary=None):
@@ -1249,6 +1251,7 @@ class NativeOperationStore:
 
     def _sweep(self, directory, state, manifests=False):
         marked = {record["artifact"] + ".diff" for record in state["records"].values()}
+        if not manifests: marked.update(ref.key+".blob" for ref in self._scope_refs(state,directory))
         self.cleanup_errors = [] if not manifests else self.cleanup_errors
         try:
             names = os.listdir(directory)
@@ -1264,7 +1267,7 @@ class NativeOperationStore:
                     owned_temp = True
                 except InvalidState:
                     pass
-            owned_artifact = not manifests and name.endswith(".diff") and DIGEST.fullmatch(name[:-5])
+            owned_artifact = not manifests and name.endswith((".diff",".blob")) and DIGEST.fullmatch(name[:-5])
             if not (owned_temp or owned_artifact) or name in marked:
                 continue
             fd = None
@@ -1274,7 +1277,23 @@ class NativeOperationStore:
                 before = os.fstat(fd)
                 entry = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 _require((before.st_dev, before.st_ino) == (entry.st_dev, entry.st_ino), "cleanup entry changed")
+                # Faults/interleaved writers run before the final content proof;
+                # timestamp equality alone cannot qualify same-size payloads.
                 self.fault("cleanup_before_unlink")
+                if name.endswith('.blob'):
+                    fingerprint=hashlib.sha256()
+                    while True:
+                        chunk=os.read(fd,CHUNK_SIZE)
+                        if not chunk:break
+                        fingerprint.update(chunk)
+                    _require(fingerprint.hexdigest()==name[:-5] and
+                             _scope_content_identity(os.fstat(fd))==_scope_content_identity(before) and
+                             _scope_content_identity(os.stat(name,dir_fd=directory,follow_symlinks=False))==_scope_content_identity(before),
+                             'unowned or changed binary cleanup object')
+                if name.endswith('.blob'):
+                    _require(_scope_content_identity(os.fstat(fd))==_scope_content_identity(before) and
+                             _scope_content_identity(os.stat(name,dir_fd=directory,follow_symlinks=False))==_scope_content_identity(before),
+                             'binary cleanup descriptor or route changed')
                 os.unlink(name, dir_fd=directory)
                 self.fault("cleanup_unlinked")
             except (OSError, InvalidState) as exc:
@@ -1339,11 +1358,12 @@ class NativeOperationStore:
     def accounting(self):
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
-            live = {record["artifact"] for record in state["records"].values()}
+            live = {record["artifact"]+".diff" for record in state["records"].values()}
+            live.update(ref.key+".blob" for ref in self._scope_refs(state,artifacts))
             stored = reclaimable = temporary = 0
             for directory in (root, artifacts):
                 for name in os.listdir(directory):
-                    if not (re.fullmatch(r"[0-9a-f]{64}\.diff", name) or re.fullmatch(r"\.tmp-[0-9a-f-]{36}", name)):
+                    if not (re.fullmatch(r"[0-9a-f]{64}\.(?:diff|blob)", name) or re.fullmatch(r"\.tmp-[0-9a-f-]{36}", name)):
                         continue
                     fd = None
                     try:
@@ -1354,7 +1374,7 @@ class NativeOperationStore:
                             temporary += size
                         else:
                             stored += size
-                            if name[:-5] not in live:
+                            if name not in live:
                                 reclaimable += size
                     except (OSError, InvalidState):
                         pass
@@ -1460,7 +1480,7 @@ class NativeOperationStore:
 
     def preview_stream(self, expected_revision, domain, identity, producer):
         validate_identity(identity, domain)
-        if identity['execution_policy'] in ('native-publication-v1','native-scope-v1'):
+        if identity['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
             raise Conflict('native publication requires issued preparation')
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
@@ -1527,7 +1547,7 @@ class NativeOperationStore:
             record = state["records"][record_id]
             if state.get("scope_pending") and record["domain"] == "apply":
                 raise Conflict("pending scope blocks Apply")
-            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication requires issued review')
             if state["active"] or state["current"][record["domain"]] != record_id or record["status"] != "preview":
                 raise Conflict("fresh Preview required")
@@ -1560,7 +1580,7 @@ class NativeOperationStore:
             state = self._load(root, artifacts)
             if state.get("scope_pending"):
                 raise Conflict("pending scope requires an issued native operation")
-            if record_id in state['records'] and state['records'][record_id]['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1'):
+            if record_id in state['records'] and state['records'][record_id]['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
                 raise Conflict('native publication requires issued claim')
             if state.get('recovery') is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication cleanup unresolved')
@@ -1637,7 +1657,7 @@ class NativeOperationStore:
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             worker, record = self._owned(state, operation_id, epoch)
-            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1'):
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
                 raise Conflict('native publication or scope requires issued checkpoint')
             transitions = {key: phases - {"invalidated"} for key, phases in WORKER_TRANSITIONS.items()}
             transitions["recovery_required"] = {"completed"}
@@ -1750,7 +1770,7 @@ class NativeOperationStore:
             record = state["records"][record_id]
             if state.get("scope_pending") and record["domain"] == "apply":
                 raise Conflict("pending scope blocks Apply")
-            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
+            if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication requires issued cancel')
             if state["active"] or record["status"] not in {"preview", "reviewed", "stale"}:
                 raise Conflict("cannot cancel pending effect")
@@ -2027,8 +2047,13 @@ def _publication_empty(store, instance_id, timestamp):
 
 
 @contextmanager
-def _publication_observe(store):
+def _publication_observe(store, *, scope_execution=None):
     """No mkdir, lock creation, state initialization, takeover or artifact writes."""
+    active=getattr(store,'_scope_execution',None)
+    if active is not None and active[0]==threading.get_ident():
+        _require(scope_execution is None,'nested scope execution forbidden')
+        yield active[3],active[4]
+        return
     descriptors = []
     try:
         fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
@@ -2053,7 +2078,14 @@ def _publication_observe(store):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise Conflict('operation owner busy') from exc
-        yield root, artifacts
+        if scope_execution is not None:
+            prepared,admission=scope_execution
+            prepared.check()
+            _require(admission.plan.evidence.scope_preparation is prepared and admission.active,'issued scope execution required')
+            store._scope_execution=(threading.get_ident(),prepared,admission,root,artifacts,lock)
+        try:yield root, artifacts
+        finally:
+            if scope_execution is not None:store._scope_execution=None
     finally:
         primary = __import__('sys').exc_info()[1]
         for descriptor in reversed(descriptors):
@@ -2077,6 +2109,8 @@ def _publication_graph(store, state, artifacts, artifact, *, historical=None):
     """
     key = hashlib.sha256(artifact).hexdigest()
     class Graph(NativeOperationStore):
+        def _validate_scope_content(self,state,directory):
+            pass  # Pure prospective graph; the admitted source recipe proves outputs.
         def _verify(self, directory, digest_key, size=None):
             if digest_key == key:
                 _require(size == len(artifact), 'prospective artifact size mismatch')
@@ -2546,7 +2580,7 @@ def _validate_scope_pending(state):
     _id(pending['id']); _id(pending['record_id']); _hash(pending['candidate_digest'])
     record=state['records'].get(pending['record_id'])
     _require(record is not None and record['domain']=='scope' and
-             record['identity']['execution_policy']=='native-scope-v1' and
+             record['identity']['execution_policy'] in ('native-scope-v1','native-scope-v2') and
              record['status'] in ('preview','stale'), 'missing native scope provenance')
     current=state['records'].get(state['current']['scope'])
     _require(current is not None and (current['id']==record['id'] or
@@ -2558,23 +2592,24 @@ def _validate_scope_pending(state):
 
 
 class PreparedScope:
-    def __init__(self,store,initial,state,artifact,operation_id):
+    def __init__(self,store,initial,state,artifact,operation_id,payloads=()):
         self.store=store; self.initial=canonical(initial); self.state=canonical(state)
         self.artifact=artifact; self.operation_id=operation_id; self.owner_id=store.owner
+        self.payloads=tuple(payloads)
         self.current=self.initial; self.used=False
-        self.seal=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id)
+        self.seal=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads)
 
     def check(self):
         if (getattr(self.store,'_prepared_scope',None) is not self or self.store.owner!=self.owner_id or
-                getattr(self.store,'_scope_snapshot',None)!=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id) or
+                getattr(self.store,'_scope_snapshot',None)!=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads) or
                 (self.used,self.current)!=getattr(self.store,'_scope_progress',None)):
             raise Conflict('issued immutable scope preparation required')
         return self
 
 
-def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,transaction_id=None):
+def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,transaction_id=None,*,payloads=()):
     validate_identity(identity,'scope')
-    _require(identity['execution_policy']=='native-scope-v1' and type(artifact) is bytes,'native scope profile required')
+    _require(identity['execution_policy']=='native-scope-v2' and type(artifact) is bytes,'native scope profile required')
     with store.mutex,_publication_observe(store) as (root,artifacts):
         _require(root is not None,'established native baseline required')
         initial=_parse(store._read_file(root,'state.json'));store._validate(initial,artifacts)
@@ -2599,7 +2634,7 @@ def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,tr
         state['revision']+=1;state['updated_at']=timestamp
         store._maintain_anchors(state);store._compact_graph(state)
         _publication_graph(store,state,artifacts,artifact)
-        prepared=PreparedScope(store,initial,state,artifact,str(uuid.uuid4()))
+        prepared=PreparedScope(store,initial,state,artifact,str(uuid.uuid4()),payloads)
         store._prepared_scope=prepared;store._scope_snapshot=prepared.seal;store._scope_progress=(False,prepared.initial)
         return prepared
 
@@ -2607,7 +2642,7 @@ def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,tr
 def _accept_scope(store,prepared,admission):
     prepared.check();admission.qualify_scope(prepared)
     _require(not prepared.used,'scope recipe already consumed')
-    with store._locked() as (root,artifacts):
+    with _publication_observe(store) as (root,artifacts):
         _require(store._read_file(root,'state.json')==prepared.initial,'scope owner fenced')
         key,size=store._produce_artifact(artifacts,(prepared.artifact,))
         _require((key,size)==(hashlib.sha256(prepared.artifact).hexdigest(),len(prepared.artifact)),'scope artifact mismatch')
@@ -2629,7 +2664,9 @@ def _prepare_scope_transition(store,expected_revision,transaction_id,*,cancel=Fa
         _require(pending is not None and pending['id']==transaction_id,'current pending scope required')
         _require(initial['active'] is None and initial['recovery'] is None,'publication reconciliation required')
         record=initial['records'][pending['record_id']]
-        artifact=store._artifact(artifacts,record['artifact'],record['artifact_size'])
+        if not cancel and record['identity']['execution_policy']!='native-scope-v2':
+            raise Conflict('legacy-scope-v1-reopen-requires-explicit-migration')
+        artifact=b'' if cancel else store._artifact(artifacts,record['artifact'],record['artifact_size'])
         state=copy.deepcopy(initial)
         if not cancel:
             state['scope_pending']['owner']=store.owner
@@ -2665,3 +2702,102 @@ def _scope_authority(store):
 
 
 NativeOperationStore.scope_authority=_scope_authority
+
+
+def _scope_content_identity(info):
+    # Reads may change atime; identity and content metadata must stay stable.
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+
+
+def _scope_refs(self,state,directory):
+    """Only the canonical pending scope owns payloads; retained history does not."""
+    pending=state.get('scope_pending')
+    if pending is None:return ()
+    record=state['records'][pending['record_id']]
+    if record['identity']['execution_policy']!='native-scope-v2':return ()
+    import native_publication as publication
+    ContentRef=publication.save.ContentRef
+    value=_parse(self._artifact(directory,record['artifact'],record['artifact_size']))
+    _require(value.get('profile')=='native-scope-review-v2','unsupported pending scope content profile')
+    found={}
+    def walk(item):
+        if type(item) is ContentRef:
+            previous=found.setdefault(item.key,item)
+            _require(previous==item,'conflicting content descriptors')
+        elif isinstance(item,(tuple,list)):
+            for child in item:walk(child)
+        elif hasattr(item,'__dataclass_fields__'):
+            for name in item.__dataclass_fields__:walk(getattr(item,name))
+    for field in ('blobs','excluded_unsaved','removed_before','baseline_blobs','review'):
+        walk(publication._decode(value[field]))
+    return tuple(found[key] for key in sorted(found))
+
+
+@contextmanager
+def _verified_scope_blob(self,directory,ref):
+    import native_publication as publication
+    ContentRef=publication.save.ContentRef
+    _require(type(ref) is ContentRef,'typed content reference required')
+    name=ref.key+'.blob'
+    fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+    identity=_scope_content_identity
+    try:
+        self._regular(fd);before=identity(os.fstat(fd))
+        raw=hashlib.sha256();git=hashlib.new(ref.object_format,b'blob '+str(ref.size).encode()+b'\0')
+        count=0;binary=False
+        while True:
+            chunk=os.read(fd,CHUNK_SIZE)
+            if not chunk:break
+            count+=len(chunk);_require(count<=ref.size,'content size exceeded')
+            raw.update(chunk);git.update(chunk);binary=binary or b'\0' in chunk
+        _require((raw.hexdigest(),count,git.hexdigest(),binary)==(ref.key,ref.size,ref.oid,ref.binary),'content descriptor mismatch')
+        _require(identity(os.fstat(fd))==before==identity(os.stat(name,dir_fd=directory,follow_symlinks=False)),'content route changed')
+        os.lseek(fd,0,os.SEEK_SET)
+        yield fd
+        _require(identity(os.fstat(fd))==before==identity(os.stat(name,dir_fd=directory,follow_symlinks=False)),'content route changed during consumption')
+    finally:os.close(fd)
+
+
+def _install_scope_blobs(self,prepared,admission):
+    prepared.check();admission.qualify_scope(prepared)
+    with _publication_observe(self) as (root,directory):
+        for ref,producer in prepared.payloads:
+            temporary='.tmp-'+str(uuid.uuid4())
+            try:
+                try:
+                    with self._verified_scope_blob(directory,ref):pass
+                except FileNotFoundError:
+                    fd=os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory)
+                    with os.fdopen(fd,'wb') as target:
+                        from native_publication import save
+                        ContentSink=save.ContentSink
+                        sink=ContentSink(ref.size,ref.object_format,target)
+                        producer(sink)
+                        _require(sink.reference()==ref,'content producer changed')
+                        target.flush();self.fault('scope_blob_written');os.fsync(target.fileno())
+                    self.fault('scope_blob_fsynced')
+                    # link is atomic and cannot overwrite a concurrent immutable name.
+                    try:os.link(temporary,ref.key+'.blob',src_dir_fd=directory,dst_dir_fd=directory,follow_symlinks=False)
+                    except FileExistsError:
+                        with self._verified_scope_blob(directory,ref):pass
+                    os.unlink(temporary,dir_fd=directory)
+                    self.fault('scope_blob_installed')
+                os.fsync(directory);self.fault('scope_blob_durable')
+                admission.acknowledge_scope_blob(prepared,ref)
+            finally:
+                try:os.unlink(temporary,dir_fd=directory)
+                except FileNotFoundError:pass
+
+
+NativeOperationStore._scope_refs=_scope_refs
+NativeOperationStore._verified_scope_blob=_verified_scope_blob
+NativeOperationStore.install_scope_blobs=_install_scope_blobs
+
+
+
+def _validate_scope_content(self,state,directory):
+    for ref in self._scope_refs(state,directory):
+        with self._verified_scope_blob(directory,ref):pass
+
+
+NativeOperationStore._validate_scope_content=_validate_scope_content

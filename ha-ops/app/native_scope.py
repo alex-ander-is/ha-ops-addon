@@ -25,6 +25,22 @@ from native_operations import (NativeOperationStore, canonical, digest, encode_n
                                decode_native_path, Conflict, _parse, _publication_observe)
 
 
+ContentSink=save.ContentSink
+
+
+def _git_ref(git,oid):
+    # copy_blob already verifies Git identity and declared length. The first
+    # pass counts without a Git header; the second derives the raw/Git receipt.
+    class Count:
+        size=0
+        def write(self,chunk):self.size+=len(chunk);return len(chunk)
+    count=Count();git.copy_blob(oid,count)
+    sink=ContentSink(count.size,'sha1' if len(oid)==40 else 'sha256');git.copy_blob(oid,sink)
+    ref=sink.reference()
+    if ref.oid!=oid:raise Conflict('git-content-identity-mismatch')
+    return ref
+
+
 def _inside(path,scope):
     return any(inventory.beneath(path,p) for p in scope)
 
@@ -129,8 +145,8 @@ def last_managed_context(git,tip,paths):
                 for path in sorted(relevant):
                     record=records.get(path)
                     if record is None or record.kind!='file':raise inventory.Blocked('last-managed-leaf-metadata-unavailable')
-                    sink=io.BytesIO();git.copy_blob(by_path[path].oid,sink);content=sink.getvalue()
-                    state=preview.FileState(by_path[path].oid,record,len(content),b'\0' in content)
+                    content=_git_ref(git,by_path[path].oid)
+                    state=preview.FileState(by_path[path].oid,record,content.size,content.binary)
                     level.append(save.HistoricalContext(path,oid,tree,state,
                         tuple(records[parent] for parent in sorted(metadata.ancestors((path,)))),content))
             next_level.extend(parents)
@@ -283,43 +299,52 @@ class NativeScope:
                 save._digest((tree,git.resolve_tree_source(source.remote_oid)[1],b'commit',sd,manifest_oid)),b'commit',parents,review)
             # Complete durable diff exposes every blob, both metadata manifests,
             # exact scope/rules, and excluded unsaved bytes in a separate section.
-            blobs={};excluded=[];before_blobs=[]
+            blobs={};excluded=[];before_blobs=[];producers={}
+            def remember(ref,producer):
+                previous=producers.setdefault(ref.key,(ref,producer))
+                if previous[0]!=ref:raise Conflict('conflicting-content-receipt')
+                return ref
+            def git_content(oid):
+                ref=_git_ref(git,oid)
+                return remember(ref,lambda sink,oid=oid:git.copy_blob(oid,sink))
+            def live_content(path,state):
+                def produce(sink):
+                    current,_=preview._live_file(p.binding,path,width,sink)
+                    if current!=state:raise preview.Stale('scope-live-copy-changed')
+                sink=ContentSink(state.size,candidate.object_format);produce(sink)
+                return remember(sink.reference(),produce)
+            def generated(data):
+                sink=ContentSink(len(data),candidate.object_format);sink.write(data)
+                return remember(sink.reference(),lambda sink,data=data:sink.write(data))
             for entry in expected:
-                if entry.path==metadata.MANIFEST_PATH:data=payload
-                elif entry.path==b'.gitignore':data=rules
-                elif entry.path in added:
-                    sink=io.BytesIO();current,_=preview._live_file(p.binding,entry.path,width,sink)
-                    if current!=live[entry.path]:raise preview.Stale('scope-live-copy-changed')
-                    data=sink.getvalue()
-                else:
-                    sink=io.BytesIO();git.copy_blob(entry.oid,sink);data=sink.getvalue()
-                blobs[entry.path]=data
+                if entry.path==metadata.MANIFEST_PATH:ref=generated(payload)
+                elif entry.path==b'.gitignore':ref=generated(rules)
+                elif entry.path in added:ref=live_content(entry.path,live[entry.path])
+                else:ref=git_content(entry.oid)
+                blobs[entry.path]=ref
             for path in sorted(removed):
-                sink=io.BytesIO();git.copy_blob(remote_states[path].oid,sink)
-                before_blobs.append((path,remote_states[path],sink.getvalue()))
+                before_blobs.append((path,remote_states[path],git_content(remote_states[path].oid)))
             excluded_paths={path for path in live if _inside(path,old.allowlist) and not _inside(path,new.allowlist)}|removed
             for path in sorted(excluded_paths):
                 actual=live.get(path);prior=remote_states.get(path)
                 if actual is not None and (prior is None or (actual.oid,actual.record)!=(prior.oid,prior.record)):
-                    sink=io.BytesIO();current,_=preview._live_file(p.binding,path,width,sink)
-                    if current!=actual:raise preview.Stale('excluded-unsaved-copy-changed')
-                    excluded.append((path,actual,sink.getvalue()))
+                    excluded.append((path,actual,live_content(path,actual)))
                 elif actual is None:excluded.append((path,None,None))
-            baseline_blobs=[]
-            for entry in remote:
-                sink=io.BytesIO();git.copy_blob(entry.oid,sink)
-                baseline_blobs.append((entry.path,sink.getvalue()))
+            baseline_blobs=[(entry.path,git_content(entry.oid)) for entry in remote]
+            for row in history:
+                if row.content is not None:
+                    remember(row.content,lambda sink,oid=row.content.oid:git.copy_blob(oid,sink))
             baseline_missing=tuple(path for path in (b'.gitignore',metadata.MANIFEST_PATH) if path not in {entry.path for entry in remote})
             import native_publication as publication
-            artifact=canonical(dict(profile='native-scope-review-v1',candidate=publication._encode(candidate),
+            artifact=canonical(dict(profile='native-scope-review-v2',candidate=publication._encode(candidate),
                 review=publication._encode(review),blobs=publication._encode(tuple(sorted(blobs.items()))),
                 excluded_unsaved=publication._encode(tuple(excluded)),removed_before=publication._encode(tuple(before_blobs)),baseline_blobs=publication._encode(tuple(baseline_blobs)),
                 baseline_missing=publication._encode(baseline_missing)))
             identity=publication._candidate_identity(candidate,source.remote_oid,b'/scope-review','refs/heads/scope-review',source.base_ref,source.base_oid)
-            identity['execution_policy']='native-scope-v1'
+            identity['execution_policy']='native-scope-v2'
             identity['effect']['after']=digest([candidate.candidate_digest,hashlib.sha256(artifact).hexdigest()])
             transaction_id=transaction_id or (state.get('scope_pending') or {}).get('id')
-            prepared=self.store.prepare_scope(expected_revision,identity,artifact,candidate.candidate_digest,transaction_id)
+            prepared=self.store.prepare_scope(expected_revision,identity,artifact,candidate.candidate_digest,transaction_id,payloads=tuple(producers[key] for key in sorted(producers)))
             sources=tuple((path,disk.source(p.binding.root+b'/'+path)) for path in sorted(added))
             evidence=Evidence(prepared.operation_id,prepared.owner_id,selected=sources,base_tree=candidate.baseline_tree_oid,
                 candidate_manifest=payload,candidate_removals=tuple(sorted(removed)),candidate_final=tuple(e.path for e in expected),
@@ -331,25 +356,30 @@ class NativeScope:
             self.saver._publication_fence(candidate,review)
             with disk.guard(plan) as admission:
                 admission.create_scope_directories(prepared)
-                self._materialize(candidate,review,selection,blobs,admission,prepared.operation_id,prepared.owner_id)
-                self.saver._publication_fence(candidate,review)
-                self.store.accept_scope(prepared,admission)
+                with self.store.mutex,_publication_observe(self.store,scope_execution=(prepared,admission)):
+                    self.store.install_scope_blobs(prepared,admission)
+                    self._materialize(candidate,review,selection,blobs,admission,prepared.operation_id,prepared.owner_id)
+                    self.saver._publication_fence(candidate,review)
+                    self.store.accept_scope(prepared,admission)
             self.saver._issue_scope(candidate,review,self.store);self._issued=(candidate,review)
             return candidate,review
 
     def _materialize(self,candidate,review,selection,blobs,admission,operation_id,owner_id):
         git=self.saver.preview.git;width=40 if candidate.object_format=='sha1' else 64
         with git.isolated_index(candidate.baseline_tree_oid,operation_id=operation_id,owner_id=owner_id,admission=admission) as handle:
-            entries=[];removals=[]
-            for row in review.selected:
-                if row.after is None:removals.append(row.path)
-                else:
-                    result=git.write_blob_stream(io.BytesIO(blobs[row.path]),operation_id=operation_id,owner_id=owner_id,admission=admission)
-                    if result.oid!=row.after.oid:raise preview.Stale('scope-blob-mismatch')
-                    entries.append(IndexEntry(row.path,b'100755' if row.after.record.mode&0o100 else b'100644',result.oid,0))
-            metadata.stage_candidate(git,handle,selection,entries=entries,removals=removals,width=width,admission=admission)
-            result=git.write_blob_stream(io.BytesIO(review.rules),operation_id=operation_id,owner_id=owner_id,admission=admission)
-            git.update_index(handle,(IndexEntry(b'.gitignore',b'100644',result.oid,0),))
+            entries=[]
+            with _publication_observe(self.store) as (_,directory):
+                for path,ref in sorted(blobs.items()):
+                    if path not in {row.path for row in review.selected if row.after is not None}|{metadata.MANIFEST_PATH,b'.gitignore'}:continue
+                    with self.store._verified_scope_blob(directory,ref) as fd:
+                        with os.fdopen(os.dup(fd),'rb') as source:
+                            result=git.write_blob_stream(source,operation_id=operation_id,owner_id=owner_id,admission=admission)
+                    if result.oid!=ref.oid:raise preview.Stale('scope-blob-mismatch')
+                    record=selection.manifest.by_path.get(path)
+                    mode=b'100755' if record is not None and record.mode&0o100 else b'100644'
+                    entries.append(IndexEntry(path,mode,result.oid,0))
+            removals=tuple(row.path for row in review.selected if row.after is None)
+            git.update_index(handle,entries,removals=removals)
             actual=git.write_tree(handle,allowed_paths=tuple(blobs))
             if actual!=candidate.tree_oid:raise inventory.Blocked('exact-scope-tree-mismatch')
 
@@ -359,7 +389,37 @@ class NativeScope:
     def reviewed_diff(self):
         diagnostic=self.diagnose();pending=diagnostic['transaction']
         if pending is None:raise Conflict('no-pending-scope')
+        with _publication_observe(self.store) as (root,_):
+            state=_parse(self.store._read_file(root,'state.json'))
+            record=state['records'][pending['record_id']]
+            if record['identity']['execution_policy']!='native-scope-v2':
+                raise Conflict('legacy-scope-v1-review-requires-explicit-migration')
         return self.store.read_diff(pending['record_id'])
+
+    def copy_review_content(self,section,path,destination,*,commit_oid=None):
+        import native_publication as publication
+        value=_parse(self.reviewed_diff())
+        if value.get('profile')!='native-scope-review-v2':raise Conflict('legacy-scope-v1-reopen-requires-explicit-migration')
+        fields={'final':'blobs','baseline':'baseline_blobs','removed':'removed_before','excluded':'excluded_unsaved'}
+        if section=='history':
+            if commit_oid is None:raise Conflict('exact-history-commit-required')
+            rows=publication._decode(value['review']).history
+            refs=[row.content for row in rows if row.path==path and row.commit_oid==commit_oid]
+        elif section in fields and commit_oid is None:
+            rows=publication._decode(value[fields[section]])
+            refs=[row[-1] for row in rows if row[0]==path]
+        else:raise Conflict('unknown-review-section')
+        if len(refs)!=1 or type(refs[0]) is not save.ContentRef:raise Conflict('review-content-absent-or-unknown')
+        ref=refs[0]
+        with _publication_observe(self.store) as (_,directory):
+            with self.store._verified_scope_blob(directory,ref) as fd:
+                sink=ContentSink(ref.size,ref.object_format,destination)
+                while True:
+                    chunk=os.read(fd,65536)
+                    if not chunk:break
+                    sink.write(chunk)
+                if sink.reference()!=ref:raise Conflict('review-content-changed')
+        return ref.size
 
     def lifecycle(self,reason='refresh'):
         if reason not in ('refresh','restart','update'):raise Conflict('invalid-scope-lifecycle')
@@ -411,7 +471,7 @@ class NativeScope:
             prepared=self.store.prepare_scope_transition(expected_revision,pending['id'])
             import native_publication as publication
             value=_parse(prepared.artifact)
-            if canonical(value)!=prepared.artifact or value.get('profile')!='native-scope-review-v1':
+            if canonical(value)!=prepared.artifact or value.get('profile')!='native-scope-review-v2':
                 raise Conflict('canonical-durable-scope-artifact-required')
             candidate=publication._decode(value['candidate']);review=publication._decode(value['review'])
             if (type(candidate) is not save.Candidate or type(review) is not save.ScopeReview or
@@ -431,8 +491,10 @@ class NativeScope:
             if set(blobs)!={e.path for e in expected}:raise Conflict('complete-durable-scope-blobs-required')
             width=40 if candidate.object_format=='sha1' else 64
             for entry in expected:
-                if save._blob(blobs[entry.path],width)!=entry.oid:raise Conflict('durable-scope-blob-mismatch')
+                if type(blobs[entry.path]) is not save.ContentRef or blobs[entry.path].oid!=entry.oid:raise Conflict('durable-scope-blob-mismatch')
             if _tree(expected,width)!=candidate.tree_oid:raise Conflict('durable-scope-tree-mismatch')
+            # Reopen has no new payload outputs. Existing canonical closure is
+            # verified by diagnose and every held consumption.
             sources=tuple((row.path,disk.source(candidate.binding.root+b'/'+row.path)) for row in review.selected if row.after is not None)
             evidence=Evidence(prepared.operation_id,prepared.owner_id,selected=sources,base_tree=candidate.baseline_tree_oid,
                 candidate_manifest=payload,candidate_removals=tuple(row.path for row in review.selected if row.after is None),
@@ -441,9 +503,11 @@ class NativeScope:
             self._admitted(plan)
             with disk.guard(plan) as admission:
                 admission.create_scope_directories(prepared)
-                self._materialize(candidate,review,selection,blobs,admission,prepared.operation_id,prepared.owner_id)
-                self.saver._publication_fence(candidate,review)
-                self.store.accept_scope(prepared,admission)
+                with self.store.mutex,_publication_observe(self.store,scope_execution=(prepared,admission)):
+                    self.store.install_scope_blobs(prepared,admission)
+                    self._materialize(candidate,review,selection,blobs,admission,prepared.operation_id,prepared.owner_id)
+                    self.saver._publication_fence(candidate,review)
+                    self.store.accept_scope(prepared,admission)
             self.saver._issue_scope(candidate,review,self.store);self._issued=(candidate,review)
             return candidate,review
 

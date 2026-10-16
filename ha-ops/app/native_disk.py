@@ -1508,6 +1508,15 @@ class NativeDisk:
                 v=add(b'data/native-operations',len(scope_preparation.state),'full-scope-state-overlap')
                 generated_controls[v.key]=max(generated_controls.get(v.key,0),len(scope_preparation.state))
                 add(b'data/native-operations/artifacts',len(scope_preparation.artifact),'full-scope-artifact-overlap')
+                from native_publication import save
+                ContentSink=save.ContentSink
+                for ref,producer in scope_preparation.payloads:
+                    sink=ContentSink(ref.size,ref.object_format);producer(sink)
+                    if sink.reference()!=ref:raise Blocked('scope-source-receipt-changed')
+                    target=b'data/native-operations/artifacts/'+ref.key.encode()+b'.blob'
+                    add(Target(target,'file'),ref.size,'scope-immutable-content',proof=('scope-blob',ref))
+                    add(b'data/native-operations/artifacts',ref.size,'scope-content-temp-overlap')
+
             for control in evidence.controls:
                 if not isinstance(control, Control) or not isinstance(control.payload, bytes):
                     raise Blocked("exact-control-serialization-required")
@@ -2027,6 +2036,20 @@ class NativeDisk:
                 raise Blocked("private-state-directories-required")
             deadline = time.monotonic() + self.limits.seconds
             class Observer(NativeOperationStore):
+                def _validate_scope_content(observer,state,directory):
+                    for ref in observer._scope_refs(state,directory):
+                        name=ref.key+'.blob'
+                        fd=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                        try:
+                            observer._regular(fd);before=_observation(os.fstat(fd))
+                            token=(name,tuple(sorted(route.items())),_identity(os.fstat(directory)),before,ref,ref.size)
+                            if token not in cache:
+                                with observer._verified_scope_blob(directory,ref):pass
+                                cache[token]=ref.size
+                            if (_observation(os.fstat(fd))!=before or
+                                    _observation(os.stat(name,dir_fd=directory,follow_symlinks=False))!=before):
+                                raise Blocked('changed-pending-scope-content')
+                        finally:os.close(fd)
                 def _verify(observer, directory, key, size=None):
                     # Keep canonical graph validation; replace only its
                     # artifact reader with a bounded, context-local proof.
@@ -2128,7 +2151,20 @@ class NativeDisk:
             locks = {}
             for path in (b"data/native-operations/lock", b"data/native/git-resources/journal.lock"):
                 expected = admission._owner_locks[path] if admission is not None else None
-                locks[path] = stack.enter_context(self._idle_lock(path, expected))
+                scope=evidence.scope_preparation
+                held=getattr(scope.store,'_scope_execution',None) if scope is not None else None
+                if path==b'data/native-operations/lock' and held is not None and admission is not None:
+                    scope.check()
+                    if (held[:3]!=(threading.get_ident(),scope,admission) or not admission.active or
+                            admission.plan.evidence.scope_preparation is not scope):
+                        raise Blocked('foreign-scope-critical-section')
+                    info=os.fstat(held[5]);source=self.source(self.root+b'/'+path)
+                    if _observation(info)!=source.observation or source.observation[:3]!=expected:
+                        raise Blocked('changed-scope-critical-section')
+                    fcntl.flock(held[5],fcntl.LOCK_EX|fcntl.LOCK_NB)
+                    locks[path]=source.observation[:3]
+                else:
+                    locks[path] = stack.enter_context(self._idle_lock(path, expected))
             self._inspect_competitors(evidence, cache if cache is not None else {}, admission)
             if admission is not None:
                 # A prospective lock is adopted only while its actual kernel
@@ -2388,6 +2424,19 @@ class Admission:
                     os.fsync(fd);os.fsync(parent)
                     self.record_directory_creation(path[len(self.disk.root)+1:],fd)
                 finally:os.close(fd)
+
+    def acknowledge_scope_blob(self,prepared,ref):
+        prepared.check()
+        if self.plan.evidence.scope_preparation is not prepared or (ref not in tuple(row[0] for row in prepared.payloads)):
+            raise Blocked('issued-scope-payload-receipt-required')
+        relative=b'data/native-operations/artifacts/'+ref.key.encode()+b'.blob'
+        path=self.disk.root+b'/'+relative
+        if dict(self.plan.output_files).get(path)!=('scope-blob',ref):raise Blocked('unplanned-scope-payload')
+        with _directory(os.path.dirname(path)) as directory:
+            with prepared.store._verified_scope_blob(directory,ref) as fd:
+                info=os.fstat(fd)
+                self._namespace[path]=_identity(info);self._created_files[path]=_observation(info)
+        self.revalidate()
 
     def acknowledge_scope(self,prepared):
         prepared.check()
