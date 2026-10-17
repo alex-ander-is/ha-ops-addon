@@ -659,14 +659,24 @@ def test_network_tmpfs_physical_peak_fits_single_frozen_forecast(tmp_path,monkey
 
 
 @linux_network
-def test_receiver_acceptance_readback_failure_lifecycle_and_explicit_same_commit_reconcile(tmp_path,monkeypatch):
+@pytest.mark.parametrize('retained_scratch',[False,True])
+def test_receiver_acceptance_readback_failure_lifecycle_and_explicit_same_commit_reconcile(tmp_path,monkeypatch,retained_scratch):
     import native_publication as pub
     from native_operations import NativeOperationStore
     import uuid
     control=receiver_control({'drop_receive_response':True,'fail_upload_after_receive':True})
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
+        rmdir=os.rmdir;cleanup_failed=[]
+        def retain_owned_pack(path,*args,**kwargs):
+            if (retained_scratch and control.get('fail_upload') and path==b'pack'
+                    and kwargs.get('dir_fd') is not None and not cleanup_failed):
+                cleanup_failed.append(True)
+                raise OSError(5,'owned readback scratch cleanup interrupted')
+            return rmdir(path,*args,**kwargs)
+        monkeypatch.setattr(os,'rmdir',retain_owned_pack)
         with pytest.raises(pub.PublicationError,match='graph fetch unavailable') as error:x.publish(c,r,**kw)
         op=error.value.operation_id;state=o.read();worker=state['workers'][op]
+        if retained_scratch:assert cleanup_failed and len(x.transport_debts())==1
         intent=pub.validate_intent(o._prepared_publication.artifact)
         assert worker['phase']=='recovery_required' and worker['publication_attempt']=='possible'
         assert worker['publication_outcome'] is None and rig.adapter.read_ref(kw['local_ref']).oid==kw['expected_local']
@@ -679,6 +689,21 @@ def test_receiver_acceptance_readback_failure_lifecycle_and_explicit_same_commit
         assert resumed.diagnose(op)['execution_authority'] is False and not calls
         control.clear()
         current=replacement.read()
+        debts=resumed.transport_debts()
+        if debts:
+            # Failed graph readback may retain exact owned scratch. Lifecycle
+            # and reconcile cannot silently consume this separate local debt.
+            from native_disk import Blocked as DiskBlocked
+            grant=resumed.approve_recovery(op,expected_revision=current['revision'],command_id=str(uuid.uuid4()),pending_effect='reconcile')
+            with pytest.raises(DiskBlocked,match='prior-transport-scratch-requires-explicit-settlement'):
+                resumed.resume(grant)
+            before_calls=len(calls)
+            for debt in debts:
+                assert debt['operation']==op and debt['owner']==worker['owner'] and debt['phase']=='debt'
+                result=resumed.settle_transport_resource(debt['resource_id'],operation_id=op,owner_id=debt['owner'])
+                assert result.state=='removed' and not result.cleanup_errors
+            assert len(calls)==before_calls and not resumed.transport_debts()
+            assert replacement.read()==current
         grant=resumed.approve_recovery(op,expected_revision=current['revision'],command_id=str(uuid.uuid4()),pending_effect='reconcile')
         result=resumed.resume(grant)
         assert result['status']=='completed' and result['commit_oid']==intent.commit_oid
