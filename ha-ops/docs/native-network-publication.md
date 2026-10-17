@@ -194,3 +194,11 @@ Dev-only package pins were checked against
 GitHub documents supported [remote URL/authentication modes](https://docs.github.com/en/get-started/git-basics/about-remote-repositories)
 and [single-repository deploy keys with explicit write access](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/managing-deploy-keys).
 No real GitHub connection or publication was used for qualification.
+# Original App runtime binding
+
+The network transport now checks the exact
+[original App runtime profile](native-runtime.md), separately from Debian
+development qualification. Native stays dormant. Git 2.54 qualification must
+execute the original App SSH/HTTPS helpers, packed/shallow output, authentication,
+limits, independent graph/CAS/recovery and physical allocation matrix. Unknown
+tuples refuse before network/allocation; there is no version-override switch.

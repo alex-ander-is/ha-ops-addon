@@ -35,6 +35,179 @@ def wrapper():
     return module
 
 
+def runtime_wrapper():
+    source = SOURCE.parent / 'runtime_qualification.py'
+    spec = importlib.util.spec_from_file_location('runtime_qualification_test', source)
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(source.parent))
+    try: spec.loader.exec_module(module)
+    finally: sys.path.remove(str(source.parent))
+    return module
+
+
+def runtime_inspection():
+    return {'Id': 'client', 'Config': {'Image': 'sha256:app', 'Labels': {'ha-ops.dev.run': 'owner'}, 'Env': []},
+            'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True},
+            'Mounts': [{'Type': 'bind', 'Destination': '/tests', 'Source': '/owned/tests', 'RW': False},
+                       {'Type': 'volume', 'Name': 'owned-tmpfs', 'Destination': '/workspace/output', 'RW': True}]}
+
+
+def test_original_runtime_accepts_only_exact_owned_mounts():
+    subject = runtime_wrapper()
+    subject.verify_container(runtime_inspection(), 'client', 'owner', 'sha256:app',
+                             {'/tests': (Path('/owned/tests'), False)}, 'none', 'owned-tmpfs')
+
+
+@pytest.mark.parametrize('mutation', ['network', 'image', 'app-overlay', 'foreign-volume', 'writable-tests',
+                                   'privileged', 'devices', 'ports', 'proxy', 'rootfs'])
+def test_original_runtime_refuses_foreign_execution_contour(mutation):
+    subject = runtime_wrapper(); entry = runtime_inspection()
+    if mutation == 'network': entry['HostConfig']['NetworkMode'] = 'host'
+    elif mutation == 'image': entry['Config']['Image'] = 'foreign'
+    elif mutation == 'app-overlay': entry['Mounts'].append({'Type': 'bind', 'Destination': '/app', 'Source': '/development/app', 'RW': False})
+    elif mutation == 'foreign-volume': entry['Mounts'][1]['Name'] = 'foreign'
+    elif mutation == 'writable-tests': entry['Mounts'][0]['RW'] = True
+    elif mutation == 'privileged': entry['HostConfig']['Privileged'] = True
+    elif mutation == 'devices': entry['HostConfig']['Devices'] = ['/dev/sda']
+    elif mutation == 'ports': entry['HostConfig']['PortBindings'] = {'80/tcp': [{'HostPort': '80'}]}
+    elif mutation == 'proxy': entry['Config']['Env'] = ['HTTPS_PROXY=http://foreign']
+    elif mutation == 'rootfs': entry['HostConfig']['ReadonlyRootfs'] = False
+    with pytest.raises(subject.vm.Refused):
+        subject.verify_container(entry, 'client', 'owner', 'sha256:app',
+                                 {'/tests': (Path('/owned/tests'), False)}, 'none', 'owned-tmpfs')
+
+
+def test_runtime_skipped_required_test_is_not_qualification():
+    subject = runtime_wrapper()
+    result = subject.test_accounting('<testsuites><testsuite tests="1"><testcase classname="network" name="required"><skipped message="missing ssh"/></testcase></testsuite></testsuites>', expected=['network.py::required'])
+    assert result['collected'] == 1 and result['passed'] == 0
+    assert result['required_unexecuted'] == [{'id': 'network.py::required', 'reason': 'missing ssh'}]
+
+
+def test_runtime_declared_scope_skip_cannot_waive_an_unrelated_obligation():
+    subject = runtime_wrapper()
+    reason = 'root SSH fixture; independent graph-loss recovery is qualified through HTTPS'
+    unrelated = subject.test_accounting('<testsuites><testsuite tests="1"><testcase classname="network" name="required"><skipped message="' + reason + '"/></testcase></testsuite></testsuites>', expected=['network.py::required'])
+    assert len(unrelated['required_unexecuted']) == 1
+    declared = subject.test_accounting('<testsuites><testsuite tests="1"><testcase classname="test_native_scope" name="test_scope_authenticated_network_publication_and_same_commit_recovery[ssh-accepted-readback-loss]"><skipped message="' + reason + '"/></testcase></testsuite></testsuites>', expected=['test_native_scope.py::test_scope_authenticated_network_publication_and_same_commit_recovery[ssh-accepted-readback-loss]'])
+    assert declared['required_unexecuted'] == []
+    assert len(declared['declared_unexecuted']) == 1
+
+
+def test_runtime_ext4_skip_is_bound_to_exact_case_and_profile():
+    subject = runtime_wrapper()
+    xml = '<testsuites><testsuite tests="1"><testcase classname="test_native_ext4" name="test_network_publication_ext4_frozen_physical_peak"><skipped message="different bounded ext4 profile"/></testcase></testsuite></testsuites>'
+    expected = ['test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak']
+    assert len(subject.test_accounting(xml, expected=expected, ext4_profile='allocation')['required_unexecuted']) == 1
+    assert subject.test_accounting(xml, expected=expected, ext4_profile='bytes')['required_unexecuted'] == []
+
+
+@pytest.mark.parametrize('kind', ['absent', 'duplicate', 'unexpected', 'suite-count', 'no-manifest', 'contradictory'])
+def test_runtime_accounting_requires_the_reviewed_complete_identity_set(kind):
+    subject = runtime_wrapper()
+    cases = '<testcase classname="network" name="first"/>'
+    expected = ['network.py::first', 'network.py::second']
+    count = 1
+    if kind == 'duplicate': cases += cases; count = 2
+    elif kind == 'unexpected': cases += '<testcase classname="network" name="foreign"/>'; count = 2
+    elif kind == 'suite-count': count = 2; expected = ['network.py::first']
+    elif kind == 'no-manifest': expected = None
+    elif kind == 'contradictory':
+        cases = '<testcase classname="network" name="first"><skipped/><failure/></testcase>'
+        expected = ['network.py::first']
+    result = subject.test_accounting('<testsuites><testsuite tests="' + str(count) + '">' + cases + '</testsuite></testsuites>', expected=expected)
+    assert result['required_unexecuted']
+    if kind == 'contradictory': assert any('Contradictory' in error for error in result['suite_errors'])
+
+
+def dependency_fixture(tmp_path, monkeypatch):
+    import hashlib
+    import zipfile
+    subject = runtime_wrapper()
+    cache = tmp_path.resolve() / 'cache'; (cache / 'pip').mkdir(parents=True)
+    wheel = cache / 'pip' / 'pytest-8.4.2-py3-none-any.whl'
+    with zipfile.ZipFile(wheel, 'w') as archive: archive.writestr('pytest/__init__.py', 'reviewed = True\n')
+    (tmp_path / 'runtime-toolchain.json').write_text(json.dumps({'pytest_wheels': ['pytest==8.4.2 --hash=sha256:' + hashlib.sha256(wheel.read_bytes()).hexdigest()]}))
+    monkeypatch.setattr(subject, 'CACHE', cache)
+    monkeypatch.setattr(subject.vm, 'HERE', tmp_path.resolve())
+    return subject, cache
+
+
+def test_fresh_reviewed_dependencies_exclude_and_preserve_stale_ssl(tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    stale = cache / 'pytest-only'; stale.mkdir(); (stale / 'ssl.py').write_text('foreign = True\n')
+    fresh = subject.pytest_dependencies()
+    assert fresh != stale and not (fresh / 'ssl.py').exists()
+    assert (stale / 'ssl.py').read_text() == 'foreign = True\n'
+    assert subject.validate_dependencies(fresh)
+
+
+@pytest.mark.parametrize('kind', ['new-module', 'changed-file', 'symlink', 'empty-directory'])
+def test_reviewed_dependency_namespace_refuses_changes(tmp_path, monkeypatch, kind):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    fresh = subject.pytest_dependencies()
+    if kind == 'new-module': (fresh / 'ssl.py').write_text('foreign = True\n')
+    elif kind == 'changed-file': (fresh / 'pytest/__init__.py').write_text('foreign = True\n')
+    elif kind == 'symlink': (fresh / 'ssl.py').symlink_to(fresh / 'pytest/__init__.py')
+    else: (fresh / 'foreign').mkdir()
+    with pytest.raises(subject.vm.Refused): subject.validate_dependencies(fresh)
+
+
+def test_advertised_architectures_have_installable_profiles():
+    import yaml
+    root = SOURCE.parents[2]
+    config = yaml.safe_load((root / 'ha-ops/config.yaml').read_text())
+    build = yaml.safe_load((root / 'ha-ops/build.yaml').read_text())
+    assert set(config['arch']) == set(build['build_from']) == {'aarch64', 'amd64'}
+    for architecture in config['arch']:
+        assert (root / ('ha-ops/runtime-apk-' + architecture + '.lock')).is_file()
+    assert 'aarch64|amd64)' in (root / 'ha-ops/runtime-install.sh').read_text()
+    profile = json.loads((root / 'ha-ops/runtime-profile.json').read_text())
+    assert 'x86_64' not in profile['qualified']
+
+
+def test_receiver_control_observes_acknowledged_changes_both_directions(monkeypatch):
+    import network_publication_helpers as helper
+    values = {}
+    def request(**payload):
+        if payload['operation'] == 'set': values[payload['key']] = payload['value']
+        elif payload['operation'] == 'del': del values[payload['key']]
+        return dict(values)
+    monkeypatch.setattr(helper, 'receiver_request', request)
+    control = helper.ReceiverControl({'stall_upload': True})
+    assert values['stall_upload'] is True
+    values['upload_started'] = True
+    assert control.get('upload_started') is True
+    control['release_upload'] = True
+    assert values['release_upload'] is True
+    control.clear()
+    assert values == {}
+
+
+def test_runtime_payload_copy_retains_directory_and_executable_modes(tmp_path, monkeypatch):
+    subject = runtime_wrapper()
+    source = tmp_path / 'source'; source.mkdir(mode=0o755)
+    (source / 'app').mkdir(mode=0o755)
+    executable = source / 'app' / 'tool'; executable.write_text('#!/bin/sh\n'); executable.chmod(0o751)
+    destination = tmp_path / 'snapshot'
+    snapshot = {'records': {(): ('directory', (1, 1, 0o40755)), ('app',): ('directory', (1, 2, 0o40755))}}
+    def private_copy(source, destination, expected):
+        import shutil
+        shutil.copytree(source, destination)
+        destination.chmod(0o700); (destination / 'app').chmod(0o700)
+    monkeypatch.setattr(subject.vm, 'copy_input', private_copy)
+    subject.copy_preserving_modes(source, destination, snapshot)
+    assert destination.stat().st_mode & 0o777 == 0o755
+    assert (destination / 'app').stat().st_mode & 0o777 == 0o755
+    assert (destination / 'app' / 'tool').stat().st_mode & 0o777 == 0o751
+
+
+def test_ext4_runtime_owner_extension_does_not_admit_arbitrary_identity():
+    subject = wrapper()
+    with pytest.raises(subject.Refused, match='nobody'):
+        subject.ext4_guest('setup', 'a' * 32, owner=(0, 0))
+
+
 def topology_runner():
     source = Path(__file__).resolve().parent / "integration/run_native_topology.py"
     spec = importlib.util.spec_from_file_location("native_runner_local", source)

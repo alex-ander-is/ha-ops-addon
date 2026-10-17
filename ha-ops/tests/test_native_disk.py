@@ -224,6 +224,11 @@ def test_selection_spool_loose_index_trees_and_exact_reserve(fixture):
     assert any(n.startswith("stream-spool") for n in names)
     assert any(n.startswith("loose-blob") for n in names)
     assert "complete-index" in names and "index-lock-overlap" in names
+    # Git 2.54 always creates this extra empty per-worktree directory. Its
+    # physical block and inode must belong to the original frozen forecast.
+    refs = [a for a in plan.allocations if a.output == 'worktree-admin-refs-directory']
+    assert len(refs) == 1 and refs[0].inodes == 1
+    assert refs[0].logical == 0
     assert any(n.startswith("generated-tree") for n in names)
     assert sum(a.logical for a in plan.allocations) > 3 * 128 * 1024
     for r in plan.reserves:

@@ -1,0 +1,655 @@
+{
+  "pytest_wheels": [
+    "execnet==2.1.1 --hash=sha256:26dee51f1b80cebd6d0ca8e74dd8745419761d3bef34163928cbebbdc4749fdc",
+    "iniconfig==2.1.0 --hash=sha256:9deba5723312380e77435581c6bf4935c94cbfab9b1ed33ef8d238ea168eb760",
+    "packaging==25.0 --hash=sha256:29572ef2b1f17581046b3a2227d5c611fb25ec70ca1ba8554b24b0e69331a484",
+    "pluggy==1.6.0 --hash=sha256:e920276dd6813095e9377c0bc5566d94c932c33b27a3e3945d8389c374dd4746",
+    "pygments==2.19.2 --hash=sha256:86540386c03d588bb81d44bc3928634ff26449851e99741617ecb9037ee5ec0b",
+    "pytest==8.4.2 --hash=sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79",
+    "pytest_xdist==3.8.0 --hash=sha256:202ca578cfeb7370784a8c33d6d05bc6e13b4f25b5053c30a152269fd10f0b88"
+  ],
+  "required_matrix_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+  "runtime_qualification": {
+    "app_files": 39,
+    "app_manifest_sha256": "1cf5ee43e38377d9595fd06020976551e372edcfad24f92e2eaf8b8cbd0f2306",
+    "architecture": "aarch64",
+    "architecture_decision": "Human approved aarch64 and amd64 only; config/build/APK/pip architecture sets agree. amd64 remains resolved-only-unqualified.",
+    "base": "ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:1b29b917841ca169fa3bece7bb03ae366e9df94a4d382698796a44c5abb3f2b5",
+    "delivery_gates": [
+      "independent sealed-source review",
+      "foreman full repository gate and separate local commit"
+    ],
+    "execution": "native local Colima VM; not live HA",
+    "final_build": {
+      "app_manifest_equal": true,
+      "delta": "Only config.yaml architecture list removes armhf/armv7/i386. NativeGit/Save ran the previous image; all other correction proofs ran this rebuilt image. The original App modules and complete observed runtime tuple are identical.",
+      "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+      "observed_runtime_tuple_equal": true,
+      "previous_image_id": "sha256:9c3f180f610f2e3bc558f8796aa363768f88e4e91562f6b4fa22410cf2e71f14"
+    },
+    "historical_evidence": {
+      "applicable": "Immutable original App/tool tuple and installer failure checks remain unchanged. Old runtime proofs lacked closed test-dependency extraction and are superseded by correction proofs, rather than retrospectively attested. Old 1200-second core timeout is failed evidence.",
+      "directory": ".local/runtime-evidence/2026-10-16-aarch64"
+    },
+    "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+    "proofs": {
+      "ext4-allocation": {
+        "cleanup_errors": [],
+        "collected": 12,
+        "declared_unexecuted": [
+          {
+            "id": "test_native_ext4.py::test_kernel_byte_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_inode_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 9,
+        "recreated": {
+          "collected": 12,
+          "declared_unexecuted": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "different bounded ext4 profile"
+            }
+          ],
+          "passed": 1,
+          "required_unexecuted": [],
+          "skipped": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "different bounded ext4 profile"
+            }
+          ]
+        },
+        "report_sha256": "89865ceaac8793e30719cadcb813b41238d852f9c568217ba33a6e01967b73a0",
+        "required_group": "ext4",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [
+          {
+            "id": "test_native_ext4.py::test_kernel_byte_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_inode_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      },
+      "ext4-bytes": {
+        "cleanup_errors": [],
+        "collected": 12,
+        "declared_unexecuted": [
+          {
+            "id": "test_native_ext4.py::test_loose_index_worktree_save",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_control_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_independent_recovery_copies",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_no_reuse_repack",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_inode_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 3,
+        "recreated": {
+          "collected": 12,
+          "declared_unexecuted": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            }
+          ],
+          "passed": 1,
+          "required_unexecuted": [],
+          "skipped": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            }
+          ]
+        },
+        "report_sha256": "3f609c25d6e2f0215d6c57b29f6df9ad7cb7a47f5b8ea849814ae97f60d4ac60",
+        "required_group": "ext4",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [
+          {
+            "id": "test_native_ext4.py::test_loose_index_worktree_save",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_control_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_independent_recovery_copies",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_no_reuse_repack",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_inode_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      },
+      "ext4-inodes": {
+        "cleanup_errors": [],
+        "collected": 12,
+        "declared_unexecuted": [
+          {
+            "id": "test_native_ext4.py::test_loose_index_worktree_save",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_control_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_independent_recovery_copies",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_no_reuse_repack",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_byte_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 2,
+        "recreated": {
+          "collected": 12,
+          "declared_unexecuted": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "different bounded ext4 profile"
+            }
+          ],
+          "passed": 1,
+          "required_unexecuted": [],
+          "skipped": [
+            {
+              "id": "test_native_ext4.py::test_loose_index_worktree_save",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_control_atomic_overlap",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_independent_recovery_copies",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_no_reuse_repack",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_byte_enospc",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_kernel_inode_enospc",
+              "reason": "recreation verifies retained filesystem; original matrix retained"
+            },
+            {
+              "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+              "reason": "different bounded ext4 profile"
+            },
+            {
+              "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+              "reason": "different bounded ext4 profile"
+            }
+          ]
+        },
+        "report_sha256": "6dbb8f0e5dff34b89b65f646956f6a79f8fd2f54dbd143c902fb7d546e7b21ed",
+        "required_group": "ext4",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [
+          {
+            "id": "test_native_ext4.py::test_loose_index_worktree_save",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_existing_reflog_complete_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_native_publication_physical_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_control_atomic_overlap",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_independent_recovery_copies",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_no_reuse_repack",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_kernel_byte_enospc",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_short_and_eio_boundaries",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_publication_ext4_frozen_physical_peak",
+            "reason": "different bounded ext4 profile"
+          },
+          {
+            "id": "test_native_ext4.py::test_network_graph_fetch_real_kernel_enospc_after_admission",
+            "reason": "different bounded ext4 profile"
+          }
+        ],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      },
+      "keygen": {
+        "cleanup_errors": [],
+        "collected": 1,
+        "declared_unexecuted": [],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 1,
+        "report_sha256": "a355cd4dbaa412d2175e0464569b87ef02fc05c775b1e9a48b7342ff7ea4e59a",
+        "required_group": "keygen",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      },
+      "native-git": {
+        "cleanup_errors": [],
+        "collected": 577,
+        "declared_unexecuted": [],
+        "image_id": "sha256:9c3f180f610f2e3bc558f8796aa363768f88e4e91562f6b4fa22410cf2e71f14",
+        "passed": 577,
+        "report_sha256": "b6f3ed2910431daf192b2cc3b83cbdbfcec58a05511ce4e69de17dece614f0ef",
+        "required_group": "native-git",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 4
+      },
+      "native-save": {
+        "cleanup_errors": [],
+        "collected": 127,
+        "declared_unexecuted": [],
+        "image_id": "sha256:9c3f180f610f2e3bc558f8796aa363768f88e4e91562f6b4fa22410cf2e71f14",
+        "passed": 127,
+        "report_sha256": "b7700174d0f60aadedbc6646d3ab9d602b1f302d74a30adaa35ee000370f0445",
+        "required_group": "native-save",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 2
+      },
+      "native-scope-final": {
+        "cleanup_errors": [],
+        "collected": 70,
+        "declared_unexecuted": [
+          {
+            "id": "test_native_scope.py::test_scope_authenticated_network_publication_and_same_commit_recovery[ssh-accepted-readback-loss]",
+            "reason": "root SSH fixture; independent graph-loss recovery is qualified through HTTPS"
+          }
+        ],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 69,
+        "report_sha256": "31598af86140c02f2d4fe9cab93e7532714ac9d740744edb4ab8ee185f2f37d7",
+        "required_group": "native-scope",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [
+          {
+            "id": "test_native_scope.py::test_scope_authenticated_network_publication_and_same_commit_recovery[ssh-accepted-readback-loss]",
+            "reason": "root SSH fixture; independent graph-loss recovery is qualified through HTTPS"
+          }
+        ],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 2
+      },
+      "network": {
+        "cleanup_errors": [],
+        "collected": 102,
+        "declared_unexecuted": [],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 102,
+        "report_sha256": "761960b49476b73ea4882844a8b031def9520ad23bd4fe22bfedb02fda02e9f3",
+        "required_group": "network",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      },
+      "recreation": {
+        "cleanup_errors": [],
+        "collected": 1,
+        "declared_unexecuted": [],
+        "image_id": "sha256:85eb2d7ba8a5ba5ec56a5a9379fd1f28f6f40fa046448fe4f782fc024687309b",
+        "passed": 1,
+        "recreated": {
+          "collected": 1,
+          "declared_unexecuted": [],
+          "passed": 1,
+          "required_unexecuted": [],
+          "skipped": []
+        },
+        "report_sha256": "e949200b55047f253455501c3a99e9092fac29b63f00af7d381c65eea03baad2",
+        "required_group": "recreation",
+        "required_manifest_sha256": "36b7913b8047a6f45a96b075afb2ca476707b23356daf99e0a47c9cac4553933",
+        "required_unexecuted": [],
+        "skipped": [],
+        "test_dependency_manifest_sha256": "a23069a760fc74a3cd7d9bc137a470d9c4fe479b4eb19bbca9b4727d5e6ffdc1",
+        "workers": 0
+      }
+    },
+    "retained_evidence_directory": ".local/runtime-evidence/2026-10-17-aarch64-r1"
+  }
+}

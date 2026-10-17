@@ -1640,6 +1640,7 @@ class NativeDisk:
                         tree_entries[base64.b64encode(name).decode()] = file_record
                     admin_entries = {base64.b64encode(name).decode(): file_record for name in
                                      (b"HEAD", b"index", b"gitdir", b"commondir", b"locked", b"logs", b"logs/HEAD", b"ORIG_HEAD")}
+                    admin_entries[base64.b64encode(b"refs").decode()] = [ri.st_dev, 2**64 - 1, 0o700, "directory"]
                     journal["records"][rid] = {"operation": evidence.operation_id, "owner": evidence.owner_id,
                         "kind": "worktree", "phase": "creating", "root": [ri.st_dev, 2**64 - 1, 0o700],
                         "lease": [ri.st_dev, 2**64 - 1, 0o600], "entries": tree_entries,
@@ -1649,6 +1650,7 @@ class NativeDisk:
                         destination = b"data/native/git-resources" if name in ("owner.json", ".git") else b"data/native/repository.git/worktrees"
                         add(destination, size, "worktree-control:" + name)
                     add(b"data/native/repository.git/worktrees", 0, "worktree-admin-directory", directory=True)
+                    add(b"data/native/repository.git/worktrees", 0, "worktree-admin-refs-directory", directory=True)
                     add(b"data/native/git-resources", 0, "worktree-directory", directory=True)
                     add(b"data/native/git-resources", 0, "worktree-lease")
                 self._resource_entry_bound = max([3] + [len(r["entries"]) for r in journal["records"].values()])

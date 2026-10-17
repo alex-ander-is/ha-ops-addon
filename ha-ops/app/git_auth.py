@@ -112,7 +112,7 @@ def publication_auth(options,generated_key_path,generated_pub_path,*,known_hosts
             # Git closes nonstandard inherited FDs before launching SSH. The
             # owned Python process remains alive through command reaping, so
             # SSH opens its private sealed descriptor via this exact proc path.
-            argv=['ssh','-F',os.devnull,'-i','/proc/%d/fd/%d'%(os.getpid(),descriptor),
+            argv=['/usr/bin/ssh','-F',os.devnull,'-i','/proc/%d/fd/%d'%(os.getpid(),descriptor),
                   '-o','IdentitiesOnly=yes','-o','IdentityAgent=none','-o','BatchMode=yes',
                   '-o','StrictHostKeyChecking=yes','-o','UserKnownHostsFile='+os.fspath(known_hosts),
                   '-o','GlobalKnownHostsFile='+os.devnull,'-o','ProxyCommand=none','-o','ProxyJump=none',

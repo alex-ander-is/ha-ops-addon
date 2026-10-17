@@ -9,6 +9,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
+from network_publication_helpers import receiver_control
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import native_scope as scope
 import native_save as save
@@ -260,7 +261,7 @@ def test_scope_authenticated_network_publication_and_same_commit_recovery(tmp_pa
     candidate,review=owner.build((),expected_revision=store.read()['revision'])
     endpoint=tmp_path/'receiver.git'
     command(['git','--git-dir='+str(endpoint),'config','http.receivepack','true'],env=isolated_environment())
-    control={}
+    control=receiver_control()
     if failure in ('lost-ack','accepted-readback-loss'):control['drop_receive_response']=True
     if failure=='accepted-readback-loss':control['fail_upload_after_receive']=True
     with tempfile.TemporaryDirectory(prefix='scope-receiver-hooks-',dir='/workspace/output') as hooks:
@@ -754,7 +755,11 @@ def test_scope_real_content_memory_scaling(tmp_path):
     for megabytes in (4,24):
         child=tmp_path/str(megabytes);child.mkdir()
         script='from pathlib import Path;from test_native_scope import _scope_memory_probe;import json;print(json.dumps(_scope_memory_probe(Path('+repr(str(child))+'),'+str(megabytes*1024*1024)+')))'
-        env={**os.environ,'PYTHONPATH':str(Path(__file__).parent)+os.pathsep+str(Path(scope.__file__).parent),'PYTHONDONTWRITEBYTECODE':'1'}
+        paths = [str(Path(scope.__file__).parent), str(Path(__file__).parent)]
+        # Original-App qualification adds only reviewed pure Python pytest
+        # dependencies here; keep that same closed test mount in probe children.
+        if os.environ.get('HA_OPS_RUNTIME_RECEIVER_SOCKET'): paths.append('/testdeps')
+        env={**os.environ,'PYTHONPATH':os.pathsep.join(paths),'PYTHONDONTWRITEBYTECODE':'1'}
         result=subprocess.run([sys.executable,'-c',script],env=env,capture_output=True,text=True,timeout=180)
         assert result.returncode==0,result.stdout+result.stderr
         peaks.append(json.loads(result.stdout.strip().splitlines()[-1]))

@@ -606,9 +606,9 @@ class NetworkGitCLITransport(GitCLITransport):
             except FileNotFoundError:observation=None
             observed.append((path,observation))
         self._route_binding=tuple(observed)
-        version=subprocess.run(['/usr/bin/git','--version'],capture_output=True,timeout=5,env=git._environment())
-        _require(version.returncode==0 and version.stdout==b'git version 2.39.5\n' and not version.stderr,
-                 'qualified pinned Linux Git required')
+        from native_runtime import qualify,UnsupportedRuntime
+        try:self.runtime_profile=qualify()
+        except UnsupportedRuntime as error:raise PublicationError(str(error)) from error
 
     def _check(self):
         if (self.git,self.options,canonical(self.route.document()),self.endpoint,self.endpoint_identity,self.destination,self.timeout,self.max_output,self.max_commits,

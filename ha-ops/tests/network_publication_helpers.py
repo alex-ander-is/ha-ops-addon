@@ -14,7 +14,54 @@ import ssl
 import subprocess
 import threading
 import time
+import json
+import uuid
+from collections.abc import MutableMapping
 from urllib.parse import urlsplit
+
+
+def receiver_request(**request):
+    endpoint = os.environ['HA_OPS_RUNTIME_RECEIVER_SOCKET']
+    address = endpoint if endpoint.startswith('/') else ('127.0.0.1', int(endpoint.rsplit(':', 1)[1]))
+    with socket.socket(socket.AF_UNIX if isinstance(address, str) else socket.AF_INET) as connection:
+        connection.settimeout(15)
+        connection.connect(address)
+        connection.sendall(json.dumps(request).encode() + b'\n')
+        with connection.makefile('rb') as stream: response = json.loads(stream.readline(1024 * 1024))
+    if not response['ok']: raise RuntimeError('Receiver control failed: ' + response['error'])
+    return response['result']
+
+
+class ReceiverControl(MutableMapping):
+    """Synchronous bidirectional flags, including receiver-originated updates."""
+    def __init__(self, initial):
+        self.identity = uuid.uuid4().hex
+        self.update(initial)
+    def _request(self, operation, **values):
+        return receiver_request(action='control', id=self.identity, operation=operation, **values)
+    def __getitem__(self, key):
+        snapshot = self._request('snapshot')
+        return snapshot[key]
+    def __setitem__(self, key, value): self._request('set', key=key, value=value)
+    def __delitem__(self, key): self._request('del', key=key)
+    def __iter__(self): return iter(self._request('snapshot'))
+    def __len__(self): return len(self._request('snapshot'))
+
+
+def receiver_control(initial=None):
+    values = {} if initial is None else initial
+    return ReceiverControl(values) if os.environ.get('HA_OPS_RUNTIME_RECEIVER_SOCKET') else dict(values)
+
+
+@contextmanager
+def remote_server(protocol, root, control=None):
+    if control is not None and not isinstance(control, ReceiverControl):
+        raise RuntimeError('Runtime receiver controls require receiver_control for synchronous updates')
+    response = receiver_request(action='start', protocol=protocol, root=str(root),
+                               control=None if control is None else control.identity)
+    descriptor = response['descriptor']
+    try: yield (descriptor[0], *(Path(item) for item in descriptor[1:]))
+    finally: receiver_request(action='stop', token=response['token'])
 
 
 def command(argv, **kwargs):
@@ -108,6 +155,9 @@ class TLSGitHandler(http.server.BaseHTTPRequestHandler):
 
 @contextmanager
 def tls_server(root,control=None):
+    if os.environ.get('HA_OPS_RUNTIME_RECEIVER_SOCKET'):
+        with remote_server('https', root, control) as descriptor: yield descriptor
+        return
     root=Path(root)
     cert,key=root/'test-ca.pem',root/'test-ca.key'
     command(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
@@ -135,6 +185,9 @@ def tls_server(root,control=None):
 
 @contextmanager
 def ssh_server(root):
+    if os.environ.get('HA_OPS_RUNTIME_RECEIVER_SOCKET'):
+        with remote_server('ssh', root) as descriptor: yield descriptor
+        return
     root=Path(root)
     client,host=root/'client-key',root/'host-key'
     for key in (client,host):

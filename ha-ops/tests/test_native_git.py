@@ -182,6 +182,37 @@ def test_private_index_complete_base_preserves_unselected_content(repo):
         adapter.index_entries(handle)
 
 
+@pytest.mark.parametrize('shape', ['empty', 'file', 'child', 'symlink'])
+def test_worktree_refs_is_one_owned_empty_directory(repo, monkeypatch, shape):
+    root, adapter = repo
+    original = adapter._run
+    observed = []
+    def run(args, **kwargs):
+        result = original(args, **kwargs)
+        if args[:2] == ('worktree', 'add'):
+            tree = Path(args[-2])
+            admin = Path((tree / '.git').read_text().strip().removeprefix('gitdir: '))
+            target = admin / 'refs'
+            if target.exists(): target.rmdir()
+            if shape == 'empty': target.mkdir()
+            elif shape == 'file': target.write_bytes(b'foreign')
+            elif shape == 'child': target.mkdir(); (target / 'foreign').write_bytes(b'preserve')
+            else: target.symlink_to(root / 'homeassistant', target_is_directory=True)
+            observed.append(target)
+        return result
+    monkeypatch.setattr(adapter, '_run', run)
+    if shape == 'empty':
+        with adapter.temporary_worktree(head(root), **ids()) as handle:
+            with adapter._journal() as journal:
+                record = journal['records'][handle.resource_id]
+                assert record['admin']['entries'][n._encode(b'refs')][3] == 'directory'
+        assert observed and not observed[0].exists() and adapter.resources() == ()
+    else:
+        with pytest.raises((n.InvalidInput, n.GitFailure)):
+            with adapter.temporary_worktree(head(root), **ids()): pass
+        assert observed and os.path.lexists(observed[0])
+
+
 @pytest.mark.parametrize("bad", [b"120000", b"160000", b"040000"])
 def test_complete_index_rejects_unselected_unsupported_modes(repo, bad):
     root, adapter = repo

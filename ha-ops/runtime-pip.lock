@@ -1,0 +1,3 @@
+annotatedyaml @ https://wheels.home-assistant.io/musllinux-index/annotatedyaml-1.0.2-cp314-cp314-musllinux_1_2_aarch64.whl ; platform_machine == "aarch64" --hash=sha256:5cb4ee79c08da2b8f4f24b1775732ca6c497682f3c9b3fd65dee4ea084fc925c
+annotatedyaml @ https://wheels.home-assistant.io/musllinux-index/annotatedyaml-1.0.2-cp314-cp314-musllinux_1_2_x86_64.whl ; platform_machine == "x86_64" --hash=sha256:94ba9937418c1b189b267540b47fa0dc24c148292739d06a6ca31c2ca8482f16
+rfc8785==0.1.4 --hash=sha256:520d690b448ecf0703691c76e1a34a24ddcd4fc5bc41d589cb7c58ec651bcd48

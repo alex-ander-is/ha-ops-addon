@@ -925,16 +925,19 @@ def failure_payload(error):
     return payload
 
 
-def ext4_guest(action, run_id, profile="allocation"):
+def ext4_guest(action, run_id, profile="allocation", *, owner=None):
     if not re.fullmatch(r"[0-9a-f]{32}", run_id) or profile not in EXT4_SIZES:
         raise Refused("Exact ext4 run identity/profile required")
+    if owner is not None and owner != (65534, 65534):
+        raise Refused('Only the explicit existing nobody runtime test owner is supported')
+    uid, gid = (os.getuid(), os.getgid()) if owner is None else owner
     # The source is sent over stdin, never installed into the guest or image.
     environment = os.environ.copy()
     for key in ("COLIMA_HOME", "COLIMA_PROFILE", "LIMA_HOME"):
         environment.pop(key, None)
     result = invoke(["colima", "ssh", "--profile", PROFILE, "--", "sudo", "-n",
                      "/usr/bin/python3", "-", action, "--run", run_id, "--profile", profile,
-                     "--uid", str(os.getuid()), "--gid", str(os.getgid())],
+                     "--uid", str(uid), "--gid", str(gid)],
                     input=EXT4_HELPER.read_bytes(), env=environment, timeout=180, check=False)
     if result.returncode:
         stderr = result.stderr.decode(errors="replace")

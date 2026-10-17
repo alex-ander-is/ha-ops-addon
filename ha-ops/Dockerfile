@@ -1,14 +1,16 @@
-ARG BUILD_FROM=ghcr.io/home-assistant/base:latest
+ARG BUILD_FROM=ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5
 FROM $BUILD_FROM
+ARG BUILD_ARCH=aarch64
 
-RUN apk add --no-cache bash curl diffutils git mosquitto-clients openssh-client openssh-keygen py3-pip py3-yaml python3 rsync \
-    && pip3 install --no-cache-dir --break-system-packages annotatedyaml==1.0.2 rfc8785==0.1.4
+COPY runtime-install.sh runtime-apk-*.lock runtime-pip.lock /tmp/
+RUN /bin/sh /tmp/runtime-install.sh "$BUILD_ARCH"
 
 WORKDIR /app
 
 COPY run.sh /run.sh
 COPY app /app
 COPY config.yaml /app/config.yaml
+COPY runtime-profile.json /usr/share/ha-ops/runtime-profile.json
 
 RUN chmod a+x /run.sh
 

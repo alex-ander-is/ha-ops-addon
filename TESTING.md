@@ -1,5 +1,20 @@
 # Testing HA Ops
 
+## Original installable App runtime (6.14)
+
+Use the commands and exact profile in
+[native-runtime.md](ha-ops/docs/native-runtime.md) for Alpine runtime proof.
+The Debian development image does not qualify the App's tools or libraries.
+The runtime runner retains original `/app` and client tools, supplies only
+hash-pinned pure Python pytest dependencies, and puts remote server tooling in
+an isolated receiver sidecar. Its reports fail on unexecuted required tests and
+cleanup failures. Named groups bind collection and completed JUnit identities to
+`dev/virtualization/runtime-required-cases.json`; changing the reviewed matrix
+requires an explicit manifest diff and pinned hash update. Every run extracts
+fresh, closed, hash-reviewed test dependencies and preserves unknown old caches.
+Native remains dormant; architecture support and step-24
+activation require the corresponding executed runtime matrix.
+
 Run commands from the repository root with the dependencies pinned in
 `requirements-dev.txt` (pytest 8.4.2, pytest-xdist 3.8.0, and PyYAML 6.0.3).
 

@@ -1508,10 +1508,14 @@ class NativeGit:
                     raise InvalidInput("unproven-worktree-backlink")
         with open(os.path.join(admin, b"HEAD"), "rb") as stream:
             _oid(stream.read().decode("ascii").rstrip("\n"), self._config())
-        allowed = {b"HEAD", b"index", b"gitdir", b"commondir", b"locked", b"logs", b"logs/HEAD", b"ORIG_HEAD"}
+        # Git 2.54's files backend creates one empty per-worktree refs
+        # directory unconditionally. It confers no reference authority.
+        allowed = {b"HEAD", b"index", b"gitdir", b"commondir", b"locked", b"logs", b"logs/HEAD", b"ORIG_HEAD", b"refs"}
         entries = self._snapshot(admin)
         if any(_decode(name) not in allowed for name in entries):
             raise InvalidInput("unknown-worktree-admin-entry")
+        if _encode(b"refs") in entries and entries[_encode(b"refs")][3] != "directory":
+            raise InvalidInput("unqualified-worktree-refs-directory")
         self._sync_snapshot(admin, entries)
         self._fsync(parent)
         return {"name": name, "identity": _identity(admin, directory=True), "entries": entries}

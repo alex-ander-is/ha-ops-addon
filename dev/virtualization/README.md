@@ -272,3 +272,22 @@ recovery. Future Apply crash recovery, exact metadata restoration, per-path
 rollback, remote publication and restart/health integration still need their
 own executor proofs. A host-only skip, green generic journal flag or disposable
 copy cannot close those obligations.
+# Original App runtime qualification
+
+`runtime_qualification.py` builds the actual installable `ha-ops/` context and
+executes its original tools/modules. See
+[the runtime profile and proof commands](../../ha-ops/docs/native-runtime.md).
+This is separate from the pinned Debian development runner below. APK and wheel
+resolution/build may download only into the named local VM; test runs use a
+bounded exact-owned tmpfs volume and network-none namespace. Receiver tooling
+never replaces App client tooling. Preserve `.local/runtime-cache`, reusable
+images and the VM; remove only recorded run resources. Nonroot ext4 proof uses
+the existing nobody account, and its complete matrix remains mandatory.
+
+Use the predeclared `native-git`, `native-save`, `native-scope`, `network`,
+`keygen`, `ext4` and `recreation` groups from `runtime-required-cases.json`.
+Collection and completed JUnit must match the reviewed identities exactly.
+Only core groups permit two or four independent pytest workers; physical
+allocation profiles stay sequential. Each run mounts a fresh exact extraction
+of the seven reviewed pure Python test wheels; unknown persistent cache content
+is excluded and preserved, never silently deleted or imported.

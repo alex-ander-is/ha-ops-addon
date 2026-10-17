@@ -1,0 +1,199 @@
+{
+  "apk_locks": {
+    "aarch64": "runtime-apk-aarch64.lock",
+    "amd64": "runtime-apk-amd64.lock"
+  },
+  "base": "3.24-2026.08.0",
+  "pip_lock": "runtime-pip.lock",
+  "qualification_status": {
+    "aarch64": "native-local-VM proof; delivery requires complete recorded test gates",
+    "amd64": "resolved-only-unqualified"
+  },
+  "qualified": {
+    "aarch64": {
+      "architecture": "aarch64",
+      "files": {
+        "/lib/ld-musl-aarch64.so.1": {
+          "realpath": "/lib/ld-musl-aarch64.so.1",
+          "sha256": "32377e6d71725bb019e9ff6d5e9f16b4d5156d6f2c36504191c2d6a7c4d4a44d"
+        },
+        "/usr/bin/git": {
+          "realpath": "/usr/bin/git",
+          "sha256": "bcbd198c0f82e788da87293cebffc5b0fa39784ad1b9e32c83dfe9b12b86b50e"
+        },
+        "/usr/bin/python3.14": {
+          "realpath": "/usr/bin/python3.14",
+          "sha256": "6bb6a4862a8812fb98be66b68ae7669c6588ff11ef9ee9f1b97b721d3801d565"
+        },
+        "/usr/bin/ssh": {
+          "realpath": "/usr/bin/ssh",
+          "sha256": "1f5b831235b6424b8d635883f8a486f421d0e554052fe71889e3563e16919f32"
+        },
+        "/usr/lib/libbrotlicommon.so.1": {
+          "realpath": "/usr/lib/libbrotlicommon.so.1.2.0",
+          "sha256": "7290b4c522c5879623318abda732991cad9922cc507b833e85900a3855c2fa18"
+        },
+        "/usr/lib/libbrotlidec.so.1": {
+          "realpath": "/usr/lib/libbrotlidec.so.1.2.0",
+          "sha256": "c5770113c9a8e6ab9146f78be7a365ae53468ff2765058f5a64e0e346eb1125d"
+        },
+        "/usr/lib/libcares.so.2": {
+          "realpath": "/usr/lib/libcares.so.2.19.7",
+          "sha256": "4da163d1f39c2d7815821fee9022d740e555376ed84c8055e34887b16e8968fe"
+        },
+        "/usr/lib/libcrypto.so.3": {
+          "realpath": "/usr/lib/libcrypto.so.3",
+          "sha256": "699d362147ff3d99d23aa84bdb353a86cc5cdc56a6bf3e1fafea7a9304f37b3e"
+        },
+        "/usr/lib/libcurl.so.4": {
+          "realpath": "/usr/lib/libcurl.so.4.8.0",
+          "sha256": "830ef2e7c5e9ea596e9d459254e563ba0fbcb42d4e68e78f95ae660c90c83829"
+        },
+        "/usr/lib/libidn2.so.0": {
+          "realpath": "/usr/lib/libidn2.so.0.4.0",
+          "sha256": "7023b0733eb32fac513a865d4630a13e266c0ce30196cd3e74948ee8fffae7a7"
+        },
+        "/usr/lib/libnghttp2.so.14": {
+          "realpath": "/usr/lib/libnghttp2.so.14.29.5",
+          "sha256": "f244a1ab310681330e04c97d88c57409883f4e5e56679c7979e971317f18f514"
+        },
+        "/usr/lib/libpcre2-8.so.0": {
+          "realpath": "/usr/lib/libpcre2-8.so.0.16.1",
+          "sha256": "d6a64c6aa72386c7334aaef33ae46a978f6e4b1626740f94e3d74bb4a734bfdd"
+        },
+        "/usr/lib/libpsl.so.5": {
+          "realpath": "/usr/lib/libpsl.so.5.3.5",
+          "sha256": "02407ec457513ded172fe186024dc8f838fe003c9e9780138c122cee09b24972"
+        },
+        "/usr/lib/libpython3.14.so.1.0": {
+          "realpath": "/usr/lib/libpython3.14.so.1.0",
+          "sha256": "33f5ee89a4d4092360a48449aec62ac9974ffb054a21c1a35d703b7e2574bd11"
+        },
+        "/usr/lib/libssl.so.3": {
+          "realpath": "/usr/lib/libssl.so.3",
+          "sha256": "74d73f8a6ded282a7e5c305b92772815b2b9ceee9fb67e3082e2412d282658e6"
+        },
+        "/usr/lib/libunistring.so.5": {
+          "realpath": "/usr/lib/libunistring.so.5.2.1",
+          "sha256": "a74bede34b08f19eec13e53fca147c6409070a49261e0ce1df9d85a7e841d0cf"
+        },
+        "/usr/lib/libz.so.1": {
+          "realpath": "/usr/lib/libz.so.1.3.2",
+          "sha256": "afe41fdd58868461eae3b04068f334bfad2d4ecd0e11c7e30f9afafe06f28528"
+        },
+        "/usr/lib/libz.so.1.3.2": {
+          "realpath": "/usr/lib/libz.so.1.3.2",
+          "sha256": "afe41fdd58868461eae3b04068f334bfad2d4ecd0e11c7e30f9afafe06f28528"
+        },
+        "/usr/lib/libzstd.so.1": {
+          "realpath": "/usr/lib/libzstd.so.1.5.7",
+          "sha256": "baeb93cf3904f55809f9229c7b0e9348bfe07b80d319a477df9ac63657a9fa55"
+        },
+        "/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-aarch64-linux-musl.so": {
+          "realpath": "/usr/lib/python3.14/lib-dynload/_ssl.cpython-314-aarch64-linux-musl.so",
+          "sha256": "ee266b6e7b33f8be3877c981ca37a31379a5426430123b1d3d97fc48c60b362f"
+        },
+        "/usr/lib/python3.14/lib-dynload/zlib.cpython-314-aarch64-linux-musl.so": {
+          "realpath": "/usr/lib/python3.14/lib-dynload/zlib.cpython-314-aarch64-linux-musl.so",
+          "sha256": "d7c1555ff4de1bf1c03360a6b0639f811e41a9353b2a8a591426ef739110f090"
+        },
+        "/usr/libexec/git-core/git-remote-https": {
+          "realpath": "/usr/libexec/git-core/git-remote-http",
+          "sha256": "69d7b3ad8f6f5ee00906bc6a06f318011df45ee0486d79e288e01d9ba256f5c3"
+        }
+      },
+      "git": "git version 2.54.0",
+      "os": "alpine",
+      "packages": [
+        "acl-libs-2.3.2-r1",
+        "alpine-baselayout-3.7.2-r1",
+        "alpine-baselayout-data-3.7.2-r1",
+        "alpine-keys-2.6-r0",
+        "alpine-release-3.24.1-r0",
+        "apk-tools-3.0.6-r0",
+        "bash-5.3.9-r1",
+        "bind-libs-9.20.26-r0",
+        "bind-tools-9.20.26-r0",
+        "brotli-libs-1.2.0-r1",
+        "busybox-1.37.0-r31",
+        "busybox-binsh-1.37.0-r31",
+        "c-ares-1.34.8-r0",
+        "ca-certificates-20260611-r0",
+        "ca-certificates-bundle-20260909-r0",
+        "cjson-1.7.19-r1",
+        "curl-8.22.0-r0",
+        "diffutils-3.12-r0",
+        "fstrm-0.6.1-r4",
+        "gdbm-1.26-r0",
+        "git-2.54.0-r0",
+        "git-init-template-2.54.0-r0",
+        "jq-1.8.1-r0",
+        "json-c-0.18-r1",
+        "keyutils-libs-1.6.3-r4",
+        "krb5-conf-1.0-r2",
+        "krb5-libs-1.22.2-r1",
+        "libapk-3.0.6-r0",
+        "libbz2-1.0.8-r6",
+        "libcom_err-1.47.4-r0",
+        "libcrypto3-3.5.9-r0",
+        "libcurl-8.22.0-r0",
+        "libedit-20260508.3.1-r1",
+        "libexpat-2.8.5-r0",
+        "libffi-3.5.2-r1",
+        "libgcc-15.2.0-r5",
+        "libidn2-2.3.8-r0",
+        "libncursesw-6.6_p20260516-r0",
+        "libpanelw-6.6_p20260516-r0",
+        "libpsl-0.21.5-r3",
+        "libssl3-3.5.9-r0",
+        "libstdc++-15.2.0-r5",
+        "libunistring-1.4.2-r0",
+        "libuv-1.52.1-r0",
+        "libverto-0.3.2-r2",
+        "libxml2-2.13.9-r2",
+        "libxxhash-0.8.3-r1",
+        "lz4-libs-1.10.0-r1",
+        "mosquitto-clients-2.1.2-r1",
+        "mosquitto-libs-2.1.2-r1",
+        "mpdecimal-4.0.1-r0",
+        "musl-1.2.6-r2",
+        "musl-utils-1.2.6-r2",
+        "ncurses-terminfo-base-6.6_p20260516-r0",
+        "nghttp2-libs-1.70.0-r0",
+        "oniguruma-6.9.10-r0",
+        "openssh-client-common-10.3_p1-r1",
+        "openssh-client-default-10.3_p1-r1",
+        "openssh-keygen-10.3_p1-r1",
+        "pcre2-10.49-r0",
+        "popt-1.19-r4",
+        "protobuf-c-1.5.2-r2",
+        "py3-pip-26.1.2-r0",
+        "py3-pip-pyc-26.1.2-r0",
+        "py3-yaml-6.0.3-r2",
+        "py3-yaml-pyc-6.0.3-r2",
+        "pyc-3.14.8-r0",
+        "python3-3.14.8-r0",
+        "python3-pyc-3.14.8-r0",
+        "python3-pycache-pyc0-3.14.8-r0",
+        "readline-8.3.3-r1",
+        "rsync-3.5.0-r0",
+        "scanelf-1.3.9-r1",
+        "sqlite-libs-3.53.4-r0",
+        "ssl_client-1.37.0-r31",
+        "tzdata-2026c-r0",
+        "userspace-rcu-0.15.3-r0",
+        "xz-5.8.3-r0",
+        "xz-libs-5.8.4-r0",
+        "yaml-0.2.5-r2",
+        "zlib-1.3.2-r1",
+        "zstd-libs-1.5.7-r2"
+      ],
+      "python": "3.14.8",
+      "release": "3.24.1",
+      "ssh": "OpenSSH_10.3p1, OpenSSL 3.5.9 29 Sep 2026",
+      "ssl": "OpenSSL 3.5.9 29 Sep 2026"
+    }
+  },
+  "schema": 1,
+  "status": "reviewed-exact-runtime-tuple"
+}

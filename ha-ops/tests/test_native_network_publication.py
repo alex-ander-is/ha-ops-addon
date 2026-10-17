@@ -19,6 +19,7 @@ import time
 from contextlib import contextmanager
 
 import pytest
+from network_publication_helpers import receiver_control
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 
@@ -137,8 +138,9 @@ def capped_fetch(scratch,url,env,cap,object_format):
 @pytest.mark.parametrize('profile',['small','many','compressed','oversized'])
 @linux_network
 def test_authenticated_packed_family_kernel_cap_and_independent_objects(tmp_path,protocol,object_format,profile):
-    assert command(['git','--version']).stdout==b'git version 2.39.5\n'
-    assert shutil.which('ssh-keygen') and shutil.which('openssl')
+    from native_runtime import qualify
+    assert qualify() in ('debian-development-2.39.5','alpine-aarch64-2.54.0','alpine-x86_64-2.54.0')
+    assert shutil.which('ssh-keygen')
     receiver,tip=repository(tmp_path,object_format,profile)
     cap=256*1024 if profile=='oversized' else 4*1024*1024
     context=ssh_server(tmp_path) if protocol=='ssh' else tls_server(tmp_path)
@@ -245,6 +247,35 @@ def test_existing_ssh_authentication_sources_reach_real_receiver(tmp_path,mode):
         env['GIT_SSH_COMMAND']=source['GIT_SSH_COMMAND']+' -F /dev/null -o BatchMode=yes -o UserKnownHostsFile='+shlex.quote(str(known))
         observed=command(['git','ls-remote','--refs',url,'refs/heads/main'],env=env).stdout
         assert observed==tip.encode()+b'\trefs/heads/main\n'
+
+
+@linux_network
+def test_original_app_generate_deploy_key_and_legacy_ssh_authentication(tmp_path):
+    import git_auth
+    receiver, tip = repository(tmp_path, 'sha1', 'small')
+    work = tmp_path / 'App generated key with spaces'
+    key, public = work / 'deploy-key', work / 'deploy-key.pub'
+    executed = []
+    def run_command(argv):
+        assert argv[0] == 'ssh-keygen' and shutil.which(argv[0]) == '/usr/bin/ssh-keygen'
+        executed.append(tuple(argv))
+        return command(argv, env=isolated_environment())
+    result = git_auth.generate_deploy_key(work, key, public, run_command, lambda message: None)
+    assert len(executed) == 1 and result == public.read_text().strip()
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert stat.S_IMODE(public.stat().st_mode) == 0o644
+    assert not (work / 'generated_deploy_key.new').exists() and not (work / 'generated_deploy_key.new.pub').exists()
+    raw = key.read_bytes()
+    assert raw.endswith(b'\n') and not raw.endswith(b'\n\n')
+    parsed = command(['/usr/bin/ssh-keygen', '-y', '-f', str(key)]).stdout.split()[:2]
+    assert parsed == public.read_bytes().split()[:2]
+    with ssh_server(tmp_path) as (url, fixture_key, known):
+        # The receiver authorizes the key produced by the original App. Its
+        # independently generated fixture private key is never the client key.
+        fixture_key.with_suffix('.pub').write_bytes(public.read_bytes())
+        env = git_auth.git_env({}, work, key, public)
+        env['GIT_SSH_COMMAND'] += ' -F /dev/null -o BatchMode=yes -o UserKnownHostsFile=' + shlex.quote(str(known))
+        assert command(['/usr/bin/git', 'ls-remote', '--refs', url, 'refs/heads/main'], env=env).stdout == tip.encode() + b'\trefs/heads/main\n'
 
 
 @pytest.mark.parametrize('url,scheme,host,port,path,user,relative',[
@@ -361,6 +392,101 @@ def test_ephemeral_https_url_auth_is_removed_from_command_destination(tmp_path,m
             assert observed==tip.encode()+b'\trefs/heads/main\n'
 
 
+@pytest.mark.parametrize('mode', ['url', 'askpass'])
+@linux_network
+def test_legacy_https_git_env_fetch_and_push_original_clients(tmp_path, monkeypatch, mode):
+    import git_auth
+    receiver, tip = repository(tmp_path, 'sha1', 'small')
+    with tls_server(tmp_path) as (url, certificate):
+        if mode == 'url':
+            url = url.replace('https://', 'https://fixture:fixture-password@')
+        else:
+            askpass = tmp_path / 'legacy-askpass'
+            askpass.write_text('#!/bin/sh\ncase "$1" in *Username*) printf fixture;; *) printf fixture-password;; esac\n')
+            askpass.chmod(0o700)
+            monkeypatch.setenv('GIT_ASKPASS', str(askpass))
+        options = {'repo_url': url, 'git_ssh_key': ''}
+        env = git_auth.git_env(options, tmp_path / 'auth', tmp_path / 'absent-key', tmp_path / 'absent-key.pub')
+        env.update(GIT_SSL_CAINFO=str(certificate), GIT_TERMINAL_PROMPT='0',
+                   GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull)
+        checkout = tmp_path / 'legacy-checkout'
+        command(['/usr/bin/git', 'init', str(checkout)], env=env)
+        command(['/usr/bin/git', '-C', str(checkout), 'fetch', url, 'refs/heads/main'], env=env)
+        command(['/usr/bin/git', '-C', str(checkout), 'checkout', '--detach', 'FETCH_HEAD'], env=env)
+        (checkout / 'legacy').write_text('legacy HTTPS publication\n')
+        command(['/usr/bin/git', '-C', str(checkout), 'add', 'legacy'], env=env)
+        command(['/usr/bin/git', '-C', str(checkout), '-c', 'user.name=Legacy Fixture',
+                 '-c', 'user.email=fixture@invalid', 'commit', '-qm', 'legacy fixture'], env=env)
+        current = command(['/usr/bin/git', '-C', str(checkout), 'rev-parse', 'HEAD'], env=env).stdout.strip()
+        assert current != tip.encode()
+        command(['/usr/bin/git', '-C', str(checkout), 'push', url, 'HEAD:refs/heads/main'], env=env)
+        assert command(['/usr/bin/git', '--git-dir=' + str(receiver), 'rev-parse', 'refs/heads/main'], env=env).stdout.strip() == current
+
+
+@linux_network
+def test_original_app_container_recreation_retains_pending_same_commit(tmp_path, monkeypatch):
+    """The runtime wrapper removes the original App before running phase two."""
+    if not os.environ.get('HA_OPS_RUNTIME_RECEIVER_SOCKET'):
+        pytest.skip('Requires the original App and persistent receiver sidecar')
+    from dataclasses import asdict
+    from network_publication_helpers import receiver_request, ReceiverControl
+    import native_publication as pub
+    import native_preview as preview
+    import native_save as save
+    import native_disk as disk
+    import native_metadata as metadata
+    from native_inventory import Policy
+    from native_git import NativeGit
+    from native_operations import NativeOperationStore
+    from test_native_preview import bindings
+    import uuid
+    marker = Path('/workspace/output/recreated-publication.json')
+    if not marker.exists():
+        from test_native_publication import publication_fixture
+        rig, receiver, old_transport, review, saver, candidate, store, old_executor, kwargs = publication_fixture(tmp_path)
+        command(['git', '--git-dir=' + str(receiver), 'config', 'http.receivepack', 'true'])
+        control = receiver_control({'drop_receive_response': True, 'fail_upload_after_receive': True})
+        peer = receiver_request(action='start', protocol='https', root=str(tmp_path), control=control.identity)
+        url, ca = peer['descriptor']
+        options = {'repo_url': url.replace('https://', 'https://fixture:fixture-password@'), 'repo_branch': 'main'}
+        transport = pub.NetworkGitCLITransport(rig.adapter, options, Path('unused'), Path('unused'), ca_file=Path(ca))
+        executor = pub.NativePublication(saver, store, transport)
+        with pytest.raises(pub.PublicationError, match='graph fetch unavailable') as error:
+            executor.publish(candidate, review, **kwargs)
+        intent = pub.validate_intent(store._prepared_publication.artifact)
+        source = asdict(rig.source); source['scope'] = [item.hex() for item in source['scope']]
+        marker.write_text(json.dumps({'root': str(rig.root), 'scratch': str(rig.scratch), 'source': source,
+            'options': options, 'ca': ca, 'control': control.identity, 'peer': peer['token'],
+            'operation': error.value.operation_id, 'commit': intent.commit_oid, 'pin': intent.commit_pin,
+            'state': store.read(), 'local_ref': kwargs['local_ref'], 'expected_local': kwargs['expected_local']}))
+        assert rig.adapter.read_ref(intent.commit_pin).oid == intent.commit_oid
+        return
+    retained = json.loads(marker.read_text())
+    root = Path(retained['root']); policy = Policy(repository_files=(metadata.MANIFEST_PATH,))
+    adapter = NativeGit(root, policy=policy)
+    source_data = retained['source']; source_data['scope'] = tuple(bytes.fromhex(item) for item in source_data['scope'])
+    source = preview.SourceObservation(**source_data)
+    owner = preview.NativePreview(adapter, lambda: source, bindings(root, policy), scratch_root=Path(retained['scratch']))
+    saver = save.NativeSave(owner, disk.NativeDisk(root)); store = NativeOperationStore(root / 'data')
+    assert store.read() == retained['state']
+    assert adapter.read_ref(retained['pin']).oid == retained['commit']
+    assert adapter.read_ref(retained['local_ref']).oid == retained['expected_local']
+    transport = pub.NetworkGitCLITransport(adapter, retained['options'], Path('unused'), Path('unused'), ca_file=Path(retained['ca']))
+    calls = []; original = transport._command
+    monkeypatch.setattr(transport, '_command', lambda *a, **k: calls.append(a) or original(*a, **k))
+    store.lifecycle(store.read()['revision'], 'explicit-App-container-recreation', {})
+    executor = pub.NativePublication(saver, store, transport)
+    assert not calls and executor.diagnose(retained['operation'])['execution_authority'] is False
+    control = ReceiverControl({}); control.identity = retained['control']; control.clear()
+    monkeypatch.setattr(transport, 'push', lambda *a, **k: pytest.fail('recreated recovery retried accepted commit'))
+    grant = executor.approve_recovery(retained['operation'], expected_revision=store.read()['revision'],
+        command_id=str(uuid.uuid4()), pending_effect='reconcile')
+    result = executor.resume(grant)
+    assert result['status'] == 'completed' and result['commit_oid'] == retained['commit']
+    assert adapter.read_ref(retained['local_ref']).oid == retained['commit'] and store.read()['recovery'] is None
+    receiver_request(action='stop', token=retained['peer'])
+
+
 def test_ephemeral_https_askpass_is_explicit_and_routing_env_is_removed(monkeypatch):
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
     import git_auth
@@ -442,7 +568,7 @@ def native_network_fixture(tmp_path,protocol,*,control=None):
 def test_real_network_refusal_race_and_acceptance_without_ack(tmp_path,protocol,failure):
     import native_publication as pub
     from test_native_publication import next_commit
-    control={}
+    control=receiver_control()
     with native_network_fixture(tmp_path,protocol,control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         classifier=t._push_kind
         def classify(intent,code,out,error):
@@ -478,7 +604,7 @@ def test_real_network_refusal_race_and_acceptance_without_ack(tmp_path,protocol,
 @linux_network
 def test_initial_network_fetch_failure_preserves_review_and_no_accepted_worker(tmp_path):
     import native_publication as pub
-    control={'fail_upload':True}
+    control=receiver_control({'fail_upload':True})
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         with pytest.raises(pub.PublicationError,match='graph fetch unavailable'):x.publish(c,r,**kw)
         assert not (rig.root/'data/native-operations/state.json').exists()
@@ -537,7 +663,7 @@ def test_receiver_acceptance_readback_failure_lifecycle_and_explicit_same_commit
     import native_publication as pub
     from native_operations import NativeOperationStore
     import uuid
-    control={'drop_receive_response':True,'fail_upload_after_receive':True}
+    control=receiver_control({'drop_receive_response':True,'fail_upload_after_receive':True})
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         with pytest.raises(pub.PublicationError,match='graph fetch unavailable') as error:x.publish(c,r,**kw)
         op=error.value.operation_id;state=o.read();worker=state['workers'][op]
@@ -647,7 +773,7 @@ def test_network_scratch_control_io_failure_preserves_candidate_and_explicit_deb
 @linux_network
 def test_actual_network_tls_and_routing_fences(tmp_path,monkeypatch,attack):
     import native_publication as pub
-    control={}
+    control=receiver_control()
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         if attack=='ambient-routing':
             for key,value in {'GIT_CONFIG_COUNT':'1','GIT_CONFIG_KEY_0':'url.http://invalid.insteadOf',
@@ -680,7 +806,7 @@ def test_actual_network_tls_and_routing_fences(tmp_path,monkeypatch,attack):
 def test_actual_send_child_timeout_kills_owned_group_and_explicit_same_commit_recovery(tmp_path,monkeypatch):
     import native_publication as pub
     import uuid
-    control={'stall_receive':True}
+    control=receiver_control({'stall_receive':True})
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         t=pub.NetworkGitCLITransport(rig.adapter,t.options,Path('unused'),Path('unused'),ca_file=t.ca_file,timeout=.75)
         x=pub.NativePublication(s,o,t)
@@ -760,7 +886,7 @@ def test_parent_sigkill_during_actual_fetch_durable_orphan_group_blocks_disposit
     import signal
     import uuid
     from native_git import InvalidInput
-    control={'stall_upload':True}
+    control=receiver_control({'stall_upload':True})
     with native_network_fixture(tmp_path,'https',control=control) as (rig,receiver,t,r,s,c,o,x,kw):
         client=os.fork()
         if client==0:
