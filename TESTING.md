@@ -24,6 +24,28 @@ Run commands from the repository root with the dependencies pinned in
 python3 -m pytest -n auto ha-ops/tests
 ```
 
+For the isolated Linux runner, pass fixture-only Git identities explicitly and
+release successful pytest temporary directories during the run. This avoids
+relying on the host Git configuration or accumulating old fixtures on tmpfs:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 -m pytest -n 2 -p no:cacheprovider \
+    -o tmp_path_retention_policy=failed ha-ops/tests \
+    -k 'not test_clean_git_checkout_imports_server and not test_generated_frontend_bundle_has_narrow_whitespace_check_exception'
+```
+
+The read-only runner input intentionally excludes `.git`. Run the two tests
+that inspect the actual repository from the host checkout instead:
+
+```sh
+python3 -m pytest -p no:cacheprovider -q \
+  ha-ops/tests/test_server.py::ServerTests::test_clean_git_checkout_imports_server \
+  ha-ops/tests/test_server.py::ServerTests::test_generated_frontend_bundle_has_narrow_whitespace_check_exception
+```
+
 The pre-push hook runs this entire suite. Focused groups below shorten the
 development feedback loop; they do not replace that gate. `-n auto` already
 uses the machine's physical CPU count. Workers are separate processes, which
@@ -203,17 +225,13 @@ claimed removed. Exact cleanup, repeat cleanup and VM/image survival precede
 passed reports. See [runner contract and measured evidence](dev/virtualization/README.md#guest-native-ext4-qualification)
 for commands, profile boundaries and remaining future-executor obligations.
 
-For the whole suite inside the local runner, the read-only input copy excludes
-`.git` and the container's `/tmp` is not executable. Use a disposable copy under
-`/workspace/output/checkout`, initialize and commit a fixture Git checkout,
-provide fixture `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL` and
-`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL`, and set `TMPDIR` to a fresh directory
-under `/workspace/output` so hook fixtures can execute. These are test-fixture
-requirements; do not change the host checkout or production Git configuration.
-Run the native-inventory group separately with the runner's default Linux `/tmp`
-instead of the output `TMPDIR`: the output bind is backed by APFS, whose filename
-rules cannot prove arbitrary Unix bytes and distinct case/Unicode names. The
-other groups need executable fixture storage; this group needs Linux tmpfs.
+For the whole suite inside the local runner, follow the fixture identities,
+temporary-directory retention and two host-only repository checks documented
+above. The generic runner provides executable Linux tmpfs at `/tmp`; ext4
+qualification retains its separate restricted mount profile. Keep native
+inventory filename checks on Linux tmpfs: the output bind is backed by APFS,
+whose filename rules cannot prove arbitrary Unix bytes and distinct case/Unicode
+names. Do not change the host checkout or production Git configuration.
 
 The Docker runner is separate from pytest and the normal full-suite gate.
 A successful real bind-mount run with full container replacement is mandatory

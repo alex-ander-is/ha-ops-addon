@@ -1032,6 +1032,7 @@ def test_generic_run_emits_stderr_and_nonzero_exit(tmp_path, monkeypatch, capfd)
         return completed()
     monkeypatch.setattr(subject, "docker", fake_docker)
     assert subject.generic_run(Path("input.txt"), ["false"]) == 7
+    assert fake_docker.created[fake_docker.created.index("--tmpfs") + 1] == "/tmp:exec"
     assert "expected failure" in capfd.readouterr().err
 
 
@@ -1696,6 +1697,8 @@ def test_ext4_setup_failure_retains_precise_partial_manifest(boundary, tmp_path,
 
 @pytest.mark.parametrize('boundary', ['setup', 'create', 'start', 'wait', 'security', 'container-cleanup', 'guest-cleanup', 'report', 'timeout', 'incomplete-matrix', 'missing-second-report', 'stale-second-report', 'fresh'])
 def test_ext4_failures_never_publish_success_and_preserve_cleanup_order(boundary, tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    monkeypatch.setattr(os, "getgid", lambda: 1000)
     subject = wrapper(); run_dirs = tmp_path / 'runs'; run_dirs.mkdir(); events = []; reports = []
     monkeypatch.setattr(subject, 'ROOT', tmp_path); monkeypatch.setattr(subject, 'HERE', tmp_path); monkeypatch.setattr(subject, 'RUNS', run_dirs)
     monkeypatch.setattr(subject, 'snapshot_input', lambda p: {'total': 10})
@@ -2096,6 +2099,8 @@ def test_ext4_observation_terms_must_be_consistent(fault):
 def test_ext4_all_finalizers_preserve_primary_and_independent_structured_failures(body_error, boundaries, tmp_path, monkeypatch):
     import copy
     import errno
+    monkeypatch.setattr(os, "getuid", lambda: 1000)
+    monkeypatch.setattr(os, "getgid", lambda: 1000)
     subject = wrapper(); runs = tmp_path / 'runs'; runs.mkdir(); events = []; reports = []; environment = {}; run = []
     attrs = {'ROOT': tmp_path, 'HERE': tmp_path, 'RUNS': runs, 'snapshot_input': lambda p: {'total': 10},
              'copy_input': lambda src, dst, **k: dst.mkdir(), 'capacity': lambda *a: 10**10, 'make_context': lambda: b'',
@@ -2192,3 +2197,12 @@ def test_ext4_explicit_cleanup_cli_keeps_structured_debt_and_container_fence(pha
     assert '"errno": 5' in stderr and '"errno": 13' in stderr
     assert events[:2] == ['container', 'container']
     assert ('guest' in events) == (phase == 'guest')
+
+
+def test_ext4_host_guard_refuses_root_before_inspection(monkeypatch):
+    subject = wrapper()
+    monkeypatch.setattr(subject.os, "getuid", lambda: 0)
+    monkeypatch.setattr(subject, "snapshot_input", lambda *a: pytest.fail("root reached input inspection"))
+    monkeypatch.setattr(subject, "docker", lambda *a, **k: pytest.fail("root reached Docker"))
+    with pytest.raises(subject.Refused, match="nonroot application UID"):
+        subject.ext4_run(Path("."), ["fixture"])

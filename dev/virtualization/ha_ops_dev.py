@@ -736,7 +736,7 @@ def generic_run(input_path, command, recreate=False):
         setup_data = setup(exact_sources=(source, output))
         for attempt in range(2 if recreate else 1):
             args = ["create", "--name", name, "--label", f"ha-ops.dev.run={run_id}",
-                    "--network", "none", "--read-only", "--tmpfs", "/tmp",
+                    "--network", "none", "--read-only", "--tmpfs", "/tmp:exec",
                     "--mount", f"type=bind,source={source},target=/workspace/input,readonly",
                     "--mount", f"type=bind,source={output},target=/workspace/output",
                     "--workdir", "/workspace/input", "--platform", setup_data["platform"],

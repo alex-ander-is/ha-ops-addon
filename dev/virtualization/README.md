@@ -74,8 +74,11 @@ for tests that resolve files from the repository root, including the topology
 unit tests above. It mounts the
 copy read-only at `/workspace/input`, and provides only `/workspace/output` as
 a writable bind. It runs without network access, with a read-only container
-root and a temporary `/tmp`. The command is executed directly, without a host
-shell. The wrapper inventories the complete input before starting the VM or
+root and an executable temporary `/tmp` so disposable Git hooks, askpass and
+release-script fixtures can run. This applies only to the generic runner; the
+nonroot ext4 fixture keeps its `noexec` mount policy. Docker supports the explicit
+[`exec` tmpfs option](https://docs.docker.com/engine/storage/tmpfs/). The command
+is executed directly, without a host shell. The wrapper inventories the complete input before starting the VM or
 using Docker. It copies all regular files regardless of name or extension,
 including `settings.yaml` and unfamiliar file types. It does not inspect file
 contents for keys: the local checkout is the trusted source and is kept
