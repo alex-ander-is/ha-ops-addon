@@ -500,3 +500,24 @@ files generated incrementally on disk. It measures Python allocation peaks durin
 build, sink review, Git-pruned reopen, publication and interrupted-publication
 cleanup recovery, and bounds growth independently of total content. Execute through
 the existing local Linux wrapper; host-only skips do not qualify these proofs.
+
+## Dormant persistent recovery (6.15)
+
+Run `ha-ops/tests/test_native_recovery.py` through the cached generic Linux
+runner for numeric ownership and the independent process crash matrix. The
+existing ext4 allocation profile additionally verifies actual recovery-point
+physical peaks, explicit reopen and repeated rollback. Its byte profile requires
+real kernel ENOSPC in recovery-copy preparation, target-volume staging, intent
+persistence and rename acknowledgment, then explicit restoration after freeing
+only the fixture filler. The complete existing profile row matrix, allocation
+recreation and inode profile remain required. Wrapper validation rejects missing
+recovery execution evidence. No host skip, injected errno or generic copy recipe
+substitutes for that proof. See [the recovery contract](ha-ops/docs/native-recovery.md).
+
+The 6.15 correction matrix additionally requires actual ext4 child exits before
+ACK in forward and rollback directions, transient atomic-control observations
+and simultaneous old/new generation allocation. The root Linux group exercises
+real distinct `/dev` and `/dev/shm` volumes, stale mount evidence, per-file-class
+foreign inode cleanup refusal, durable reconcile failure/retry and exact pointer
+write substeps. Removal attribution requires a known owned tombstone, preserving
+external deletions and raced unselected directory children.

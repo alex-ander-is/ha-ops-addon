@@ -395,3 +395,14 @@ fixed ASCII OID/hash slots before the single snapshot. Placeholder controls are
 accounting inputs, excluded from ordinary output grants. Only owner-issued
 compiled bytes from an exact qualified proof pass Admission; measured extent,
 owner graph, source binding and every retained historical commitment remain exact.
+
+## Explicit recovery qualification
+
+Step 6.15 adds the separate `recovery_project` / `recovery_resume` seam for an
+issuer-owned `native_recovery.Prepared`. It derives exact streamed recovery
+copies, per-target-volume staged inodes and bounded control schemas before any
+operation effects. Its immutable signed forecast retains original capacities,
+reserves and inode floor across reopen. Targeted binding/current-state checks
+remain the recovery owner's responsibility and run before each syscall. Generic
+Plan issuance, one-shot Admission and existing namespace receipts are unchanged;
+serialized generic Plans still grant nothing. See [the recovery contract](native-recovery.md).

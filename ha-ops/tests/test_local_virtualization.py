@@ -1887,6 +1887,12 @@ def complete_ext4_proof(run, profile='allocation', attempt=0, token='c' * 32):
         rows['controls'] = {'measurements': [sample('full-old-new-control-temp-diff', ['full-prospective-operation-state', 'full-pending-control', 'exact-diff-artifact'])],
                             'prior_control_retained_during_replace': True, 'full_pending_failure_envelope': True}
         rows['independent-copies'] = sample('two-independent-copies-metadata-replacement', ['independent-copy:first', 'independent-copy:second', 'exact-encoded-metadata:source', 'replacement-temporary:oid'])
+        native_allocations=[[[os.makedev(7,3),'65787434',b'/dev/loop3'.hex()],name,1,4096,1] for name in ('recovery-copy','recovery-stage','recovery-control','recovery-forecast')]
+        rows['independent-copies']['native_recovery']={'physical_peak':4096,'inode_peak':1,'additional_peak':16384,'required_inodes':6,'repeated_rollback':True,'discovery_only':True,
+            'forecast':{'schema':1,'allocations':native_allocations,'volumes':[[native_allocations[0][0],16384,4096,6,1024**2,128]]}}
+        rows['independent-copies']['native_recovery'].update(sample_boundaries=['control_written','marker_written','stage_durable','generation_durable','pointer_replaced','slot_durable','effect:replace'],sample_count=7,
+            old_new_overlap=True,retained_baseline_physical=4096,overlap_total_physical=8192,
+            process_crash=[{'direction':direction,'exit_code':73,'pending_before':True,'repeated_rollback':True,'target_device':os.makedev(7,3)} for direction in ('forward','rollback')])
         rows['repack'] = {**sample('all-object-kinds-old-pack-new-pack-index-full-temp', ['new-pack-old-packs-retained', 'pack-index', 'pack-temporary-overlap']),
                           'objects': 5, 'kinds': ['blob', 'tree', 'commit', 'tag'], 'unreachable': True,
                           'argv': ['pack-objects', '--window=0', '--depth=0', '--no-reuse-object', '--no-reuse-delta']}
@@ -1903,6 +1909,9 @@ def complete_ext4_proof(run, profile='allocation', attempt=0, token='c' * 32):
         rows['byte-enospc'] = {'kernel_errno': 28, 'written_bytes': 1024**2, 'state_preserved': True, 'recovered_resources': [],
             'failures': [{'boundary': b, 'errno': 28, 'error': 'No space left on device'} for b in
                 ('preview-payload', 'blob-payload', 'materialization', 'state-atomic-publication-after-durable-artifact')]}
+        rows['byte-enospc']['native_recovery']={'active_generation_retained':True,'explicit_repeated_rollback':True,
+            'failures':[{'boundary':name,'errno':28} for name in ('recovery-copy-preparation','target-volume-staging','before-effect-intent-control','rename-ack-control')],
+            'cleanup':[{'generation':'a'*32,'status':'removed','errors':[]}]}
     else:
         rows['inode-enospc'] = {'kernel_errno': 28, 'state_preserved': True, 'recovered_resources': [],
                                'observed_total_inodes': 128, 'created_inodes': 63, 'remaining_bytes': 60 * 1024**2}
@@ -2015,6 +2024,7 @@ def test_ext4_report_write_preserves_replace_error_after_temporary_unlink_failur
 def test_ext4_linux_sentinel_device_is_compared_as_guest_evidence_not_host_decoded(monkeypatch):
     subject = wrapper(); proof = complete_ext4_proof('a' * 32)
     proof['rows']['recreation']['sentinel']['device'] = 1795
+    for crash in proof['rows']['independent-copies']['native_recovery']['process_crash']: crash['target_device']=1795
     for row in proof['rows'].values():
         samples = row.get('measurements', [row]) + ([row['existing_reflog']] if 'existing_reflog' in row else [])
         for sample in samples:
@@ -2199,6 +2209,16 @@ def test_ext4_explicit_cleanup_cli_keeps_structured_debt_and_container_fence(pha
     assert ('guest' in events) == (phase == 'guest')
 
 
+@pytest.mark.parametrize('profile',['allocation','bytes'])
+def test_ext4_recovery_execution_evidence_is_mandatory(profile):
+    subject=wrapper(); run='d'*32; proof=complete_ext4_proof(run,profile)
+    row=proof['rows']['independent-copies' if profile=='allocation' else 'byte-enospc']
+    del row['native_recovery']
+    fixture={'mount_device_number':os.makedev(7,3),'mount':{'device':'7:3'},'quantum':4096,'total_inodes':128,'loop':{'name':'/dev/loop3'}}
+    with pytest.raises(subject.Refused,match='persistent recovery'):
+        subject.validate_ext4_proof(proof,run_id=run,profile=profile,attempt=0,token='c'*32,fixture=fixture)
+
+
 def test_ext4_host_guard_refuses_root_before_inspection(monkeypatch):
     subject = wrapper()
     monkeypatch.setattr(subject.os, "getuid", lambda: 0)
@@ -2206,3 +2226,12 @@ def test_ext4_host_guard_refuses_root_before_inspection(monkeypatch):
     monkeypatch.setattr(subject, "docker", lambda *a, **k: pytest.fail("root reached Docker"))
     with pytest.raises(subject.Refused, match="nonroot application UID"):
         subject.ext4_run(Path("."), ["fixture"])
+
+
+@pytest.mark.parametrize('field',['sample_boundaries','old_new_overlap','process_crash'])
+def test_ext4_recovery_transient_overlap_and_child_proof_cannot_be_omitted(field):
+    subject=wrapper(); run='d'*32; proof=complete_ext4_proof(run)
+    del proof['rows']['independent-copies']['native_recovery'][field]
+    fixture={'mount_device_number':os.makedev(7,3),'mount':{'device':'7:3'},'quantum':4096,'total_inodes':128,'loop':{'name':'/dev/loop3'}}
+    with pytest.raises(subject.Refused,match='persistent recovery'):
+        subject.validate_ext4_proof(proof,run_id=run,profile='allocation',attempt=0,token='c'*32,fixture=fixture)

@@ -2970,3 +2970,108 @@ class Admission:
         self._validate_context()
         self._current = self._baseline
         return self._current
+
+
+def recovery_project(disk, prepared):
+    """Issuer-qualified recovery accounting, independent of generic Plan.
+
+    All sizes come from qualified immutable payloads and maximal encodings of
+    the exact schemas. Existing disk guards and their one-shot lifetime remain
+    unchanged. Capacity is sampled only here, never during resume or phases.
+    """
+    from native_recovery import Prepared, canonical
+    if type(prepared) is not Prepared or prepared.store.disk is not disk:
+        raise Blocked('issued-recovery-recipe-required')
+    manifest=prepared.check(); snapshot=disk.snapshot()
+    if not snapshot.complete: raise Blocked('incomplete-recovery-accounting:'+repr(snapshot.issues))
+    mounts=linux_mounts() if os.path.exists('/proc/self/mountinfo') else None
+    volumes={v.key:v for v in snapshot.volumes}; allocations=[]; parents=set()
+    outputs=prepared.store._allocations(prepared)
+    for target,size,digest,label in outputs:
+        volume,missing=disk._destination(os.path.dirname(target),mounts)
+        old=volumes.get(volume.key)
+        if old:
+            volume=replace(volume,available=min(volume.available,old.available),
+                inodes=(min(volume.inodes,old.inodes) if volume.inodes is not None and old.inodes is not None else volume.inodes),
+                largest_control=max(volume.largest_control,old.largest_control))
+        volumes[volume.key]=volume
+        if not volume.supported: raise Blocked('unsupported-recovery-allocation-profile')
+        q=volume.quantum; data=_round(size,q)
+        physical=data+(data+2*q if volume.filesystem==b'ext4' else 0)+q
+        allocations.append([list(_recovery_key(volume.key)),label,size,physical,1])
+        for parent in missing:
+            if parent not in parents:
+                parents.add(parent); allocations.append([list(_recovery_key(volume.key)),'recovery-parent',0,q,1])
+    root_volume,_=disk._destination(prepared.store.directory,mounts)
+    for label in ('recovery-generation','recovery-lock','recovery-generation-entry','recovery-authority-key'):
+        size=32 if label=='recovery-authority-key' else 0
+        q=root_volume.quantum; data=_round(size,q)
+        physical=data+(data+2*q if root_volume.filesystem==b'ext4' and size else 0)+q
+        allocations.append([list(_recovery_key(root_volume.key)),label,size,physical,1])
+    keys=sorted({tuple(a[0]) for a in allocations},key=repr)
+    # Persisted forecast demand is derived after routes are qualified, so even
+    # long device/source names use their exact encoding. Maximal numeric fields
+    # bound every later value; no arbitrary pathname/count ceiling is needed.
+    maximum=2**64-1
+    forecast_rows=allocations+[[list(_recovery_key(root_volume.key)),'recovery-forecast',maximum,maximum,1] for _ in range(2)]
+    template=dict(schema=1,snapshot='f'*64,layout='f'*64,root=[maximum]*3,
+        operation=manifest['operation'],owner=manifest['owner'],recipe='f'*64,seal='f'*64,
+        allocations=[[a[0],a[1],maximum,maximum,1] for a in forecast_rows],
+        volumes=[[list(k),maximum,maximum,maximum,maximum,maximum] for k in keys])
+    encoded_size=len(canonical(template)); q=root_volume.quantum; data=_round(encoded_size,q)
+    physical=data+(data+2*q if root_volume.filesystem==b'ext4' else 0)+q
+    allocations.extend([[list(_recovery_key(root_volume.key)),'recovery-forecast',encoded_size,physical,1] for _ in range(2)])
+    rows=[]
+    for key in keys:
+        volume=next(v for v in volumes.values() if tuple(_recovery_key(v.key))==key)
+        selected=[a for a in allocations if tuple(a[0])==key]
+        peak=sum(a[3] for a in selected); inodes=sum(a[4] for a in selected)+2
+        control=max([size for _,size,_,label in outputs if label=='recovery-control']+[encoded_size])
+        reserve=_round(volume.largest_control,volume.quantum)+_round(control,volume.quantum)+volume.quantum
+        if peak+reserve>volume.available or volume.inodes is not None and inodes>volume.inodes:
+            raise InsufficientSpace('insufficient-recovery-space')
+        rows.append([list(key),peak,reserve,inodes,volume.available,volume.inodes])
+    recipe=hashlib.sha256(prepared.manifest+b'\0'+canonical([[p.hex(),size,digest,label] for p,size,digest,label in outputs])).hexdigest()
+    return dict(schema=1,snapshot=snapshot.digest,layout=disk.layout_digest,root=manifest['root'],
+        operation=manifest['operation'],owner=manifest['owner'],recipe=recipe,allocations=allocations,volumes=rows)
+
+
+def _recovery_key(key):
+    return tuple(v.hex() if isinstance(v,bytes) else v for v in key)
+
+
+def recovery_resume(disk, store, manifest, journal):
+    """Qualify only the validated active recovery generation, without rescans.
+
+    The private slot's immutable manifest digest binds its original forecast;
+    store discovery verifies that slot, all preimages and strict journal first.
+    Target identities are independently checked before each effect by the
+    recovery executor. Public Plan deserialization is never used as authority.
+    """
+    from native_recovery import RecoveryStore, _fields, _uint
+    if type(store) is not RecoveryStore or store.disk is not disk or store.binding.root!=disk.root:
+        raise Blocked('qualified-recovery-store-required')
+    f=manifest['forecast']
+    store._verify_seal(f)
+    _fields(f,'schema snapshot layout root operation owner recipe allocations volumes seal')
+    if type(f['schema']) is not int or f['schema']!=1 or f['layout']!=disk.layout_digest or f['root']!=manifest['root'] or any(f[k]!=manifest[k] for k in ('operation','owner')):
+        raise Blocked('different-recovery-forecast')
+    if any(type(f[k]) is not str or not re.fullmatch('[0-9a-f]{64}',f[k]) for k in ('snapshot','layout','recipe')):
+        raise Blocked('invalid-recovery-forecast-digest')
+    if type(f['allocations']) is not list or not f['allocations'] or type(f['volumes']) is not list or not f['volumes']:
+        raise Blocked('invalid-recovery-forecast-rows')
+    for row in f['allocations']:
+        if type(row) is not list or len(row)!=5 or type(row[0]) is not list or len(row[0])!=3 or type(row[1]) is not str: raise Blocked('invalid-recovery-allocation')
+        for n in row[2:]: _uint(n)
+        if row[2]>row[3] or row[4]!=1: raise Blocked('inconsistent-recovery-allocation')
+    seen=[]
+    for row in f['volumes']:
+        if type(row) is not list or len(row)!=6 or row[0] in seen: raise Blocked('invalid-recovery-volume')
+        seen.append(row[0])
+        for n in row[1:5]: _uint(n)
+        if row[5] is not None: _uint(row[5])
+        allocations=[a for a in f['allocations'] if a[0]==row[0]]
+        if sum(a[3] for a in allocations)!=row[1] or sum(a[4] for a in allocations)+2!=row[3] or row[1]+row[2]>row[4] or row[5] is not None and row[3]>row[5]:
+            raise Blocked('inconsistent-recovery-frozen-floor')
+    if any(a[0] not in seen for a in f['allocations']): raise Blocked('unbound-recovery-allocation-volume')
+    return f

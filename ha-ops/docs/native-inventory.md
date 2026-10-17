@@ -167,7 +167,13 @@ and hide selected files; matching root-policy bytes cannot excuse either.
 `--sparse` keeps sparse directory records explicit for rejection. Every record
 is checked against component selection and known denials, even when absent
 from live inventory. Pending deletion of an allowed tracked file is valid;
-force-added secrets and unselected byte names block. Nonzero merge stages,
+force-added secrets and unselected byte names block. Every
+`.ha-ops-recovery` or `.ha-ops-recovery-*` component and its descendants are
+reserved private service data at any depth or live root, including malformed
+and stale pool names. Inventory skips these pools, rendered allowlists never
+reopen them, and a force-added pool entry blocks the complete-index audit.
+Ordinary unrelated hidden directories remain eligible. The deny-matrix digest
+includes this namespace so previous reviewed policy identities become stale. Nonzero merge stages,
 duplicate/conflicting entries, symlinks, gitlinks, sparse entries, unsupported
 modes and malformed records block. It does not require every eligible file to
 be tracked. A clean ignore report never pardons an unsafe index.

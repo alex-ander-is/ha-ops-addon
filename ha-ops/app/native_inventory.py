@@ -114,7 +114,7 @@ def linux_mounts():
 
 
 # This finite matrix is deliberately independent of legacy export projections.
-DENY_MATRIX = b"native-known-secrets-v1:secrets.yaml;storage/core.config_entries,auth,auth_provider.homeassistant;.cloud;.google.token;.ssh;.gnupg;.git-credentials;.git;zigbee2mqtt/coordinator_backup*.json;reserved/config,data,backup,system;unsupported/LF,CR"
+DENY_MATRIX = b"native-known-secrets-v1:secrets.yaml;storage/core.config_entries,auth,auth_provider.homeassistant;.cloud;.google.token;.ssh;.gnupg;.git-credentials;.git;zigbee2mqtt/coordinator_backup*.json;reserved/config,data,backup,system;recovery-pool/component=.ha-ops-recovery or prefix=.ha-ops-recovery-;unsupported/LF,CR"
 POLICY_VERSION = "native-known-secrets-v1"
 POLICY_DIGEST = hashlib.sha256(DENY_MATRIX).hexdigest()
 
@@ -156,6 +156,11 @@ class Policy:
         if b"\n" in path or b"\r" in path:
             return "unsupported-line-break-name"
         parts = path.split(b"/")
+        # Target-volume recovery pools can sit inside any managed live root.
+        # Reserve the whole prefix, including orphaned/malformed generations,
+        # before repository-file exceptions or configured live-root expansion.
+        if any(p == b".ha-ops-recovery" or p.startswith(b".ha-ops-recovery-") for p in parts):
+            return "private-recovery-pool"
         if b".git" in parts:
             return "git-metadata"
         if any(beneath(path, p) for p in self.extra_denies):

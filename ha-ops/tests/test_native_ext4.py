@@ -356,6 +356,7 @@ def test_independent_recovery_copies(proof):
         assert len({p.stat().st_ino for p in [source, *outputs]}) == 3
         assert all(p.stat().st_blocks * 512 >= MIB for p in outputs)
         observation = measured(baseline, observe(root), plan, 'two-independent-copies-metadata-replacement')
+    observation['native_recovery']=recovery_allocation_evidence(parent)
     report['rows']['independent-copies'] = observation
 
 
@@ -461,7 +462,8 @@ def test_kernel_byte_enospc(proof):
     debts = recover(adapter, root)
     assert fingerprints(root, store) == before
     report['rows']['byte-enospc'] = {'kernel_errno': failure.errno, 'written_bytes': written,
-                                     'failures': failures, 'recovered_resources': debts, 'state_preserved': True}
+                                     'failures': failures, 'recovered_resources': debts, 'state_preserved': True,
+                                     'native_recovery':recovery_kernel_enospc_evidence(parent)}
 
 
 def materialize_failure(adapter, commit):
@@ -651,3 +653,130 @@ def test_network_graph_fetch_real_kernel_enospc_after_admission(proof,monkeypatc
         assert x.publish(c,r,**kw)['status']=='completed'
         report['rows']['byte-enospc']['network_fetch']={'kernel_enospc':True,'written_bytes':reached[0],
             'before_acceptance':True,'same_candidate_retry':True}
+
+
+def recovery_process_crash_evidence(parent):
+    import native_recovery as recovery
+    from test_native_recovery import store, file
+    rows=[]
+    for direction in ('forward','rollback'):
+        root=native_root(parent,'recovery-child-'+direction); write(root/'homeassistant/a',b'old ext4')
+        s=store(root); s.install(s.prepare({b'homeassistant/a':file(b'new ext4')}))
+        if direction=='rollback': s.execute()
+        script="""import os,sys
+sys.path[:0]=sys.argv[1:3]
+from test_native_recovery import store
+s=store(__import__('pathlib').Path(sys.argv[3]))
+s.fault=lambda stage: os._exit(73) if stage=='effect:replace' else None
+getattr(s,sys.argv[4])()
+"""
+        child=subprocess.run([sys.executable,'-c',script,str(Path(recovery.__file__).parent),str(Path(__file__).parent),str(root),'execute' if direction=='forward' else 'rollback'],capture_output=True,timeout=30)
+        assert child.returncode==73,child.stderr
+        fresh=store(root); found=fresh.discover(); assert found['journal']['pending'] is not None
+        generation=found['pointer']['generation'].encode(); raw=fresh._read(generation+b'/journal.json'); content=(root/'homeassistant/a').read_bytes()
+        assert fresh.discover()==found and fresh._read(generation+b'/journal.json')==raw and (root/'homeassistant/a').read_bytes()==content
+        with no_rescan(fresh.disk): fresh.rollback(); before=fresh.discover(); fresh.rollback(); assert fresh.discover()==before
+        assert (root/'homeassistant/a').read_bytes()==b'old ext4'
+        rows.append({'direction':direction,'exit_code':child.returncode,'pending_before':True,'repeated_rollback':True,'target_device':(root/'homeassistant/a').stat().st_dev})
+    return rows
+
+
+def recovery_allocation_evidence(parent):
+    """Measure actual control/transient and retained A + new B high water."""
+    import native_recovery as recovery
+    from test_native_recovery import store, file
+    root=native_root(parent,'persistent-recovery-allocation'); write(root/'homeassistant/a',b'A'*MIB,0o640)
+    s=store(root); first=s.install(s.prepare({b'homeassistant/a':file(b'first candidate')})); old=first['pointer']['generation']
+    baseline=observe(root); points=[]; labels=[]; overlap=[]
+    prepared=s.prepare({b'homeassistant/a':file(b'B'*(MIB//2)),b'homeassistant/new/deep/b':file(b'C'*65536)})
+    new=__import__('native_recovery').parse(prepared.manifest)['generation']
+    def sample(stage):
+        boundary=None
+        if stage in ('control_written','marker_written','stage_durable','generation_durable','slot_durable','effect:replace'): boundary=stage
+        elif stage=='control_replaced:active.json': boundary='pointer_replaced'
+        if boundary is None: return
+        points.append(observe(root)); labels.append(boundary)
+        if stage=='generation_durable':
+            assert (root/'data/native/recovery'/old/'manifest.json').exists() and (root/'data/native/recovery'/new/'manifest.json').exists()
+            overlap.append(sum(x['blocks'] for x in points[-1]['entries'].values()))
+    s.fault=sample; found=s.install(prepared); forecast=found['manifest']['forecast']
+    with no_rescan(s.disk): s.execute(); s.rollback(); before=s.discover(); s.rollback(); assert s.discover()==before
+    peak=max(max(0,sum(x['blocks'] for x in p['entries'].values())-sum(x['blocks'] for x in baseline['entries'].values()),baseline['free_bytes']-p['free_bytes']) for p in points)
+    inodes=max(max(len(set(p['entries'])-set(baseline['entries'])),baseline['free_inodes']-p['free_inodes']) for p in points)
+    bound=sum(v[1] for v in forecast['volumes']); inode_bound=sum(v[3] for v in forecast['volumes'])
+    assert peak>0 and peak<=bound and inodes<=inode_bound
+    required={'control_written','marker_written','stage_durable','generation_durable','pointer_replaced','slot_durable','effect:replace'}
+    assert required<=set(labels) and overlap and overlap[0]>sum(x['blocks'] for x in baseline['entries'].values())
+    assert (root/'homeassistant/a').read_bytes()==b'A'*MIB and not (root/'homeassistant/new').exists()
+    # Child interruption uses separate fixtures on this exact ext4 mount.
+    crashes=recovery_process_crash_evidence(parent)
+    return {'physical_peak':peak,'inode_peak':inodes,'additional_peak':bound,'required_inodes':inode_bound,'forecast':forecast,'repeated_rollback':True,'discovery_only':True,
+        'sample_boundaries':sorted(set(labels)),'sample_count':len(points),'old_new_overlap':True,'overlap_total_physical':overlap[0],
+        'retained_baseline_physical':sum(x['blocks'] for x in baseline['entries'].values()),'process_crash':crashes}
+
+
+def recovery_kernel_enospc_evidence(parent):
+    """Real kernel failures after initial admission, including an unacked rename."""
+    from test_native_recovery import store, file
+    root=native_root(parent,'persistent-recovery-enospc'); write(root/'homeassistant/a',b'A'*(4*MIB))
+    s=store(root); initial=s.install(s.prepare({b'homeassistant/a':file(b'B'*(4*MIB))}))
+    initial_generation=initial['pointer']['generation']; filler=root/'recovery-owned-filler'; failures=[]
+    def fill(headroom=0):
+        with filler.open('ab',buffering=0) as stream:
+            for _ in range(256*MIB//4096):
+                try: stream.write(b'F'*4096)
+                except OSError as error:
+                    assert error.errno==errno.ENOSPC
+                    if headroom:
+                        stream.truncate(max(0,filler.stat().st_size-headroom)); os.fsync(stream.fileno())
+                    return error.errno
+        raise AssertionError('recovery filler did not reach bounded kernel ENOSPC')
+    # Recovery-copy failure leaves the active A generation and its exact bytes.
+    prepared=s.prepare({b'homeassistant/a':file(b'C'*(4*MIB))})
+    reached=[]
+    def preparation(stage):
+        if stage=='generation_created' and not reached: reached.append(stage); fill(128*1024)
+    s.fault=preparation
+    with pytest.raises(OSError) as caught: s.install(prepared)
+    assert reached and caught.value.errno==errno.ENOSPC
+    failures.append({'boundary':'recovery-copy-preparation','errno':caught.value.errno})
+    filler.unlink(); s=store(root); assert s.discover()['pointer']['generation']==initial_generation
+    assert (root/'homeassistant/a').read_bytes()==b'A'*(4*MIB)
+    cleanup=s.cleanup(); assert cleanup and all(row['status']=='removed' for row in cleanup)
+    prepared=s.prepare({b'homeassistant/a':file(b'C'*(4*MIB))}); reached=[]
+    def staged(stage):
+        if stage=='pool_durable' and not reached: reached.append(stage); fill(128*1024)
+    s.fault=staged
+    with pytest.raises(OSError) as caught: s.install(prepared)
+    assert reached and caught.value.errno==errno.ENOSPC
+    failures.append({'boundary':'target-volume-staging','errno':caught.value.errno})
+    filler.unlink(); s=store(root); assert s.discover()['pointer']['generation']==initial_generation
+    cleanup.extend(s.cleanup()); assert all(row['status']=='removed' for row in cleanup)
+    reached=[]
+    def intent(stage):
+        if stage=='before_intent:replace' and not reached: reached.append(stage); fill()
+    s.fault=intent
+    with pytest.raises(OSError) as caught:
+        with no_rescan(s.disk): s.execute()
+    assert reached and caught.value.errno==errno.ENOSPC
+    failures.append({'boundary':'before-effect-intent-control','errno':caught.value.errno})
+    assert (root/'homeassistant/a').read_bytes()==b'A'*(4*MIB)
+    filler.unlink(); s=store(root); s.rollback(); s.rollback()
+    s.install(s.prepare({b'homeassistant/a':file(b'B'*(4*MIB))})); initial_generation=s.discover()['pointer']['generation']
+    # A durable intent followed by real ENOSPC in its acknowledgment must remain
+    # pending, recognize its known staged inode, then explicitly restore twice.
+    reached=[]
+    def ack(stage):
+        if stage=='effect:replace' and not reached: reached.append(stage); fill()
+    s.fault=ack
+    with pytest.raises(OSError) as caught:
+        with no_rescan(s.disk): s.execute()
+    assert reached and caught.value.errno==errno.ENOSPC
+    failures.append({'boundary':'rename-ack-control','errno':caught.value.errno})
+    assert (root/'homeassistant/a').read_bytes()==b'B'*(4*MIB)
+    filler.unlink(); reopened=store(root)
+    assert reopened.discover()['journal']['pending'] is not None
+    with no_rescan(reopened.disk): reopened.rollback(); reopened.rollback()
+    assert (root/'homeassistant/a').read_bytes()==b'A'*(4*MIB)
+    assert reopened.discover()['pointer']['generation']==initial_generation
+    return {'failures':failures,'active_generation_retained':True,'explicit_repeated_rollback':True,'cleanup':cleanup}

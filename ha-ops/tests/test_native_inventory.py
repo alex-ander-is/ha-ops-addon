@@ -1027,7 +1027,7 @@ def test_no_production_import_or_legacy_policy_dependency():
 
 
 def assert_inventory_dormancy(sources):
-    peers={'native_metadata.py','native_disk.py','native_preview.py','native_save.py','native_git.py','native_publication.py','native_scope.py'}
+    peers={'native_metadata.py','native_disk.py','native_preview.py','native_save.py','native_git.py','native_publication.py','native_scope.py','native_recovery.py'}
     for name,source in sources.items():
         for node in ast.walk(ast.parse(source)):
             if isinstance(node,ast.Import):
@@ -1235,3 +1235,36 @@ def test_folder_unsupported_retypes_keep_semantic_membership(tmp_path, monkeypat
     if not result.blockers:
         assert result.managed_files == (b"homeassistant/a",)
         assert result.diagnostics and n.render_ignore(result)
+
+
+@pytest.mark.parametrize("root", [b"homeassistant", b"addon_configs/example", b"custom/live"])
+@pytest.mark.parametrize("name", [b".ha-ops-recovery", b".ha-ops-recovery-", b".ha-ops-recovery-stale", b".ha-ops-recovery-" + b"a"*32 + b"-" + b"b"*16])
+def test_recovery_pool_namespace_is_reserved_at_every_live_depth(root, name):
+    policy = n.Policy(extra_live_roots=(b"custom/live",))
+    for path in (root+b"/"+name, root+b"/nested/"+name+b"/stage-"+b"c"*64):
+        assert policy.reason(path) == "private-recovery-pool"
+        assert not n.allowed_path(path, (root,), policy)
+    for name in (b".manual", b"manualdata", b".ha-ops-recoverynotes"):
+        assert policy.reason(root+b"/nested/"+name+b"/file") is None
+
+
+def test_recovery_pools_never_enter_inventory_whitelist_or_complete_index(tmp_path):
+    private = [b"homeassistant/.ha-ops-recovery-"+b"a"*32+b"-"+b"b"*16+b"/stage-"+b"c"*64,
+               b"homeassistant/nested/.ha-ops-recovery-stale/removed-original",
+               b"addon_configs/example/.ha-ops-recovery-broken/blob-original"]
+    ordinary = [b"homeassistant/.manual/settings", b"homeassistant/manualdata/settings",
+                b"addon_configs/example/config.yaml"]
+    for path in private+ordinary:
+        write(tmp_path, path)
+    scope = (b"homeassistant", b"addon_configs")
+    result, rules = fixture_git(tmp_path, scope)
+    assert not result.blockers
+    assert set(result.managed_files) == set(ordinary)
+    assert all(path not in rules for path in private)
+    assert {e.reason for e in result.entries if b".ha-ops-recovery" in e.path} == {"private-recovery-pool"}
+    git(tmp_path, "add", "-A")
+    assert n.audit_index(tmp_path, scope).clean
+    assert n.audit_ignore(tmp_path, private+ordinary, result).clean
+    git(tmp_path, "add", "-f", "--", *(os.fsdecode(p) for p in private))
+    audit = n.audit_index(tmp_path, scope)
+    assert {(i.path, i.reason) for i in audit.blockers} == {(p, "private-recovery-pool") for p in private}

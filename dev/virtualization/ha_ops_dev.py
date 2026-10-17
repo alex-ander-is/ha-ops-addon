@@ -874,6 +874,23 @@ def validate_ext4_proof(proof, *, run_id, profile, attempt, token, fixture, prev
         measurement(samples[0], 'full-old-new-control-temp-diff', ('full-prospective-operation-state', 'full-pending-control', 'exact-diff-artifact'))
         copies = rows['independent-copies']; measurement(copies, 'two-independent-copies-metadata-replacement', ('independent-copy:', 'exact-encoded-metadata:', 'replacement-temporary:'))
         require(sum(a['output'].startswith('independent-copy:') for a in copies['allocations']) == 2, 'two independent copy recipes')
+        candidate=copies.get('native_recovery')
+        require(isinstance(candidate,dict) and candidate.get('repeated_rollback') is True and candidate.get('discovery_only') is True, 'persistent recovery execution absent')
+        for name in ('physical_peak','inode_peak','additional_peak','required_inodes'):
+            require(integer(candidate.get(name),1),'persistent recovery measurement '+name)
+        require(candidate['physical_peak']<=candidate['additional_peak'] and candidate['inode_peak']<=candidate['required_inodes'],'persistent recovery forecast overrun')
+        forecast=candidate.get('forecast')
+        require(isinstance(forecast,dict) and forecast.get('schema')==1 and isinstance(forecast.get('allocations'),list) and isinstance(forecast.get('volumes'),list),'persistent recovery forecast absent')
+        require(sum(a[3] for a in forecast['allocations'])==candidate['additional_peak'] and sum(v[3] for v in forecast['volumes'])==candidate['required_inodes'],'persistent recovery forecast totals')
+        require({'recovery-copy','recovery-stage','recovery-control','recovery-forecast'}<={a[1] for a in forecast['allocations']},'persistent recovery recipe families')
+        expected_boundaries={'control_written','marker_written','stage_durable','generation_durable','pointer_replaced','slot_durable','effect:replace'}
+        require(isinstance(candidate.get('sample_boundaries'),list) and expected_boundaries<=set(candidate['sample_boundaries']) and integer(candidate.get('sample_count'),len(expected_boundaries)),'persistent recovery transient samples')
+        require(candidate.get('old_new_overlap') is True and integer(candidate.get('retained_baseline_physical'),1) and integer(candidate.get('overlap_total_physical'),candidate['retained_baseline_physical']+1),'persistent recovery old/new overlap')
+        crashes=candidate.get('process_crash')
+        require(isinstance(crashes,list) and len(crashes)==2 and all(isinstance(r,dict) for r in crashes) and {r.get('direction') for r in crashes}=={'forward','rollback'},'persistent recovery ext4 child crash matrix')
+        require(all(r.get('exit_code')==73 and r.get('pending_before') is True and r.get('repeated_rollback') is True and r.get('target_device')==fixture['mount_device_number'] for r in crashes),'persistent recovery ext4 child crash evidence')
+
+
         repack = rows['repack']; measurement(repack, 'all-object-kinds-old-pack-new-pack-index-full-temp', ('new-pack-old-packs-retained', 'pack-index', 'pack-temporary-overlap'))
         require(integer(repack.get('objects'), 5) and repack.get('kinds') == ['blob', 'tree', 'commit', 'tag'] and repack.get('unreachable') is True and
                 repack.get('argv') == ['pack-objects', '--window=0', '--depth=0', '--no-reuse-object', '--no-reuse-delta'], 'complete no-reuse repack profile')
@@ -906,6 +923,13 @@ def validate_ext4_proof(proof, *, run_id, profile, attempt, token, fixture, prev
             require(isinstance(failures, list) and len(failures) == 4 and all(isinstance(r, dict) for r in failures) and
                     {r.get('boundary') for r in failures} == expected, 'mandatory byte failure boundaries')
             require(all(r.get('errno') == 28 and isinstance(r.get('error'), str) and r['error'] for r in failures), 'actual byte ENOSPC errors')
+            candidate=row.get('native_recovery')
+            require(isinstance(candidate,dict) and candidate.get('active_generation_retained') is True and candidate.get('explicit_repeated_rollback') is True,'persistent recovery ENOSPC recovery absent')
+            native_failures=candidate.get('failures')
+            expected_native={'recovery-copy-preparation','target-volume-staging','before-effect-intent-control','rename-ack-control'}
+            require(isinstance(native_failures,list) and len(native_failures)==len(expected_native) and all(isinstance(r,dict) and r.get('errno')==28 for r in native_failures) and {r.get('boundary') for r in native_failures}==expected_native,'persistent recovery actual ENOSPC boundaries')
+            require(isinstance(candidate.get('cleanup'),list) and candidate['cleanup'] and all(r.get('status')=='removed' for r in candidate['cleanup']),'persistent recovery addressed preparation cleanup')
+
         else:
             require(row.get('observed_total_inodes') == fixture['total_inodes'] and integer(row.get('created_inodes'), 1) and
                     row['created_inodes'] <= fixture['total_inodes'] + 8 and integer(row.get('remaining_bytes'), 16 * 1024**2), 'isolated inode exhaustion with free bytes')

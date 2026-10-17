@@ -739,7 +739,8 @@ def assert_dormant_import_contour(sources):
                     ("native_publication.py", "native_disk"), ("native_operations.py", "native_publication"),
                     ("native_git.py", "native_publication"), ("native_disk.py", "native_publication"),
                     ("native_scope.py", "native_git"), ("native_scope.py", "native_disk"),
-                    ("native_scope.py", "native_publication"), ("native_publication.py", "native_scope")), (name, module)
+                    ("native_scope.py", "native_publication"), ("native_publication.py", "native_scope"),
+                    ("native_recovery.py", "native_disk")), (name, module)
 
 
 @pytest.mark.parametrize("module", ["native_publication", "app.native_publication", "native_git", "native_disk", "native_git.helpers", "native_disk.helpers", "app.native_git", "app.native_disk", "app.native_git.helpers", "app.native_disk.helpers"])
