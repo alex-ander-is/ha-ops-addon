@@ -283,8 +283,20 @@ def test_scope_authenticated_network_publication_and_same_commit_recovery(tmp_pa
             kwargs=dict(author=sig,committer=sig,message=b'exact scope over authenticated HTTPS\n',
                 local_ref=rig.source.base_ref,expected_local=rig.source.base_oid,command_id=str(uuid.uuid4()),expected_revision=store.read()['revision'])
             if failure=='accepted-readback-loss':
-                with pytest.raises(pub.PublicationError,match='graph fetch unavailable') as error:owner.confirm(candidate,review,executor,**kwargs)
+                rmdir=os.rmdir;cleanup_failed=[]
+                def retain_owned_pack(path,*args,**kwargs):
+                    if (control.get('fail_upload') and path==b'pack'
+                            and kwargs.get('dir_fd') is not None and not cleanup_failed):
+                        cleanup_failed.append(True)
+                        raise OSError(5,'owned readback scratch cleanup interrupted')
+                    return rmdir(path,*args,**kwargs)
+                with monkeypatch.context() as initial_confirm:
+                    initial_confirm.setattr(os,'rmdir',retain_owned_pack)
+                    with pytest.raises(pub.PublicationError,match='graph fetch unavailable') as error:
+                        owner.confirm(candidate,review,executor,**kwargs)
                 operation_id=error.value.operation_id;state=store.read()
+                worker=state['workers'][operation_id]
+                assert cleanup_failed and len(executor.transport_debts())==1
                 intent=pub.validate_intent(store._prepared_publication.artifact)
                 assert owner.active_policy()==old and owner.active_rules()==oldrules and owner.diagnose()['apply_blocked']
                 fresh=owner.fresh_apply_preview();assert fresh['apply_blocked'] and fresh['transaction']
@@ -303,6 +315,19 @@ def test_scope_authenticated_network_publication_and_same_commit_recovery(tmp_pa
                 command(['git','--git-dir='+str(endpoint),'update-ref','refs/heads/main',child,intent.commit_oid])
                 monkeypatch.setattr(transport,'push',lambda *a,**k:pytest.fail('same-commit reconciliation retried send'))
                 fresh_owner=scope.NativeScope(saver,replacement)
+                current=replacement.read()
+                with pytest.raises(disk.Blocked,match='prior-transport-scratch-requires-explicit-settlement'):
+                    fresh_owner.recover_publication(resumed,operation_id,expected_revision=current['revision'],command_id=str(uuid.uuid4()))
+                assert replacement.read()==current
+                assert fresh_owner.active_policy()==old and fresh_owner.active_rules()==oldrules and fresh_owner.diagnose()['apply_blocked']
+                debts=resumed.transport_debts();assert len(debts)==1
+                before_calls=len(calls)
+                for debt in debts:
+                    assert debt['operation']==operation_id and debt['owner']==worker['owner'] and debt['phase']=='debt'
+                    settled=resumed.settle_transport_resource(debt['resource_id'],operation_id=operation_id,owner_id=debt['owner'])
+                    assert settled.state=='removed' and not settled.cleanup_errors
+                assert len(calls)==before_calls and not resumed.transport_debts()
+                assert replacement.read()==current
                 result=fresh_owner.recover_publication(resumed,operation_id,expected_revision=replacement.read()['revision'],command_id=str(uuid.uuid4()))
                 assert result['commit_oid']==intent.commit_oid and result['status']=='completed'
                 assert fresh_owner.active_policy()==review.new.document() and fresh_owner.active_rules()==review.rules
