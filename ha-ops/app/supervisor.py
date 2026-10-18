@@ -153,8 +153,24 @@ def backup_manager_info(call_supervisor):
 
 
 def mqtt_service(call_supervisor):
-    payload = call_supervisor("GET", "/services/mqtt")
-    if payload.get("result") == "error":
-        message = payload.get("message") or payload
-        raise RuntimeError(f"MQTT service is not available to HA Ops: {message}")
-    return payload.get("data", payload)
+    message = "MQTT service is not available to HA Ops: No access to mqtt service."
+    try:
+        payload = call_supervisor("GET", "/services/mqtt")
+    except Exception:
+        raise RuntimeError(message) from None
+    if not isinstance(payload, dict) or ("result" in payload and payload["result"] != "ok"):
+        raise RuntimeError(message)
+    data = payload.get("data", payload)
+    if not isinstance(data, dict):
+        raise RuntimeError(message)
+    host, port = data.get("host") or data.get("hostname"), data.get("port")
+    valid_port = (type(port) is int and 1 <= port <= 65535) or (
+        isinstance(port, str) and port.isascii() and port.isdecimal() and
+        1 <= len(port) <= 5 and 1 <= int(port) <= 65535)
+    if (not isinstance(host, str) or not host.strip() or host.startswith("-") or
+            any(char.isspace() or ord(char) < 32 for char in host) or
+            not valid_port or any(key in data and data[key] is not None and
+                                  (not isinstance(data[key], str) or "\x00" in data[key])
+                                  for key in ("username", "user", "password"))):
+        raise RuntimeError(message)
+    return data

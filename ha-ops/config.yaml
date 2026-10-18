@@ -14,7 +14,7 @@ homeassistant_api: true
 docker_api: true
 hassio_role: manager
 services:
-  - mqtt:need
+  - mqtt:want
 watchdog: http://[HOST]:[PORT:8099]/health
 map:
   - homeassistant_config:rw

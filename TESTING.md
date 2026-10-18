@@ -1,5 +1,23 @@
 # Testing HA Ops
 
+## Dormant service lifecycle (6.16)
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_services.py
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_server.py -k 'retained_mqtt or declares_mqtt'
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_services.py
+```
+
+The focused portable suite checks full frozen inventory, ordering, original
+stopped preservation, partial failures, independent recovery, distinct bounded
+readiness/recovery mode, lost acknowledgment/evidence and real process crash,
+reopen and competing flock behavior. MQTT checks prove per-invocation availability
+and zero client commands for invalid service responses. Fixture adapters supply
+normalized observations/evidence; they do not qualify real Supervisor receipts,
+live readiness or production timeout enforcement. Reopen never auto-resumes.
+See [the dormant contract](ha-ops/docs/native-services.md). The foreman owns
+the isolated Linux and final repository gates; no live HA verification is needed.
+
 ## Original installable App runtime (6.14)
 
 Use the commands and exact profile in

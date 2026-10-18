@@ -11372,7 +11372,59 @@ class ServerTests(unittest.TestCase):
         config = (ROOT / "config.yaml").read_text(encoding="utf-8")
 
         self.assertIn("services:", config)
-        self.assertIn("  - mqtt:need", config)
+        self.assertIn("  - mqtt:want", config)
+        self.assertNotIn("  - mqtt:need", config)
+
+    def test_retained_mqtt_unavailable_at_invocation_prevents_client_commands(self):
+        server = load_server()
+        payloads = [None, [], "secret-token", {}, {"data": []},
+                    {"result": "denied", "data": {"host": "mqtt", "port": 1883}, "password": "secret-token"},
+                    {"result": "ok"}, {"host": "", "port": 1883},
+                    {"host": "-bad", "port": 1883}, {"host": "mqtt", "port": True},
+                    {"host": "mqtt", "port": 0}, {"host": "mqtt", "port": 65536},
+                    {"host": "mqtt", "port": 1883, "password": []},
+                    {"host": "mqtt", "port": 1883, "password": "secret-token\x00"}]
+        for payload in payloads:
+            for action in ("discover", "clear"):
+                with self.subTest(payload=payload, action=action):
+                    ctx = server.app_context.AppContext()
+                    ctx.call_supervisor = mock.Mock(return_value=payload)
+                    ctx.run_command = mock.Mock()
+                    with self.assertRaisesRegex(RuntimeError, "No access to mqtt service") as failure:
+                        if action == "discover":
+                            ctx.list_retained_discovery_topics()
+                        else:
+                            ctx.clear_retained_discovery_topic("homeassistant/test/config")
+                    self.assertNotIn("secret-token", str(failure.exception))
+                    ctx.run_command.assert_not_called()
+                    ctx.call_supervisor.assert_called_once_with("GET", "/services/mqtt")
+
+    def test_retained_mqtt_supported_responses_and_fresh_lookup(self):
+        server = load_server()
+        for data in ({"host": "mqtt", "port": 1883},
+                     {"host": "mqtt", "port": "1883", "username": None, "password": None},
+                     {"hostname": "mqtt", "port": 1883, "user": "u", "password": "p"}):
+            for payload in (data, {"result": "ok", "data": data}, {"data": data}):
+                self.assertEqual(server.app_context.supervisor.mqtt_service(lambda *args: payload), data)
+        with mock.patch.object(server.app_context.supervisor, "mqtt_service") as lookup:
+            ctx = server.app_context.AppContext()
+            lookup.assert_not_called()
+        ctx.call_supervisor = mock.Mock(side_effect=[{"host": "mqtt", "port": 1883}, None])
+        ctx.run_command = mock.Mock(return_value=subprocess.CompletedProcess([], 124, stdout="", stderr=""))
+        ctx.list_retained_discovery_topics()
+        with self.assertRaisesRegex(RuntimeError, "No access to mqtt service"):
+            ctx.clear_retained_discovery_topic("homeassistant/test/config")
+        self.assertEqual(ctx.run_command.call_count, 1)
+
+    def test_retained_mqtt_client_failure_is_invocation_failure(self):
+        server = load_server()
+        ctx = server.app_context.AppContext()
+        ctx.call_supervisor = mock.Mock(return_value={"host": "mqtt", "port": 1883})
+        ctx.run_command = mock.Mock(return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="disconnected"))
+        for action in (ctx.list_retained_discovery_topics,
+                       lambda: ctx.clear_retained_discovery_topic("homeassistant/test/config")):
+            with self.assertRaisesRegex(RuntimeError, "disconnected"):
+                action()
 
     def test_addon_declares_homeassistant_api_access(self):
         config = (ROOT / "config.yaml").read_text(encoding="utf-8")
