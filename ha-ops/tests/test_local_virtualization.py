@@ -140,6 +140,7 @@ def test_fresh_reviewed_dependencies_exclude_and_preserve_stale_ssl(tmp_path, mo
     assert fresh != stale and not (fresh / 'ssl.py').exists()
     assert (stale / 'ssl.py').read_text() == 'foreign = True\n'
     assert subject.validate_dependencies(fresh)
+    subject.cleanup_dependencies(fresh)
 
 
 @pytest.mark.parametrize('kind', ['new-module', 'changed-file', 'symlink', 'empty-directory'])
@@ -150,7 +151,10 @@ def test_reviewed_dependency_namespace_refuses_changes(tmp_path, monkeypatch, ki
     elif kind == 'changed-file': (fresh / 'pytest/__init__.py').write_text('foreign = True\n')
     elif kind == 'symlink': (fresh / 'ssl.py').symlink_to(fresh / 'pytest/__init__.py')
     else: (fresh / 'foreign').mkdir()
-    with pytest.raises(subject.vm.Refused): subject.validate_dependencies(fresh)
+    try:
+        with pytest.raises(subject.vm.Refused): subject.validate_dependencies(fresh)
+    finally:
+        subject.DEPENDENCY_OWNERS[fresh].close()
 
 
 def test_advertised_architectures_have_installable_profiles():
@@ -2010,7 +2014,7 @@ def test_ext4_helper_failure_diagnostics_survive_process_boundary(monkeypatch):
 def test_ext4_report_write_preserves_replace_error_after_temporary_unlink_failure(tmp_path, monkeypatch):
     import errno
     subject = wrapper(); first = OSError(errno.EIO, 'primary report replace'); second = OSError(errno.EACCES, 'secondary report unlink')
-    monkeypatch.setattr(subject.os, 'replace', lambda *a: (_ for _ in ()).throw(first))
+    monkeypatch.setattr(subject.os, 'replace', lambda *a, **kw: (_ for _ in ()).throw(first))
     original_unlink = Path.unlink
     def unlink(path, *a, **k):
         if '.tmp-' in path.name: raise second
@@ -2235,3 +2239,1070 @@ def test_ext4_recovery_transient_overlap_and_child_proof_cannot_be_omitted(field
     fixture={'mount_device_number':os.makedev(7,3),'mount':{'device':'7:3'},'quantum':4096,'total_inodes':128,'loop':{'name':'/dev/loop3'}}
     with pytest.raises(subject.Refused,match='persistent recovery'):
         subject.validate_ext4_proof(proof,run_id=run,profile='allocation',attempt=0,token='c'*32,fixture=fixture)
+
+
+def runtime_lifecycle_fixture(tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    runs = tmp_path.resolve() / 'runs'; runs.mkdir()
+    app = tmp_path.resolve() / 'app'; (app / 'tests').mkdir(parents=True)
+    (app / 'tests/test_fixture.py').write_text('fixture = True\n')
+    (app / 'runtime-install.sh').write_text('#!/bin/sh\n')
+    (app / 'runtime-apk-aarch64.lock').write_text('1' * 64 + '  https://invalid/example.apk\n')
+    (tmp_path / 'runtime_receiver.py').write_text('receiver = True\n')
+    monkeypatch.setattr(subject, 'APP', app)
+    monkeypatch.setattr(subject.vm, 'LOCAL', tmp_path.resolve())
+    monkeypatch.setattr(subject.vm, 'RUNS', runs)
+    monkeypatch.setattr(subject.vm, 'ready', lambda **kw: None)
+    monkeypatch.setattr(subject.vm, 'guest_platform', lambda: 'linux/arm64')
+    monkeypatch.setattr(subject.vm, 'image_name', lambda: 'dev-image')
+    monkeypatch.setattr(subject.vm, 'verify_source', lambda path: None)
+    monkeypatch.setattr(subject.vm, 'snapshot_input', lambda path: {})
+    def copy(source, destination, snapshot, *, fixture=None):
+        import shutil
+        shutil.copytree(source, destination)
+        if fixture is not None: fixture.remember(destination.name)
+    monkeypatch.setattr(subject, 'copy_preserving_modes', copy)
+    monkeypatch.setattr(subject, 'runtime_image', lambda: {'image_id': 'image', 'app_manifest': {}})
+    monkeypatch.setattr(subject, 'required_group', lambda *a, **kw: ('fixture', {'selectors': ['test_fixture.py'], 'nodeids': ['test_fixture.py::test_case']}, 'hash'))
+    monkeypatch.setattr(subject, 'verify_container', lambda *a: None)
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *a: None)
+    monkeypatch.setattr(subject.vm, 'owned_container', lambda *a: None)
+    volume_exists = [False]
+    def docker(*args, **kw):
+        out, err, code = b'', b'', 0
+        if args[:2] == ('volume', 'create'): volume_exists[0] = True
+        elif args[:2] == ('volume', 'rm'): volume_exists[0] = False
+        elif args[:2] == ('volume', 'inspect'):
+            if volume_exists[0]: out = json.dumps([{'Driver': 'local', 'Labels': {'ha-ops.dev.run': args[2].removeprefix('ha-ops-runtime-')}, 'Options': {'type': 'tmpfs', 'device': 'tmpfs', 'o': 'size=1073741824,mode=1777'}}]).encode()
+            else: code, err = 1, b'no such volume'
+        elif args[0] == 'create': out = args[args.index('--name') + 1].encode()
+        elif args[0] == 'inspect': out = b'[{}]'
+        elif args[:2] == ('image', 'inspect'): out = b'image'
+        elif args[0] == 'exec':
+            if '--collect-only' in args: out = b'test_fixture.py::test_case\n'
+            elif '/bin/cat' in args: out = b'<testsuites><testsuite tests="1"><testcase classname="test_fixture" name="test_case"/></testsuite></testsuites>'
+            elif args[-1].startswith('import pathlib,hashlib,json;'): out = b'{}'
+        return subprocess.CompletedProcess(args, code, out, err)
+    monkeypatch.setattr(subject.vm, 'docker', docker)
+    return subject, runs, cache, docker
+
+
+@pytest.mark.parametrize('outcome', ['passed', 'nonzero', 'copy', 'interrupt'])
+def test_runtime_run_removes_owned_fixtures_on_every_exit(outcome, tmp_path, monkeypatch, capsys):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = KeyboardInterrupt('original interrupt') if outcome == 'interrupt' else OSError('original copy')
+    if outcome == 'copy':
+        monkeypatch.setattr(subject, 'copy_preserving_modes', lambda *a, **kw: (_ for _ in ()).throw(first))
+    else:
+        def execute(*args, **kw):
+            if args[0] == 'exec' and '--basetemp=/workspace/output/pytest' in args:
+                if outcome == 'interrupt': raise first
+                if outcome == 'nonzero': return subprocess.CompletedProcess(args, 1, b'failed stdout', b'failed stderr')
+            return docker(*args, **kw)
+        monkeypatch.setattr(subject.vm, 'docker', execute)
+    report = tmp_path / 'report.json'
+    if outcome in ('copy', 'interrupt'):
+        with pytest.raises(type(first)) as caught: subject.run_tests([], report)
+        assert caught.value is first
+    else: assert subject.run_tests([], report) == (0 if outcome == 'passed' else 1)
+    retained = outcome == 'interrupt'
+    assert bool(list(runs.iterdir())) == bool(list(cache.glob('pytest-owned-*'))) == retained
+    proof = json.loads(report.read_text())
+    assert proof['cleanup']['status'] == ('retained' if retained else 'removed')
+    assert proof['status'] == ('passed' if outcome == 'passed' else 'failed')
+    if outcome == 'nonzero': assert proof['stdout'] == 'failed stdout' and proof['junit']
+
+
+@pytest.mark.parametrize('mutation', ['replace', 'unknown', 'input', 'receiver', 'output-replace'])
+def test_runtime_cleanup_preserves_changed_namespace(mutation, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir()
+    fixture = subject.RuntimeFixture(root)
+    (root / 'input').mkdir(); (root / 'input/source').write_text('owned')
+    (root / 'receiver.py').write_text('owned')
+    (root / 'output').mkdir()
+    for name in ('input', 'receiver.py'): fixture.remember(name)
+    fixture.remember('output', dynamic=True)
+    if mutation == 'replace':
+        root.rename(runs / 'original'); root.mkdir(); (root / 'user').write_text('foreign')
+    elif mutation == 'unknown': (root / 'user').write_text('foreign')
+    elif mutation == 'output-replace':
+        (root / 'output').rename(root / 'old-output'); (root / 'output').mkdir()
+    elif mutation == 'input': (root / 'input/source').write_text('changed')
+    else: (root / 'receiver.py').write_text('changed')
+    result = {'status': 'passed'}
+    with pytest.raises(subject.vm.Refused): subject.finish_runtime(result, tmp_path / 'proof.json', 'owned', fixture)
+    assert root.exists() and result['status'] == 'failed' and result['cleanup']['status'] == 'refused'
+    assert fixture.owned.root is None
+
+
+@pytest.mark.parametrize('publication', ['first', 'all', 'final'])
+def test_runtime_report_failure_preserves_proof_and_is_never_success(publication, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    report = tmp_path / 'proof.json'
+    actual = subject.vm.write_report
+    calls = []
+    def write(path, data):
+        calls.append(path)
+        if publication == 'all' or publication == 'first' and len(calls) == 1 or publication == 'final' and len(calls) == 2:
+            raise OSError('report denied')
+        if len(calls) == 1: assert root.exists() and data['status'] == 'finalizing'
+        actual(path, data)
+    monkeypatch.setattr(subject.vm, 'write_report', write)
+    result = {'status': 'passed', 'stdout': 'causal proof', 'junit': '<testsuites/>'}
+    with pytest.raises(subject.vm.Refused): subject.finish_runtime(result, report, 'owned', fixture)
+    assert result['status'] == 'failed' and root.exists() == (publication == 'all')
+    durable = report if publication == 'final' else tmp_path / 'runtime-cleanup-owned.json'
+    if publication != 'all': assert json.loads(durable.read_text())['stdout'] == 'causal proof'
+    if publication == 'final': assert json.loads(report.read_text())['status'] == 'finalizing'
+
+
+@pytest.mark.parametrize('recovered', [True, False])
+def test_runtime_consumer_fence_retries_exact_identity_and_retains_debt(recovered, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    dependencies = subject.pytest_dependencies()
+    calls = []
+    def remove(name, owner):
+        calls.append(name)
+        if name == 'first' and (not recovered or calls.count('first') == 1): raise subject.vm.Refused('consumer uncertain')
+    monkeypatch.setattr(subject.vm, 'remove_owned', remove)
+    result = {'status': 'passed'}
+    if recovered: subject.finish_runtime(result, tmp_path / 'proof.json', 'owned', fixture, dependencies, ['second', 'first'])
+    else:
+        with pytest.raises(subject.vm.Refused): subject.finish_runtime(result, tmp_path / 'proof.json', 'owned', fixture, dependencies, ['second', 'first'])
+    assert calls == ['first', 'first', 'second']
+    assert root.exists() == dependencies.exists() == (not recovered)
+    assert len(result['cleanup_attempts']) >= 3
+    if not recovered: assert subject.DEPENDENCY_OWNERS[dependencies].root is None
+
+
+@pytest.mark.parametrize('boundary', ['parse', 'hash', 'extract'])
+def test_runtime_partial_dependency_failure_reclaims_known_extraction(boundary, tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    if boundary == 'parse': (tmp_path / 'runtime-toolchain.json').write_text('{')
+    elif boundary == 'hash': (cache / 'pip/pytest-8.4.2-py3-none-any.whl').write_text('changed')
+    else:
+        import hashlib
+        import zipfile
+        wheel = cache / 'pip/pytest-8.4.2-py3-none-any.whl'
+        with zipfile.ZipFile(wheel, 'a') as archive: archive.writestr('ssl.py', 'foreign')
+        (tmp_path / 'runtime-toolchain.json').write_text(json.dumps({'pytest_wheels': ['pytest==8.4.2 --hash=sha256:' + hashlib.sha256(wheel.read_bytes()).hexdigest()]}))
+    with pytest.raises((ValueError, subject.vm.Refused)): subject.pytest_dependencies()
+    assert not list(cache.glob('pytest-owned-*')) and not subject.DEPENDENCY_OWNERS
+
+
+def test_runtime_dependency_cleanup_preserves_changed_files(tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    fresh = subject.pytest_dependencies()
+    (fresh / 'pytest/__init__.py').write_text('foreign')
+    with pytest.raises(subject.vm.Refused): subject.cleanup_dependencies(fresh)
+    assert fresh.exists() and fresh in subject.DEPENDENCY_TREES and subject.DEPENDENCY_OWNERS[fresh].root is None
+
+
+@pytest.mark.parametrize('outcome', ['passed', 'timeout'])
+def test_runtime_negative_probe_names_consumers_and_cleans_on_interrupt(outcome, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    consumers = []
+    first = subprocess.TimeoutExpired('docker run', 120, output=b'causal output')
+    def execute(*args, **kw):
+        assert args[0] == 'run' and '--name' in args and '--label' in args
+        consumers.append(args[args.index('--name') + 1])
+        if outcome == 'timeout': raise first
+        return subprocess.CompletedProcess(args, 1, b'FAILED Pinned runtime artifact unavailable', b'')
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    removed = []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda name, owner: removed.append(name))
+    if outcome == 'timeout':
+        with pytest.raises(subprocess.TimeoutExpired) as caught: subject.check_lock_failure(tmp_path / 'proof.json')
+        assert caught.value is first
+    else: subject.check_lock_failure(tmp_path / 'proof.json')
+    assert set(removed) == set(consumers) and not list(runs.iterdir())
+
+
+def test_runtime_build_copy_failure_uses_creation_anchor(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = OSError('copy preflight failed')
+    monkeypatch.setattr(subject, 'copy_preserving_modes', lambda *a, **kw: (_ for _ in ()).throw(first))
+    with pytest.raises(OSError) as caught: subject.build()
+    assert caught.value is first and not list(runs.iterdir())
+    assert list(tmp_path.glob('runtime-build-*.json'))
+
+
+def test_runtime_report_inside_fixture_is_rejected_before_acquisition(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(subject.uuid, 'uuid4', lambda: type('UUID', (), {'hex': 'a' * 32})())
+    with pytest.raises(subject.vm.Refused, match='outside disposable'):
+        subject.run_tests([], runs / ('runtime-' + 'a' * 32) / 'proof.json')
+    assert not list(runs.iterdir()) and not list(cache.glob('pytest-owned-*'))
+
+
+def test_runtime_primary_interrupt_survives_cleanup_and_report_failures(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = KeyboardInterrupt('causal')
+    monkeypatch.setattr(subject, 'copy_preserving_modes', lambda *a, **kw: (_ for _ in ()).throw(first))
+    monkeypatch.setattr(subject.vm, 'write_report', lambda *a: (_ for _ in ()).throw(OSError('secondary report')))
+    with pytest.raises(KeyboardInterrupt) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first and first.cleanup_errors and list(runs.iterdir())
+
+
+@pytest.mark.parametrize('boundary', ['partial-write', 'close'])
+def test_runtime_dependency_acquisition_failure_cleans_partial_owned_bytes(boundary, tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    actual_write, actual_close = subject.os.write, subject.os.close
+    first = OSError('owned file ' + boundary)
+    writes = []
+    def write(handle, payload):
+        writes.append(handle)
+        if len(writes) == 1: return actual_write(handle, payload[:3])
+        raise first
+    def close(handle):
+        actual_close(handle)
+        if handle in writes: raise OSError('secondary close')
+    monkeypatch.setattr(subject.os, 'write', write)
+    if boundary == 'close': monkeypatch.setattr(subject.os, 'close', close)
+    with pytest.raises(OSError) as caught: subject.pytest_dependencies()
+    assert caught.value is first and not list(cache.glob('pytest-owned-*'))
+    if boundary == 'close': assert first.cleanup_errors[0]['phase'] == 'dependency file close'
+
+
+def test_runtime_dependency_cleanup_refuses_replacement_root(tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    fresh = subject.pytest_dependencies()
+    fresh.rename(cache / 'original')
+    fresh.mkdir(); (fresh / 'user').write_text('foreign')
+    with pytest.raises(subject.vm.Refused, match='root changed'): subject.cleanup_dependencies(fresh)
+    assert (fresh / 'user').read_text() == 'foreign' and (cache / 'original/pytest/__init__.py').exists()
+
+
+def test_runtime_consumer_absence_inspection_failure_retains_all_host_binds(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    dependencies = subject.pytest_dependencies()
+    monkeypatch.setattr(subject.vm, 'owned_container', lambda *a: (_ for _ in ()).throw(subject.vm.Refused('inspection unavailable')))
+    with pytest.raises(subject.vm.Refused):
+        subject.finish_runtime({'status': 'passed'}, tmp_path / 'proof.json', 'owned', fixture, dependencies, ['exact-name'])
+    assert root.exists() and dependencies.exists()
+
+
+def test_runtime_dynamic_output_is_removed_but_neighbor_cache_survives(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    (root / 'output').mkdir(); fixture.remember('output', dynamic=True)
+    (root / 'output/results').write_text('dynamic')
+    neighbor = cache / 'user'; neighbor.write_text('preserved')
+    subject.finish_runtime({'status': 'passed'}, tmp_path / 'proof.json', 'owned', fixture)
+    assert not root.exists() and neighbor.read_text() == 'preserved'
+
+
+def test_runtime_primary_failure_survives_anchor_close_failure(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    first = KeyboardInterrupt('original')
+    actual = fixture.close
+    def close():
+        actual()
+        raise OSError('secondary close')
+    monkeypatch.setattr(fixture, 'close', close)
+    result = {'status': 'passed'}
+    subject.finish_runtime(result, tmp_path / 'proof.json', 'owned', fixture, primary=first)
+    assert any(row['phase'] == 'host fixture close' for row in first.cleanup_errors)
+    assert json.loads((tmp_path / 'proof.json').read_text())['status'] == 'failed'
+
+
+def test_runtime_build_timeout_retains_context_with_causal_proof(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = subprocess.TimeoutExpired('docker build', 1200, output=b'build proof')
+    monkeypatch.setattr(subject.vm, 'docker', lambda *a, **kw: (_ for _ in ()).throw(first))
+    with pytest.raises(subprocess.TimeoutExpired) as caught: subject.build()
+    assert caught.value is first and len(list(runs.iterdir())) == 1
+    proof = json.loads(next(tmp_path.glob('runtime-build-*.json')).read_text())
+    assert proof['status'] == 'failed' and proof['failure']['stdout'] == 'build proof'
+    assert proof['cleanup']['status'] == 'retained'
+def test_runtime_durable_proof_precedes_tmpfs_deletion_on_interrupt(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    events = []
+    publish = subject.vm.write_report
+    def write(path, data):
+        publish(path, data)
+        events.append('durable-proof')
+    def execute(*args, **kwargs):
+        if args[0] == 'exec' and '--basetemp=/workspace/output/pytest' in args:
+            raise KeyboardInterrupt('interrupted with partial output')
+        if args[:2] == ('volume', 'rm'):
+            events.append('volume-delete')
+        return docker(*args, **kwargs)
+    monkeypatch.setattr(subject.vm, 'write_report', write)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(KeyboardInterrupt):
+        subject.run_tests([], tmp_path / 'proof.json')
+    assert 'durable-proof' in events and 'volume-delete' not in events
+    # Also seed readable partial JUnit/ext4 bytes and deny all report writes:
+    # raw bytes must either be durably preserved or survive in retained storage.
+
+
+def test_runtime_recreated_junit_survives_cleanup(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    assert subject.run_tests([], tmp_path / 'proof.json', recreate=True) == 0
+    report = json.loads((tmp_path / 'proof.json').read_text())
+    assert report['recreated']['junit'].startswith('<testsuites>')
+
+
+def test_runtime_post_copy_chmod_failure_reclaims_owned_input(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    (subject.APP / 'tests/nested').mkdir()
+    real_copy = runtime_wrapper().copy_preserving_modes
+    copy = subject.copy_preserving_modes
+    monkeypatch.setattr(subject, 'copy_preserving_modes', real_copy)
+    source_vm = wrapper()
+    monkeypatch.setattr(source_vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(source_vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(subject.vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'snapshot_input', source_vm.snapshot_input)
+    monkeypatch.setattr(subject, 'copy_preserving_modes', real_copy if 'real_copy' in locals() else actual)
+    chmod = subject.os.fchmod
+    first = OSError('chmod after owned copy')
+    def fail_nested(handle, mode):
+        if any(path.stat().st_ino == os.fstat(handle).st_ino for path in runs.glob('*/input/nested')): raise first
+        return chmod(handle, mode)
+    monkeypatch.setattr(subject.os, 'fchmod', fail_nested)
+    with pytest.raises(OSError) as caught:
+        subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first
+    assert not list(runs.iterdir())
+
+
+def test_runtime_negative_probe_does_not_publish_success_before_cleanup(tmp_path, monkeypatch, capsys):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(subject.vm, 'docker', lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, b'FAILED Pinned runtime artifact unavailable', b''))
+    def refuse(*args):
+        raise subject.vm.Refused('persistent removal failure')
+    monkeypatch.setattr(subject.vm, 'remove_owned', refuse)
+    with pytest.raises(subject.vm.Refused):
+        subject.check_lock_failure(tmp_path / 'proof.json')
+    assert '"status": "passed"' not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('entrypoint', ['run', 'build'])
+def test_runtime_actual_copy_mode_failure_keeps_creation_receipt(entrypoint, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    actual = runtime_wrapper().copy_preserving_modes
+    copy = subject.copy_preserving_modes
+    source_vm = wrapper()
+    monkeypatch.setattr(source_vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(source_vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(subject.vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'snapshot_input', source_vm.snapshot_input)
+    monkeypatch.setattr(subject, 'copy_preserving_modes', real_copy if 'real_copy' in locals() else actual)
+    chmod = subject.os.fchmod
+    first = OSError('chmod after owned copy')
+    def fail_input(handle, mode):
+        if any(path.stat().st_ino == os.fstat(handle).st_ino for path in runs.glob('*/input')): raise first
+        return chmod(handle, mode)
+    monkeypatch.setattr(subject.os, 'fchmod', fail_input)
+    with pytest.raises(OSError) as caught:
+        subject.run_tests([], tmp_path / 'proof.json') if entrypoint == 'run' else subject.build()
+    assert caught.value is first and not list(runs.iterdir())
+
+
+@pytest.mark.parametrize('entrypoint', ['run', 'negative'])
+def test_runtime_partial_owned_file_writes_are_reclaimed(entrypoint, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    # Keep dependency extraction independent of the deliberately failed fixture write.
+    dependency = subject.pytest_dependencies()
+    monkeypatch.setattr(subject, 'pytest_dependencies', lambda: dependency)
+    write = subject.os.write
+    first = OSError('partial fixture write')
+    calls = []
+    def partial(handle, payload):
+        calls.append(handle)
+        if len(calls) == 1: return write(handle, payload[:3])
+        raise first
+    monkeypatch.setattr(subject.os, 'write', partial)
+    with pytest.raises(OSError) as caught:
+        subject.run_tests([], tmp_path / 'proof.json') if entrypoint == 'run' else subject.check_lock_failure(tmp_path / 'proof.json')
+    assert caught.value is first and not list(runs.iterdir())
+    if entrypoint == 'negative': subject.cleanup_dependencies(dependency)
+
+
+def test_runtime_output_chmod_failure_reclaims_registered_output(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    chmod = subject.os.fchmod
+    first = OSError('output chmod')
+    def fail(handle, mode):
+        if any(path.stat().st_ino == os.fstat(handle).st_ino for path in runs.glob('*/output')): raise first
+        return chmod(handle, mode)
+    monkeypatch.setattr(subject.os, 'fchmod', fail)
+    with pytest.raises(OSError) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first and not list(runs.iterdir())
+
+
+@pytest.mark.parametrize('boundary', ['dependency', 'run', 'build'])
+def test_runtime_anchor_acquisition_failure_has_durable_exact_debt(boundary, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    anchor = subject.vm.OwnedDirectory
+    first = OSError('anchor unavailable')
+    def fail(path):
+        name = path.name
+        if boundary == 'dependency' and name.startswith('pytest-owned-') or boundary == 'build' and name.startswith('runtime-build-') or boundary == 'run' and name.startswith('runtime-'):
+            raise first
+        return anchor(path)
+    monkeypatch.setattr(subject.vm, 'OwnedDirectory', fail)
+    with pytest.raises(OSError) as caught:
+        subject.build() if boundary == 'build' else subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first
+    retained = list(cache.glob('pytest-owned-*')) if boundary == 'dependency' else list(runs.iterdir())
+    assert len(retained) == 1
+    path = next(tmp_path.glob('runtime-build-*.json')) if boundary == 'build' else tmp_path / 'proof.json'
+    report = json.loads(path.read_text())
+    assert report['status'] == 'failed' and any(row['path'] == str(retained[0]) for row in report['acquisition_debt'])
+
+
+@pytest.mark.parametrize('stream', ['stdout', 'stderr'])
+@pytest.mark.parametrize('recreated', [False, True])
+def test_runtime_console_failure_preserves_completed_results_and_junit(stream, recreated, tmp_path, monkeypatch):
+    import types
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = BrokenPipeError('closed ' + stream)
+    calls = []
+    def execute(*args, **kw):
+        completed = docker(*args, **kw)
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args):
+            completed.stdout, completed.stderr = b'completed stdout', b'completed stderr'
+        return completed
+    def echo(payload):
+        calls.append(payload)
+        if len(calls) == (2 if recreated else 1): raise first
+        return len(payload)
+    noop = types.SimpleNamespace(buffer=types.SimpleNamespace(write=lambda payload: len(payload)))
+    broken = types.SimpleNamespace(buffer=types.SimpleNamespace(write=echo))
+    monkeypatch.setattr(subject, 'sys', types.SimpleNamespace(stdout=broken if stream == 'stdout' else noop,
+        stderr=broken if stream == 'stderr' else noop, exc_info=sys.exc_info))
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(BrokenPipeError) as caught: subject.run_tests([], tmp_path / 'proof.json', recreate=recreated)
+    assert caught.value is first and not list(runs.iterdir())
+    result = json.loads((tmp_path / 'proof.json').read_text())
+    target = result['recreated'] if recreated else result
+    assert target['stdout'] == 'completed stdout' and target['stderr'] == 'completed stderr' and target['returncode'] == 0
+    assert target['junit'].startswith('<testsuites>')
+
+
+@pytest.mark.parametrize('failure', ['transient-read', 'persistent-read', 'reports', 'interrupt'])
+def test_runtime_output_storage_survives_until_proof_is_saved(failure, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    events, reads = [], []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *a: events.append('consumer-deleted'))
+    publish = subject.vm.write_report
+    first = KeyboardInterrupt('test interrupted') if failure == 'interrupt' else OSError('read failed')
+    def execute(*args, **kw):
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args) and failure == 'interrupt': raise first
+        if args[0] == 'exec' and '/bin/cat' in args:
+            reads.append(args[-1])
+            if failure == 'persistent-read' or failure == 'transient-read' and len(reads) == 1: raise first
+        if args[:2] == ('volume', 'rm'): events.append('volume-deleted')
+        return docker(*args, **kw)
+    def write(path, report):
+        if failure == 'reports': raise OSError('all publication denied')
+        publish(path, report); events.append('proof-saved')
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    monkeypatch.setattr(subject.vm, 'write_report', write)
+    with pytest.raises((OSError, KeyboardInterrupt, subject.vm.Refused)):
+        subject.run_tests([], tmp_path / 'proof.json')
+    retained = failure in ('persistent-read', 'reports', 'interrupt')
+    assert bool(list(runs.iterdir())) == retained
+    if retained: assert 'volume-deleted' not in events and 'consumer-deleted' not in events
+    else:
+        assert events.index('proof-saved') < events.index('consumer-deleted') < events.index('volume-deleted')
+        assert json.loads((tmp_path / 'proof.json').read_text())['junit'].startswith('<testsuites>')
+    if failure == 'persistent-read':
+        report = json.loads((tmp_path / 'proof.json').read_text())
+        assert report['cleanup']['volume']['status'] == 'retained' and report['cleanup']['dependencies']['status'] == 'retained'
+
+
+def test_runtime_inner_copy_failure_removes_partial_input_without_parent_debt(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    # The existing copier removes its held partial destination before propagating failure.
+    real_vm = wrapper()
+    monkeypatch.setattr(real_vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(real_vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject, 'copy_preserving_modes', runtime_wrapper().copy_preserving_modes)
+    monkeypatch.setattr(subject.vm, 'snapshot_input', real_vm.snapshot_input)
+    monkeypatch.setattr(subject.vm, 'copy_input', real_vm.copy_input)
+    first = OSError('source read')
+    monkeypatch.setattr(subject.os, 'read', lambda *args: (_ for _ in ()).throw(first))
+    with pytest.raises(OSError) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first and not list(runs.iterdir())
+    assert not json.loads((tmp_path / 'proof.json').read_text())['acquisition_debt']
+
+
+@pytest.mark.parametrize('boundary', ['export', 'publication'])
+def test_runtime_unpreserved_ext4_proof_retains_backing_storage(boundary, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    events = []
+    def execute(*args, **kw):
+        if args[:2] == ('volume', 'rm'): events.append('volume-delete')
+        return docker(*args, **kw)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    monkeypatch.setattr(subject.vm, 'ext4_guest', lambda *a, **kw: events.append('ext4-delete'))
+    if boundary == 'publication': monkeypatch.setattr(subject.vm, 'write_report', lambda *a: (_ for _ in ()).throw(OSError('proof publication denied')))
+    report = {'status': 'failed', 'junit': '<testsuites/>', 'ext4_raw': '{partial proof'}
+    with pytest.raises(subject.vm.Refused):
+        subject.finish_runtime(report, tmp_path / 'proof.json', 'owned', fixture, volume='owned-volume', ext4_acquired=True,
+            ext4_profile='allocation', proof_complete=boundary != 'export')
+    assert root.exists() and not events
+    if boundary == 'export':
+        proof = json.loads((tmp_path / 'proof.json').read_text())
+        assert proof['cleanup']['volume']['status'] == proof['cleanup']['ext4']['status'] == 'retained'
+        assert proof['ext4_raw'] == '{partial proof'
+
+
+def test_runtime_timeout_preserves_partial_process_output_and_available_junit(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = subprocess.TimeoutExpired('docker exec pytest', 1200, output=b'partial stdout', stderr=b'partial stderr')
+    def execute(*args, **kw):
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args): raise first
+        return docker(*args, **kw)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(subprocess.TimeoutExpired) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    proof = json.loads((tmp_path / 'proof.json').read_text())
+    assert caught.value is first and proof['stdout'] == 'partial stdout' and proof['stderr'] == 'partial stderr'
+    assert proof['junit'].startswith('<testsuites>') and list(runs.iterdir())
+    assert proof['cleanup']['volume']['status'] == 'retained'
+
+
+def test_runtime_partial_copy_with_unavailable_anchor_reports_debt_without_adoption(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    real_copy = runtime_wrapper().copy_preserving_modes
+    first = OSError('inner destination anchor unavailable')
+    def copy(source, destination, expected):
+        destination.mkdir(); (destination / 'unknown').write_text('unproven')
+        raise first
+    monkeypatch.setattr(subject, 'copy_preserving_modes', real_copy)
+    monkeypatch.setitem(real_copy.__globals__, 'copy_into_fixture', lambda src, dst, snap, fixture: copy(src, dst, snap))
+    with pytest.raises(OSError) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    root = next(runs.iterdir())
+    proof = json.loads((tmp_path / 'proof.json').read_text())
+    assert caught.value is first and (root / 'input/unknown').read_text() == 'unproven'
+    assert any(row['path'] == str(root / 'input') for row in proof['acquisition_debt'])
+    assert proof['cleanup']['status'] == 'refused'
+
+
+@pytest.mark.parametrize('completed', [False, True])
+def test_runtime_proven_absent_junit_only_cleans_after_completed_execution(completed, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    removed = []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *a: removed.append(a))
+    first = KeyboardInterrupt('execution outcome unknown')
+    def execute(*args, **kw):
+        if args[0] == 'exec' and '/bin/cat' in args:
+            return subprocess.CompletedProcess(args, 1, b'', b'cat: results.xml: No such file or directory')
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args):
+            if not completed: raise first
+            return subprocess.CompletedProcess(args, 4, b'usage error', b'pytest usage error')
+        return docker(*args, **kw)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    if completed: assert subject.run_tests([], tmp_path / 'proof.json') == 1
+    else:
+        with pytest.raises(KeyboardInterrupt) as caught: subject.run_tests([], tmp_path / 'proof.json')
+        assert caught.value is first
+    proof = json.loads((tmp_path / 'proof.json').read_text())
+    assert bool(removed) == completed and bool(list(runs.iterdir())) != completed
+    assert proof['status'] == 'failed'
+    if completed: assert proof['junit_absent']['path'] == 'results.xml'
+
+
+def test_runtime_owned_receiver_and_lock_remain_readable_to_nonroot_peer(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    try:
+        fixture.write('receiver.py', b'receiver')
+        assert (root / 'receiver.py').stat().st_mode & 0o444 == 0o444
+        fixture.write('receiver.py', b'rewritten')
+        fixture.validate()
+    finally:
+        fixture.remove(); fixture.close()
+def test_runtime_unknown_exec_retains_consumer_even_with_readable_xml(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = subprocess.TimeoutExpired('docker exec pytest', 1200, output=b'partial stdout')
+    removed = []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *args: removed.append(args))
+    def execute(*args, **kwargs):
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args):
+            raise first
+        # A readable XML file is not a remote-process completion receipt.
+        return docker(*args, **kwargs)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first
+    report = json.loads((tmp_path / 'proof.json').read_text())
+    assert 'execution_completed' not in report and report['junit']
+    assert not removed
+    assert report['cleanup']['volume']['status'] == 'retained'
+
+
+def test_runtime_dependency_refusal_preserves_creation_identity_and_manifest(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    created = []
+    dependencies = subject.pytest_dependencies
+    def acquire():
+        destination = dependencies()
+        created.append((destination, destination.stat().st_dev, destination.stat().st_ino,
+                        dict(subject.DEPENDENCY_TREES[destination])))
+        return destination
+    monkeypatch.setattr(subject, 'pytest_dependencies', acquire)
+    def execute(*args, **kwargs):
+        if args[0] == 'exec' and any(str(arg).startswith('--basetemp=') for arg in args):
+            (created[0][0] / 'pytest/__init__.py').write_text('changed content')
+        return docker(*args, **kwargs)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(subject.vm.Refused):
+        subject.run_tests([], tmp_path / 'proof.json')
+    row = json.loads((tmp_path / 'proof.json').read_text())['cleanup']['dependencies']
+    assert row['status'] == 'refused'
+    assert row['identity'] == list(created[0][1:3])
+    assert row['expected_files'] == created[0][3]
+    assert row['retry']
+
+
+def test_runtime_recreation_publishes_original_proof_before_first_removal(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    events = []
+    publish = subject.vm.write_report
+    def write(path, result):
+        publish(path, result)
+        events.append('durable')
+    monkeypatch.setattr(subject.vm, 'write_report', write)
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *args: events.append('consumer-remove'))
+    assert subject.run_tests([], tmp_path / 'proof.json', recreate=True) == 0
+    assert events.index('durable') < events.index('consumer-remove')
+
+
+@pytest.mark.parametrize('recreated', [False, True])
+@pytest.mark.parametrize('artifact', [b'<partial-junit', b'<testsuites><testsuite tests="0"/></testsuites>'])
+def test_runtime_unknown_writer_retains_all_resources_despite_readable_xml(recreated, artifact, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = KeyboardInterrupt('writer completion unknown')
+    removed, calls = [], []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *args: removed.append(args))
+    def execute(*args, **kwargs):
+        if args[0] == 'exec' and any(str(x).startswith('--basetemp=') for x in args):
+            calls.append(args)
+            if not recreated or len(calls) == 2: raise first
+        if args[0] == 'exec' and '/bin/cat' in args and (not recreated or len(calls) == 2):
+            return subprocess.CompletedProcess(args, 0, artifact, b'')
+        return docker(*args, **kwargs)
+    monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(KeyboardInterrupt) as caught: subject.run_tests([], tmp_path / 'proof.json', recreate=recreated)
+    proof = json.loads((tmp_path / 'proof.json').read_text())
+    target = proof['recreated'] if recreated else proof
+    assert caught.value is first and not target.get('execution_completed') and target['junit'] == artifact.decode()
+    assert len(removed) == int(recreated)  # Only checkpointed first client in recreation.
+    assert proof['cleanup']['volume']['status'] == 'retained' and proof['cleanup']['dependencies']['identity']
+    assert list(runs.iterdir())
+
+
+@pytest.mark.parametrize('error_type', [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('phase', ['consumer', 'proof', 'volume', 'host', 'close', 'artifact-recovery'])
+def test_runtime_first_finalization_cancellation_survives_unchanged(error_type, phase, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    first = error_type('first cancellation in ' + phase)
+    calls = []
+    def fail_once(*args):
+        calls.append(args)
+        if len(calls) == 1: raise first
+    if phase == 'consumer': monkeypatch.setattr(subject.vm, 'remove_owned', fail_once)
+    elif phase == 'proof':
+        actual = subject.vm.write_report
+        def write(*args): fail_once(*args); return actual(*args)
+        monkeypatch.setattr(subject.vm, 'write_report', write)
+    elif phase in ('host', 'close'):
+        actual = getattr(subject.RuntimeFixture, 'remove' if phase == 'host' else 'close')
+        def action(self):
+            if phase == 'close': actual(self)
+            fail_once(self)
+            if phase == 'host': actual(self)
+        monkeypatch.setattr(subject.RuntimeFixture, 'remove' if phase == 'host' else 'close', action)
+    else:
+        reads = []
+        def execute(*args, **kw):
+            if phase == 'volume' and args[:2] == ('volume', 'rm'): fail_once(*args)
+            if phase == 'artifact-recovery' and args[0] == 'exec' and '/bin/cat' in args:
+                reads.append(args)
+                if len(reads) == 1: return subprocess.CompletedProcess(args, 1, b'', b'uncertain read')
+                raise first
+            return docker(*args, **kw)
+        monkeypatch.setattr(subject.vm, 'docker', execute)
+    with pytest.raises(error_type) as caught: subject.run_tests([], tmp_path / 'proof.json')
+    assert caught.value is first
+    reports = list(tmp_path.glob('proof.json')) + list(tmp_path.glob('runtime-cleanup-*.json'))
+    assert reports and all(json.loads(path.read_text())['status'] != 'passed' for path in reports)
+
+
+@pytest.mark.parametrize('phase', ['write-open', 'chmod-open', 'chmod-after-open', 'root-write', 'root-mkdir'])
+def test_runtime_mutation_uses_original_root_and_verified_entry_descriptor(phase, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    fixture.write('lock', b'owned')
+    fixture.mkdir('input')
+    original_open, original_chmod, original_mkdir = subject.os.open, subject.os.fchmod, subject.os.mkdir
+    swapped = []
+    def swap_file():
+        (root / 'lock').rename(root / 'old-lock'); (root / 'lock').write_bytes(b'foreign-keep')
+    def swap_directory():
+        (root / 'input').rename(root / 'old-input'); (root / 'input').mkdir(mode=0o700)
+    def swap_root():
+        root.rename(runs / 'held-root'); root.mkdir(); (root / 'user').write_bytes(b'foreign-root')
+    def opened(path, flags, *args, **kw):
+        if not swapped and phase in ('write-open', 'root-write', 'chmod-open') and kw.get('dir_fd') is not None and os.fstat(kw['dir_fd']).st_ino == os.fstat(fixture.owned.root).st_ino and str(path) == ('lock' if phase in ('write-open', 'root-write') else 'input'):
+            if phase == 'write-open': swap_file()
+            elif phase == 'chmod-open': swap_directory()
+            elif phase == 'root-write': swap_root()
+            swapped.append(True)
+        return original_open(path, flags, *args, **kw)
+    def chmod(handle, mode):
+        if phase == 'chmod-after-open' and not swapped: swap_directory(); swapped.append(True)
+        return original_chmod(handle, mode)
+    def mkdir(path, *args, **kw):
+        if phase == 'root-mkdir' and kw.get('dir_fd') == fixture.owned.root and not swapped:
+            swap_root(); swapped.append(True)
+        return original_mkdir(path, *args, **kw)
+    monkeypatch.setattr(subject.os, 'open', opened)
+    monkeypatch.setattr(subject.os, 'fchmod', chmod)
+    monkeypatch.setattr(subject.os, 'mkdir', mkdir)
+    try:
+        if phase == 'chmod-after-open': fixture.chmod('input', Path('.'), 0o755)
+        else:
+            with pytest.raises(subject.vm.Refused):
+                if phase == 'root-mkdir': fixture.mkdir('output')
+                elif phase == 'chmod-open': fixture.chmod('input', Path('.'), 0o755)
+                else: fixture.write('lock', b'rewritten')
+        assert swapped
+        if phase == 'write-open': assert (root / 'lock').read_bytes() == b'foreign-keep'
+        elif phase.startswith('chmod'): assert (root / 'input').stat().st_mode & 0o777 == 0o700
+        else: assert (root / 'user').read_bytes() == b'foreign-root' and not (root / 'output').exists()
+    finally: fixture.close()
+
+
+def test_runtime_recreation_checkpoint_publication_failure_preserves_consumers(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    removed = []
+    monkeypatch.setattr(subject.vm, 'remove_owned', lambda *args: removed.append(args))
+    first = OSError('checkpoint and final publication unavailable')
+    monkeypatch.setattr(subject.vm, 'write_report', lambda *args: (_ for _ in ()).throw(first))
+    with pytest.raises(OSError) as caught: subject.run_tests([], tmp_path / 'proof.json', recreate=True)
+    assert caught.value is first and not removed and list(runs.iterdir())
+
+
+def test_runtime_descriptor_copy_never_writes_into_replaced_root(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    source_vm = wrapper()
+    monkeypatch.setattr(source_vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(source_vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'ROOT', subject.APP.parent)
+    monkeypatch.setattr(subject.vm, 'mount_points', lambda: [])
+    snapshot = source_vm.snapshot_input(subject.APP / 'tests')
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    mkdir = subject.os.mkdir
+    swapped = []
+    def swap(path, *args, **kw):
+        if str(path) == 'input' and kw.get('dir_fd') == fixture.owned.root and not swapped:
+            root.rename(runs / 'held-root'); root.mkdir(); (root / 'user').write_text('foreign')
+            swapped.append(True)
+        return mkdir(path, *args, **kw)
+    monkeypatch.setattr(subject.os, 'mkdir', swap)
+    try:
+        with pytest.raises(subject.vm.Refused): subject.copy_into_fixture(subject.APP / 'tests', root / 'input', snapshot, fixture)
+        assert (root / 'user').read_text() == 'foreign' and not (root / 'input').exists()
+    finally: fixture.close()
+def test_runtime_write_refuses_new_external_hardlink_before_truncate(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    try:
+        fixture.write('lock', b'owned')
+        foreign = tmp_path / 'external-user-alias'
+        os.link(root / 'lock', foreign)
+        with pytest.raises(subject.vm.Refused):
+            fixture.write('lock', b'changed')
+        assert foreign.read_bytes() == b'owned'
+    finally:
+        fixture.close()
+
+
+def test_runtime_descriptor_copy_refuses_swapped_new_directory(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(subject, 'copy_preserving_modes', runtime_wrapper().copy_preserving_modes)
+    source_vm = wrapper()
+    monkeypatch.setattr(source_vm, 'ROOT', tmp_path.resolve())
+    monkeypatch.setattr(source_vm, 'mount_points', lambda: [])
+    monkeypatch.setattr(subject.vm, 'ROOT', tmp_path.resolve())
+    monkeypatch.setattr(subject.vm, 'mount_points', lambda: [])
+    source = tmp_path / 'source'; (source / 'nested').mkdir(parents=True)
+    (source / 'nested/owned-file').write_text('owned')
+    snapshot = source_vm.snapshot_input(source)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    foreign = tmp_path / 'user-empty-directory'; foreign.mkdir()
+    foreign_identity = foreign.stat().st_ino
+    opened = subject.os.open
+    swapped = []
+    def replace(path, flags, *args, **kwargs):
+        if str(path) == 'nested' and flags & os.O_DIRECTORY and kwargs.get('dir_fd') is not None and (root / 'input/nested').exists() and not swapped:
+            (root / 'input/nested').rename(tmp_path / 'saved-owned-directory')
+            foreign.rename(root / 'input/nested')
+            swapped.append(True)
+        return opened(path, flags, *args, **kwargs)
+    monkeypatch.setattr(subject.os, 'open', replace)
+    try:
+        with pytest.raises(subject.vm.Refused):
+            subject.copy_preserving_modes(source, root / 'input', snapshot, fixture=fixture)
+        assert swapped
+        assert (root / 'input/nested').stat().st_ino == foreign_identity
+        assert not (root / 'input/nested/owned-file').exists()
+    finally:
+        fixture.close()
+
+
+@pytest.mark.parametrize('boundary', ['root', 'nested'])
+def test_runtime_dependency_replacement_never_receives_mutations(boundary, tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    anchor, opened = subject.vm.OwnedDirectory, subject.os.open
+    changed = []
+    def acquire(path):
+        owned = anchor(path)
+        if boundary == 'root':
+            path.rename(cache / 'held-original'); path.mkdir(mode=0o700); (path / 'user').write_text('foreign')
+            changed.append(path)
+        return owned
+    def replace(path, flags, *args, **kw):
+        roots = list(cache.glob('pytest-owned-*'))
+        root = roots[0] if len(roots) == 1 else None
+        parent = kw.get('dir_fd')
+        if (boundary == 'nested' and str(path) == 'pytest' and flags & os.O_DIRECTORY and not changed
+                and root is not None and (root / 'pytest').is_dir() and parent is not None
+                and (os.fstat(parent).st_dev, os.fstat(parent).st_ino) == (root.stat().st_dev, root.stat().st_ino)):
+            (root / 'pytest').rename(root / 'held-original'); (root / 'pytest').mkdir(mode=0o700)
+            changed.append(root / 'pytest')
+        return opened(path, flags, *args, **kw)
+    monkeypatch.setattr(subject.vm, 'OwnedDirectory', acquire)
+    monkeypatch.setattr(subject.os, 'open', replace)
+    with pytest.raises(subject.vm.Refused): subject.pytest_dependencies()
+    target = changed[0]
+    assert target.stat().st_mode & 0o777 == 0o700
+    assert sorted(p.name for p in target.iterdir()) == (['user'] if boundary == 'root' else [])
+
+
+def test_runtime_mkdir_refuses_replacement_after_initial_receipt(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root)
+    opened = subject.os.open
+    def replace(path, flags, *args, **kw):
+        if str(path) == 'output' and flags & os.O_DIRECTORY:
+            (root / 'output').rename(root / 'held-output'); (root / 'output').mkdir(mode=0o700)
+        return opened(path, flags, *args, **kw)
+    monkeypatch.setattr(subject.os, 'open', replace)
+    try:
+        with pytest.raises(subject.vm.Refused): fixture.mkdir('output', dynamic=True)
+        assert not list((root / 'output').iterdir()) and fixture.entries['output'][1]['.'][1] != (root / 'output').stat().st_ino
+    finally: fixture.close()
+
+
+@pytest.mark.parametrize('boundary', ['directory-parent', 'file-parent', 'chmod-parent'])
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('reuse_parent_number', [False, True])
+def test_runtime_child_lifetime_encloses_failed_parent_close(boundary, error_type, reuse_parent_number, tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    opened, closed = subject.os.open, subject.os.close
+    state = {}
+    first = error_type('first parent close failure')
+    fixture = None
+    if boundary == 'chmod-parent':
+        root = tmp_path / 'runtime'; root.mkdir(); fixture = subject.RuntimeFixture(root); fixture.mkdir('input')
+    guard_path = tmp_path / 'external-fd-guard'; guard_path.write_bytes(b'keep')
+    def acquire(path, flags, *args, **kw):
+        handle = opened(path, flags, *args, **kw)
+        parent = kw.get('dir_fd')
+        target = 'input' if boundary == 'chmod-parent' else 'pytest' if boundary == 'directory-parent' else '__init__.py'
+        if str(path) == target and parent is not None and 'child' not in state:
+            valid = boundary == 'chmod-parent' and os.fstat(parent).st_ino == os.fstat(fixture.owned.root).st_ino
+            roots = list(cache.glob('pytest-owned-*'))
+            if boundary != 'chmod-parent' and len(roots) == 1:
+                relative = roots[0] if boundary == 'directory-parent' else roots[0] / 'pytest'
+                valid = relative.is_dir() and os.fstat(parent).st_ino == relative.stat().st_ino
+            if valid: state.update(child=handle, child_identity=(os.fstat(handle).st_dev, os.fstat(handle).st_ino), parent=parent)
+        return handle
+    def close(handle):
+        closed(handle)
+        if handle == state.get('parent') and not state.get('failed'):
+            state['failed'] = True
+            if reuse_parent_number:
+                guard = opened(guard_path, os.O_RDONLY)
+                assert guard == handle
+                state['guard'] = guard
+            raise first
+    monkeypatch.setattr(subject.os, 'open', acquire)
+    monkeypatch.setattr(subject.os, 'close', close)
+    try:
+        with pytest.raises(error_type) as caught:
+            if boundary == 'chmod-parent': fixture.chmod('input', Path('.'), 0o755)
+            else: subject.pytest_dependencies()
+        assert caught.value is first and state['failed']
+        with pytest.raises(OSError): os.fstat(state['child'])
+        if reuse_parent_number:
+            assert os.read(state['guard'], 4) == b'keep'
+        assert not list(cache.glob('pytest-owned-*'))
+        if fixture is not None: fixture.validate()
+    finally:
+        if 'guard' in state: closed(state['guard'])
+        if fixture is not None: fixture.remove(); fixture.close()
+
+
+def test_runtime_chmod_primary_survives_receipt_and_close_errors(tmp_path, monkeypatch):
+    subject, cache = dependency_fixture(tmp_path, monkeypatch)
+    root = tmp_path / 'runtime'; root.mkdir(); fixture = subject.RuntimeFixture(root); fixture.mkdir('input')
+    actual_stat, actual_close = subject.os.fstat, subject.os.close
+    first, second = OSError('first chmod'), KeyboardInterrupt('secondary receipt')
+    changed = []
+    def chmod(*args): changed.append(True); raise first
+    def receipt(handle):
+        if changed and len(changed) == 1: changed.append(True); raise second
+        return actual_stat(handle)
+    monkeypatch.setattr(subject.os, 'fchmod', chmod)
+    monkeypatch.setattr(subject.os, 'fstat', receipt)
+    try:
+        with pytest.raises(OSError) as caught: fixture.chmod('input', Path('.'), 0o755)
+        assert caught.value is first and first.cleanup_errors[0]['failure']['type'] == 'KeyboardInterrupt'
+    finally: fixture.remove(); fixture.close()
+
+
+@pytest.mark.parametrize('lifecycle', ['fixture', 'dependency'])
+@pytest.mark.parametrize('slot', ['root', 'parent'])
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize('reuse', [False, True])
+def test_runtime_creation_anchor_consumes_each_slot_before_close(lifecycle, slot, error_type, reuse, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    if lifecycle == 'fixture':
+        root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root); anchor = fixture.owned
+    else:
+        destination = subject.pytest_dependencies(); anchor = subject.DEPENDENCY_OWNERS[destination]
+    original = {'root': anchor.root, 'parent': anchor.parent}
+    actual_close, actual_open = subject.os.close, subject.os.open
+    guard_path = tmp_path / 'unrelated-anchor-guard'; guard_path.write_bytes(b'keep')
+    first = error_type('first ' + slot + ' close')
+    state, calls = {}, []
+    def close(handle):
+        if handle in original.values(): calls.append(handle)
+        actual_close(handle)
+        if handle == original[slot] and not state.get('failed'):
+            state['failed'] = True
+            assert anchor.root is None and anchor.parent is None
+            if reuse:
+                guard = actual_open(guard_path, os.O_RDONLY)
+                if guard != handle:
+                    os.dup2(guard, handle)
+                    actual_close(guard)
+                state['guard'] = handle
+            raise first
+    monkeypatch.setattr(subject.os, 'close', close)
+    try:
+        with pytest.raises(error_type) as caught:
+            if lifecycle == 'fixture': subject.finish_runtime({'status': 'passed'}, tmp_path / 'proof.json', 'owned', fixture)
+            else: subject.cleanup_dependencies(destination)
+        assert caught.value is first and anchor.root is None and anchor.parent is None
+        assert calls.count(original['root']) == calls.count(original['parent']) == 1
+        if reuse: assert os.read(state['guard'], 4) == b'keep'
+        if lifecycle == 'fixture':
+            assert json.loads((tmp_path / 'proof.json').read_text())['status'] == 'failed'
+            fixture.close()  # Idempotent; no retry of either consumed integer.
+        else:
+            assert not destination.exists() and subject.DEPENDENCY_OWNERS[destination] is anchor
+            assert subject.DEPENDENCY_CLOSE_DEBT[destination]['namespace_status'] == 'removed'
+            assert subject.DEPENDENCY_CLOSE_DEBT[destination]['anchor_slots_consumed']
+            subject.close_runtime_anchor(anchor)
+        assert calls.count(original['root']) == calls.count(original['parent']) == 1
+    finally:
+        if 'guard' in state: actual_close(state['guard'])
+
+
+@pytest.mark.parametrize('lifecycle', ['fixture', 'dependency'])
+def test_runtime_anchor_attempts_parent_after_root_failure_preserving_first(lifecycle, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    if lifecycle == 'fixture':
+        root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root); anchor = fixture.owned
+    else:
+        destination = subject.pytest_dependencies(); anchor = subject.DEPENDENCY_OWNERS[destination]
+    root_fd, parent_fd = anchor.root, anchor.parent
+    first, second = KeyboardInterrupt('first root close'), OSError('secondary parent close')
+    close = subject.os.close
+    calls = []
+    def fail(handle):
+        close(handle); calls.append(handle)
+        if handle == root_fd: raise first
+        if handle == parent_fd: raise second
+    monkeypatch.setattr(subject.os, 'close', fail)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        if lifecycle == 'fixture': fixture.close()
+        else: subject.cleanup_dependencies(destination)
+    assert caught.value is first and calls.count(root_fd) == calls.count(parent_fd) == 1
+    assert anchor.root is None and anchor.parent is None
+    assert any(row['failure']['error'] == str(second) for row in first.cleanup_errors)
+
+
+def test_runtime_dependency_close_failure_is_durable_after_namespace_removal(tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    dependency = subject.pytest_dependencies(); anchor = subject.DEPENDENCY_OWNERS[dependency]
+    root_fd = anchor.root
+    monkeypatch.setattr(subject, 'pytest_dependencies', lambda: dependency)
+    close = subject.os.close
+    first = OSError('dependency close diagnostic')
+    failed = []
+    def fail(handle):
+        close(handle)
+        if handle == root_fd and not failed: failed.append(True); raise first
+    monkeypatch.setattr(subject.os, 'close', fail)
+    with pytest.raises(subject.vm.Refused): subject.run_tests([], tmp_path / 'proof.json')
+    proof = json.loads((tmp_path / 'proof.json').read_text())
+    debt = proof['cleanup']['dependencies']
+    assert debt['status'] == 'removed' and debt['close_status'] == 'failed'
+    assert debt['close_debt']['anchor_slots_consumed'] and debt['identity']
+    assert debt['expected_files'] and str(first) in json.dumps(debt['close_debt'])
+    assert anchor.root is None and anchor.parent is None and not dependency.exists()
+
+
+@pytest.mark.parametrize('lifecycle', ['fixture', 'dependency'])
+@pytest.mark.parametrize('error_type', [OSError, KeyboardInterrupt, SystemExit])
+def test_runtime_fallback_finalizes_parent_only_anchor_without_reuse_collateral(lifecycle, error_type, tmp_path, monkeypatch):
+    subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
+    if lifecycle == 'fixture':
+        root = runs / 'runtime-owned'; root.mkdir(); fixture = subject.RuntimeFixture(root); fixture.remove(); anchor = fixture.owned
+        dependency = None
+    else:
+        fixture = None; dependency = subject.pytest_dependencies(); anchor = subject.DEPENDENCY_OWNERS[dependency]; anchor.remove()
+    close, opened = subject.os.close, subject.os.open
+    close(anchor.root); anchor.root = None
+    parent = anchor.parent
+    first, second = OSError('first before fallback'), error_type('secondary parent close')
+    guard_path = tmp_path / 'fallback-guard'; guard_path.write_bytes(b'keep')
+    calls, state = [], {}
+    def fail(handle):
+        close(handle)
+        if handle == parent:
+            calls.append(handle)
+            guard = opened(guard_path, os.O_RDONLY)
+            if guard != handle: os.dup2(guard, handle); close(guard)
+            state['guard'] = handle
+            raise second
+    monkeypatch.setattr(subject.os, 'close', fail)
+    monkeypatch.setattr(subject, '_finish_runtime', lambda *args, **kw: (_ for _ in ()).throw(first))
+    try:
+        with pytest.raises(OSError) as caught: subject.finish_runtime({'status': 'passed'}, tmp_path / 'proof.json', 'owned', fixture, dependency)
+        assert caught.value is first and calls == [parent]
+        assert anchor.root is None and anchor.parent is None and os.read(state['guard'], 4) == b'keep'
+        assert any(row['failure']['type'] == error_type.__name__ for row in first.cleanup_errors)
+        if lifecycle == 'dependency':
+            assert subject.DEPENDENCY_OWNERS[dependency] is anchor
+            assert subject.DEPENDENCY_CLOSE_DEBT[dependency]['close_outcome'] == 'uncertain'
+    finally: close(state['guard'])

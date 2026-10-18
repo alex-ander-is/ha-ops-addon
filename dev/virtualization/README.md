@@ -294,3 +294,63 @@ Only core groups permit two or four independent pytest workers; physical
 allocation profiles stay sequential. Each run mounts a fresh exact extraction
 of the seven reviewed pure Python test wheels; unknown persistent cache content
 is excluded and preserved, never silently deleted or imported.
+
+Runtime qualification owns each `runtime-*` fixture and fresh `pytest-owned-*`
+extraction from creation through finalization. Success, test failure and
+interruption preserve results, JUnit and causal diagnostics in an external
+atomic report before removing the exact host fixture. The report is then
+updated with the final cleanup receipt. Reports inside a disposable root are
+refused. Build reports live outside `runs/` alongside runtime metadata.
+
+Cleanup first exports original and recreated raw JUnit, available ext4 proof,
+and completed or partial process output into an external report. Only after
+that report is durable does it remove exact named consumers and prove absence
+before removing bind inputs, dependencies, tmpfs volumes or ext4 resources.
+An unknown execution outcome retains every consumer even when XML is readable.
+An incomplete export or unavailable publication also retains every consumer as well
+as its exact volume/ext4 storage, because tmpfs contents need a live attachment.
+Original proof is durably checkpointed before recreation removes its first
+client. The first cancellation, including one during finalization, propagates
+unchanged; secondary failures remain attached. Retained dependency receipts
+include the original device/inode, expected files/directories and exact retry
+instructions before handles are closed.
+Completed execution with a proven missing JUnit file still fails qualification,
+but does not retain storage for a nonexistent file. A transient consumer
+or volume cleanup gets one additional exact attempt; both attempts remain in
+the report. Changed roots, immutable inputs, dependency files and unknown
+namespace entries are preserved as explicit cleanup debt. Ownership is recorded
+before mode changes or file writes; descriptor-relative creation, verified open
+file identities and descriptor chmod prevent replaced paths being mutated; partial writes remain owned. When an anchor
+cannot be acquired, the report names the exact retained acquisition debt without
+adopting a new root. Dynamic output contents belong to the acquired output
+directory. A failed requested report
+uses a separate local cleanup report; if neither report can be saved, fixtures
+are retained. Report failures always fail the command. Resolve the reported
+consumer or ownership debt before retrying only its exact recorded path and
+identity; never remove the parent namespace. VM disks, reusable images and
+package caches survive every run. A build interrupted before Docker confirms
+completion retains its context because daemon consumption is uncertain.
+
+Mutation authority uses the original observed inode, including exclusive regular
+file ownership (`st_nlink == 1`). New directories receive an immediate no-follow
+identity receipt after mkdir; a later descriptor open must match that receipt
+and the visible entry before descent. Dependency chmod and extraction use the
+original held root and verified descendant descriptors. These are private
+same-user fixtures: no atomic mkdir-and-open guarantee is claimed before the
+first identity observation, and a hostile same-user attacker is outside this
+assurance boundary. Observed replacements are refused and preserved.
+
+Descriptor acquisition is enrolled before releasing a parent or performing
+fallible metadata work. Empty dependency files receive their identity and hash
+receipt before parent close. A close attempt consumes ownership of that FD
+number even if it raises, so a reused number is never blindly closed again;
+remaining enrolled children are finalized and secondary close failures attach
+to the first error. The same scope covers chmod and copied input handoffs.
+
+Creation anchors use the same one-attempt lifecycle for their root and parent
+slots independently. Both slots are consumed before closure, and failure of
+one never skips the other's close attempt or retries a reused FD number.
+A parent-only anchor is still finalized. A failed syscall records uncertain
+close outcome rather than claiming certain closure. Dependency ownership and
+identity/manifest receipts are retained on close failure even if its namespace
+was already removed; the registry is cleared only after successful finalization.
