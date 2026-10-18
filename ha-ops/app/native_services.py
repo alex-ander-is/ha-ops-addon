@@ -257,10 +257,11 @@ class ServiceStore:
     Calls hold a stable nonblocking flock through commands and probes. Adapters
     must honor finite timeout values; arbitrary Python callbacks cannot be killed.
     """
-    def __init__(self, directory, *, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, directory, *, clock=time.monotonic, sleep=time.sleep, create=True):
         self.directory = Path(os.path.abspath(directory))
         self.clock, self.sleep = clock, sleep
-        _durable_directory(self.directory)
+        if create:
+            _durable_directory(self.directory)
         st = self.directory.lstat()
         _need(stat.S_ISDIR(st.st_mode) and st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) == 0o700)
         self._identity = (st.st_dev, st.st_ino)
@@ -310,7 +311,7 @@ class ServiceStore:
     def _load(self, directory):
         self._check_paths(directory)
         try:
-            fd = os.open("state.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory)
+            fd = os.open("state.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
         except FileNotFoundError:
             self._pointer = None
             return None
@@ -320,7 +321,7 @@ class ServiceStore:
             try:
                 value = json.load(stream, object_pairs_hook=_pairs,
                                   parse_constant=lambda _: (_ for _ in ()).throw(InvalidState("invalid JSON")))
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 raise InvalidState("invalid native service JSON") from None
         self._pointer = (st.st_dev, st.st_ino)
         return validate(value)

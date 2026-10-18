@@ -1387,7 +1387,7 @@ class HaOpsApp extends LitElement {
 
   render() {
     if (!Object.keys(this.view || {}).length) {
-      return html`<main><section class="card wide" role="status"><h1>HA Ops</h1><p>Loading…</p></section></main>`;
+      return html`<main><ha-ops-direct></ha-ops-direct><section class="card wide" role="status"><h1>HA Ops</h1><p>Loading…</p></section></main>`;
     }
     const blocked = this.mutationBlocked();
     const pending = Boolean(this.state.deleted_devices_pending_confirmation);
@@ -1397,6 +1397,7 @@ class HaOpsApp extends LitElement {
     const displayedStatus = this.connection === "unknown" ? "unknown" : status === "success" ? TEXT.statusDone || "done" : status;
     return html`
       <main>
+        <ha-ops-direct></ha-ops-direct>
         <div class="top-grid">
           <section class="card control-card">
             <div class="title-row"><h1>${t("title.site")}</h1><div class="header-badges">
@@ -2086,3 +2087,59 @@ class HaOpsApp extends LitElement {
   }
 }
 customElements.define("ha-ops-app", HaOpsApp);
+
+// Shared Vaadin controls for ingress enrollment and independent direct diagnostics.
+export function suggestedDirectAddress(hostname, https = false, port = 8100) {
+  const host = hostname.replace(/^\[|\]$/g, '');
+  const local = host === 'localhost' || host.endsWith('.local') || /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host) || /^(::1|f[cd][0-9a-f:]*|fe80:[0-9a-f:]*)$/i.test(host);
+  return local ? `${https ? 'https' : 'http'}://${host.includes(':') ? `[${host}]` : host}:${port}` : '';
+}
+
+class HaOpsDirect extends LitElement {
+  static properties = { direct: {type: Boolean}, address: {state: true}, message: {state: true}, setup: {state: true}, snapshot: {state: true}, busy: {state: true} };
+  static styles = css`
+    :host{display:block;font:16px system-ui;color:#243443}section{padding:20px;margin:16px auto;max-width:900px;border:1px solid #d6dde4;border-radius:12px;background:#fff}p{line-height:1.5}vaadin-text-field{width:100%}vaadin-button{margin:8px 8px 0 0}vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}pre{white-space:pre-wrap;overflow-wrap:anywhere} .actions{display:flex;flex-wrap:wrap} h2{font-size:1.2rem}`;
+  constructor() { super(); this.direct = location.pathname === '/direct/'; this.address = ''; this.message = ''; this.busy = false; }
+  connectedCallback() { super.connectedCallback(); if(this.direct) this.loadDirect(); else this.loadSetup(); }
+  disconnectedCallback() { clearTimeout(this.timer); super.disconnectedCallback(); }
+  async api(path, init = {}) {
+    const base = this.direct ? '/direct/' : new URL('.', location.href).pathname;
+    const response = await fetch(base + path, {...init, headers: {'Content-Type':'application/json', ...init.headers}});
+    const value = await response.json();
+    if(!response.ok || value.ok === false) throw Error(value.message || 'Direct access unavailable');
+    return value;
+  }
+  async loadSetup() {
+    try { this.setup = await this.api('api/direct-access/setup'); if(!this.address) this.address = suggestedDirectAddress(location.hostname, this.setup.https, this.setup.suggested_port); }
+    catch(error) { this.message = error.message; }
+  }
+  async allow() {
+    // Open during the user gesture; never open a window after awaiting the network.
+    const tab = window.open('about:blank', '_blank');
+    if(!tab) { this.message = 'Popup blocked. Allow popups and try Allow this browser again.'; return; }
+    tab.opener = null; this.busy = true;
+    try {
+      const result = await this.api('api/direct-access/allow', {method:'POST', body:JSON.stringify({nonce:this.setup.nonce,address:this.address})});
+      tab.location.href = result.url;
+      this.message = 'Authorization opened in a new window. This browser will remember direct access.';
+    } catch(error) { tab.close(); this.message = error.message; }
+    finally { this.busy = false; await this.loadSetup(); }
+  }
+  open() {
+    try { const url = new URL(this.address); if(!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !['','/'].includes(url.pathname) || url.search || url.hash) throw Error(); window.open(url.origin + '/direct/', '_blank', 'noopener'); }
+    catch { this.message = 'Enter an HTTP or HTTPS address with its configured host port.'; }
+  }
+  async loadDirect() {
+    try {
+      await window.haOpsBootstrap;
+      await this.api('api/session');
+      this.snapshot = await this.api('api/status'); this.message = '';
+    } catch(error) { this.message = error.message; }
+    if(this.isConnected) this.timer = setTimeout(()=>this.loadDirect(), 3000);
+  }
+  render() {
+    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.message || 'Remembered browser access is active.'}</p>${this.snapshot ? html`<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
+    return html`<section data-testid="direct-access-entry"><h2>Direct recovery access</h2><p>Remember this browser for access while Core or ingress is unavailable. HTTP is supported on your trusted LAN; HTTPS is optional.</p><vaadin-text-field label="Direct address" placeholder="http://homeassistant.local:8100" .value=${this.address} @value-changed=${e=>{this.address=e.detail.value;}}></vaadin-text-field><p>Port 8100 is a suggestion. Enter the host port configured for HA Ops.</p><div class="actions"><vaadin-button ?disabled=${!this.setup || !this.address || this.busy} @click=${()=>this.allow()}>Allow this browser</vaadin-button><vaadin-button ?disabled=${!this.address} @click=${()=>this.open()}>Open in new window</vaadin-button><vaadin-button @click=${()=>{this.message='You can authorize this browser later. Ingress remains available.';}}>Set up later</vaadin-button></div><p role="status">${this.message}</p></section>`;
+  }
+}
+customElements.define('ha-ops-direct', HaOpsDirect);

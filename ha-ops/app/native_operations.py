@@ -423,7 +423,7 @@ class NativeOperationStore:
             self.mutex = _LOCKS.setdefault(str(self.data_root), threading.RLock())
 
     @contextmanager
-    def _locked(self):
+    def _locked(self, *, create=True):
         _require(getattr(self,'_scope_execution',None) is None,'scope execution owns canonical critical section')
         with self.mutex:
             descriptors = []
@@ -434,19 +434,20 @@ class NativeOperationStore:
                     fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     descriptors.append(fd)
                 for part in ("native-operations", "artifacts"):
-                    try:
-                        os.mkdir(part, 0o700, dir_fd=fd)
-                        os.fsync(fd)
-                    except FileExistsError:
-                        pass
+                    if create:
+                        try:
+                            os.mkdir(part, 0o700, dir_fd=fd)
+                            os.fsync(fd)
+                        except FileExistsError:
+                            pass
                     fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
                     descriptors.append(fd)
                     _require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, "unsafe directory permissions")
                 root, artifacts = descriptors[-2:]
-                lock = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=root)
+                lock = os.open("lock", os.O_RDWR | (os.O_CREAT if create else 0) | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=root)
                 descriptors.append(lock)
                 self._regular(lock)
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                fcntl.flock(lock, fcntl.LOCK_EX if create else fcntl.LOCK_SH | fcntl.LOCK_NB)
                 yield root, artifacts
             finally:
                 for fd in reversed(descriptors):
@@ -1414,10 +1415,12 @@ class NativeOperationStore:
             self._commit(root, artifacts, state)
             return self._projection(state)
 
-    def _load(self, root, artifacts):
+    def _load(self, root, artifacts, *, create=True):
         try:
             state = _parse(self._read_file(root, "state.json"))
         except FileNotFoundError:
+            if not create:
+                raise
             state = {"schema": SCHEMA, "revision": 0, "instance_id": str(uuid.uuid4()),
                      "updated_at": _now(), "app_version": "unactivated", "epoch": 0,
                      "records": {}, "current": dict.fromkeys(sorted(DOMAINS)), "workers": {},
@@ -1452,13 +1455,16 @@ class NativeOperationStore:
         if state["revision"] != expected:
             raise Conflict("native state revision changed")
 
-    def read(self):
+    def read(self, *, observe=False):
+        if observe:
+            with self._locked(create=False) as (root, artifacts):
+                return self._load(root, artifacts, create=False)
         with self._locked() as (root, artifacts):
             return self._load(root, artifacts)
 
-    def refresh(self):
+    def refresh(self, *, observe=False):
         """Diagnostic projection only: never initializes editable decisions."""
-        state = self.read()
+        state = self.read(observe=True) if observe else self.read()
         return {"revision": state["revision"], "candidates": {
             domain: None if key is None else {field: copy.deepcopy(state["records"][key][field])
                                               for field in ("id", "status", "artifact", "identity_digest", "checkpoints")}

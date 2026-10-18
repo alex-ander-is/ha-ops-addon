@@ -300,6 +300,7 @@ def main(ctx=None):
         ctx.releases_dir.mkdir(parents=True, exist_ok=True)
         ctx.repair_startup_state()
         ctx.log_state_summary("Startup state")
+        web.direct_access.start(ctx)
         httpd = ThreadingHTTPServer((ctx.host, ctx.port), web.create_handler(ctx))
         httpd.serve_forever()
     except Exception:

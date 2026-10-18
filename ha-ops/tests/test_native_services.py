@@ -873,6 +873,11 @@ def test_no_production_import_hook_or_ingress_broker_dependency():
     directory = Path(n.__file__).parent
     for path in directory.glob("*.py"):
         if path.name == "native_services.py": continue
+        if path.name == "native_status.py":
+            # Exact observational composition only; never expose worker methods.
+            source = path.read_text()
+            assert not any("." + name + "(" in source for name in ("prepare", "stop", "restore", "reconcile"))
+            continue
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
             if isinstance(node, ast.Import): assert all(alias.name != "native_services" for alias in node.names)

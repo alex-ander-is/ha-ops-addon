@@ -21,6 +21,7 @@ import registry_diff
 import state as state_store
 import sync as sync_logic
 import diff_split
+import direct_access
 
 
 def _(key, **values):
@@ -1310,6 +1311,7 @@ def create_handler(ctx):
                 self.active_command_id = None
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode("utf-8"))
 
@@ -1382,6 +1384,8 @@ def create_handler(ctx):
             return False
 
         def do_GET(self):
+            if direct_access.ingress_request(self, ctx):
+                return
             parsed = urlparse(self.path)
             route = ingress_route(parsed.path, *GET_ENDPOINTS)
             dev_harness_get = getattr(ctx, "dev_harness_handle_get", None)
@@ -1528,6 +1532,8 @@ def create_handler(ctx):
             self.send_html(render_page(ctx))
 
         def do_POST(self):
+            if direct_access.ingress_request(self, ctx):
+                return
             self._force_json = True
             parsed = urlparse(self.path)
             route = ingress_route(parsed.path, *POST_ENDPOINTS)

@@ -65,3 +65,8 @@ Preview Git to HA checks backup freshness before building the diff. A missing or
 backup shows an immediate warning. Retry Preview checks again; Continue Preview Without
 a Fresh Backup permits one diff review only. Apply checks independently, including a
 read-only recheck for Acknowledge & Proceed. Unknown backup status cannot be bypassed.
+
+Direct access on a configurable host port supports remembered browser tokens,
+trusted-LAN HTTP and optional HTTPS. Authorize from ingress; access survives Core
+or ingress loss and App restart. Native execution remains unavailable pending
+its separate qualification. See [direct access](ha-ops/docs/direct-access.md).
