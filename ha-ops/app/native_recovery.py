@@ -6,6 +6,7 @@ are durable. Namespace effects therefore always have an identifiable postimage.
 """
 from __future__ import annotations
 from contextlib import contextmanager
+from contextlib import nullcontext
 from dataclasses import dataclass
 import base64
 import fcntl
@@ -22,6 +23,10 @@ from native_metadata import Binding, _opened, ancestors, MAX_ID
 from native_disk import NativeDisk, recovery_project, recovery_resume
 
 U64 = 2**64 - 1
+
+
+class _SuccessorPublished(RuntimeError):
+    """Internal restart at a durably switched immutable revision."""
 
 
 def canonical(value):
@@ -90,6 +95,29 @@ class Directory:
         _uint(self.uid, MAX_ID); _uint(self.gid, MAX_ID); _uint(self.mode, 0o7777)
 
 
+@dataclass(frozen=True,eq=False)
+class SourceFile:
+    """Issued immutable no-follow stream source, never an arbitrary filename."""
+    store: object
+    source: bytes
+    state: bytes
+
+    def check(self):
+        if self.store._source_issued.get(id(self))!=(self,self.source,self.state):
+            raise Blocked('unissued-recovery-source')
+        expected=parse(self.state)
+        if self.store._observe(self.source)!=expected:
+            raise Blocked('changed-recovery-source')
+        return expected
+
+    @property
+    def uid(self):return parse(self.state)['uid']
+    @property
+    def gid(self):return parse(self.state)['gid']
+    @property
+    def mode(self):return parse(self.state)['mode']
+
+
 def _semantic(state):
     return None if state is None else {k: v for k, v in state.items() if k not in ('dev', 'ino')}
 
@@ -136,10 +164,21 @@ class Prepared:
     manifest: bytes
     payloads: tuple
     prior: bytes | None
+    successor: bool = False
 
     def check(self):
         if self.store._issued.get(id(self)) is not self: raise Blocked('unissued-recovery-preparation')
         return parse(self.manifest)
+
+
+@dataclass(frozen=True,eq=False)
+class CloseApproval:
+    store: object
+    pointer: bytes
+    operation: str
+    owner: str
+    revision: int
+    command: str
 
 
 class RecoveryStore:
@@ -152,12 +191,24 @@ class RecoveryStore:
         if self.disk.root != binding.root: raise Blocked('different-recovery-disk-root')
         self.fault = fault or (lambda _: None)
         self._issued = {}
+        self._apply_qualified = {}
+        self._apply_captures = {}
+        self._source_issued = {}
+        self._close_issued={}
         self._held_routes=None
 
     def _target_path(self, path):
         if self.binding.policy.reason(path) or path == b'.gitignore' or path in self.binding.policy.repository_files:
             raise Blocked('non-managed-recovery-target')
         return path
+
+    def source_file(self,path):
+        path=path_bytes(path)
+        state=self._observe(path)
+        if state is None or state['kind']!='file':raise Blocked('regular-recovery-source-required')
+        source=SourceFile(self,path,canonical(state))
+        self._source_issued[id(source)]=(source,source.source,source.state)
+        return source
 
     def _observe(self, path, *, content=False):
         parts = path.split(b'/')
@@ -350,6 +401,128 @@ class RecoveryStore:
         if len(self._read(b'authority.key'))!=32: raise Blocked('invalid-recovery-authority-key')
 
     @contextmanager
+    def draft_claim_fence(self):
+        """One stable inode lease for cleanup versus durable acceptance."""
+        with self._directory() as fd:
+            identity=_id(os.fstat(fd))
+            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise Blocked('draft-claim-or-cleanup-busy') from None
+            try:
+                if _id(os.stat(self._private(b''),follow_symlinks=False))!=identity:raise Blocked('changed-draft-claim-fence')
+                yield
+            finally:fcntl.flock(fd,fcntl.LOCK_UN)
+
+    @staticmethod
+    def cleanup_draft_template(operation):
+        return dict(schema=1,operation=operation,root=[U64]*3,authority=dict(namespace=[U64]*3,key='f'*64,receipts={}),phase='retiring',identity=[U64,U64],seal='f'*64)
+
+    def _cleanup_draft(self,operation):
+        if str(uuid.UUID(operation))!=operation:raise Blocked('invalid-cleanup-draft-operation')
+        name=b'apply-draft-'+operation.encode()+b'.json'
+        value=parse(self._read(name));_fields(value,'schema operation root authority phase identity seal')
+        actual=self._observe(self.directory+b'/'+name)
+        if value['phase'] not in ('draft','retiring') or value['schema']!=1 or value['operation']!=operation or value['root']!=_id(os.stat(self.binding.root,follow_symlinks=False))+[stat.S_IMODE(os.stat(self.binding.root,follow_symlinks=False).st_mode)] or type(value['seal']) is not str or not hmac.compare_digest(value['seal'],self._seal(value,'seal')) or actual is None or [actual['dev'],actual['ino']]!=value['identity']:raise Blocked('modified-cleanup-draft-authority')
+        return value
+
+    def register_cleanup_draft(self,admission,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,admission.operation,deleting=False)
+        if capability.purpose!='prepare':raise Blocked('draft-allocation-capability-required')
+        from native_disk import ApplyAdmission
+        if type(admission) is not ApplyAdmission or admission.disk is not self.disk:raise Blocked('issued-cleanup-draft-admission-required')
+        admission.check();self._ensure()
+        with self._lock():
+            value=dict(schema=1,operation=admission.operation,root=_id(os.stat(self.binding.root,follow_symlinks=False))+[stat.S_IMODE(os.stat(self.binding.root,follow_symlinks=False).st_mode)],authority=dict(namespace=None,key=admission._cleanup_key.hex(),receipts={}),phase='draft',identity=None,seal=None)
+            def encoded(identity):
+                value['identity']=identity;value['seal']=self._seal(value,'seal');return canonical(value)
+            self._write(b'apply-draft-'+admission.operation.encode()+b'.json',encoded,replace=False)
+            self.fault('cleanup_draft_registered')
+            # The same interprocess fence covers creation and its identity ACK.
+            # A cleanup cannot retire an absent draft while a live preparer is
+            # about to allocate that namespace.
+            from native_disk import _identity
+            prefix=b''
+            for component in admission.directory.split(b'/'):
+                with _opened(self.binding,prefix,'directory') as (fd,_):
+                    try:os.mkdir(component,0o700,dir_fd=fd);os.fsync(fd)
+                    except FileExistsError:
+                        if prefix+b'/'+component==admission.directory:raise Blocked('foreign-draft-leaf-namespace') from None
+                    info=os.stat(component,dir_fd=fd,follow_symlinks=False)
+                    if not stat.S_ISDIR(info.st_mode) or prefix in (b'data/native',b'data/native/apply') and (info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700):raise Blocked('unsafe-cleanup-draft-namespace')
+                prefix=prefix+(b'/' if prefix else b'')+component
+            with _opened(self.binding,admission.directory,'directory') as (fd,_):admission._directory_identity=_identity(os.fstat(fd))
+            self.fault('cleanup_draft_namespace_created')
+            value['authority']['namespace']=list(admission._directory_identity)
+            self._write(b'apply-draft-'+admission.operation.encode()+b'.json',encoded)
+            self.fault('cleanup_draft_bound')
+        admission._draft_store=self;admission._draft_bound=True
+
+    def bind_cleanup_draft(self,admission,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,admission.operation,deleting=False)
+        if capability.purpose!='prepare':raise Blocked('draft-allocation-capability-required')
+        with self._lock():
+            value=self._cleanup_draft(admission.operation)
+            if value['authority']['key']!=admission._cleanup_key.hex() or value['authority']['namespace'] is not None:raise Blocked('cleanup-draft-already-bound')
+            value['authority']['namespace']=list(admission._directory_identity)
+            def encoded(identity):
+                value['identity']=identity;value['seal']=self._seal(value,'seal');return canonical(value)
+            self._write(b'apply-draft-'+admission.operation.encode()+b'.json',encoded)
+        admission._draft_bound=True
+
+    def retire_unallocated_cleanup_draft(self,operation,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,operation,deleting=True)
+        self.begin_draft_retirement(operation,capability=capability)
+        with self._lock():
+            value=self._cleanup_draft(operation)
+            if value['authority']['namespace'] is not None:return False
+            if self._observe(b'data/native/apply/'+operation.encode()) is not None:raise Blocked('unacknowledged-cleanup-draft-namespace')
+            with self._directory() as fd:os.unlink(b'apply-draft-'+operation.encode()+b'.json',dir_fd=fd);os.fsync(fd)
+            return True
+
+    def begin_draft_retirement(self,operation,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,operation,deleting=True)
+        try:value=self._cleanup_draft(operation)
+        except FileNotFoundError:return
+        if value['phase']=='retiring':return
+        value['phase']='retiring'
+        with self._lock():
+            def encoded(identity):
+                value['identity']=identity;value['seal']=self._seal(value,'seal');return canonical(value)
+            self._write(b'apply-draft-'+operation.encode()+b'.json',encoded)
+        self.fault('draft_retirement_durable')
+
+    def cleanup_draft_authority(self,operation):
+        value=self._cleanup_draft(operation)
+        if value['authority']['namespace'] is None:raise Blocked('unacknowledged-cleanup-draft-namespace')
+        return value['authority']
+
+    def cleanup_drafts(self):
+        try:
+            with self._directory() as fd:names=os.listdir(fd)
+        except FileNotFoundError:return []
+        result=[]
+        for name in sorted(names):
+            if re.fullmatch(r'apply-draft-[0-9a-f-]{36}\.json',name):
+                operation=name[len('apply-draft-'):-len('.json')]
+                value=self._cleanup_draft(operation)
+                result.append(dict(operation=operation,namespace_bound=value['authority']['namespace'] is not None))
+        return result
+
+    def retire_cleanup_draft(self,operation,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,operation,deleting=True)
+        try:value=self._cleanup_draft(operation)
+        except FileNotFoundError:return
+        if value['phase']!='retiring':raise Blocked('durable-draft-retirement-required')
+        if self._observe(b'data/native/apply/'+operation.encode()) is not None:raise Blocked('draft-resources-not-retired')
+        with self._lock():
+            if self._cleanup_draft(operation)!=value:raise Blocked('cleanup-draft-authority-changed')
+            with self._directory() as fd:os.unlink(b'apply-draft-'+operation.encode()+b'.json',dir_fd=fd);os.fsync(fd)
+
+    @contextmanager
     def _lock(self):
         with self._directory() as parent:
             fd = os.open(b'lock', os.O_RDWR | os.O_NOFOLLOW, dir_fd=parent)
@@ -386,24 +559,65 @@ class RecoveryStore:
         found=self.discover()
         if found is None: raise Blocked('missing-prior-recovery-point')
         journal=found['journal']
+        if found['manifest'].get('apply_policy')=='retain-until-reviewed-close':
+            raise Blocked('retained-apply-point-requires-reviewed-close')
         if journal['phase'] not in ('ready','applied','restored') or journal['pending'] is not None:
             raise Blocked('pending-recovery-point-cannot-be-replaced')
 
-    def prepare(self, targets, *, operation_id=None, owner_id=None):
+    @staticmethod
+    def _apply_prepared_signature(prepared):
+        return canonical(dict(manifest=prepared.manifest.hex(),prior=None if prepared.prior is None else prepared.prior.hex(),
+            successor=prepared.successor,payloads=[[h,None if p.data is None else _digest(p.data),None if p.source is None else p.source.hex(),p.state.hex()] for h,p in prepared.payloads]))
+
+    @staticmethod
+    def _apply_targets(targets):
+        rows={}
+        for path,target in targets.items():
+            if target is None:state=None
+            elif type(target) is SourceFile:state=_semantic(target.check())
+            elif type(target) is File:state=dict(kind='file',uid=target.uid,gid=target.gid,mode=target.mode,size=len(target.data),digest=_digest(target.data))
+            else:state=dict(kind='directory',uid=target.uid,gid=target.gid,mode=target.mode,size=0,digest=None)
+            rows[_key(path)]=state
+        return canonical(rows)
+
+    def qualify_capture(self,review,capture,targets,*,capability):
+        from native_disk import require_apply
+        from native_apply import PreparedApply
+        if type(review) is not PreparedApply or review.issuer.recovery is not self:raise Blocked('issued-apply-capture-required')
+        require_apply(capability,self,review.operation);review.check(fresh=False)
+        frozen=canonical({_key(p):v for p,v in capture.items()})
+        self._apply_captures[id(capture)]=(capture,review,frozen,self._apply_targets(targets))
+
+    def prepare(self, targets, *, operation_id=None, owner_id=None, apply_authority=None, capability=None, capture=None):
         if type(targets) is not dict or not targets: raise Blocked('explicit-recovery-targets-required')
         op, owner = operation_id or str(uuid.uuid4()), owner_id or str(uuid.uuid4())
         for value in (op, owner):
             if str(uuid.UUID(value)) != value: raise Blocked('invalid-recovery-operation-identity')
+        from native_disk import require_apply
+        try:self._cleanup_draft(op);capsule_owned=True
+        except FileNotFoundError:capsule_owned=False
+        apply_owned=capsule_owned or apply_authority is not None or any(type(t) is SourceFile and t.source.startswith(b'data/native/apply/') for t in targets.values())
+        if apply_owned:
+            require_apply(capability,self,op)
+            if apply_authority is None:raise Blocked('issued-apply-retention-policy-required')
         explicit = {}
         for path, target in targets.items():
             if type(path) is not bytes: raise Blocked('byte-recovery-path-required')
             path = self._target_path(path_bytes(path))
-            if target is not None and type(target) not in (File, Directory): raise Blocked('invalid-recovery-target')
+            if target is not None and type(target) not in (File, Directory, SourceFile): raise Blocked('invalid-recovery-target')
+            if type(target) is SourceFile:
+                if target.store is not self:raise Blocked('foreign-recovery-source')
+                target.check()
             explicit[path] = target
         paths = set(explicit) | set(ancestors(explicit)); before = {}; payloads = {}
         for path in sorted(paths):
             value, raw = self._observe(path, content=True); before[_key(path)] = value
             if raw is not None: payloads[raw.digest]=raw
+        if apply_owned:
+            receipt=self._apply_captures.get(id(capture))
+            if receipt is None or receipt[0] is not capture or receipt[1] is not apply_authority or receipt[2]!=canonical({_key(p):v for p,v in capture.items()}) or receipt[3]!=self._apply_targets(targets):raise Blocked('issued-captured-apply-targets-required')
+            if type(capture) is not dict or set(capture)!=paths or any(before[_key(p)]!=capture[p] for p in paths):
+                raise Blocked('compiled-apply-capture-mismatch')
         after = {}
         for path in sorted(paths):
             old = before[_key(path)]
@@ -417,10 +631,14 @@ class RecoveryStore:
                 # Only materialized descendants require new parent directories.
                 target = Directory(old['uid'], old['gid'], old['mode']) if old and old['kind'] == 'directory' else Directory(os.geteuid(), os.getegid(), 0o755)
             if target is None: value = None
-            elif type(target) is File:
-                value = dict(kind='file', uid=target.uid, gid=target.gid, mode=target.mode,
-                             size=len(target.data), digest=_digest(target.data))
-                payloads[value['digest']]=Payload(target.data,None,b'')
+            elif type(target) in (File,SourceFile):
+                if type(target) is File:
+                    value = dict(kind='file', uid=target.uid, gid=target.gid, mode=target.mode,
+                                 size=len(target.data), digest=_digest(target.data))
+                    payloads[value['digest']]=Payload(target.data,None,b'')
+                else:
+                    state=target.check();value=_semantic(state)
+                    payloads[value['digest']]=Payload(None,target.source,target.state)
             else: value = dict(kind='directory', uid=target.uid, gid=target.gid, mode=target.mode, size=0, digest=None)
             after[_key(path)] = value
         for key, value in after.items():
@@ -440,13 +658,104 @@ class RecoveryStore:
         manifest = dict(schema=1, operation=op, owner=owner, generation=uuid.uuid4().hex,
                         root=_id(os.stat(self.binding.root, follow_symlinks=False))+[stat.S_IMODE(os.stat(self.binding.root,follow_symlinks=False).st_mode)], directory=_key(self.directory),
                         before=before, after=after, explicit=[_key(p) for p in sorted(explicit)], stages={}, pools={}, store_routes=None, binding_seal=None, cleanup=None, previous=parse(prior) if prior else None, forecast=None)
+        if apply_authority is not None:
+            from native_apply import PreparedApply
+            if type(apply_authority) is not PreparedApply or apply_authority.issuer.recovery is not self or apply_authority.operation!=op:
+                raise Blocked('issued-apply-retention-policy-required')
+            apply_authority.check()
+            manifest['apply_policy']='retain-until-reviewed-close'
         prepared = Prepared(self, canonical(manifest), tuple(sorted(payloads.items())), prior)
         self._issued[id(prepared)] = prepared
+        if apply_owned:
+            self._apply_qualified[id(prepared)]=(prepared,self._apply_prepared_signature(prepared))
+            from native_disk import qualify_apply
+            qualify_apply(capability,prepared)
         return prepared
 
     def _journal(self, manifest):
-        return dict(schema=1, operation=manifest['operation'], owner=manifest['owner'], generation=manifest['generation'],
+        journal=dict(schema=1, operation=manifest['operation'], owner=manifest['owner'], generation=manifest['generation'],
                     revision=0, phase='ready', current=manifest['before'], changed=[], pending=None, seal=None, identity=None, removed={})
+        if 'lineage' in manifest:
+            old=manifest['lineage']
+            journal.update(phase='forward',current=dict(manifest['before'],**old['current']),
+                           changed=list(old['changed']),removed=dict(old['removed']))
+        return journal
+
+    def amend(self, authority, path, preimage, target, admission,*,capability=None,captured=None):
+        from native_disk import require_apply
+        require_apply(capability,self,admission.operation)
+        """Publish a successor for an untouched selected leaf under both fences.
+
+        Every acknowledged earlier effect and original preimage remains signed
+        and unchanged. The independently sealed successor owns inherited effects; predecessor
+        payloads and unused stages retire only after durable publication.
+        """
+        from native_apply import NativeApply
+        if type(authority) is not NativeApply or authority.recovery is not self or self._held_routes is None:
+            raise Blocked('held-issued-apply-amendment-required')
+        found=self.discover();m,j=found['manifest'],found['journal'];key=_key(path)
+        debt=self._cleanup_debt_locked(exclude=m['generation'],capability=capability)
+        if any(row['status']!='removed' for row in debt):raise Blocked('successor-retirement-debt')
+        self._reconcile(m,j)
+        if (j['pending'] is not None or key not in m['explicit'] or key in j['changed'] or
+                any(_key(p) in j['changed'] for p in ancestors((path,)))):
+            raise Blocked('affected-recovery-path-cannot-be-amended')
+        self._routes(m,j,path)
+        actual=self._observe(path)
+        for source in (preimage,target):
+            if source is not None and (type(source) is not SourceFile or source.store is not self):
+                raise Blocked('issued-successor-content-required')
+            if source is not None:source.check()
+        if ((actual is None)!=(preimage is None) or actual is not None and
+                _semantic(actual)!=_semantic(parse(preimage.state))):
+            raise Blocked('successor-preimage-changed')
+        if actual!=captured:raise Blocked('successor-capture-mismatch')
+        for other,expected in j['current'].items():
+            if other!=key and self._observe(_path(other))!=expected:raise Blocked('successor-closure-changed')
+        before=dict(m['before']);before[key]=actual
+        after=dict(m['after']);after[key]=None if target is None else _semantic(target.check())
+        predecessor=self._pointer();generation=uuid.uuid4().hex
+        lineage=dict(schema=2,anchors={k:[m['before'][k],m['after'][k]] for k in j['changed']},pointer=parse(predecessor),journal=_digest(self._read(m['generation'].encode()+b'/journal.json')),
+                     current={k:j['current'][k] for k in j['changed']},changed=list(j['changed']),removed=dict(j['removed']),
+                     tombs={k:_key(self._tomb_path(m,k.split(':',1)[1],k.split(':',1)[0])) for k in j['removed']},
+                     pools={k:v for k,v in m['pools'].items() if any(os.path.dirname(self._tomb_path(m,r.split(':',1)[1],r.split(':',1)[0]))==_path(k) for r in j['removed'])})
+        manifest=dict(m,before=before,after=after,generation=generation,stages={},pools=dict(lineage['pools']),
+                      store_routes=None,binding_seal=None,cleanup=None,previous=parse(predecessor),forecast=None,lineage=lineage)
+        payloads={}
+        replacements={}
+        for source in (preimage,target):
+            if source is not None:replacements[parse(source.state)['digest']]=Payload(None,source.source,source.state)
+        for states in (before,after):
+            for state in states.values():
+                if state is None or state['kind']!='file':continue
+                h=state['digest']
+                if h in replacements:payloads[h]=replacements[h];continue
+                source_path=self.directory+b'/'+m['generation'].encode()+b'/blob-'+h.encode()
+                source=self._observe(source_path)
+                if source is None or source['digest']!=h or source['size']!=state['size']:
+                    raise Blocked('missing-successor-independent-payload')
+                payloads[h]=Payload(None,source_path,canonical(source))
+        prepared=Prepared(self,canonical(manifest),tuple(sorted(payloads.items())),predecessor,True)
+        self._issued[id(prepared)]=prepared
+        self._apply_qualified[id(prepared)]=(prepared,self._apply_prepared_signature(prepared))
+        # No cleanup credit: charge all predecessor resources simultaneously.
+        original=dict(m,stages={},pools=m.get('lineage',{}).get('pools',{}),store_routes=None,binding_seal=None,cleanup=None,forecast=None)
+        try:
+            # Exact previous recipe outputs use immutable declared payload sizes.
+            old_payloads={}
+            for states in (m['before'],m['after']):
+                for s in states.values():
+                    if s and s['kind']=='file':old_payloads[s['digest']]=Payload(None,b'',canonical(s))
+            prior=Prepared(self,canonical(original),tuple(sorted(old_payloads.items())),None)
+            self._issued[id(prior)]=prior
+            admission.retain(prior,capability=capability)
+        finally:self._issued.pop(id(prior),None)
+        self.fault('successor_prepared')
+        result=self.install(prepared,admission=admission,capability=capability)
+        self.fault('successor_published')
+        if any(row['status']!='removed' for row in result['cleanup']):raise Blocked('successor-retirement-debt')
+        admission.release(prior,capability=capability)
+        raise _SuccessorPublished()
 
     def _control_template(self, manifest):
         state = dict(kind='file', uid=MAX_ID, gid=MAX_ID, mode=0o7777, size=U64, digest='f'*64, dev=U64, ino=U64)
@@ -461,6 +770,8 @@ class RecoveryStore:
         entries.update({_key(self._tomb_path(manifest,k,d)):state for k in manifest['before'] for d in ('forward','rollback')})
         prep=dict(schema=1,generation=manifest['generation'],operation=manifest['operation'],owner=manifest['owner'],root=[U64,U64,0o7777],identity=[U64,U64],pools=m['pools'],entries=entries,
             files=m['cleanup']['files'],marker_identity=[U64,U64],seal='f'*64,blobs={name[5:]:dict(size=U64,digest='f'*64) for name in m['cleanup']['files'] if name.startswith('blob-')},manifest='f'*64)
+        if 'lineage' in manifest:
+            m['pools']=dict(manifest['lineage']['pools'],**m['pools'])
         metadata=max((canonical(m),canonical(prep)),key=len)
         return canonical(journal), metadata
 
@@ -485,14 +796,22 @@ class RecoveryStore:
                 if state is not None:
                     name=b'stage-'+hashlib.sha256((direction+key).encode()).hexdigest().encode()
                     outputs.append((pool+b'/'+name,state['size'],state['digest'] or _digest(b''),'recovery-stage'))
+        for key,state in manifest.get('lineage',{}).get('current',{}).items():
+            if state and state['kind']=='file':outputs.append((_path(key),state['size'],state['digest'],'inherited-live-effect'))
         for key in manifest['before']:
             for direction in ('forward','rollback'): outputs.append((self._tomb_path(manifest,key,direction),0,_digest(b''),'recovery-tombstone'))
         for pool in sorted(pools): outputs.append((pool+b'/entry',0,_digest(b''),'recovery-pool'))
         for label,raw in (('journal',journal),('manifest',metadata),('preparation',metadata),('pointer',canonical(dict(schema=1,generation='f'*32,manifest='f'*64,identity=[U64,U64])))):
             for _ in range(2): outputs.append((self.directory+b'/'+label.encode(),len(raw),_digest(raw),'recovery-control'))
+        if 'apply_policy' in manifest:
+            raw=canonical(dict(schema=1,command='f'*36,operation=manifest['operation'],owner=manifest['owner'],revision=U64,
+                               pointer=dict(schema=1,generation='f'*32,manifest='f'*64,identity=[U64,U64]),phase='closing',seal='f'*64))
+            for _ in range(2):outputs.append((self.directory+b'/closed.json',len(raw),_digest(raw),'apply-close-control'))
         return tuple(outputs)
 
     def _tomb_path(self,m,key,direction):
+        inherited=m.get('lineage',{}).get('tombs',{}).get(direction+':'+key)
+        if inherited is not None:return _path(inherited)
         return self._pool_for(m,key)+b'/removed-'+hashlib.sha256((direction+key).encode()).hexdigest().encode()
 
     def _removed_receipt(self,m,p,*,allow_children=False):
@@ -519,22 +838,29 @@ class RecoveryStore:
                 raise Blocked('changed-recovery-stage-pool')
             yield fd
 
-    def install(self,prepared):
-        manifest=prepared.check(); forecast=recovery_project(self.disk,prepared)
+    def install(self,prepared,*,admission=None,capability=None):
+        manifest=prepared.check()
+        if manifest.get('apply_policy') is not None:
+            from native_disk import require_apply
+            require_apply(capability,self,manifest['operation'])
+            if self._apply_qualified.get(id(prepared))!=(prepared,self._apply_prepared_signature(prepared)):raise Blocked('qualified-apply-manifest-required')
+        forecast=(recovery_project(self.disk,prepared) if admission is None else
+                  recovery_project(self.disk,prepared,admission=admission))
         self._ensure()
         forecast['seal']=hmac.new(self._read(b'authority.key'),canonical(forecast),hashlib.sha256).hexdigest()
-        with self._lock():
+        with (nullcontext() if prepared.successor and self._held_routes is not None else self._lock()):
             if self._pointer()!=prepared.prior: raise Blocked('stale-recovery-slot')
             # An unchanged pointer does not authorize retiring a point whose
             # signed journal advanced after prepare. Check under this same
             # stable lock before allocating any new generation resources.
-            if prepared.prior is not None: self._replaceable_point()
+            if prepared.prior is not None and not prepared.successor: self._replaceable_point()
             for key,before in manifest['before'].items():
-                if self._observe(_path(key))!=before: raise Blocked('changed-recovery-preimage')
+                expected=manifest.get('lineage',{}).get('current',{}).get(key,before)
+                if self._observe(_path(key))!=expected: raise Blocked('changed-recovery-preimage')
             manifest['forecast']=forecast
             manifest['store_routes']={_key(p):self._observe(p) for p in sorted(set(ancestors((self.directory,)))|{self.directory,self.directory+b'/authority.key'})}
             generation=manifest['generation'].encode()
-            prep=dict(schema=1,generation=manifest['generation'],operation=manifest['operation'],owner=manifest['owner'],root=manifest['root'],identity=None,pools={},entries={},files={},marker_identity=None,seal=None,blobs={h:{'size':payload.size,'digest':h} for h,payload in prepared.payloads},manifest=None)
+            prep=dict(schema=1,generation=manifest['generation'],operation=manifest['operation'],owner=manifest['owner'],root=manifest['root'],identity=None,pools=dict(manifest.get('lineage',{}).get('pools',{})),entries={_key(self._tomb_path(manifest,k.split(':',1)[1],k.split(':',1)[0])):v for k,v in manifest.get('lineage',{}).get('removed',{}).items()},files={},marker_identity=None,seal=None,blobs={h:{'size':payload.size,'digest':h} for h,payload in prepared.payloads},manifest=None)
             self._marker_write(generation,prep,create=True)
             try:
                 with self._directory() as fd:
@@ -612,12 +938,13 @@ class RecoveryStore:
                 raw=canonical(manifest)
                 self.fault('generation_durable')
                 for key,before in manifest['before'].items():
-                    if self._observe(_path(key))!=before: raise Blocked('changed-recovery-preimage-before-publication')
+                    expected=manifest.get('lineage',{}).get('current',{}).get(key,before)
+                    if self._observe(_path(key))!=expected: raise Blocked('changed-recovery-preimage-before-publication')
                 pointer=canonical(dict(schema=1,generation=manifest['generation'],manifest=_digest(raw),identity=prep['identity']))
                 self._write(b'active.json',pointer); self.fault('slot_durable')
                 # Only after pointer and directory durability may old immutable
                 # resources be reclaimed. Cleanup has its own explicit retry API.
-                cleanup=self._cleanup_debt_locked(exclude=manifest['generation'])
+                cleanup=self._cleanup_debt_locked(exclude=manifest['generation'],capability=capability)
                 self._issued.pop(id(prepared),None)
                 result=self.discover(); result['cleanup']=cleanup
                 return result
@@ -668,7 +995,7 @@ class RecoveryStore:
             # Interrupted in-place marker persistence is repairable only through
             # its immutable manifest-pinned inode, never a replacement inode.
             prep=dict(schema=1,generation=m['generation'],operation=m['operation'],owner=m['owner'],root=m['root'],identity=m['cleanup']['generation_identity'],
-                pools=m['pools'],entries={v['path']:v['state'] for v in m['stages'].values()},files=dict(m['cleanup']['files']),marker_identity=m['cleanup']['marker_identity'],seal=None,
+                pools=dict(m['pools']),entries={v['path']:v['state'] for v in m['stages'].values()},files=dict(m['cleanup']['files']),marker_identity=m['cleanup']['marker_identity'],seal=None,
                 blobs={name[5:]:dict(size=value['size'],digest=value['digest']) for name,value in m['cleanup']['files'].items() if name.startswith('blob-')},manifest=_digest(canonical(m)))
             manifest_receipt=self._observe(self.directory+b'/'+generation+b'/manifest.json')
             if manifest_receipt is None or [manifest_receipt['dev'],manifest_receipt['ino']]!=m['cleanup']['manifest_identity']: raise Blocked('substituted-repair-manifest')
@@ -679,22 +1006,38 @@ class RecoveryStore:
         prep['files']['journal.json']=journal_receipt
         self._marker_write(generation,prep,expected=m['cleanup']['marker_identity'])
 
-    def _cleanup_debt_locked(self,*,exclude):
+    def _cleanup_debt_locked(self,*,exclude,capability=None):
         results=[]
         with self._directory() as fd:
             names=os.listdir(fd)
-        for name in sorted(names):
-            if not re.fullmatch(r'preparation-[0-9a-f]{32}\.json',name): continue
-            generation=name[len('preparation-'):-len('.json')]
-            if generation==exclude: continue
+        generations={name[len('preparation-'):-len('.json')]:name for name in names
+                     if re.fullmatch(r'preparation-[0-9a-f]{32}\.json',name)}
+        dependencies={}
+        for generation in generations:
             try:
-                self._cleanup_generation(name.encode(),generation)
+                m=parse(self._read(generation.encode()+b'/manifest.json'))
+                if 'lineage' in m and m['lineage'].get('schema')!=2:dependencies[generation]=m['lineage']['pointer']['generation']
+            except (OSError,ValueError,KeyError,TypeError):pass
+        protected=set()
+        while exclude is not None and exclude not in protected:
+            protected.add(exclude);exclude=dependencies.get(exclude)
+        ordered=[];remaining=set(generations)
+        while remaining:
+            leaves=sorted(g for g in remaining if not any(dependencies.get(child)==g for child in remaining))
+            if not leaves:leaves=sorted(remaining)
+            ordered.extend(leaves);remaining.difference_update(leaves)
+        for generation in ordered:
+            name=generations[generation]
+            if not re.fullmatch(r'preparation-[0-9a-f]{32}\.json',name): continue
+            if generation in protected: continue
+            try:
+                self._cleanup_generation(name.encode(),generation,capability=capability)
                 results.append(dict(generation=generation,status='removed',errors=[]))
             except (OSError,ValueError) as exc:
                 results.append(dict(generation=generation,status='debt',errors=[str(exc)]))
         return results
 
-    def _cleanup_generation(self,marker,generation):
+    def _cleanup_generation(self,marker,generation,*,capability=None):
         generation_bytes=generation.encode()
         # The immutable self-pinned manifest and self-pinned signed journal can
         # requalify a completed own control publication whose marker update was
@@ -712,10 +1055,18 @@ class RecoveryStore:
             else:
                 self._validate_journal(manifest,journal); self._validate_authority(manifest,journal)
                 journal_receipt=self._observe(self.directory+b'/'+generation_bytes+b'/journal.json')
+        if manifest is not None and manifest.get('apply_policy') is not None:
+            from native_disk import require_apply
+            require_apply(capability,self,manifest['operation'],deleting=True)
         try: prep=self._read_marker(generation_bytes)
         except (OSError,ValueError):
             if manifest is None or journal_receipt is None: raise
             self._update_marker(manifest,journal_receipt); prep=self._read_marker(generation_bytes)
+        try:self._cleanup_draft(prep['operation']);apply_owned=True
+        except FileNotFoundError:apply_owned=False
+        if apply_owned:
+            from native_disk import require_apply
+            require_apply(capability,self,prep['operation'],deleting=True)
         if journal_receipt is not None and prep['files'].get('journal.json')!=journal_receipt:
             prep['files']['journal.json']=journal_receipt
             self._marker_write(generation_bytes,prep,expected=manifest['cleanup']['marker_identity'])
@@ -750,14 +1101,19 @@ class RecoveryStore:
             else:
                 journal=parse(self._read(generation_bytes+b'/'+name))
                 if any(journal.get(k)!=prep[k] for k in ('generation','operation','owner')): raise Blocked('changed-cleanup-journal-owner')
+        active=self.discover() if self._pointer() is not None else None
+        active=active['manifest'] if active is not None else {}
+        shared=active.get('lineage',{}).get('pools',{})
+        protected={_key(self._tomb_path(active,k.split(':',1)[1],k.split(':',1)[0])):v for k,v in active.get('lineage',{}).get('removed',{}).items()}
         for key,identity in prep['pools'].items():
             pool=_path(key)
-            if b'.ha-ops-recovery-'+generation_bytes+b'-' not in os.path.basename(pool) or type(identity) is not list or len(identity)!=2:
+            if (b'.ha-ops-recovery-'+generation_bytes+b'-' not in os.path.basename(pool) and (manifest is None or key not in manifest.get('lineage',{}).get('pools',{}))) or type(identity) is not list or len(identity)!=2:
                 raise Blocked('unacknowledged-or-invalid-cleanup-pool')
             if self._observe(pool) is None: continue
             with self._stage_directory(pool,identity) as fd:
                 for name in os.listdir(fd):
                     path=pool+b'/'+os.fsencode(name); encoded=_key(path)
+                    if key in shared and shared[key]==identity and encoded in protected and self._observe(path)==protected[encoded]:continue
                     if encoded not in prep['entries'] or self._observe(path)!=prep['entries'][encoded]: raise Blocked('foreign-stage-cleanup-entry')
         # Each unlink/rmdir is nonrecursive and independently rechecks ownership.
         for key,identity in prep['pools'].items():
@@ -765,11 +1121,14 @@ class RecoveryStore:
             if self._observe(pool) is None: continue
             with self._stage_directory(pool,identity) as fd:
                 for name in os.listdir(fd):
-                    path=pool+b'/'+os.fsencode(name); state=prep['entries'][_key(path)]
+                    path=pool+b'/'+os.fsencode(name)
+                    if key in shared and shared[key]==identity and _key(path) in protected:continue
+                    state=prep['entries'][_key(path)]
                     if self._observe(path)!=state: raise Blocked('changed-stage-during-cleanup')
                     if state['kind']=='directory': os.rmdir(name,dir_fd=fd)
                     else: os.unlink(name,dir_fd=fd)
                 os.fsync(fd)
+            if key in shared and shared[key]==identity:continue
             parent,_,name=pool.rpartition(b'/')
             with _opened(self.binding,parent,'directory') as (fd,_):
                 if _id(os.stat(name,dir_fd=fd,follow_symlinks=False))!=identity: raise Blocked('replaced-cleanup-pool')
@@ -788,11 +1147,143 @@ class RecoveryStore:
             if self._read(marker)!=raw or self._read_marker(generation_bytes)['marker_identity']!=prep['marker_identity']: raise Blocked('changed-cleanup-marker')
             os.unlink(marker,dir_fd=fd); os.fsync(fd)
 
+    def cleanup_no_effect(self,operation,owner,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,operation,deleting=True)
+        """Explicitly retire only this un-dispatched operation's preparations."""
+        try:self._read(b'authority.key')
+        except FileNotFoundError:return
+        with self._lock():
+            if self._pointer() is not None:raise Blocked('no-effect-recovery-pointer-changed')
+            with self._directory() as fd:names=os.listdir(fd)
+            for name in names:
+                if not re.fullmatch(r'preparation-[0-9a-f]{32}\.json',name):continue
+                generation=name[len('preparation-'):-len('.json')]
+                marker=self._read_marker(generation.encode())
+                if marker['operation']!=operation:continue
+                if marker['owner']!=owner:raise Blocked('no-effect-preparation-owner-changed')
+                try:journal=parse(self._read(generation.encode()+b'/journal.json'))
+                except FileNotFoundError:journal=None
+                if journal is not None and (journal['changed'] or journal['pending'] is not None or journal['phase']!='ready'):raise Blocked('preparation-has-effect-receipts')
+                self._cleanup_generation(name.encode(),generation,capability=capability)
+
     def cleanup(self):
         """Explicitly retry addressed inactive generations, retaining conflicts."""
         with self._lock():
             p=self._pointer()
             return self._cleanup_debt_locked(exclude=parse(p)['generation'] if p else None)
+
+    def retire(self, authority, *, revision,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,authority.operation,deleting=True)
+        """Close the active slot only with durable healthy Apply participant proof."""
+        from native_apply import PreparedApply
+        if type(authority) is not PreparedApply or authority.issuer.recovery is not self:
+            raise Blocked('issued-apply-retirement-required')
+        authority.check(fresh=False)
+        worker=authority.issuer.operations.read()['workers'].get(authority.operation)
+        service=authority.issuer.services.discover()
+        if (worker is None or worker['phase']!='completed' or service is None or
+                service['phase']!='restored' or service['operation']!=authority.operation or
+                service['owner']!=worker['owner']):
+            raise Blocked('healthy-durable-apply-proof-required')
+        with self._lock():
+            found=self.discover()
+            if (found is None or found['manifest']['operation']!=authority.operation or
+                    found['manifest']['owner']!=worker['owner'] or found['journal']['revision']!=revision or
+                    found['journal']['phase']!='applied' or found['journal']['pending'] is not None):
+                raise Blocked('stale-or-unhealthy-recovery-retirement')
+            pointer=self._pointer()
+            with self._directory() as fd:
+                identity=self._observe(self.directory+b'/active.json')
+                if self._read(b'active.json')!=pointer or self._observe(self.directory+b'/active.json')!=identity:
+                    raise Blocked('changed-retirement-pointer')
+                os.unlink(b'active.json',dir_fd=fd);self.fault('retirement_unlinked');os.fsync(fd)
+            cleanup=self._cleanup_debt_locked(exclude=None,capability=capability)
+            if any(row['status']!='removed' for row in cleanup):
+                raise Blocked('retained-apply-cleanup-debt')
+            return cleanup
+
+    def review_close(self,*,operation_id,owner_id,revision,command_id):
+        """Fresh explicit close review; authentication is never passed here."""
+        if str(uuid.UUID(command_id))!=command_id:raise Blocked('invalid-close-command')
+        with self._lock():
+            found=self.discover()
+            if (found is None or found['manifest']['operation']!=operation_id or
+                    found['manifest']['owner']!=owner_id or found['journal']['revision']!=revision or
+                    found['journal']['pending'] is not None):raise Blocked('stale-close-review')
+            approval=CloseApproval(self,self._pointer(),operation_id,owner_id,revision,command_id)
+            self._close_issued[id(approval)]=(approval,approval.pointer,operation_id,owner_id,revision,command_id)
+            return approval
+
+    def review_absent_close(self,issuer,*,operation_id,command_id):
+        """Issued cleanup-only review for a completed worker after pointer loss."""
+        from native_apply import NativeApply
+        if type(issuer) is not NativeApply or issuer.recovery is not self:raise Blocked('issued-cleanup-review-required')
+        if str(uuid.UUID(command_id))!=command_id:raise Blocked('invalid-close-command')
+        state=issuer.operations.read();worker=state['workers'].get(operation_id)
+        if (worker is None or not (worker['phase'] in ('effect_started','recovery_required') or worker['phase']=='completed' and (worker.get('apply_result') or {}).get('cleanup_debt')) or
+                state['recovery'] is None or state['recovery']['record_id']!=worker['record_id']):
+            raise Blocked('completed-cleanup-debt-required')
+        with self._lock():
+            if self._pointer() is not None:raise Blocked('cleanup-pointer-changed')
+            approval=CloseApproval(self,None,operation_id,worker['owner'],0,command_id)
+            self._close_issued[id(approval)]=(approval,None,operation_id,worker['owner'],0,command_id)
+            return approval
+
+    def close(self,approval,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,approval.operation,deleting=True)
+        if (type(approval) is not CloseApproval or approval.store is not self or
+                self._close_issued.get(id(approval))!=(approval,approval.pointer,approval.operation,approval.owner,approval.revision,approval.command)):
+            raise Blocked('issued-one-use-close-review-required')
+        with self._lock():
+            found=self.discover()
+            if (self._pointer()!=approval.pointer or (approval.pointer is not None and
+                    (found is None or found['journal']['revision']!=approval.revision or found['journal']['pending'] is not None))):
+                raise Blocked('stale-close-review')
+            self.fault('close_reviewed')
+            self._close_issued.pop(id(approval),None)
+            closed=dict(schema=1,command=approval.command,operation=approval.operation,owner=approval.owner,
+                        revision=approval.revision,pointer=parse(approval.pointer) if approval.pointer else None,phase='closing',seal=None)
+            closed['seal']=self._seal(closed,'seal');self._write(b'closed.json',canonical(closed));self.fault('close_intent_durable')
+            if approval.pointer is not None:
+                with self._directory() as fd:
+                    os.unlink(b'active.json',dir_fd=fd);os.fsync(fd);self.fault('close_pointer_unlinked')
+            cleanup=self._cleanup_debt_locked(exclude=None,capability=capability)
+            if any(row['status']!='removed' for row in cleanup):raise Blocked('reviewed-close-cleanup-debt')
+            closed['phase']='closed';closed['seal']=self._seal(closed,'seal');self._write(b'closed.json',canonical(closed))
+            return cleanup
+
+    def closed_receipt(self,command):
+        value=parse(self._read(b'closed.json'))
+        if type(value.get('seal')) is not str or not hmac.compare_digest(value['seal'],self._seal(value,'seal')):
+            raise Blocked('unissued-or-modified-reviewed-close')
+        _fields(value,'schema command operation owner revision pointer phase seal')
+        if value['schema']!=1 or value['command']!=command or value['phase']!='closed' or self._pointer() is not None:
+            raise Blocked('completed-reviewed-close-required')
+        return value
+
+    def resume_close(self,command,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,deleting=True)
+        """Explicit retry of the already reviewed, signed close transaction."""
+        with self._lock():
+            value=parse(self._read(b'closed.json'))
+            if type(value.get('seal')) is not str or not hmac.compare_digest(value['seal'],self._seal(value,'seal')):
+                raise Blocked('unissued-or-modified-reviewed-close')
+            _fields(value,'schema command operation owner revision pointer phase seal')
+            if value['command']!=command or value['phase'] not in ('closing','closed'):
+                raise Blocked('recorded-reviewed-close-required')
+            pointer=self._pointer()
+            if pointer is not None:
+                if parse(pointer)!=value['pointer']:raise Blocked('reviewed-close-pointer-changed')
+                with self._directory() as fd:os.unlink(b'active.json',dir_fd=fd);os.fsync(fd)
+            if value['phase']=='closing':
+                cleanup=self._cleanup_debt_locked(exclude=None,capability=capability)
+                if any(row['status']!='removed' for row in cleanup):raise Blocked('reviewed-close-cleanup-debt')
+                value['phase']='closed';value['seal']=self._seal(value,'seal');self._write(b'closed.json',canonical(value))
+            return value
 
     def discover(self):
         pointer=self._pointer()
@@ -802,7 +1293,8 @@ class RecoveryStore:
             if _id(os.fstat(generation_fd))!=p['identity']: raise Blocked('changed-recovery-generation')
         raw=self._read(generation+b'/manifest.json')
         if _digest(raw)!=p['manifest']: raise Blocked('changed-recovery-manifest')
-        m=parse(raw); _fields(m,'schema operation owner generation root directory before after explicit stages pools store_routes binding_seal cleanup previous forecast')
+        m=parse(raw); _fields(m,'schema operation owner generation root directory before after explicit stages pools store_routes binding_seal cleanup previous forecast'+(' lineage' if 'lineage' in m else '')+(' apply_policy' if 'apply_policy' in m else ''))
+        if 'apply_policy' in m and m['apply_policy']!='retain-until-reviewed-close':raise Blocked('invalid-apply-recovery-policy')
         if type(m['binding_seal']) is not str or not hmac.compare_digest(m['binding_seal'],self._seal(m,'binding_seal')): raise Blocked('unissued-or-modified-recovery-manifest')
         if type(m['schema']) is not int or m['schema']!=1 or m['generation']!=p['generation'] or m['root']!=_id(os.stat(self.binding.root,follow_symlinks=False))+[stat.S_IMODE(os.stat(self.binding.root,follow_symlinks=False).st_mode)] or m['directory']!=_key(self.directory):
             raise Blocked('different-recovery-root-or-generation')
@@ -865,7 +1357,9 @@ class RecoveryStore:
         if value is None: return True
         baseline=m['before'][key]
         stage_states=[v['state'] for k,v in m['stages'].items() if k.split(':',1)[1]==key]
-        known=([baseline] if baseline else [])+stage_states
+        inherited=m.get('lineage',{}).get('current',{}).get(key)
+        inherited_removed=[v for k,v in m.get('lineage',{}).get('removed',{}).items() if k.split(':',1)[1]==key]
+        known=([baseline] if baseline else [])+stage_states+([inherited] if inherited else [])+inherited_removed
         identity=[v for v in known if (v['dev'],v['ino'],v['kind'])==(value['dev'],value['ino'],value['kind'])]
         if not identity: return False
         if value['kind']=='file': return value in identity
@@ -875,6 +1369,35 @@ class RecoveryStore:
         return (value['uid'],value['gid']) in owners and value['mode'] in modes
 
     def _validate_authority(self,m,j):
+        if 'lineage' in m:
+            lineage=m['lineage']
+            if lineage.get('schema')==2:
+                _fields(lineage,'schema anchors pointer journal current changed removed tombs pools')
+                if lineage['pointer']!=m['previous'] or lineage['pointer']['generation']==m['generation'] or set(lineage['anchors'])!=set(lineage['changed']) or set(lineage['current'])!=set(lineage['changed']):
+                    raise Blocked('invalid-independent-successor')
+                for key,anchor in lineage['anchors'].items():
+                    if anchor!=[m['before'][key],m['after'][key]]:raise Blocked('modified-successor-earlier-effect')
+                if set(lineage['tombs'])!=set(lineage['removed']):raise Blocked('incomplete-successor-tombs')
+                for key,path in lineage['tombs'].items():
+                    if _key(os.path.dirname(_path(path))) not in lineage['pools']:raise Blocked('unowned-successor-tomb-pool')
+            else:
+                _fields(lineage,'pointer journal current changed removed tombs pools')
+                p=lineage['pointer']
+                if p!=m['previous'] or p['generation']==m['generation']:raise Blocked('invalid-successor-predecessor')
+                raw=self._read(p['generation'].encode()+b'/manifest.json')
+                if _digest(raw)!=p['manifest']:raise Blocked('changed-successor-predecessor')
+                previous=parse(raw)
+                if (previous['operation'],previous['owner'],previous['forecast']['snapshot'])!=(m['operation'],m['owner'],m['forecast']['snapshot']):
+                    raise Blocked('different-successor-operation-or-baseline')
+                prior_raw=self._read(p['generation'].encode()+b'/journal.json')
+                if _digest(prior_raw)!=lineage['journal']:raise Blocked('changed-successor-effect-receipts')
+                prior=parse(prior_raw);self._validate_journal(previous,prior)
+                if prior['pending'] is not None or lineage['changed']!=prior['changed'] or lineage['removed']!=prior['removed'] or lineage['current']!={k:prior['current'][k] for k in prior['changed']} or lineage['pools']!=previous['pools']:
+                    raise Blocked('different-successor-owned-effects')
+                if set(lineage['tombs'])!=set(prior['removed']) or any(lineage['tombs'][k]!=_key(self._tomb_path(previous,k.split(':',1)[1],k.split(':',1)[0])) for k in prior['removed']):
+                    raise Blocked('different-successor-tombstone-receipts')
+                for k in prior['changed']:
+                    if m['before'][k]!=previous['before'][k] or m['after'][k]!=previous['after'][k]:raise Blocked('modified-successor-earlier-effect')
         expected_stages={direction+':'+key for key in m['before'] for direction,state in (('forward',m['after'][key]),('rollback',m['before'][key])) if state is not None}
         if set(m['stages'])!=expected_stages or type(m['pools']) is not dict: raise Blocked('incomplete-recovery-stages')
         for key,stage in m['stages'].items():
@@ -931,7 +1454,7 @@ class RecoveryStore:
             raise Blocked('unissued-or-modified-recovery-forecast')
 
     def _verify_recipe(self,m):
-        original=dict(m,stages={},pools={},store_routes=None,binding_seal=None,cleanup=None,forecast=None)
+        original=dict(m,stages={},pools=m.get('lineage',{}).get('pools',{}),store_routes=None,binding_seal=None,cleanup=None,forecast=None)
         payloads={}
         for states in (m['before'],m['after']):
             for state in states.values():
@@ -1001,6 +1524,8 @@ class RecoveryStore:
         self.fault('reconciled_effect_durable:'+p['action'])
 
     def _step(self,m,j,key,action,after,*,direction,stage=None):
+        if direction=='forward' and getattr(self,'_apply_guard',None) is not None:
+            self._apply_guard.before_effect(self,m,j,_path(key))
         path=_path(key); self._routes(m,j,path)
         before=j['current'][key]
         if self._observe(path)!=before: raise Blocked('recovery-conflict:changed-target')
@@ -1013,6 +1538,12 @@ class RecoveryStore:
         parent,_,name=path.rpartition(b'/')
         with _opened(self.binding,parent,'directory') as (fd,_):
             if self._observe(path)!=before: raise Blocked('recovery-conflict:before-syscall')
+            if direction=='forward' and getattr(self,'_apply_guard',None) is not None:
+                self._apply_guard.before_dispatch(self,path)
+                # Transport/object verification may block. Its successful
+                # return cannot preserve an earlier live ownership observation.
+                self._assert_held_routes();self._routes(m,j,path)
+                if self._observe(path)!=before:raise Blocked('recovery-conflict:after-blocking-authority')
             if action=='replace':
                 resource=self._resource(m,j,stage)
                 relative=_path(resource['path'])
@@ -1065,6 +1596,8 @@ class RecoveryStore:
         # Refuse foreign changed paths before any rollback effect; unmodified
         # selections are deliberately excluded from restoration.
         for key in keys:
+            if direction=='forward' and getattr(self,'_apply_guard',None) is not None:
+                self._apply_guard.before_effect(self,m,j,_path(key))
             if self._observe(_path(key))!=j['current'][key]: raise Blocked('recovery-conflict:changed-target')
         self._persist(m,j)
         # Remove changed structure deepest first. No recursive target deletion.
@@ -1096,15 +1629,35 @@ class RecoveryStore:
                 self._step(m,j,key,'chmod',[dict(current,mode=target['mode'])],direction=direction)
         j['phase']='applied' if direction=='forward' else 'restored'; self._persist(m,j)
 
-    def _mutate(self,action,*,operation_id=None,owner_id=None,revision=None):
+    def _mutate(self,action,*,operation_id=None,owner_id=None,revision=None,guard=None,capability=None):
+        point=self.discover()
+        if point is not None and point['manifest'].get('apply_policy') is not None:
+            from native_disk import require_apply,apply_transaction
+            if action!='forward' and capability is None:
+                with apply_transaction(self.binding,(self,),point['manifest']['operation'],'close') as manual:
+                    return self._mutate(action,operation_id=operation_id,owner_id=owner_id,revision=revision,capability=manual)
+            require_apply(capability if guard is None else guard.capability,self,point['manifest']['operation'])
+            if action=='forward' and guard is None:raise Blocked('qualified-apply-effect-guard-required')
+        if guard is not None:
+            from native_apply import _ApplyGuard
+            if type(guard) is not _ApplyGuard or guard.recovery is not self or action!='forward':
+                raise Blocked('issued-apply-effect-guard-required')
         with self._lock():
             found=self.discover()
             if found is None: raise Blocked('no-recovery-point')
             m,j=found['manifest'],found['journal']
             if operation_id is not None and operation_id!=m['operation'] or owner_id is not None and owner_id!=m['owner'] or revision is not None and (type(revision) is not int or revision!=j['revision']):
                 raise Blocked('stale-recovery-owner-or-revision')
-            if action=='reconcile': self._reconcile(m,j)
-            else: self._run(m,j,action)
+            self._apply_guard=guard
+            try:
+                if action=='reconcile': self._reconcile(m,j)
+                else:
+                    while True:
+                        try:self._run(m,j,action);break
+                        except _SuccessorPublished:
+                            found=self.discover();m,j=found['manifest'],found['journal']
+            finally:
+                self._apply_guard=None
             return self.discover()
 
     def execute(self,**identity): return self._mutate('forward',**identity)

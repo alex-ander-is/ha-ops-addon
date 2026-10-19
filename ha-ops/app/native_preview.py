@@ -1101,6 +1101,38 @@ class NativePreview:
             yield observed
             self._candidate_fence(review)
 
+    def _apply_fence(self, review, *, live=False):
+        """Issued whole-file Apply authority, distinct from the Save context."""
+        if (type(review) is not Review or self._review is not review or
+                review.draft is not self._draft or review.draft.generation != self._generation or
+                review.draft.direction != 'apply' or not review.ready or not review.selected or
+                self._review_binding != (self.binding, self.git, self.git.policy)):
+            raise Stale('current-issued-ready-apply-review-required')
+        snapshot = self._current(review.draft.snapshot_id)
+        source, width = self._source()
+        if snapshot.direction != 'apply' or source != snapshot.source:
+            raise Stale('apply-source-binding-changed')
+        if live:
+            original_routes = dict(self._observed.routes)
+            for row in review.selected:
+                actual, routes = _live_file(self.binding, row.path, width)
+                if actual != row.before or any(original_routes.get(p) != v for p, v in routes):
+                    raise Stale('selected-apply-preimage-changed')
+        return self._observed
+
+    @contextmanager
+    def apply_context(self, review, *, reviewed_live=True):
+        """Hold issued session authority while a dormant Apply peer runs.
+
+        Entry requires reviewed live preimages. Subsequent live changes are
+        handled by the worker's three-way merge and recovery receipts; the exit
+        fence checks Git/session authority without treating owned writes as drift.
+        """
+        with self._call():
+            observed = self._apply_fence(review, live=reviewed_live)
+            yield observed
+            self._apply_fence(review)
+
     def view_file(self, snapshot_id, byte_path, destination):
         with self._call():
             snapshot = self._current(snapshot_id)

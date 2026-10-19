@@ -1,5 +1,35 @@
 # Testing HA Ops
 
+## Dormant native Apply candidate (6.18)
+
+Use the existing isolated Linux runner; no live HA services or configured remotes:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  python3 -m pytest -p no:cacheprovider -q \
+  ha-ops/tests/test_native_apply.py ha-ops/tests/test_native_apply_integration.py
+```
+
+These tests compose actual native Git, Preview, disk, operation, recovery and
+service stores, authenticated HTTP and owned process fixtures. The opt-in
+`ha-ops/tests/browser/native_apply_fixture.py` exposes the same qualified Linux
+participants to an externally owned localhost browser relay while the fixture's
+Core/App processes are stopped. It never enables the production listener.
+The opt-in `test_native_apply_ext4.py` runs only in the runner's isolated
+allocation profile, attempt zero. It measures composed Apply allocation peaks,
+large compatible merge and compensation, kernel ENOSPC/EIO at generation, stage,
+pre-intent, durable-intent and effect/ACK boundaries, and actual process exits. Default host skips do not constitute ext4 qualification. Integration tests
+separately exercise repeated successor retirement, per-resource cleanup retries,
+reviewed close process death, authenticated fresh-process cleanup, namespace
+replacement refusal and no-effect abandonment across initial/reused lifecycle,
+null/owned pins and own zero-command participants. Real process exits also cover
+unclaimed draft capsules before/after namespace binding and accepted command
+restart/update takeover before explicit settlement. Deterministic concurrent
+claim/cleanup orderings, exclusive fresh namespace creation and required-parent
+metadata drift are covered by the Apply integration group.
+See [native-apply.md](ha-ops/docs/native-apply.md) for the lifecycle and evidence
+boundary; record actual final snapshot results before delivery.
+
 ## Dormant service lifecycle (6.16)
 
 ```sh
@@ -539,3 +569,12 @@ real distinct `/dev` and `/dev/shm` volumes, stale mount evidence, per-file-clas
 foreign inode cleanup refusal, durable reconcile failure/retry and exact pointer
 write substeps. Removal attribution requires a known owned tombstone, preserving
 external deletions and raced unselected directory children.
+
+Native Apply coordinator qualification additionally covers registered capability
+lifetime/thread/fork refusal, bootstrap contention at every draft mutation
+entrance, remote failure before replacement cleanup, frozen leaf/parent capture
+(including same-size ABA content), and actual child death through retirement
+intent/source/control/namespace deletion. Run the existing native Apply,
+recovery, operations, disk, metadata and dormancy contours together after changes
+to these boundaries. Opt-in ext4 proofs must use the same final resource recipe;
+older measurements do not qualify changed controls.

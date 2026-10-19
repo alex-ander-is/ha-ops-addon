@@ -111,6 +111,37 @@ def test_large_inventory_and_stopped_core(tmp_path):
     assert not any(target in {"core", "app:self"} for _, target in adapter.calls)
 
 
+def test_finite_compensation_preserves_original_inventory_and_receipts(tmp_path):
+    store, adapter, state = setup(tmp_path, [item('app:self'),item('app:a'),item('core','core'),item('app:off',state='stopped')])
+    state=store.stop(*fence(state),adapter)
+    adapter.health['core']=dict(target='core',status='unhealthy',recovery_mode=True)
+    failed=store.restore(*fence(state),adapter)
+    assert failed['phase']=='recovery_required'
+    assert entry(failed,'core')['start'] is not None and entry(failed,'app:a')['start'] is None
+    compensated=store.compensate(*fence(failed),adapter)
+    assert compensated['phase']=='stopped'
+    assert compensated['compensation']==failed
+    assert adapter.calls.count(('stop','core'))==2
+    assert adapter.calls.count(('stop','app:a'))==1
+    adapter.health.clear()
+    restored=store.restore(*fence(compensated),adapter)
+    assert restored['phase']=='restored'
+    assert not any(target in ('app:self','app:off') for _,target in adapter.calls)
+    with pytest.raises(n.Conflict,match='already consumed'):
+        store.compensate(*fence(restored),adapter)
+    assert n.ServiceStore(store.directory).discover()==restored
+
+
+def test_compensation_unknown_start_never_grants_stop_ownership(tmp_path):
+    store,adapter,state=setup(tmp_path)
+    stopped=store.stop(*fence(state),adapter)
+    adapter.lost.add(('start','core'))
+    uncertain=store.restore(*fence(stopped),adapter)
+    before=list(adapter.calls)
+    with pytest.raises(n.Conflict):store.compensate(*fence(uncertain),adapter)
+    assert adapter.calls==before
+
+
 @pytest.mark.parametrize("change", ["incomplete", "duplicate", "unknown", "self_missing", "core_missing", "capability", "extra"])
 def test_invalid_inventory_zero_effects(tmp_path, change):
     adapter = Adapter()
@@ -872,7 +903,7 @@ def test_invalidated_stop_rejects_any_attempt_before_adapter_reads(tmp_path, loc
 def test_no_production_import_hook_or_ingress_broker_dependency():
     directory = Path(n.__file__).parent
     for path in directory.glob("*.py"):
-        if path.name == "native_services.py": continue
+        if path.name in ("native_services.py", "native_apply.py"): continue
         if path.name == "native_status.py":
             # Exact observational composition only; never expose worker methods.
             source = path.read_text()
@@ -886,3 +917,10 @@ def test_no_production_import_hook_or_ingress_broker_dependency():
     assert "import subprocess" not in source and "import socket" not in source
     # Every worker fixture above runs using only its private adapter/store; there
     # is no request, ingress or broker object to survive or recreate.
+
+
+def test_absent_service_discovery_does_not_bootstrap_mutation_lock(tmp_path):
+    store=n.ServiceStore(tmp_path/'services')
+    before=set(store.directory.iterdir())
+    assert store.discover() is None
+    assert set(store.directory.iterdir())==before

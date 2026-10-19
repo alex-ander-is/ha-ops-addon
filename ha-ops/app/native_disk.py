@@ -11,6 +11,7 @@ import base64
 import copy
 import fcntl
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -21,6 +22,7 @@ import subprocess
 import threading
 import time
 import weakref
+import uuid
 
 from native_inventory import Inventory, beneath, linux_mounts, path_bytes
 
@@ -2972,7 +2974,7 @@ class Admission:
         return self._current
 
 
-def recovery_project(disk, prepared):
+def recovery_project(disk, prepared, *, admission=None):
     """Issuer-qualified recovery accounting, independent of generic Plan.
 
     All sizes come from qualified immutable payloads and maximal encodings of
@@ -2982,13 +2984,22 @@ def recovery_project(disk, prepared):
     from native_recovery import Prepared, canonical
     if type(prepared) is not Prepared or prepared.store.disk is not disk:
         raise Blocked('issued-recovery-recipe-required')
-    manifest=prepared.check(); snapshot=disk.snapshot()
+    manifest=prepared.check()
+    if admission is None:
+        snapshot=disk.snapshot()
+    else:
+        if type(admission) is not ApplyAdmission or admission.disk is not disk:
+            raise Blocked('issued-apply-admission-required')
+        snapshot=admission.check()
     if not snapshot.complete: raise Blocked('incomplete-recovery-accounting:'+repr(snapshot.issues))
     mounts=linux_mounts() if os.path.exists('/proc/self/mountinfo') else None
     volumes={v.key:v for v in snapshot.volumes}; allocations=[]; parents=set()
     outputs=prepared.store._allocations(prepared)
+    if admission is not None:
+        outputs += admission.outputs()
     for target,size,digest,label in outputs:
-        volume,missing=disk._destination(os.path.dirname(target),mounts)
+        volume,missing=(disk._destination(os.path.dirname(target),mounts) if admission is None
+                        else admission.destination(os.path.dirname(target)))
         old=volumes.get(volume.key)
         if old:
             volume=replace(volume,available=min(volume.available,old.available),
@@ -3002,7 +3013,8 @@ def recovery_project(disk, prepared):
         for parent in missing:
             if parent not in parents:
                 parents.add(parent); allocations.append([list(_recovery_key(volume.key)),'recovery-parent',0,q,1])
-    root_volume,_=disk._destination(prepared.store.directory,mounts)
+    root_volume,_=(disk._destination(prepared.store.directory,mounts) if admission is None
+                  else admission.destination(prepared.store.directory))
     for label in ('recovery-generation','recovery-lock','recovery-generation-entry','recovery-authority-key'):
         size=32 if label=='recovery-authority-key' else 0
         q=root_volume.quantum; data=_round(size,q)
@@ -3031,9 +3043,404 @@ def recovery_project(disk, prepared):
         if peak+reserve>volume.available or volume.inodes is not None and inodes>volume.inodes:
             raise InsufficientSpace('insufficient-recovery-space')
         rows.append([list(key),peak,reserve,inodes,volume.available,volume.inodes])
-    recipe=hashlib.sha256(prepared.manifest+b'\0'+canonical([[p.hex(),size,digest,label] for p,size,digest,label in outputs])).hexdigest()
+    recipe_outputs=prepared.store._allocations(prepared)
+    recipe=hashlib.sha256(prepared.manifest+b'\0'+canonical([[p.hex(),size,digest,label] for p,size,digest,label in recipe_outputs])).hexdigest()
     return dict(schema=1,snapshot=snapshot.digest,layout=disk.layout_digest,root=manifest['root'],
         operation=manifest['operation'],owner=manifest['owner'],recipe=recipe,allocations=allocations,volumes=rows)
+
+
+# Apply capabilities are registered by identity, never reconstructed from fields.
+_APPLY_CAPABILITIES = {}
+_APPLY_QUALIFIED = {}
+
+
+class ApplyCapability:
+    def check(self, participant, operation=None, *, deleting=False):
+        record=_APPLY_CAPABILITIES.get(id(self))
+        if record is None or record[0] is not self:
+            raise Blocked('active-apply-capability-required')
+        _,pid,thread,fd,binding,identity,participants,op,purpose=record
+        if pid!=os.getpid() or thread!=threading.get_ident() or all(participant is not item for item in participants) or operation is not None and operation!=op:
+            raise Blocked('different-apply-capability-context')
+        if _identity(os.fstat(fd))!=identity or _identity(os.stat(binding.root,follow_symlinks=False))!=identity:
+            raise Blocked('changed-apply-coordinator-root')
+        binding.check(b'',os.fstat(fd),linux_mounts() if os.path.exists('/proc/self/mountinfo') else None)
+        if deleting and purpose not in ('retire','worker','close','prepare','reset'):
+            raise Blocked('apply-cleanup-purpose-required')
+        return self
+
+    @property
+    def purpose(self):
+        record=_APPLY_CAPABILITIES.get(id(self))
+        if record is None:raise Blocked('inactive-apply-capability')
+        return record[8]
+
+    @property
+    def operation(self):
+        record=_APPLY_CAPABILITIES.get(id(self))
+        if record is None:raise Blocked('inactive-apply-capability')
+        return record[7]
+
+
+def require_apply(capability,participant,operation=None,*,deleting=False):
+    if type(capability) is not ApplyCapability:raise Blocked('active-apply-capability-required')
+    return capability.check(participant,operation,deleting=deleting)
+
+
+@contextmanager
+def apply_transaction(binding,participants,operation,purpose):
+    from native_metadata import _opened
+    with _opened(binding,b'', 'directory') as (fd,_):
+        try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:raise Blocked('draft-claim-or-cleanup-busy') from None
+        capability=ApplyCapability()
+        _APPLY_CAPABILITIES[id(capability)]=(capability,os.getpid(),threading.get_ident(),fd,binding,_identity(os.fstat(fd)),tuple(participants),operation,purpose)
+        try:
+            capability.check(participants[0],operation)
+            yield capability
+        finally:
+            _APPLY_CAPABILITIES.pop(id(capability),None)
+            _APPLY_QUALIFIED.pop(id(capability),None)
+            fcntl.flock(fd,fcntl.LOCK_UN)
+
+
+@contextmanager
+def delegate_apply(parent,operation,purpose):
+    record=_APPLY_CAPABILITIES.get(id(parent))
+    if record is None:raise Blocked('active-apply-capability-required')
+    parent.check(record[6][0])
+    child=ApplyCapability()
+    _APPLY_CAPABILITIES[id(child)]=(child,)+record[1:7]+(operation,purpose)
+    try:yield child
+    finally:_APPLY_CAPABILITIES.pop(id(child),None)
+
+
+def qualify_apply(capability,prepared):
+    require_apply(capability,prepared.store,prepared.check()['operation'])
+    if prepared.store._apply_qualified.get(id(prepared))!=(prepared,prepared.store._apply_prepared_signature(prepared)):raise Blocked('qualified-apply-manifest-required')
+    _APPLY_QUALIFIED[id(capability)]=(capability,prepared,hashlib.sha256(prepared.manifest).hexdigest())
+
+
+def qualified_apply(capability,participant):
+    require_apply(capability,participant)
+    value=_APPLY_QUALIFIED.get(id(capability))
+    if value is None or value[0] is not capability:raise Blocked('qualified-apply-manifest-required')
+    prepared=value[1]
+    if hashlib.sha256(prepared.manifest).hexdigest()!=value[2] or prepared.store._apply_qualified.get(id(prepared))!=(prepared,prepared.store._apply_prepared_signature(prepared)):raise Blocked('modified-qualified-apply-manifest')
+    return value[2]
+
+
+def bind_apply_identity(capability,participant,identity):
+    qualified_apply(capability,participant)
+    value=_APPLY_QUALIFIED[id(capability)]
+    _APPLY_QUALIFIED[id(capability)]=value[:3]+(json.dumps(identity,sort_keys=True,separators=(',',':')),)
+
+
+def check_apply_identity(capability,participant,identity):
+    qualified_apply(capability,participant)
+    value=_APPLY_QUALIFIED[id(capability)]
+    if len(value)!=4 or value[3]!=json.dumps(identity,sort_keys=True,separators=(',',':')):raise Blocked('qualified-apply-identity-mismatch')
+
+
+def _apply_after_fork():
+    # A child must not keep its parent's open-description flock alive.
+    for record in tuple(_APPLY_CAPABILITIES.values()):
+        try:os.close(record[3])
+        except OSError:pass
+    _APPLY_CAPABILITIES.clear()
+    _APPLY_QUALIFIED.clear()
+
+
+if hasattr(os,'register_at_fork'):os.register_at_fork(after_in_child=_apply_after_fork)
+
+
+class ApplyAdmission:
+    """Specialized demand extension against one issued original free floor.
+
+    Namespace/mount qualification remains fresh; capacity is never reacquired.
+    Additional exact recipes accumulate and no presumed cleanup earns credit.
+    """
+    def __init__(self, disk, snapshot, *, operation=None, capability=None):
+        require_apply(capability,disk,operation)
+        if capability.purpose not in ('prepare','worker'):raise Blocked('allocating-apply-capability-required')
+        if type(disk) is not NativeDisk or disk._snapshots.get(id(snapshot)) is not snapshot:
+            raise Blocked('issued-original-apply-snapshot-required')
+        if not snapshot.complete:
+            raise Blocked('incomplete-apply-snapshot')
+        self.disk, self.snapshot = disk, snapshot
+        self.mounts=linux_mounts() if os.path.exists('/proc/self/mountinfo') else None
+        self._outputs=()
+        self._retained={}
+        self._recipes=[]
+        self.operation=operation or str(uuid.uuid4())
+        if str(uuid.UUID(self.operation))!=self.operation:raise Blocked('invalid-apply-admission-operation')
+        self.directory=b'data/native/apply/'+self.operation.encode()
+        self._cleanup_key=os.urandom(32)
+        self._recipe_identity=None
+        self._receipts={}
+        self._cleanup={}
+        self._retiring=False
+        self._directory_identity=None
+        self._control_size=0
+
+    def _document(self,outputs,*,maximum=False):
+        return dict(schema=1,operation=self.operation,snapshot=self.snapshot.digest,layout=self.disk.layout_digest,
+            namespace=[2**64-1]*3 if maximum else self._directory_identity,root=list(self.snapshot.root_identity),volumes=[[list(_recovery_key(v.key)),v.available,v.inodes,v.quantum] for v in self.snapshot.volumes],
+            outputs=[[p.hex(),size,h,label] for p,size,h,label in outputs],receipts=self._receipts,cleanup=self._cleanup,
+            control=2**64-1 if maximum else self._control_size,control_identity=[2**64-1]*3 if maximum else None,seal='f'*64 if maximum else None)
+
+    def authority(self):
+        return dict(namespace=list(self._directory_identity),key=self._cleanup_key.hex(),receipts=copy.deepcopy(self._receipts))
+
+    @staticmethod
+    def _signature(document,key):
+        unsigned=dict(document,seal=None)
+        return hmac.new(key,json.dumps(unsigned,sort_keys=True,separators=(',',':')).encode(),hashlib.sha256).hexdigest()
+
+    @classmethod
+    def reopen_cleanup(cls,disk,operation,authority=None,*,capability=None):
+        require_apply(capability,disk,operation,deleting=True)
+        if str(uuid.UUID(operation))!=operation:raise Blocked('invalid-apply-cleanup-operation')
+        directory=b'data/native/apply/'+operation.encode()
+        if type(authority) is not dict or set(authority)!={'namespace','key','receipts'} or not re.fullmatch('[0-9a-f]{64}',authority.get('key','')):raise Blocked('immutable-apply-cleanup-authority-required')
+        namespace=tuple(authority['namespace']);key=bytes.fromhex(authority['key'])
+        try:
+            with _directory(disk.root+b'/'+directory) as fd:
+                info=os.fstat(fd)
+                if _identity(info)!=namespace or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700:raise Blocked('unsafe-apply-cleanup-namespace')
+                control=os.open(b'admission.json',os.O_RDONLY|os.O_NOFOLLOW,dir_fd=fd)
+                try:
+                    receipt=os.fstat(control)
+                    if not stat.S_ISREG(receipt.st_mode) or receipt.st_nlink!=1 or receipt.st_uid!=os.geteuid() or stat.S_IMODE(receipt.st_mode)!=0o600:raise Blocked('unsafe-apply-cleanup-control')
+                    with os.fdopen(control,'rb',closefd=False) as stream:raw=stream.read()
+                finally:os.close(control)
+        except FileNotFoundError:
+            try:
+                with _directory(disk.root+b'/'+directory) as fd:
+                    info=os.fstat(fd)
+                    if _identity(info)!=namespace or info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700 or os.listdir(fd):raise Blocked('missing-apply-cleanup-control-with-resources')
+                parent,_,name=directory.rpartition(b'/')
+                with _directory(disk.root+b'/'+parent) as fd:
+                    if _identity(os.stat(name,dir_fd=fd,follow_symlinks=False))!=_identity(info):raise Blocked('changed-empty-apply-cleanup-namespace')
+                    os.rmdir(name,dir_fd=fd);os.fsync(fd)
+            except FileNotFoundError:pass
+            return None
+        doc=json.loads(raw)
+        if type(doc) is not dict or set(doc)!={'schema','operation','snapshot','layout','namespace','root','volumes','outputs','receipts','cleanup','control','control_identity','seal'} or doc['schema']!=1 or type(doc.get('seal')) is not str or not hmac.compare_digest(doc['seal'],cls._signature(doc,key)):raise Blocked('unissued-or-modified-apply-cleanup-control')
+        if any(doc['receipts'].get(k)!=v for k,v in authority['receipts'].items()) or set(doc['cleanup'])!=set(doc['receipts']) or any(v not in ('present','unlinking','removed') for v in doc['cleanup'].values()):raise Blocked('changed-original-apply-cleanup-receipts')
+        if doc['control_identity']!=list(_identity(receipt)):raise Blocked('substituted-apply-cleanup-control')
+        if doc['operation']!=operation or doc['namespace']!=list(_identity(info)):raise Blocked('changed-apply-cleanup-namespace')
+        instance=object.__new__(cls);instance.disk=disk;instance.operation=operation;instance.directory=directory
+        instance._cleanup_key=key
+        instance._frozen_document=doc;instance._outputs=tuple((bytes.fromhex(p),size,h,label) for p,size,h,label in doc['outputs'])
+        instance._receipts=doc['receipts'];instance._cleanup=doc['cleanup'];instance._control_size=doc['control']
+        instance._recipe_identity=_identity(receipt);instance._directory_identity=_identity(info);instance._retiring=False
+        prefix=directory+b'/'
+        for encoded,state in instance._receipts.items():
+            path=bytes.fromhex(encoded)
+            if not path.startswith(prefix) or not re.fullmatch(b'[0-9a-f]{32}',path[len(prefix):]) or state.get('kind')!='file':raise Blocked('invalid-command-owned-cleanup-source')
+        return instance
+
+    def _publish(self, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=False)
+        prefix=b''
+        for component in self.directory.split(b'/'):
+            with _directory(self.disk.root+(b'/'+prefix if prefix else b'')) as fd:
+                try:os.mkdir(component,0o700,dir_fd=fd);os.fsync(fd)
+                except FileExistsError:pass
+                s=os.stat(component,dir_fd=fd,follow_symlinks=False)
+                if not stat.S_ISDIR(s.st_mode) or prefix in (b'data/native',b'data/native/apply') and (s.st_uid!=os.geteuid() or stat.S_IMODE(s.st_mode)!=0o700):
+                    raise Blocked('unsafe-apply-admission-directory')
+            prefix=prefix+(b'/' if prefix else b'')+component
+        document=self._document(self._outputs) if not hasattr(self,'_frozen_document') else dict(self._frozen_document,cleanup=self._cleanup)
+        document['seal']=self._signature(document,self._cleanup_key)
+        raw=json.dumps(document,sort_keys=True,separators=(',',':')).encode()
+        if len(raw)>self._control_size:raise Blocked('apply-recipe-control-exceeded')
+        with _directory(self.disk.root+b'/'+self.directory) as fd:
+            actual_directory=_identity(os.fstat(fd))
+            if self._directory_identity is not None and self._directory_identity!=actual_directory:
+                raise Blocked('changed-apply-resource-namespace')
+            self._directory_identity=actual_directory
+            if getattr(self,'_draft_store',None) is not None and not getattr(self,'_draft_bound',False):self._draft_store.bind_cleanup_draft(self,capability=capability)
+            document=self._document(self._outputs) if not hasattr(self,'_frozen_document') else dict(self._frozen_document,cleanup=self._cleanup)
+            try:
+                old=os.stat(b'admission.json',dir_fd=fd,follow_symlinks=False)
+                if self._recipe_identity!=_identity(old):raise Blocked('changed-apply-recipe-control')
+            except FileNotFoundError:
+                if self._recipe_identity is not None:raise Blocked('missing-apply-recipe-control')
+            name=b'admission-'+uuid.uuid4().hex.encode()+b'.tmp'
+            child=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+            try:
+                document['control_identity']=list(_identity(os.fstat(child)))
+                document['seal']=self._signature(document,self._cleanup_key)
+                raw=json.dumps(document,sort_keys=True,separators=(',',':')).encode()
+                if len(raw)>self._control_size:raise Blocked('apply-recipe-control-exceeded')
+                with os.fdopen(child,'wb',closefd=False) as stream:
+                    stream.write(raw);stream.flush();os.fsync(child)
+                os.replace(name,b'admission.json',src_dir_fd=fd,dst_dir_fd=fd)
+                self._recipe_identity=_identity(os.stat(b'admission.json',dir_fd=fd,follow_symlinks=False));os.fsync(fd)
+            except BaseException as error:
+                try:
+                    try:temporary=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                    except FileNotFoundError:pass
+                    else:
+                        if _identity(temporary)!=_identity(os.fstat(child)):raise Blocked('substituted-failed-apply-control-temp')
+                        os.unlink(name,dir_fd=fd);os.fsync(fd)
+                except BaseException as cleanup:error.cleanup_errors=tuple(getattr(error,'cleanup_errors',()))+('apply-control-temp:'+type(cleanup).__name__,)
+                raise
+            finally:os.close(child)
+
+    def record_source(self,source, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=False)
+        if capability.purpose not in ('prepare','worker'):raise Blocked('allocating-apply-capability-required')
+        expected=dict(self._receipts)
+        expected[source.source.hex()]=__import__('json').loads(source.state)
+        self._receipts=expected
+        self._cleanup.setdefault(source.source.hex(),'present')
+        # Receipts are maximal-sized before the corresponding resource starts.
+        self._publish(capability=capability)
+
+    def cleanup_intent(self,source, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=True)
+        key=source.source.hex()
+        if self._receipts.get(key)!=json.loads(source.state):raise Blocked('different-apply-cleanup-resource')
+        phase=self._cleanup.get(key)
+        if phase not in ('present','unlinking','removed'):raise Blocked('invalid-apply-cleanup-phase')
+        if phase=='present':
+            source.check();self._cleanup[key]='unlinking'
+            try:self._publish(capability=capability)
+            except BaseException:
+                self._cleanup[key]='present'
+                raise
+        return self._cleanup[key]
+
+    def cleanup_ack(self,source, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=True)
+        key=source.source.hex()
+        if self._cleanup.get(key)!='unlinking':raise Blocked('unissued-apply-cleanup-ack')
+        self._cleanup[key]='removed'
+        try:self._publish(capability=capability)
+        except BaseException:
+            self._cleanup[key]='unlinking'
+            raise
+
+    def cleanup(self, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=True)
+        """Retire only this exact recipe after the issuer removed its spools."""
+        absolute=self.disk.root+b'/'+self.directory
+        if not os.path.lexists(absolute):
+            if self._recipe_identity is None:return
+            if self._retiring:
+                with _directory(os.path.dirname(absolute)) as fd:os.fsync(fd)
+                return
+            raise Blocked('missing-apply-cleanup-namespace')
+        with _directory(absolute) as fd:
+            info=os.fstat(fd)
+            names=set(os.listdir(fd))
+            if (info.st_uid!=os.geteuid() or stat.S_IMODE(info.st_mode)!=0o700 or
+                    self._directory_identity is not None and _identity(info)!=self._directory_identity or
+                    names not in ({'admission.json'},set())):
+                raise Blocked('foreign-apply-recipe-cleanup-entry')
+            if names:
+                current=os.stat(b'admission.json',dir_fd=fd,follow_symlinks=False)
+                if _identity(current)!=self._recipe_identity:raise Blocked('changed-apply-recipe-cleanup-control')
+                self._retiring=True
+                os.unlink(b'admission.json',dir_fd=fd)
+            elif not self._retiring:raise Blocked('missing-unretired-apply-recipe')
+            os.fsync(fd)
+        parent,_,name=absolute.rpartition(b'/')
+        with _directory(parent) as fd:
+            current=os.stat(name,dir_fd=fd,follow_symlinks=False)
+            if (current.st_dev,current.st_ino)!=(info.st_dev,info.st_ino):raise Blocked('changed-apply-recipe-cleanup-directory')
+            os.rmdir(name,dir_fd=fd);os.fsync(fd)
+
+    def check(self):
+        if (self.disk._snapshots.get(id(self.snapshot)) is not self.snapshot or
+                self.snapshot.layout_digest != self.disk.layout_digest or
+                (linux_mounts() if self.mounts is not None else None) != self.mounts):
+            raise Blocked('changed-original-apply-admission')
+        return self.snapshot
+
+    def destination(self, relative):
+        self.check()
+        path=self.disk.root + (b'/' + relative if relative else b'')
+        missing=[]
+        while True:
+            try:
+                with _directory(path) as fd:
+                    key,mount,fs,supported=self.disk._mount(path,os.fstat(fd),self.mounts)
+                    volume=next((v for v in self.snapshot.volumes if v.key==key and mount in v.mounts),None)
+                    if volume is None or not supported or not volume.supported:
+                        raise Blocked('unqualified-apply-destination-volume')
+                    return volume,tuple(reversed(missing))
+            except FileNotFoundError:
+                if path==self.disk.root: raise Blocked('missing-apply-root')
+                missing.append(path);path=os.path.dirname(path)
+
+    def extend(self, outputs, *, publish=True, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=False)
+        if capability.purpose not in ('prepare','worker'):raise Blocked('allocating-apply-capability-required')
+        self.check()
+        checked=[]
+        for path,size,digest,label in outputs:
+            path_bytes(path)
+            if type(size) is not int or size<0 or type(digest) is not str or not re.fullmatch('[0-9a-f]{64}',digest):
+                raise Blocked('invalid-apply-output-recipe')
+            checked.append((path,size,digest,label))
+        proposed=self._outputs + tuple(checked)
+        # Each output may acquire one full uint64/stat/digest receipt. Include
+        # that maximal schema before allocating even the first source byte.
+        template=self._document(proposed,maximum=True)
+        state=dict(kind='file',uid=2**64-1,gid=2**64-1,mode=0o7777,dev=2**64-1,ino=2**64-1,size=2**64-1,digest='f'*64)
+        template['receipts']={p.hex():state for p,_,_,_ in proposed}
+        template['cleanup']={p.hex():'unlinking' for p,_,_,_ in proposed}
+        control_size=len(json.dumps(template,sort_keys=True,separators=(',',':')).encode())
+        controls=tuple((self.directory+b'/admission-'+str(i).encode(),control_size,'0'*64,'apply-admission-control') for i in range(2))
+        totals={}
+        missing_parents=set()
+        for path,size,_,_ in proposed+controls:
+            volume,missing=self.destination(os.path.dirname(path));q=volume.quantum
+            data=_round(size,q)
+            physical=data+(data+2*q if volume.filesystem==b'ext4' else 0)+q
+            total=totals.setdefault(volume.key,[volume,0,0])
+            total[1]+=physical;total[2]+=1
+            for parent in missing:
+                if parent not in missing_parents:missing_parents.add(parent);total[1]+=q;total[2]+=1
+        for volume,peak,inodes in totals.values():
+            reserve=_round(max(volume.largest_control,max((v[1] for v in proposed),default=0)),volume.quantum)+volume.quantum
+            if peak+reserve>volume.available or volume.inodes is not None and inodes>volume.inodes:
+                raise InsufficientSpace('insufficient-original-apply-floor')
+        self._outputs=proposed
+        self._control_size=control_size
+        if publish:self._publish(capability=capability)
+
+    def outputs(self):
+        self.check()
+        return self._outputs+tuple((self.directory+b'/admission-'+str(i).encode(),self._control_size,'0'*64,'apply-admission-control') for i in range(2))
+
+    def retain(self, prepared, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=False)
+        if capability.purpose not in ('prepare','worker'):raise Blocked('allocating-apply-capability-required')
+        """Prior immutable generations remain charged during successor overlap."""
+        rows=prepared.store._allocations(prepared)
+        generation=prepared.check()['generation']
+        self.extend(rows,capability=capability)
+        self._retained[generation]=rows
+
+    def release(self,prepared, *, capability=None):
+        require_apply(capability,self.disk,self.operation,deleting=True)
+        generation=json.loads(prepared.manifest)['generation']
+        with prepared.store._directory() as fd:
+            for relative in (generation.encode(),b'preparation-'+generation.encode()+b'.json'):
+                try:os.stat(relative,dir_fd=fd,follow_symlinks=False)
+                except FileNotFoundError:pass
+                else:raise Blocked('unretired-successor-accounting')
+        rows=list(self._outputs)
+        for row in self._retained.get(generation,()):rows.remove(row)
+        old=self._outputs;self._outputs=tuple(rows)
+        try:self._publish(capability=capability)
+        except BaseException:self._outputs=old;raise
+        self._retained.pop(generation,None)
 
 
 def _recovery_key(key):

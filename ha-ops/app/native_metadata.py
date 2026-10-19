@@ -433,6 +433,13 @@ def _stat(s):
             s.st_size, s.st_mtime_ns, s.st_ctime_ns)
 
 
+def _directory_acquisition(info):
+    """Named, live directory identity and numeric metadata, not child churn."""
+    if not stat.S_ISDIR(info.st_mode) or info.st_nlink == 0:
+        raise Blocked('unlinked-or-unsafe-directory-route')
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
 @dataclass(frozen=True)
 class Observation:
     path: bytes
@@ -467,7 +474,9 @@ def _opened(binding, path, kind):
             s = os.stat(part, dir_fd=fd, follow_symlinks=False)
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
             fds.append(child)
-            if _stat(s) != _stat(os.fstat(child)):
+            acquired = os.fstat(child)
+            if (_directory_acquisition(s) != _directory_acquisition(acquired) or
+                    _directory_acquisition(os.stat(part, dir_fd=fd, follow_symlinks=False)) != _directory_acquisition(acquired)):
                 raise Blocked("changed-root-route")
             fd = child
         binding.check(b"", os.fstat(fd), current_mounts)
@@ -488,7 +497,12 @@ def _opened(binding, path, kind):
                 flags |= os.O_DIRECTORY
             child = os.open(part, flags, dir_fd=fd)
             fds.append(child)
-            if _stat(s) != _stat(os.fstat(child)):
+            acquired = os.fstat(child)
+            if directory:
+                if (_directory_acquisition(s) != _directory_acquisition(acquired) or
+                        _directory_acquisition(os.stat(part, dir_fd=fd, follow_symlinks=False)) != _directory_acquisition(acquired)):
+                    raise Blocked("changed-object-route")
+            elif _stat(s) != _stat(acquired):
                 raise Blocked("changed-object-route")
             fd = child
             routes[prefix] = _stat(s)

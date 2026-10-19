@@ -18,6 +18,16 @@ class NativeStatus:
         self.service_value = None
         self.initial_errors = {}
         self.data_dir = None
+        self._apply_prepared=None
+
+    def bind_apply(self,prepared):
+        """Optional issued dormant participant binding; never a boolean flag."""
+        from native_apply import PreparedApply
+        if (type(prepared) is not PreparedApply or self.operations is not prepared.issuer.operations or
+                self.services is not prepared.issuer.services or self.recovery is not prepared.issuer.recovery):
+            raise ValueError('Exact issued Apply status participants required')
+        prepared.check()
+        self._apply_prepared=prepared
 
     def _key(self):
         store = self.recovery
@@ -132,6 +142,17 @@ class NativeStatus:
                 except Exception:
                     self.recovery_key, self.recovery_value = None, None
                     result['recovery'] = dict(status='blocked', message='Recovery journal validation failed')
+            prepared=self._apply_prepared
+            if prepared is not None:
+                worker=(result.get('operation') or {}).get('worker')
+                service=result.get('services') or {}
+                recovery=result.get('recovery') or {}
+                if (worker and worker.get('id')==prepared.operation and
+                        service.get('operation')==prepared.operation and recovery.get('operation')==prepared.operation and
+                        worker.get('phase') in ('effect_started','recovery_required','completed') and
+                        not any(value.get('status') in ('blocked','busy') for value in (service,recovery))):
+                    result['available']=True
+                    result['reason']='Approved native Apply operation and retained recovery are readable.'
             return result
 
 

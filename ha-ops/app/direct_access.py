@@ -2,6 +2,7 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import json
+import hmac
 import re
 import socket
 import ssl
@@ -100,9 +101,20 @@ class DirectServer(ThreadingHTTPServer):
         finally:
             self.slots.release()
 
+    def shutdown(self):
+        peer=getattr(self,'_readiness_peer',None)
+        if peer is not None:peer.reset()
+        return super().shutdown()
 
-def create_handler(authority, status=None, *, secure=False, configured_origin=None):
+    def server_close(self):
+        peer=getattr(self,'_readiness_peer',None)
+        if peer is not None:peer.reset()
+        return super().server_close()
+
+
+def create_handler(authority, status=None, *, secure=False, configured_origin=None, readiness=None):
     status = status or NativeStatus()
+    if readiness is not None:readiness.attach_status(status)
 
     class DirectHandler(BaseHTTPRequestHandler):
         server_version = 'HAOpsDirect'
@@ -180,6 +192,25 @@ def create_handler(authority, status=None, *, secure=False, configured_origin=No
                     if not auth:
                         return self.send(401 if authority.permit(self.client_address[0]) else 429, dict(message='Allow this browser from Home Assistant ingress'))
                     return self.send(200, dict(csrf=authority.session(auth[0])) if self.path.endswith('/session') else status.read())
+                # Optional dormant peer. Production start() supplies none, so
+                # authentication alone never enables an Apply/recovery action.
+                if readiness is not None and self.path == '/direct/api/apply-readiness':
+                    auth = authority.authenticate(self.headers.get('Cookie'), address)
+                    if not auth:
+                        return self.send(401, dict(message='Allow this browser from Home Assistant ingress'))
+                    if self.command == 'GET':
+                        current = status.read()
+                        self.server._readiness_peer=readiness
+                        return self.send(200, readiness.challenge(auth[0], address, current,listener=self.server))
+                    if self.command == 'POST':
+                        if (self.headers.get('Origin') != address or self.headers.get('Sec-Fetch-Site') == 'cross-site' or
+                                not hmac.compare_digest(self.headers.get('X-CSRF-Token', ''), authority.session(auth[0]))):
+                            raise Refused('Readiness origin or CSRF refused')
+                        body = json_body(self)
+                        if set(body) != {'challenge'} or type(body['challenge']) is not str:
+                            raise Refused('Invalid readiness response')
+                        readiness.acknowledge(auth[0], address, body['challenge'])
+                        return self.send(200, dict(ok=True))
                 return self.send(404, dict(message='Not found'))
             except (Refused, ValueError, OSError, socket.timeout):
                 return self.send(403, dict(message='Direct access refused. Reopen authorization from Home Assistant ingress.'))

@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 import time
+import threading
 import uuid
 from contextlib import contextmanager
 
@@ -118,7 +119,25 @@ def _durable_directory(path):
 
 def _validate(state):
     """Validate the authority graph, not merely individual field types."""
-    _fields(state, "schema operation owner revision self phase entries order pending")
+    _fields(state, "schema operation owner revision self phase entries order pending" +
+            (" compensation" if "compensation" in state else ""))
+    if "compensation" in state:
+        original = state["compensation"]
+        _need(type(original) is dict and "compensation" not in original)
+        _validate(original)
+        _need(original["operation"] == state["operation"] and original["owner"] == state["owner"])
+        _need(original["pending"] is None and all(e["uncertain"] is None and
+              not e["stop_invalidated"] for e in original["entries"]))
+        _need(any(e["start"] is not None for e in original["entries"]))
+        _need(len(original["entries"]) == len(state["entries"]))
+        for old, current in zip(original["entries"], state["entries"]):
+            _need(all(old[k] == current[k] for k in
+                      ("id", "startup", "original", "manageable", "capability", "exclusion", "selected")))
+            if old["start"] is None:
+                _need(current["stop"] == old["stop"])
+            else:
+                _need(current["stop"] is None or current["stop"]["attempt"] != old["stop"]["attempt"])
+                _need(current["start"] is None or current["start"]["attempt"] != old["start"]["attempt"])
     _need(type(state["schema"]) is int and state["schema"] == 1)
     _uuid(state["operation"]); _uuid(state["owner"])
     _need(type(state["revision"]) is int and state["revision"] >= 0)
@@ -258,6 +277,7 @@ class ServiceStore:
     must honor finite timeout values; arbitrary Python callbacks cannot be killed.
     """
     def __init__(self, directory, *, clock=time.monotonic, sleep=time.sleep, create=True):
+        self._local_lock=threading.RLock()
         self.directory = Path(os.path.abspath(directory))
         self.clock, self.sleep = clock, sleep
         if create:
@@ -267,7 +287,12 @@ class ServiceStore:
         self._identity = (st.st_dev, st.st_ino)
 
     @contextmanager
-    def _lock(self):
+    def _lock(self,*,create=True):
+        with self._local_lock:
+            with self._process_lock(create=create) as directory:yield directory
+
+    @contextmanager
+    def _process_lock(self,*,create=True):
         directory = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         lock = None
         try:
@@ -279,7 +304,13 @@ class ServiceStore:
                 fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 raise Conflict("service worker busy") from None
-            lock = os.open("lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            try:lock = os.open("lock", os.O_RDWR | (os.O_CREAT if create else 0) | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            except FileNotFoundError:
+                if create:raise
+                try:os.stat('state.json',dir_fd=directory,follow_symlinks=False)
+                except FileNotFoundError:
+                    yield None;return
+                raise Conflict('missing service journal lock')
             ls = os.fstat(lock)
             _need(stat.S_ISREG(ls.st_mode) and ls.st_nlink == 1 and ls.st_uid == os.geteuid() and stat.S_IMODE(ls.st_mode) == 0o600)
             try:
@@ -344,6 +375,8 @@ class ServiceStore:
             _need(self._pointer is None)
         state["revision"] += 1
         validate(state)
+        if hasattr(self,'_apply_limit') and len(json.dumps(state,sort_keys=True,separators=(',',':')).encode())>self._apply_limit:
+            raise InvalidState('service control envelope exceeded')
         name = "state-" + str(uuid.uuid4()) + ".tmp"
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
         try:
@@ -361,8 +394,8 @@ class ServiceStore:
                 pass
 
     def discover(self):
-        with self._lock() as directory:
-            return copy.deepcopy(self._load(directory))
+        with self._lock(create=False) as directory:
+            return None if directory is None else copy.deepcopy(self._load(directory))
 
     def _fenced(self, directory, operation, owner, revision):
         state = self._load(directory)
@@ -370,8 +403,21 @@ class ServiceStore:
             raise Conflict("stale service authority")
         return state
 
-    def prepare(self, adapter, *, seconds=60, polls=10, replace=None):
+    def abandon_prepared(self,operation,owner,revision):
+        """Explicitly retire a frozen inventory that dispatched zero commands."""
+        with self._lock() as directory:
+            state=self._fenced(directory,operation,owner,revision)
+            if state['phase'] not in ('prepared','restored') or state['pending'] is not None or state.get('compensation') is not None or any(e['stop'] is not None or e['start'] is not None or e['uncertain'] is not None for e in state['entries']):raise Conflict('service effects prevent abandonment')
+            if state['phase']!='restored':state['phase']='restored';self._save(directory,state)
+            return copy.deepcopy(state)
+
+    def prepare(self, adapter, *, seconds=60, polls=10, replace=None, operation_id=None, owner_id=None, admission=None,capability=None):
         budget = _Budget(seconds, polls, self.clock, self.sleep)
+        if admission is not None:
+            from native_disk import require_apply
+            require_apply(capability,self,operation_id)
+            relative=os.path.relpath(os.fsencode(self.directory),admission.disk.root)
+            admission.extend(((relative+b'/lock',0,'0'*64,'apply-service-lock'),),capability=capability)
         with self._lock() as directory:
             old = self._load(directory)
             if old is not None:
@@ -401,9 +447,27 @@ class ServiceStore:
                 entry["exclusion"] = _selection(entry, inventory["self"])
                 entry["selected"] = entry["exclusion"] is None
                 entries.append(entry)
-            state = dict(schema=1, operation=str(uuid.uuid4()), owner=str(uuid.uuid4()), revision=0,
+            state = dict(schema=1, operation=operation_id or str(uuid.uuid4()), owner=owner_id or str(uuid.uuid4()), revision=0,
                          self=inventory["self"], phase="prepared", entries=entries, pending=None,
                          order=[e["id"] for e in sorted(entries, key=lambda e: (-_RANK.get(e["startup"], -1), e["id"])) if e["selected"]])
+            if admission is not None:
+                from native_disk import ApplyAdmission
+                _need(type(admission) is ApplyAdmission)
+                # Both cycles retain two exact receipts and ambiguous intent per
+                # service. Maximal scalar encodings bound atomic rewrite overlap.
+                maximal=copy.deepcopy(state)
+                receipt=dict(operation='f'*36,owner='f'*36,attempt='f'*36,target='x'*255,
+                             kind='start',proof='injected_evidence',before=dict(target='x'*255,state='stopped'),
+                             after=dict(target='x'*255,state='running'),result='completed')
+                for entry in maximal['entries']:
+                    entry.update(stop=receipt,start=receipt,observation=dict(target='x'*255,state='unknown'),
+                                 error='observation_mismatch',health='unhealthy',uncertain=dict(receipt,dispatch='entered',result='accepted'))
+                maximal['pending']=copy.deepcopy(maximal['entries'][0]['uncertain'])
+                maximal['revision']=2**64-1;maximal['phase']='recovery_required'
+                maximal['compensation']=copy.deepcopy(maximal)
+                self._apply_limit=len(json.dumps(maximal,sort_keys=True,separators=(',',':')).encode())
+                relative=os.path.relpath(os.fsencode(self.directory),admission.disk.root)
+                admission.extend(tuple((relative+b'/control-'+str(i).encode(),self._apply_limit,'0'*64,'apply-service-control') for i in range(2)),capability=capability)
             self._save(directory, state)
             return copy.deepcopy(state)
 
@@ -421,7 +485,7 @@ class ServiceStore:
         entry["error"] = None
         state["pending"] = None
 
-    def _command(self, directory, state, entry, kind, adapter, budget):
+    def _command(self, directory, state, entry, kind, adapter, budget, *, guard=None):
         before = self._observe(adapter, budget, entry)
         entry["observation"] = before
         expected = "running" if kind == "stop" else "stopped"
@@ -433,15 +497,28 @@ class ServiceStore:
                 entry["error"] = "ownership_changed"
             self._save(directory, state)
             return False
+        if guard is not None:guard.before_service_command(self,entry,kind)
         pending = dict(operation=state["operation"], owner=state["owner"], attempt=str(uuid.uuid4()),
                        target=entry["id"], kind=kind, before=before, dispatch="intent", result=None)
         state["pending"] = pending
         entry["stop_disposition"] = "stop_pending" if kind == "stop" else "start_pending"
         self._save(directory, state)
         budget.remaining()
+        if guard is not None:
+            try:guard.before_service_command(self,entry,kind)
+            except Exception:
+                state['pending']=None;entry['stop_disposition']='untouched'
+                entry['error']='adapter_unavailable';self._save(directory,state)
+                raise Unavailable('adapter_unavailable') from None
         pending["dispatch"] = "entered"
         self._save(directory, state)
         self._check_paths(directory)
+        if guard is not None:
+            try:guard.before_service_command(self,entry,kind)
+            except Exception:
+                state['pending']=None;entry['stop_disposition']='untouched'
+                entry['error']='adapter_unavailable';self._save(directory,state)
+                raise Unavailable('adapter_unavailable') from None
         result = budget.call(adapter.command, copy.deepcopy(pending))
         _fields(result, "operation owner attempt target kind outcome")
         _need(all(result[key] == pending[key] for key in ("operation", "owner", "attempt", "target", "kind")))
@@ -500,7 +577,10 @@ class ServiceStore:
         state["phase"] = "recovery_required"
         self._save(directory, state)
 
-    def stop(self, operation, owner, revision, adapter, *, seconds=60, polls=10):
+    def stop(self, operation, owner, revision, adapter, *, seconds=60, polls=10, guard=None):
+        if guard is not None:
+            from native_apply import _ApplyGuard
+            _need(type(guard) is _ApplyGuard and guard.services is self)
         budget = _Budget(seconds, polls, self.clock, self.sleep)
         with self._lock() as directory:
             state = self._fenced(directory, operation, owner, revision)
@@ -534,7 +614,7 @@ class ServiceStore:
                     entry["error"] = "dependency_blocked"
                     continue
                 try:
-                    good = self._command(directory, state, entry, "stop", adapter, budget)
+                    good = self._command(directory, state, entry, "stop", adapter, budget,guard=guard)
                 except (Unavailable, InvalidState) as exc:
                     self._failure(directory, state, entry, exc); good = False
                 if not good:
@@ -544,6 +624,36 @@ class ServiceStore:
             state["phase"] = "stopped" if all(e["stop"] is not None and e["uncertain"] is None and e["error"] is None and e["observation"]["state"] == "stopped" for e in state["entries"] if e["selected"]) and state["pending"] is None else "recovery_required"
             self._save(directory, state)
             return copy.deepcopy(state)
+
+    def compensate(self, operation, owner, revision, adapter, *, seconds=60, polls=10):
+        """Begin the single automatic quiesce cycle after acknowledged starts.
+
+        The initial inventory and every first-cycle receipt remain immutable in
+        the journal. Unknown dispatches never become authority from observation.
+        Reopen discovers this cycle; continuing stop/restore remains explicit.
+        """
+        budget = _Budget(seconds, polls, self.clock, self.sleep)
+        with self._lock() as directory:
+            state = self._fenced(directory, operation, owner, revision)
+            if ("compensation" in state or state["pending"] is not None or
+                    any(e["uncertain"] is not None or e["stop_invalidated"] for e in state["entries"])):
+                raise Conflict("compensation unavailable or already consumed")
+            started = [e for e in state["entries"] if e["start"] is not None]
+            if not started:
+                raise Conflict("no acknowledged starts to compensate")
+            for entry in state["entries"]:
+                if entry["selected"]:
+                    expected = "running" if entry["start"] is not None else "stopped"
+                    if entry["stop"] is None or self._observe(adapter, budget, entry)["state"] != expected:
+                        raise Conflict("compensation ownership changed")
+            state["compensation"] = copy.deepcopy(state)
+            for entry in started:
+                entry.update(stop=None, start=None, observation=None, health="unchecked", error=None,
+                             uncertain=None, stop_invalidated=False, stop_disposition="untouched")
+            state["phase"] = "recovery_required"
+            self._save(directory, state)
+            identity = (state["operation"], state["owner"], state["revision"])
+        return self.stop(*identity, adapter, seconds=budget.remaining(), polls=polls)
 
     def restore(self, operation, owner, revision, adapter, *, seconds=60, polls=10):
         budget = _Budget(seconds, polls, self.clock, self.sleep)

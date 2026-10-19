@@ -411,7 +411,7 @@ def assert_metadata_dormancy(sources):
             else:
                 continue
             if "native_metadata" in modules:
-                assert name in ("native_preview.py", "native_save.py", "native_disk.py", "native_publication.py", "native_scope.py", "native_recovery.py"), name
+                assert name in ("native_preview.py", "native_save.py", "native_disk.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_operations.py"), name
 
 
 @pytest.mark.parametrize("name", ["server.py", "another_dormant.py"])
@@ -1052,3 +1052,135 @@ def test_consistent_review_of_foreign_existing_parent_still_blocks(tmp_path, mon
             n.stage_candidate(g, handle, invalid)
         assert effects == [] and initial == g.index_entries(handle)
     assert canonical == (root / METADATA / "index").read_bytes()
+
+
+def _route_acquisition_fixture(tmp_path, level):
+    ancestor=tmp_path/'ancestor';root=ancestor/'bound'
+    write(root,b'homeassistant/p/a',b'exact selected bytes')
+    directory={'absolute':ancestor,'root':root,'relative':root/'homeassistant/p'}[level]
+    return root,binding(root),directory
+
+
+def _interleave_directory_open(monkeypatch,directory,event,*,after=False):
+    original=os.open;parent=os.stat(directory.parent);fired=[]
+    def opening(path,flags,*args,**kwargs):
+        parent_fd=kwargs.get('dir_fd')
+        match=(not fired and parent_fd is not None and os.fsencode(path)==os.fsencode(directory.name) and
+               (os.fstat(parent_fd).st_dev,os.fstat(parent_fd).st_ino)==(parent.st_dev,parent.st_ino))
+        if match:
+            fired.append(True)
+            if not after:event()
+        result=original(path,flags,*args,**kwargs)
+        if match and after:event()
+        return result
+    monkeypatch.setattr(os,'open',opening)
+    return fired
+
+
+@pytest.mark.parametrize('level',['absolute','root','relative'])
+@pytest.mark.parametrize('event',['create-file','remove-file','create-directory','remove-directory'])
+def test_directory_acquisition_accepts_only_unrelated_child_churn(tmp_path,monkeypatch,level,event):
+    root,b,directory=_route_acquisition_fixture(tmp_path,level)
+    sibling=directory/'unselected'
+    if event=='remove-file':sibling.write_bytes(b'unrelated')
+    if event=='remove-directory':sibling.mkdir()
+    before=os.stat(directory);selected=root/'homeassistant/p/a';expected=n._stat(os.stat(selected))
+    def change():
+        if event=='create-file':sibling.write_bytes(b'unrelated')
+        elif event=='remove-file':sibling.unlink()
+        elif event=='create-directory':sibling.mkdir()
+        else:sibling.rmdir()
+    fired=_interleave_directory_open(monkeypatch,directory,change)
+    with n._opened(b,b'homeassistant/p/a','file') as (fd,routes):
+        assert os.read(fd,100)==b'exact selected bytes'
+        assert all(len(value)==9 for value in routes.values())
+    assert fired and n._stat(os.stat(selected))==expected
+    after=os.stat(directory)
+    assert n._directory_acquisition(before)==n._directory_acquisition(after)
+
+
+@pytest.mark.parametrize('level',['absolute','root','relative'])
+@pytest.mark.parametrize('event',['inode','symlink','mode','special-mode'])
+def test_directory_acquisition_rejects_route_identity_or_numeric_metadata_change(tmp_path,monkeypatch,level,event):
+    root,b,directory=_route_acquisition_fixture(tmp_path,level)
+    original=os.stat(directory);retained=directory.with_name(directory.name+'-original')
+    def change():
+        if event in ('inode','symlink'):
+            directory.rename(retained)
+            if event=='inode':directory.mkdir(mode=stat.S_IMODE(original.st_mode))
+            else:directory.symlink_to(retained,target_is_directory=True)
+        else:directory.chmod(stat.S_IMODE(original.st_mode)^(0o1000 if event=='special-mode' else 0o010))
+    fired=_interleave_directory_open(monkeypatch,directory,change)
+    with pytest.raises((n.Blocked,OSError)):
+        with n._opened(b,b'homeassistant/p/a','file'):pytest.fail('changed route acquired')
+    assert fired
+    live=(retained if retained.exists() else directory)
+    selected=(live/'a' if level=='relative' else live/('homeassistant/p/a' if level=='root' else 'bound/homeassistant/p/a'))
+    assert selected.read_bytes()==b'exact selected bytes'
+
+
+@pytest.mark.parametrize('level',['root','relative'])
+def test_directory_acquisition_rejects_unlinked_open_descriptor(tmp_path,monkeypatch,level):
+    root=tmp_path/'bound';root.mkdir()
+    directory=root if level=='root' else root/'empty'
+    if level=='relative':directory.mkdir()
+    b=binding(root);fired=_interleave_directory_open(monkeypatch,directory,lambda:directory.rmdir(),after=True)
+    with pytest.raises((n.Blocked,FileNotFoundError)):
+        with n._opened(b,b'' if level=='root' else b'empty','directory'):pytest.fail('detached descriptor acquired')
+    assert fired and not directory.exists()
+
+
+@pytest.mark.parametrize('field',['st_uid','st_gid'])
+def test_directory_acquisition_retains_full_numeric_ownership(field,tmp_path):
+    from types import SimpleNamespace
+    info=os.stat(tmp_path);values={name:getattr(info,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink')}
+    changed=dict(values);changed[field]+=1
+    assert n._directory_acquisition(SimpleNamespace(**values))!=n._directory_acquisition(SimpleNamespace(**changed))
+
+
+@pytest.mark.parametrize('event',['bytes','inode','mode','hardlink'])
+def test_regular_file_acquisition_keeps_full_stat_fence(tmp_path,monkeypatch,event):
+    root,b,_=_route_acquisition_fixture(tmp_path,'relative');leaf=root/'homeassistant/p/a'
+    original=os.stat(leaf)
+    def change():
+        if event=='bytes':leaf.write_bytes(b'changed selected data');os.utime(leaf,ns=(original.st_atime_ns,original.st_mtime_ns))
+        elif event=='inode':
+            leaf.rename(leaf.with_name('retained-original'));leaf.write_bytes(b'exact selected bytes');leaf.chmod(stat.S_IMODE(original.st_mode))
+        elif event=='mode':leaf.chmod(stat.S_IMODE(original.st_mode)^0o010)
+        else:os.link(leaf,leaf.with_name('other-link'))
+    fired=_interleave_directory_open(monkeypatch,leaf,change)
+    with pytest.raises(n.Blocked):
+        with n._opened(b,b'homeassistant/p/a','file'):pytest.fail('changed leaf acquired')
+    assert fired
+
+
+def test_directory_acquisition_preserves_qualified_mount_requirement(tmp_path):
+    root,b,_=_route_acquisition_fixture(tmp_path,'relative')
+    unconfirmed=d.replace(b,confirmed_mounts=())
+    with pytest.raises(n.Blocked,match='unconfirmed'):
+        with n._opened(unconfirmed,b'homeassistant/p/a','file'):pytest.fail('unqualified mount acquired')
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='actual Linux recovery structural closure')
+def test_directory_acquisition_does_not_authorize_new_child_deletion(tmp_path):
+    from test_native_recovery import point
+    (tmp_path/'homeassistant/d').mkdir(parents=True)
+    recovery,_=point(tmp_path,{b'homeassistant/d':None})
+    child=tmp_path/'homeassistant/d/unselected'
+    def race(stage):
+        if stage=='before_intent:remove':child.write_bytes(b'preserved independent child')
+    recovery.fault=race
+    with pytest.raises((n.Blocked,OSError)):recovery.execute()
+    assert child.read_bytes()==b'preserved independent child'
+
+
+@pytest.mark.parametrize('field',['uid','gid'])
+def test_directory_acquisition_rejects_actual_owner_change_when_permitted(tmp_path,monkeypatch,field):
+    if os.geteuid()!=0:pytest.skip('actual ownership mutation requires isolated root fixture')
+    root,b,directory=_route_acquisition_fixture(tmp_path,'relative')
+    before=os.stat(directory)
+    def change():os.chown(directory,1 if field=='uid' else before.st_uid,1 if field=='gid' else before.st_gid)
+    fired=_interleave_directory_open(monkeypatch,directory,change)
+    with pytest.raises(n.Blocked):
+        with n._opened(b,b'homeassistant/p/a','file'):pytest.fail('changed owner acquired')
+    assert fired

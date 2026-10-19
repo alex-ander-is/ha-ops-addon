@@ -1027,7 +1027,7 @@ def test_no_production_import_or_legacy_policy_dependency():
 
 
 def assert_inventory_dormancy(sources):
-    peers={'native_metadata.py','native_disk.py','native_preview.py','native_save.py','native_git.py','native_publication.py','native_scope.py','native_recovery.py'}
+    peers={'native_metadata.py','native_disk.py','native_preview.py','native_save.py','native_git.py','native_publication.py','native_scope.py','native_recovery.py','native_apply.py','native_operations.py'}
     for name,source in sources.items():
         for node in ast.walk(ast.parse(source)):
             if isinstance(node,ast.Import):

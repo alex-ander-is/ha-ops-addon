@@ -92,7 +92,7 @@ def _path(value, absolute=False):
 
 
 # Only explicitly implemented execution profiles select a byte identity codec.
-_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1", "native-scope-v1": "native-bytes-v1", "native-scope-v2": "native-bytes-v1"}
+_NATIVE_PROFILES = {"native-publication-v1": "native-bytes-v1", "native-scope-v1": "native-bytes-v1", "native-scope-v2": "native-bytes-v1", "native-apply-v1": "native-bytes-v1"}
 
 
 def identity_codec(identity):
@@ -421,6 +421,102 @@ class NativeOperationStore:
         self._prepared_publication = None
         with _LOCKS_GUARD:
             self.mutex = _LOCKS.setdefault(str(self.data_root), threading.RLock())
+
+    @contextmanager
+    def apply_authority(self,prepared,*,capability=None):
+        from native_disk import require_apply
+        from native_apply import PreparedApply
+        if type(prepared) is not PreparedApply or prepared.issuer.operations is not self:raise Conflict('issued Apply authority required')
+        require_apply(capability,self,prepared.operation)
+        prepared.check(fresh=False)
+        yield capability
+
+    def _apply_gate(self,identity,capability=None):
+        if identity['execution_policy']=='native-apply-v1':
+            from native_disk import require_apply
+            require_apply(capability,self)
+            from native_disk import check_apply_identity
+            check_apply_identity(capability,self,identity)
+
+    def apply_cleanup_result(self,prepared,result,*,release=False,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,prepared.operation,deleting=True)
+        """Durable terminal cleanup outcome; never reruns configuration effects."""
+        from native_apply import PreparedApply
+        if type(prepared) is not PreparedApply or prepared.issuer.operations is not self:
+            raise Conflict('issued Apply cleanup authority required')
+        prepared.check(fresh=False)
+        if release:
+            service=prepared.issuer.services.discover()
+            if (prepared.issuer.recovery._pointer() is not None or service is None or service['phase']!='restored' or
+                    service['operation']!=prepared.operation):raise Conflict('Apply cleanup participants unresolved')
+        with self._locked() as (root,artifacts):
+            state=self._load(root,artifacts);worker=state['workers'].get(prepared.operation)
+            if worker is None or worker['phase']!='completed' or worker['owner']!=self.owner:
+                raise Conflict('terminal Apply cleanup authority changed')
+            record=state['records'][worker['record_id']]
+            _require(record['identity']['execution_policy']=='native-apply-v1' and type(result) is dict and
+                     result.get('operation')==prepared.operation and result.get('status') in ('SUCCESS','WARNING','ERROR'),'invalid Apply cleanup result')
+            if release:
+                if state['recovery']!={'record_id':record['id'],'identity_digest':record['identity_digest']}:
+                    raise Conflict('Apply cleanup pin changed')
+                state['recovery']=None
+            worker['apply_result']=copy.deepcopy(result)
+            self._commit(root,artifacts,state)
+            return copy.deepcopy(result)
+
+    def apply_abandoned(self,issuer,approval,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,approval.operation,deleting=True)
+        from native_apply import NativeApply,_NoEffectClose
+        if type(issuer) is not NativeApply or issuer.operations is not self or type(approval) is not _NoEffectClose or issuer._abandon_issued.get(id(approval))!=(approval,approval.operation,approval.command,approval.revision,approval.participant,approval.pin):raise Conflict('issued no-effect abandonment required')
+        with self._locked() as (root,artifacts):
+            state=self._load(root,artifacts);self._cas(state,approval.revision)
+            worker=state['workers'].get(approval.operation)
+            if worker is None or not (worker['phase']=='accepted' or worker['phase'] in ('failed','recovery_required') and (worker.get('apply_result') or {}).get('no_effect') is True):raise Conflict('no-effect worker proof changed')
+            record=state['records'][worker['record_id']]
+            if record['identity']['execution_policy']!='native-apply-v1' or state['active'] not in (None,approval.operation) or state['recovery'] not in (None,{'record_id':record['id'],'identity_digest':record['identity_digest']}):raise Conflict('no-effect operation pin changed')
+            append=worker['phase']!='failed'
+            worker.update(phase='failed',outcome='failed',apply_result=dict(status='ERROR',operation=worker['id'],error='recovery-point-closed',close_command=approval.command,recovery_retained=False,no_effect=True))
+            self._invalidate(record)
+            if append:self._append_checkpoint(record,worker)
+            state['recovery']=None
+            if state['active']==worker['id']:state['active']=None
+            self._commit(root,artifacts,state)
+            return copy.deepcopy(worker['apply_result'])
+
+    def apply_closed(self,issuer,command,*,capability=None):
+        from native_disk import require_apply
+        require_apply(capability,self,deleting=True)
+        from native_apply import NativeApply
+        if type(issuer) is not NativeApply or issuer.operations is not self:raise Conflict('explicit Apply close issuer required')
+        receipt=issuer.recovery.closed_receipt(command);service=issuer.services.discover()
+        require_apply(capability,self,receipt['operation'],deleting=True)
+        if service is not None and (service['phase']!='restored' or service['operation']!=receipt['operation']):
+            raise Conflict('reviewed close service restoration incomplete')
+        with self._locked() as (root,artifacts):
+            state=self._load(root,artifacts);worker=state['workers'].get(receipt['operation'])
+            if worker is None:raise Conflict('reviewed close operation missing')
+            record=state['records'][worker['record_id']]
+            if ((worker.get('apply_result') or {}).get('close_command')==command):
+                return copy.deepcopy(worker['apply_result'])
+            healthy=worker['phase']=='completed' and (worker.get('apply_result') or {}).get('cleanup_debt') is True
+            if (record['identity']['execution_policy']!='native-apply-v1' or
+                    state['recovery']!={'record_id':record['id'],'identity_digest':record['identity_digest']} or
+                    worker['phase'] not in ('accepted','effect_started','recovery_required') and not healthy):
+                raise Conflict('reviewed close operation fence changed')
+            if healthy:
+                previous=worker['apply_result']
+                worker['apply_result']=dict(status=previous['healthy_status'],operation=worker['id'],
+                    residual=copy.deepcopy(previous.get('residual',[])),selected=[],close_command=command)
+            else:
+                worker.update(phase='failed',outcome='failed',apply_result=dict(status='ERROR',operation=worker['id'],
+                    error='recovery-point-closed',close_command=command,recovery_retained=False))
+                self._invalidate(record);self._append_checkpoint(record,worker)
+            state['recovery']=None
+            if state['active']==worker['id']:state['active']=None
+            self._commit(root,artifacts,state)
+            return copy.deepcopy(worker['apply_result'])
 
     @contextmanager
     def _locked(self, *, create=True):
@@ -838,7 +934,12 @@ class NativeOperationStore:
                        previous["phase"] in ("effect_started","recovery_required") and current["phase"] == "failed" and
                        (previous['phase']=='effect_started' or worker.get('publication_attempt')=='not-sent') and
                        current["epoch"] == previous["epoch"] and current["evidence"] == worker["evidence"])
-            _require(cleanup_transition or marker_transition or refusal or current["phase"] in WORKER_TRANSITIONS.get(previous["phase"], set()),
+            apply_close=(record is not None and record['identity']['execution_policy']=='native-apply-v1' and
+                         (worker.get('apply_result') or {}).get('error')=='recovery-point-closed' and
+                         previous['phase'] in ('effect_started','recovery_required') and current['phase']=='failed' and
+                         previous['epoch']==current['epoch'] and current['evidence'] is None)
+            no_effect_takeover=(record is not None and record['identity']['execution_policy']=='native-apply-v1' and (worker.get('apply_result') or {}).get('no_effect') is True and previous['phase']=='accepted' and current['phase']=='recovery_required' and current['epoch']==previous['epoch']+1)
+            _require(no_effect_takeover or cleanup_transition or marker_transition or refusal or apply_close or current["phase"] in WORKER_TRANSITIONS.get(previous["phase"], set()),
                      "impossible checkpoint transition")
             if current["epoch"] == previous["epoch"]:
                 _require(current["owner"] == previous["owner"], "owner changed without takeover")
@@ -849,7 +950,7 @@ class NativeOperationStore:
                     previous['epoch']==summary['first_epoch'] and current['epoch']==summary['last_epoch'])
                 _require((current["epoch"] == previous["epoch"] + 1 or summarized) and
                          (previous["phase"], current["phase"]) in {
-                             ("accepted", "invalidated"), ("effect_started", "recovery_required"),
+                             ("accepted", "invalidated"), *(([("accepted","recovery_required")] if record is not None and record['identity']['execution_policy']=='native-apply-v1' and (worker.get('apply_result') or {}).get('no_effect') is True else [])), ("effect_started", "recovery_required"),
                              ("recovery_required", "recovery_required")}, "impossible takeover epoch")
         latest = history[-1]
         if native:
@@ -1204,6 +1305,7 @@ class NativeOperationStore:
             pins.add(state["scope_pending"]["record_id"])
         if state.get("scope_rules_record_id"):
             pins.add(state["scope_rules_record_id"])
+        pins.update(w['record_id'] for w in state['workers'].values() if (w.get('apply_result') or {}).get('no_effect') is True and not (w.get('apply_result') or {}).get('close_command'))
         return pins
 
     def _compact_graph(self, state):
@@ -1308,20 +1410,36 @@ class NativeOperationStore:
         except OSError as exc:
             self.cleanup_errors.append(str(exc))
 
-    def compact(self, expected_revision):
+    def compact(self, expected_revision,*,capability=None):
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
+            self._apply_state_gate(state,capability)
             self._commit(root, artifacts, state)
             return self._projection(state)
 
-    def recovery_pin(self, expected_revision, expected_slot, record_id=None, identity_digest=None):
+    def _apply_state_gate(self,state,capability):
+        # Schema 1 has no native Apply profile/recovery slot. Existing legacy
+        # replay and explicit upgrade checks retain sole authority for it.
+        if state['schema']==1:return
+        selected=set()
+        if state['active']:selected.add(state['workers'][state['active']]['record_id'])
+        if state['recovery']:selected.add(state['recovery']['record_id'])
+        from native_disk import require_apply
+        for record_id in selected:
+            if state['records'][record_id]['identity']['execution_policy']=='native-apply-v1':
+                worker=next(w for w in state['workers'].values() if w['record_id']==record_id)
+                require_apply(capability,self,worker['id'])
+
+    def recovery_pin(self, expected_revision, expected_slot, record_id=None, identity_digest=None,*,capability=None):
         """Exact CAS protection only; no recovery journal or rollback is performed."""
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             if state['active'] is not None and state['records'][state['workers'][state['active']]['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication protection requires issued authority')
+            for candidate in (record_id,(state['recovery'] or {}).get('record_id'),state['workers'][state['active']]['record_id'] if state['active'] else None):
+                if candidate is not None:self._apply_gate(state['records'][candidate]['identity'],capability)
             protected=state['recovery']
             if protected is not None and state['records'][protected['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication protection requires issued cleanup')
@@ -1415,19 +1533,22 @@ class NativeOperationStore:
             self._commit(root, artifacts, state)
             return self._projection(state)
 
+    def _initial_state(self):
+        return {"schema": SCHEMA, "revision": 0, "instance_id": str(uuid.uuid4()),
+                 "updated_at": _now(), "app_version": "unactivated", "epoch": 0,
+                 "records": {}, "current": dict.fromkeys(sorted(DOMAINS)), "workers": {},
+                 "active": None, "commands": {}, "baseline_record_id": None,
+                 "baseline_scope": None, "active_scope": None,
+                 "generation": 0, "retention": self.retention, "checkpoint": self._checkpoint(),
+                 "anchors": {}, "baseline_provenance": None, "recovery": None}
+
     def _load(self, root, artifacts, *, create=True):
         try:
             state = _parse(self._read_file(root, "state.json"))
         except FileNotFoundError:
             if not create:
                 raise
-            state = {"schema": SCHEMA, "revision": 0, "instance_id": str(uuid.uuid4()),
-                     "updated_at": _now(), "app_version": "unactivated", "epoch": 0,
-                     "records": {}, "current": dict.fromkeys(sorted(DOMAINS)), "workers": {},
-                     "active": None, "commands": {}, "baseline_record_id": None,
-                     "baseline_scope": None, "active_scope": None,
-                     "generation": 0, "retention": self.retention, "checkpoint": self._checkpoint(),
-                     "anchors": {}, "baseline_provenance": None, "recovery": None}
+            state = self._initial_state()
             self._write(root, "state.json", canonical(state))
         try:
             self._validate(state, artifacts)
@@ -1465,13 +1586,16 @@ class NativeOperationStore:
     def refresh(self, *, observe=False):
         """Diagnostic projection only: never initializes editable decisions."""
         state = self.read(observe=True) if observe else self.read()
-        return {"revision": state["revision"], "candidates": {
+        result={"revision": state["revision"], "candidates": {
             domain: None if key is None else {field: copy.deepcopy(state["records"][key][field])
                                               for field in ("id", "status", "artifact", "identity_digest", "checkpoints")}
             for domain, key in state["current"].items()},
             "worker": None if state["active"] is None else {
                 field: state["workers"][state["active"]][field] for field in ("id", "phase", "epoch", "outcome")},
             "draft": {}}
+        if result['worker'] is not None and 'apply_result' in state['workers'][state['active']]:
+            result['worker']['result']=copy.deepcopy(state['workers'][state['active']]['apply_result'])
+        return result
 
     def read_diff(self, record_id):
         with self._locked() as (root, artifacts):
@@ -1479,17 +1603,22 @@ class NativeOperationStore:
             record = state["records"][record_id]
             return self._artifact(artifacts, record["artifact"], record.get("artifact_size"))
 
-    def preview(self, expected_revision, domain, identity, diff):
+    def preview(self, expected_revision, domain, identity, diff,*,capability=None):
         validate_identity(identity, domain)
         _require(type(diff) is bytes, "invalid artifact bytes")
-        return self.preview_stream(expected_revision, domain, identity, (diff,))
+        return self.preview_stream(expected_revision, domain, identity, (diff,),capability=capability)
 
-    def preview_stream(self, expected_revision, domain, identity, producer):
+    def preview_stream(self, expected_revision, domain, identity, producer,*,capability=None):
         validate_identity(identity, domain)
+        self._apply_gate(identity,capability)
+        if identity['execution_policy']=='native-apply-v1':
+            from native_disk import qualified_apply
+            qualified_apply(capability,self)
         if identity['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
             raise Conflict('native publication requires issued preparation')
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
+            self._apply_state_gate(state,capability)
             self._cas(state, expected_revision)
             if state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
                 raise Conflict('native publication cleanup unresolved')
@@ -1545,12 +1674,14 @@ class NativeOperationStore:
     def _scope_matches(state, record):
         return state["active_scope"] is not None and record["identity"]["scope"] == state["active_scope"]
 
-    def review(self, expected_revision, record_id, decisions, approval_id, observation):
+    def review(self, expected_revision, record_id, decisions, approval_id, observation,*,capability=None):
         _id(approval_id)
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
+            self._apply_state_gate(state,capability)
             self._cas(state, expected_revision)
             record = state["records"][record_id]
+            self._apply_gate(record['identity'],capability)
             if state.get("scope_pending") and record["domain"] == "apply":
                 raise Conflict("pending scope blocks Apply")
             if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2') or state['recovery'] is not None and state['records'][state['recovery']['record_id']]['identity']['execution_policy']=='native-publication-v1':
@@ -1579,11 +1710,14 @@ class NativeOperationStore:
         return digest(payload)
 
     def claim(self, expected_revision, command_id, record_id, approval_binding, observation,
-              *, instance_id=_OMITTED, generation=_OMITTED):
+              *, instance_id=_OMITTED, generation=_OMITTED,capability=None):
         _id(command_id)
         _hash(approval_binding)
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
+            self._apply_state_gate(state,capability)
+            if record_id in state['records']:
+                self._apply_gate(state['records'][record_id]['identity'],capability)
             if state.get("scope_pending"):
                 raise Conflict("pending scope requires an issued native operation")
             if record_id in state['records'] and state['records'][record_id]['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
@@ -1628,11 +1762,14 @@ class NativeOperationStore:
                 self._invalidate(record)
                 self._commit(root, artifacts, state)
                 raise Conflict("source changed; fresh Preview required")
-            operation_id = str(uuid.uuid4())
+            operation_id = (capability.operation if record['identity']['execution_policy']=='native-apply-v1'
+                            else str(uuid.uuid4()))
             state["epoch"] += 1
             worker = {"id": operation_id, "record_id": record_id, "owner": self.owner,
                       "epoch": state["epoch"], "phase": "accepted", "marker": str(uuid.uuid4()),
                       "evidence": None, "outcome": None, "binding": approval_binding}
+            if record['identity']['execution_policy']=='native-apply-v1':
+                worker['apply_result']=None
             if record['identity']['execution_policy']=='native-publication-v1':
                 worker['publication_attempt']='not-sent'
                 worker['publication_outcome']=None
@@ -1657,12 +1794,24 @@ class NativeOperationStore:
             raise Conflict("native worker fenced")
         return worker, state["records"][worker["record_id"]]
 
-    def checkpoint(self, expected_revision, operation_id, epoch, phase, observation=None, evidence=None):
+    def checkpoint(self, expected_revision, operation_id, epoch, phase, observation=None, evidence=None, apply_result=None,*,capability=None):
         """Durable effect intent precedes future adapter calls; this makes none."""
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
             worker, record = self._owned(state, operation_id, epoch)
+            self._apply_gate(record['identity'],capability)
+            if record['identity']['execution_policy']=='native-apply-v1':
+                from native_disk import require_apply
+                require_apply(capability,self,operation_id)
+                if apply_result is not None:
+                    _require(type(apply_result) is dict and apply_result.get('status') in ('SUCCESS','WARNING','ERROR') and
+                             apply_result.get('operation')==operation_id,'invalid Apply result')
+                    canonical(apply_result)
+                    worker['apply_result']=copy.deepcopy(apply_result)
+                _require(phase!='completed' or worker['apply_result'] is not None,'durable Apply result required')
+            else:
+                _require(apply_result is None,'Apply result outside native profile')
             if record['identity']['execution_policy'] in ('native-publication-v1','native-scope-v1','native-scope-v2'):
                 raise Conflict('native publication or scope requires issued checkpoint')
             transitions = {key: phases - {"invalidated"} for key, phases in WORKER_TRANSITIONS.items()}
@@ -1700,8 +1849,24 @@ class NativeOperationStore:
             self._commit(root, artifacts, state)
             return copy.deepcopy(worker)
 
-    def lifecycle(self, expected_revision, app_version, observations):
+    def lifecycle(self, expected_revision, app_version, observations,*,capability=None):
         """Explicit restart/update takeover; never schedules or retries work."""
+        observed=self.read(observe=True)
+        selected=observed['active']
+        if selected is None and observed['recovery'] is not None:
+            selected=next((w['id'] for w in observed['workers'].values() if w['record_id']==observed['recovery']['record_id']),None)
+        if selected is not None:
+            worker=observed['workers'][selected];record=observed['records'][worker['record_id']]
+            if record['identity']['execution_policy']=='native-apply-v1':
+                from native_disk import require_apply,apply_transaction
+                if capability is None:
+                    from native_metadata import Binding
+                    from native_inventory import Policy,linux_mounts
+                    root=decode_native_path(record['identity']['root']['path'],absolute=True)
+                    mounts=linux_mounts();binding=Binding(root,Policy(),mounts,tuple(m.id for m in mounts),True)
+                    with apply_transaction(binding,(self,),selected,'close') as takeover:
+                        return self.lifecycle(expected_revision,app_version,observations,capability=takeover)
+                require_apply(capability,self,selected)
         _text(app_version)
         _require(isinstance(observations, dict), "invalid observations")
         with self._locked() as (root, artifacts):
@@ -1717,9 +1882,10 @@ class NativeOperationStore:
             if active:
                 worker = state["workers"][active]
                 record = state["records"][worker["record_id"]]
+                if record['identity']['execution_policy']=='native-apply-v1' and worker['phase']=='accepted':worker['apply_result']=dict(status='ERROR',operation=worker['id'],error='explicit-no-effect-cleanup-required',no_effect=True)
                 state["epoch"] += 1
                 worker.update(owner=self.owner, epoch=state["epoch"])
-                if worker["phase"] == "accepted":
+                if worker["phase"] == "accepted" and record['identity']['execution_policy']!='native-apply-v1':
                     self._invalidate(record)
                     worker.update(phase="invalidated", outcome="invalidated")
                     state["active"] = None
@@ -1769,10 +1935,11 @@ class NativeOperationStore:
     def _projection(state):
         return {"revision": state["revision"], "active": state["active"], "app_version": state["app_version"]}
 
-    def cancel(self, expected_revision, record_id):
+    def cancel(self, expected_revision, record_id,*,capability=None):
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)
             self._cas(state, expected_revision)
+            self._apply_state_gate(state,capability)
             record = state["records"][record_id]
             if state.get("scope_pending") and record["domain"] == "apply":
                 raise Conflict("pending scope blocks Apply")
@@ -1819,6 +1986,12 @@ def _worker_end(worker):
 
 def _publication_worker_fields(worker,record):
     names="id record_id owner epoch phase marker evidence outcome binding"
+    if record['identity']['execution_policy']=='native-apply-v1':
+        _fields(worker,names+' apply_result')
+        result=worker['apply_result']
+        _require(result is None or type(result) is dict and result.get('status') in ('SUCCESS','WARNING','ERROR') and
+                 result.get('operation')==worker['id'],'invalid durable Apply result')
+        return
     if record['identity']['execution_policy']=='native-publication-v1':
         _fields(worker,names+" publication_attempt publication_outcome publication_confirmation publication_cleanup publication_cleanup_owner publication_resources"+(" publication_scope_activated" if record["domain"]=="scope" else ""))
         if record["domain"]=="scope":
