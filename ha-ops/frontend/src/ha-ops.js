@@ -1093,6 +1093,56 @@ function renderRetainedDevicesTable(rows, disabled, onToggle) {
   `;
 }
 
+// Reusable discovery control. Rules contain only canonical backend folder IDs;
+// file drafts, directional consent and browser authorization never enter it.
+class HaOpsFolderScope extends LitElement {
+  static properties = { model: {type: Object}, busy: {type: Boolean}, error: {type: String} };
+  static styles = css`
+    :host{display:block;font:16px system-ui;color:var(--lumo-body-text-color,#243443)}
+    section{padding:20px;border:1px solid #d6dde4;border-radius:12px;background:var(--lumo-base-color,#fff)}
+    .folder{margin:8px 0}.children{padding-left:20px;border-left:1px solid #d6dde4}
+    .row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.size{color:#647383;font-size:.9rem}
+    .warning{color:#8a5400}p{line-height:1.5;overflow-wrap:anywhere}vaadin-checkbox{max-width:100%;overflow-wrap:anywhere}
+    vaadin-button{margin:8px 8px 0 0}vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}
+    @media(max-width:600px){section{padding:12px}.children{padding-left:12px}.row{gap:6px}}
+  `;
+  constructor(){super();this.model={};this.busy=false;this.error="";}
+  included(path,rules=this.model.policy?.rules||[]){let included=false;for(const rule of rules)if(path===rule.path||path.startsWith(rule.path+"/"))included=rule.include;return included;}
+  mixed(path){const selected=this.included(path);return (this.model.policy?.rules||[]).some(rule=>rule.path.startsWith(path+"/")&&rule.include!==selected);}
+  toggle(path,include){
+    if(this.busy||this.model.blocked)return;
+    const rules=(this.model.policy?.rules||[]).filter(rule=>rule.path!==path&&!rule.path.startsWith(path+"/"));
+    rules.push({path,include});rules.sort((a,b)=>a.path<b.path?-1:a.path>b.path?1:0);
+    const normalized=[];
+    for(const rule of rules){let parent=false;for(const previous of normalized)if(rule.path.startsWith(previous.path+"/"))parent=previous.include;if(rule.include!==parent)normalized.push(rule);}
+    this.request("review",{rules:normalized});
+  }
+  request(action,payload={}){this.dispatchEvent(new CustomEvent("discovery-request",{detail:{action,expected_revision:this.model.revision,...payload},bubbles:true,composed:true}));}
+  node(node){
+    const mixed=this.mixed(node.id),checked=this.included(node.id)&&!mixed;
+    return html`<div class="folder" data-folder-id=${node.id}>
+      <div class="row"><vaadin-checkbox .label=${node.label} .checked=${checked} .indeterminate=${mixed}
+        ?disabled=${this.busy||this.model.blocked} @change=${event=>this.toggle(node.id,checkboxRequest(event,checked))}></vaadin-checkbox>
+        <span class="size">${Number.isFinite(node.bytes)?`${node.bytes.toLocaleString()} bytes`:'Size unknown'}</span>
+        ${node.unavailable?html`<ha-ops-status-badge severity="warning" label="Absent or unavailable"></ha-ops-status-badge>`:nothing}</div>
+      ${(node.exclusions||[]).length?html`<p class="warning">${node.exclusions.join(". ")}.</p>`:nothing}
+      ${(node.advisories||[]).length?html`<p class="size">${node.advisories.join(". ")}.</p>`:nothing}
+      <p class="size">${node.estimate||'Git growth and disk overhead unknown'}</p>
+      ${node.children?.length?html`<vaadin-details .summary=${`Subfolders of ${node.label}`}><div class="children">${node.children.map(child=>this.node(child))}</div></vaadin-details>`:nothing}
+    </div>`;
+  }
+  render(){return html`<section data-testid="folder-discovery"><h2>Folders for discovery and comparison</h2>
+    <p>Choose folders to compare. Selecting a folder does not transfer or restore files. Each Save or Apply requires a separate whole-file selection and directional confirmation.</p>
+    <p>Secrets and private authorization data are always excluded. Databases, logs and caches may be selected; Git history can grow substantially. Calculate and Compact will be available in a later step.</p>
+    ${(this.model.nodes||[]).map(node=>this.node(node))}
+    ${this.model.pending?html`<p role="status">Pending local discovery policy is already used for fresh comparisons.</p>`:nothing}
+    <vaadin-button ?disabled=${this.busy||this.model.blocked||!this.model.pending} @click=${()=>this.request("fresh_review",{review_id:this.model.pending?.id})}>Review current discovery policy</vaadin-button>
+    <vaadin-button ?disabled=${this.busy||this.model.blocked||!this.model.pending||!this.model.review_ready} @click=${()=>this.request("confirm",{review_id:this.model.pending?.id})}>Confirm discovery policy</vaadin-button>
+    <vaadin-button ?disabled=${this.busy||this.model.blocked||!this.model.pending} @click=${()=>this.request("cancel")}>Cancel discovery changes</vaadin-button>
+    <p role="status">${this.error}</p></section>`;}
+}
+customElements.define("ha-ops-folder-scope",HaOpsFolderScope);
+
 class HaOpsApp extends LitElement {
   static properties = {
     connection: { type: String },
@@ -1246,6 +1296,18 @@ class HaOpsApp extends LitElement {
 
   updated() {
     if (!this.resizeObserver) this.observeLayout();
+  }
+
+  async discoveryRequest(event) {
+    // The production server has no discovery mutation dispatch. A qualified
+    // dormant adapter owns this route in isolated composition only.
+    if(this.view.native_discovery?.qualified!==true)return;
+    const control=event.currentTarget;control.busy=true;control.error="";
+    try{
+      const response=await fetch("api/v1/discovery",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(event.detail)});
+      const model=await response.json();if(!response.ok)throw Error(model.message||"Discovery review unavailable");
+      this.view={...this.view,native_discovery:model};
+    }catch(error){control.error=error.message;}finally{control.busy=false;}
   }
 
   actionButton(command, label, { disabled = false, confirm = "", payload = {}, theme = "secondary" } = {}) {
@@ -1552,7 +1614,8 @@ class HaOpsApp extends LitElement {
         <div id="reactive-previews" data-testid="reactive-previews">${this.previewTemplate()}</div>
         ${this.renderInternalIdsPreview(controlsBlocked)}
         ${this.renderGitAccess()}
-        <section class="card wide" data-testid="managed-targets-section"><h2>${t("heading.managed_targets")}</h2>
+        ${this.view.native_discovery?.qualified === true ? html`<ha-ops-folder-scope class="wide"
+          .model=${this.view.native_discovery} @discovery-request=${event=>this.discoveryRequest(event)}></ha-ops-folder-scope>` : html`<section class="card wide" data-testid="managed-targets-section"><h2>${t("heading.managed_targets")}</h2>
           <p>${t("notice.managed_targets")}</p>
           <vaadin-details .opened=${this.managedTargetsOpen}
             @opened-changed=${(event) => { this.managedTargetsOpen = event.detail.value; }}>
@@ -1566,6 +1629,7 @@ class HaOpsApp extends LitElement {
             </tbody></table></div>
           </vaadin-details>
         </section>
+        `}
         <section class="card wide"><h2>${t("heading.release_snapshots")}</h2>
           <p>${t("notice.release_snapshots")}</p>
           ${(this.view.releases || []).map((release) => html`<div class="action-row">

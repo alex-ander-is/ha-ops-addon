@@ -1,5 +1,38 @@
 # Testing HA Ops
 
+## Dormant folder discovery (6.19)
+
+Use `test_native_scope.py` for state-only discovery admission, canonical prefix
+rules, empty drafts, cancel/reopen, token independence and selected publication.
+The retained legacy families synthesize old records in test-only constructors
+to preserve explicit recovery/streaming/forgery coverage; public automatic scope
+construction is retired. `test_native_apply_integration.py -k discovery_pending`
+proves intentional selected Git restore from divergent or absent live folders
+without prior HA Save, full owner/mode/parent metadata, and unchanged siblings
+and remote. Reviewer regressions also cover mixed Git/HA keeps, selected Git
+delete with surviving unselected siblings, absent excluded scaffolds for deeper
+re-inclusion, explicit policy re-review after lifecycle and offline/empty first
+setup with zero remote observations. Linux allocation/ownership proof is mandatory; host skips are not
+qualification.
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 -m pytest -p no:cacheprovider -q \
+    ha-ops/tests/test_native_scope.py ha-ops/tests/test_native_apply_integration.py
+/Users/purportex/Applications/Playwright/bin/playwright-node \
+  ha-ops/tests/browser/folder-scope.mjs
+```
+
+The browser flow serves the rebuilt shipped bundle and an actual qualified
+Linux discovery store through an owned localhost relay. It uses the dedicated
+persistent profile, records/cleans owned tabs, checks mixed parents and Space,
+reload/restart/cancel, empty file consent, independent auth entry, visible
+disabled controls and desktop/mobile rendering. See
+[native-scope.md](ha-ops/docs/native-scope.md) for the contract and fixture
+instructions. No live HA writes or production native dispatch are used.
+
 ## Dormant native Apply candidate (6.18)
 
 Use the existing isolated Linux runner; no live HA services or configured remotes:

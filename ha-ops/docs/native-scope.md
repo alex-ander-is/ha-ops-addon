@@ -1,136 +1,120 @@
-# Dormant native folder scope API
+# Dormant native folder discovery
 
-`native_scope.NativeScope` is an inactive orchestration API for the future native
-folder tree. Production startup, dispatch and UI do not import it. No live Apply,
-installation of policy files, fetch on refresh, or automatic publication exists.
+Native activation remains deferred to step 24. `NativeScope` is never imported
+or dispatched by the production server. The first-install folder UI is rendered
+only when a qualified isolated adapter supplies `view.native_discovery`; query
+parameters do not enable a backend. Installed legacy targets remain outside this
+contour. The browser authorization entry is independent of folder setup.
 
-Construct it with an exact `NativeSave` and its canonical `NativeOperationStore`.
-Construction has no I/O. `diagnose()` validates existing state without initializing
-missing state. A real established native baseline is required before `build`.
-The caller supplies fresh, authoritative source observations through NativePreview.
+`build(proposed, expected_revision=...)` persists **discovery rules only**. It
+never selects files, captures publication blobs, stages/removes tracked files,
+changes Git refs, publishes, or writes live configuration. No HA Save or native
+baseline is required. A fresh installation defaults to no included folders; an
+old established store inherits its published allowlist as the discovery default.
+The original `active_scope`, baseline anchors and completed-worker proof remain
+unchanged by discovery edits.
 
-`build(proposed, approved_parents=..., expected_revision=...)` begins or revises one
-pending transaction. Nested byte paths normalize once; empty scope is valid. Only
-newly included live leaves replace remote blobs. Excluded tracked leaves are
-removed from the candidate index while live files remain present. Unchanged
-remote content and shared-parent attributes survive. Required new directory
-attributes need explicit parent approval. Re-inclusion captures current live
-bytes; history never restores excluded content to the live tree.
+Rules are canonical sorted `(byte_folder_path, include_bool)` pairs. The longest
+matching component prefix wins, with default excluded. For example, include A,
+exclude A/B, and include A/B/C retain A's direct files and C while excluding B's
+other descendants. A rule identical to its nearest ancestor is redundant and
+refused by the backend. The reusable Vaadin component normalizes subtree toggles
+and removes deeper overrides when a folder is checked or unchecked. IDs use the
+canonical native byte codec; labels are escaped display text and never authority.
+Known secret/private/recovery paths always remain excluded. Inventory traverses
+excluded folders only as scaffolding for deeper includes and does not descend
+into unrelated excluded subtrees. Databases, WAL, logs and caches are allowed;
+the UI reports their size/warnings and explicitly unknown Git history/disk cost.
+Calculate and Compact are future work, without placeholder action buttons.
 
-The issued `ScopeReview` identifies old/new policies, complete observed membership,
-parent approval and exact generated ignore bytes. The `.gitignore` contains its
-own re-inclusion, the fixed metadata exception and a canonical scope comment.
-`reviewed_diff()` returns a metadata-only `native-scope-review-v2` canonical
-envelope: typed review/candidate, final and baseline content references, removed
-before metadata/references, excluded unsaved states and historical context. Each
-`ContentRef` records raw SHA-256, exact size, Git blob identity/format and binary
-flag. Payloads live independently as immutable private `<sha256>.blob` files.
+Canonical discovery stores effective policy, previous confirmed policy, pending
+review ID/local-root commitment and a monotonically increasing revision. Local
+folder review, confirmation and cancellation never require a remote observer or
+a first Git commit; empty/offline repositories remain usable for setup. A pending
+policy immediately supplies fresh Save and Apply comparisons. Confirm finalizes
+it locally; cancel restores the previous policy with a newer revision. After
+reload/restart the UI disables confirmation until the user explicitly selects
+Review current discovery policy. This admitted state-only review retains the
+same policy/pending ID and issues fresh volatile consent; it never hydrates old
+consent automatically. Neither
+requires optional ignore/tracking publication. Active operations, recovery debt,
+unsafe topology, incomplete metadata and actual capacity failures remain gates.
+Old pending scope publications require explicit reconciliation/cancel; they are
+not interpreted as checkbox consent.
 
-`copy_review_content(section, path, destination, commit_oid=...)` streams one
-complete verified file to a sink. Sections are `final`, `baseline`, `removed`,
-`excluded`, and `history`; historical selection requires the exact commit OID.
-Absent entries remain explicit and have no content to copy. Selection resolves
-only entries of the current canonical pending review. Raw/Git hashes, exact size,
-binary flag, no-follow regular descriptor, private mode, single link, and held
-route identity are verified before emission and after consumption.
+Every policy write uses an exact `PreparedScope` state-only recipe, the existing
+`scope_control` disk forecast/admission, full canonical atomic overlap, held
+store lock, source review identity and state CAS. Missing-store admission binds
+proved absence instead of initializing a baseline. Atomic fault/reopen retains
+old or new valid policy without creating any content authority. No new physical
+resource class or content payload recipe was introduced.
 
-Build measures sources through fixed-size digest sinks before any output effect.
-The one admitted plan includes every payload, temporary/final overlap, exact
-metadata/state atomic overlap, entries/inodes and candidate Git resources. The
-issued immutable prepared recipe binds each producer/reference to the operation
-and owner; disk projection independently remeasures it. After admission, a held
-canonical scope lock excludes compaction until durable payload installation,
-streamed candidate materialization and canonical state CAS finish. Output receipts
-verify binary files independently of bounded JSON control readers. Content memory
-is fixed by chunk size plus metadata proportional to path count, without a file
-size ceiling. Durable review survives Git pruning independently of Git objects.
+## Explicit whole-file operations
 
-Only the canonical pending scope owns the complete binary closure, including
-history and excluded content. Refresh, restart, update, compaction, publication
-and recovery retain it. Replacement first installs the new closure and then
-switches authority atomically. Completed publication cleanup or explicit cancel
-releases binary ownership; retained history and active-rule provenance keep only
-metadata. Subsequent compaction removes unowned payloads and records unlink errors
-as cleanup debt. Legacy `native-scope-v1` state can be diagnosed and cancelled
-with streaming artifact verification; reopen refuses with an explicit migration
-requirement instead of decoding aggregate content.
+Fresh Preview always has empty file selection, parent approvals and choices.
+Discovery membership never authorizes content effects. Selected Save and Apply
+identities bind the original published baseline **and** the exact effective
+rules/revision/exclusion digest. Old candidates refuse after edits, cancel,
+change-back, branch/source movement, refresh, restart or update. Historical
+publication codecs accept missing new optional fields, preserving old proof.
 
-`confirm(candidate, review, publication, **confirmation)` requires the exact current
-issued pair and the same NativeSave/store peers. NativePublication independently
-reconstructs the complete scope candidate and runs the existing expected-old,
-authenticated transport, graph-proof, local-CAS and owned-cleanup protocol. The
-canonical publication record uses the scope domain. Active scope and rule bytes
-advance only in the final publication cleanup transition, after positive proof,
-local CAS and required resource retirement. A completed worker with cleanup still
-pending leaves the old policy active and Apply blocked. Generic store commands
-cannot approve, claim, checkpoint or cancel the issued scope record.
+The dormant Preview `select(..., resolutions={byte_path: 'git'|'ha'})` accepts
+choices only for explicitly selected files under discovery. No choice retains
+the established three-way merge/conflict behavior. An explicit choice pairs
+that side's complete bytes or reviewed absence with its numeric leaf metadata.
+Save/git preserves the remote file; Apply/ha retains the live file without a
+write. Required parent metadata still needs separate approval. Choices resolve
+reviewed merge ambiguity only; secrets, unsafe types, unavailable metadata,
+backup/disk/service/recovery/direct-access gates remain in force. A changed live
+preimage or approved parent after a whole-file choice refuses execution instead
+of silently overwriting newer state. Choice tuples are ephemeral immutable
+review authority and cannot be replayed from a serialized artifact.
 
-`last_save_offer()` exposes excluded unsaved path/state/reference rows. Declining requires no action.
-`review_last_save()` creates an ordinary, separate old-scope Save review.
-`confirm_last_save()` is the separate explicit publication confirmation. It retains
-the scope transaction and invalidates its old issuer grant. A fresh source and an
-explicit scope build/review are mandatory afterward. Ordinary Save candidates can
-carry an exact `ScopePolicy` through `build(..., active_policy=...)`, preserving
-canonical revisions after the first scope change.
+Refresh/restart/update retain discovery but clear file drafts, parent approvals,
+directional choices, publication grants and local policy review grants. No
+lifecycle event fetches, rebuilds, publishes or applies. Token storage is outside
+discovery schemas and is never reset by folder actions.
 
-`lifecycle('refresh'|'restart'|'update')` clears ephemeral grants and selections,
-retaining canonical transaction and full reviewed bytes. It performs no fetch,
-publication or rebuild. `reopen_review(expected_revision=...)` explicitly verifies
-source, complete current membership/content/metadata, binding and durable blobs,
-then admits re-materialization and issues a new bounded grant for the same tree
-and diff. Source or live changes require an explicit new build. Publication
-recovery uses the same retained intent/commit through `recover_publication` and a
-fresh one-attempt approval; it does not rebuild another commit.
+## Retired scope publication and verification
 
-`cancel(expected_revision=...)` admits a canonical state-only transition, retires
-the pending linkage and preserves old active policy and all live bytes. An active
-or unresolved publication must reconcile first. `fresh_apply_preview()` uses an
-independent Preview session and the current old policy while any transaction is
-pending. It observes fresh sources, supersedes its prior Apply result/generation,
-and returns empty drafts plus authoritative transaction/Apply-blocked diagnostics.
-It does not consume the scope grant or replace publication recovery state. The
-store also rejects old Apply review/claim paths while a scope is pending.
+The old scope builder implicitly selected newly included contents and removed
+excluded remote files. Its public preparation/build/reopen entry points are
+retired. Persisted v1/v2 records retain diagnostic, explicit cancellation and
+already accepted in-flight publication recovery support. Test-only historical
+record constructors preserve streaming, corruption, forgery, lifecycle, GC,
+capacity and authenticated recovery coverage; they do not enable production
+legacy grants.
 
-## Verification boundaries
+Run real Linux scope and restore proof through the repository runner:
 
-`test_native_scope.py` contains portable no-I/O/codec/pre-effect recipe guards and
-real Linux candidate, lifecycle/GC, cancellation, publication cleanup and final
-Save scenarios. Portable forecast interception does not prove Linux admission.
-Use the repository's existing local virtualization wrapper and cached image;
-never use the live HA host as a runner. The normal root-capable Linux profile is
-needed for arbitrary UID/GID and authenticated-network fixtures. A supported
-nonroot ext4 run can prove own-UID scope cases only, and must also execute the
-complete required ext4 qualification matrix. Host skips are not operational proof.
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 -m pytest -p no:cacheprovider -q \
+    ha-ops/tests/test_native_scope.py ha-ops/tests/test_native_apply_integration.py
+```
 
-An already tracked denied path or an invalid/mismatched baseline manifest blocks
-scope construction without live, index, ref or canonical-state writes. This API
-does not weaken the secret policy to remove unsafe historical entries. Their
-disposition requires a separately reviewed repository repair before native scope
-work can resume. This follows the product's requirement to block publication
-until disallowed tracked entries have a resolved disposition.
+The selected restore regression includes a divergent or entirely absent folder,
+no prior HA Save, nondefault numeric owner/full modes and required parent
+metadata, ordinary authenticated readiness/backup/service/recovery participants,
+an unselected sibling and an unchanged independent remote. Separate Save proof
+publishes only its selected file and preserves original baseline provenance.
+Host skips cannot qualify Linux allocation or ownership behavior.
 
-Re-inclusion review also carries typed last-managed comparison context. Explicit
-build walks exact commit parents rooted at the current authoritative remote,
-retaining the nearest managed revision's complete content reference and supported leaf and
-required-parent metadata. Equal-distance merge ancestors remain separate contexts;
-paths absent from the entire observed ancestry carry explicit no-history entries.
-Unavailable historical metadata blocks rather than inventing attributes. The
-context is durably serialized with the review and independently verified before
-publication/reopen. It never supplies the proposed tree or writes live files.
+The shipped-bundle browser flow uses the dedicated persistent Playwright profile
+and a disposable Linux backend with actual canonical persistence. Its localhost
+relay uses bounded task-owned file IPC; no network is enabled in the runner.
+Only recorded owned tabs/processes are closed. Screenshots and DOM proof cover
+nested mixed-state selection, click/Space, reload/restart, cancel, mobile bounds,
+disabled styling, auth-entry independence and the native/legacy rendering gate.
 
-Pending scope authority has its own canonical owner and revocation epoch.
-Canonical lifecycle takeover advances it, expiring retained scope and optional
-final-Save receipts even when a caller supplies the latest state revision.
-Explicit admitted reopen renews that authority while preserving the same candidate
-and immutable diff; direct NativePublication calls enforce the same fence.
+```sh
+/Users/purportex/Applications/Playwright/bin/playwright-node \
+  ha-ops/tests/browser/folder-scope.mjs
+```
 
-The historical comparison universe covers all historical managed leaves in the
-newly included folder region, including files deleted while excluded and an
-entire folder currently absent. Each scoped context explicitly records current
-presence; current absence remains absent in both proposed Git content and live
-files. Build, publication and reopen derive this complete universe from the same
-old/new folder membership rather than a submitted subset of present selections.
-Issuer replacement publishes one complete receipt with its immutable canonical
-binding. Failed validation, Busy acquisition, edit or reopen either retains the
-original bound receipt or revokes it completely; clearing a nullable association
-cannot turn an expired scoped grant into an ordinary unbound grant.
+Set `HA_OPS_BROWSER_CDP_URL` when reusing an already running dedicated browser and
+`HA_OPS_BROWSER_ARTIFACTS_DIR` for evidence output. The fixture's opaque auth
+sentinel is a relay isolation check; the real remembered-token persistence
+regression and direct-access tests supply authorization-store proof.

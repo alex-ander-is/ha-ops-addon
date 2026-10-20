@@ -22,7 +22,7 @@ import native_save as save
 from native_disk import NativeDisk, Evidence, InsufficientSpace, Blocked as DiskBlocked
 from native_git import IndexEntry, TreeEntry
 from native_operations import (NativeOperationStore, canonical, digest, encode_native_path,
-                               decode_native_path, Conflict, _parse, _publication_observe)
+                               decode_native_path, Conflict, _parse, _publication_observe, discovery_from_scope)
 
 
 ContentSink=save.ContentSink
@@ -180,7 +180,7 @@ def scope_history_context(git,tip,old,new,current):
     return tuple(replace(row,current_present=row.path in current) for row in last_managed_context(git,tip,paths))
 
 
-class NativeScope:
+class _LegacyScope:
     def __init__(self,saver,store):
         if type(saver) is not save.NativeSave or not isinstance(store,NativeOperationStore):
             raise inventory.Blocked('exact-native-scope-peers-required')
@@ -225,6 +225,7 @@ class NativeScope:
                 return intent.candidate.scope_review.rules
             # The original native baseline provenance is immutable; ordinary
             # Save preserves its rule bytes until the first scope publication.
+            if state['baseline_provenance'] is None:return None
             oid=state['baseline_provenance']['identity']['refs']['remote']['oid']
             entry=next((e for e in self.saver.preview.git.tree_entries(oid) if e.path==b'.gitignore'),None)
             if entry is None:return b''
@@ -238,7 +239,7 @@ class NativeScope:
             raise Conflict('current-source-policy-disagrees-with-canonical-baseline')
         return old
 
-    def build(self,proposed,*,approved_parents=(),expected_revision,transaction_id=None):
+    def _retired_build(self,proposed,*,approved_parents=(),expected_revision,transaction_id=None):
         with self._call(),self.saver.preview._call():
             p=self.saver.preview;git=p.git;disk=self.saver.disk
             with _publication_observe(self.store) as (root,artifacts):
@@ -383,8 +384,8 @@ class NativeScope:
             actual=git.write_tree(handle,allowed_paths=tuple(blobs))
             if actual!=candidate.tree_oid:raise inventory.Blocked('exact-scope-tree-mismatch')
 
-    begin=build
-    edit=build
+    def begin(self,*args,**kwargs):raise Conflict("legacy scope construction retired")
+    edit=begin
 
     def reviewed_diff(self):
         diagnostic=self.diagnose();pending=diagnostic['transaction']
@@ -578,3 +579,155 @@ class NativeScope:
                 command_id=command_id,pending_effect=pending_effect)
             self._issued=None;self.saver._revoke_publication()
             return publication.resume(grant)
+
+
+class NativeScope(_LegacyScope):
+    """Explicit discovery policy only; it never issues content authority.
+
+    Old durable scope artifacts remain diagnosable/cancellable. Only an already
+    accepted publication can use explicit recovery; no new legacy grant is issued.
+    """
+    def __init__(self,saver,store):
+        super().__init__(saver,store)
+        if saver.preview.discovery_store not in (None,store):raise Conflict('different discovery store')
+        saver.preview.discovery_store=store
+        self._policy_review=None
+
+    def diagnose(self):
+        with self.store.mutex,_publication_observe(self.store) as (root,artifacts):
+            if root is None:state=self.store._initial_state()
+            else:
+                state=_parse(self.store._read_file(root,'state.json'));self.store._validate(state,artifacts)
+            effective,baseline,discovery=self.store.discovery_policy(self.saver.preview.binding.policy.digest) if root is None else (None,None,None)
+            if root is not None:
+                discovery=state.get('discovery');baseline=state['active_scope']
+                effective=discovery['effective'] if discovery else discovery_from_scope(baseline,self.saver.preview.binding.policy.digest)
+            return dict(transaction=discovery['pending'] if discovery else state.get('scope_pending'),
+                revision=state['revision'],active_policy=effective,published_policy=baseline,
+                confirmed_policy=discovery['confirmed'] if discovery else effective,
+                legacy_transaction=state.get('scope_pending'),
+                apply_blocked=bool(state['active'] or state['recovery']),draft={},selected_files=[],consent=None,
+                review_ready=bool(discovery and discovery['pending'] and self._policy_review==(discovery['pending']['id'],effective,state['revision'])))
+
+    def _source_digest(self):
+        # Discovery is a local policy, available before any first sync and while
+        # remote source observation is unavailable. Content peers independently
+        # bind and revalidate their branch/remote during explicit Preview.
+        binding=self.saver.preview.binding
+        root=os.stat(binding.root,follow_symlinks=False)
+        if not stat.S_ISDIR(root.st_mode):raise inventory.Blocked('unsafe-discovery-root')
+        return digest([encode_native_path(binding.root,absolute=True),root.st_dev,root.st_ino,binding.policy.digest])
+
+    def _install(self,prepared):
+        disk=self.saver.disk
+        evidence=Evidence(prepared.operation_id,prepared.owner_id,scope_preparation=prepared)
+        plan=disk.project('scope_control',disk.snapshot(),evidence);self._admitted(plan)
+        with disk.guard(plan) as admission:
+            admission.create_scope_directories(prepared)
+            self.store.accept_discovery(prepared,admission)
+        self.saver._revoke_publication();self.saver.preview.reset()
+
+    def build(self,proposed,*,approved_parents=(),expected_revision,transaction_id=None):
+        with self._call():
+            if approved_parents:raise Conflict('folder discovery grants no parent approval')
+            if transaction_id is not None:raise Conflict("discovery review identity is backend-issued")
+            from native_operations import _discovery
+            # Byte folder pairs are canonical longest-prefix rules. A tuple of
+            # paths remains a convenience for simple positive scope callers.
+            raw=tuple(proposed)
+            rules=tuple((path,True) for path in raw) if all(type(path) is bytes for path in raw) else raw
+            policy=save.DiscoveryPolicy(self.diagnose()['active_policy']['revision']+1,rules,self.saver.preview.binding.policy.digest)
+            for path,include in policy.rules:
+                if self.saver.preview.binding.policy.reason(path):raise inventory.Blocked('prohibited-scope')
+            prepared=self.store.prepare_discovery(expected_revision,policy.document(),self._source_digest())
+            self._install(prepared)
+            diagnostic=self.diagnose()
+            self._policy_review=(diagnostic['transaction']['id'],policy.document(),diagnostic['revision'])
+            return self.diagnose()
+
+    begin=build
+    edit=build
+
+    def review_pending(self,*,expected_revision,review_id):
+        """Explicitly review the displayed unchanged policy after lifecycle."""
+        with self._call():
+            current=self.diagnose();pending=current['transaction']
+            if current['revision']!=expected_revision:raise Conflict('native state revision changed')
+            if pending is None or pending['id']!=review_id:raise Conflict('current discovery review required')
+            prepared=self.store.prepare_discovery(expected_revision,current['active_policy'],self._source_digest(),action='re_review',review_id=review_id)
+            self._install(prepared)
+            current=self.diagnose()
+            self._policy_review=(review_id,current['active_policy'],current['revision'])
+            return self.diagnose()
+
+    def confirm(self,*,expected_revision,review_id):
+        with self._call():
+            current=self.diagnose()
+            if self._policy_review!=(review_id,current['active_policy'],current['revision']):raise Conflict('fresh explicit discovery review required')
+            prepared=self.store.prepare_discovery(expected_revision,current['active_policy'],self._source_digest(),action='confirm',review_id=review_id)
+            self._install(prepared);self._policy_review=None
+            return self.diagnose()
+
+    def cancel(self,*,expected_revision):
+        if self.diagnose()['legacy_transaction'] is not None:return super().cancel(expected_revision=expected_revision)
+        with self._call():
+            current=self.diagnose();pending=current['transaction']
+            if pending is None:raise Conflict('pending-discovery-required')
+            prepared=self.store.prepare_discovery(expected_revision,current['active_policy'],self._source_digest(),action='cancel',review_id=pending['id'])
+            self._install(prepared);self._policy_review=None
+            return self.diagnose()
+
+    def reviewed_diff(self):
+        if self.diagnose()['legacy_transaction'] is None:raise Conflict('discovery policy has no implicit content candidate')
+        return super().reviewed_diff()
+
+    def review_last_save(self,**kwargs):
+        raise Conflict('explicit ordinary selected Save required')
+
+    def lifecycle(self,reason):
+        if reason not in ('refresh','restart','update'):raise Conflict('invalid-lifecycle-reason')
+        with self._call():
+            self.saver.preview.reset(reason);self.saver._revoke_publication()
+            self._policy_review=None;self._issued=None;self._last_save=None
+            return self.diagnose()
+
+    def reopen_review(self,**kwargs):
+        raise Conflict('explicit-new-discovery-review-required; legacy content replay retired')
+
+    def fresh_apply_preview(self):
+        with self._call():
+            p=self.saver.preview
+            isolated=preview.NativePreview(p.git,p.observer,p.binding,scratch_root=p.scratch_root,timeout=p.timeout)
+            isolated.discovery_store=self.store
+            snapshot=isolated.build('apply');self._apply_generation+=1
+            return dict(self.diagnose(),snapshot=snapshot,generation=self._apply_generation,draft={})
+
+    def folders(self):
+        """Metadata-only qualified inventory; byte IDs are authoritative."""
+        p=self.saver.preview;policy=p.binding.policy
+        inv=inventory.inventory(p.binding.root,policy.live_roots,policy=policy,mounts=p.binding.mounts,
+            confirmed_mounts=p.binding.confirmed_mounts,topology_verified=p.binding.topology_verified)
+        directories={e.path:e for e in inv.entries if e.kind=='directory' and e.reason is None and not policy.reason(e.path)}
+        for root in policy.live_roots:
+            if root not in directories:directories[root]=None
+        nodes={}
+        for path,entry in sorted(directories.items(),key=lambda row:(row[0].count(b'/'),row[0])):
+            children=[e for e in inv.entries if inventory.beneath(e.path,path) and e.kind=='file']
+            excluded={e.reason for e in inv.entries if inventory.beneath(e.path,path) and e.reason}
+            advisory={w for e in children for w in e.warnings}
+            exclusion_labels={'known-secret-secrets-yaml':'secrets.yaml stays excluded',
+                'known-storage-credentials':'Private authentication and integration credentials stay excluded',
+                'known-credentials':'Credential files stay excluded','known-cloud-credentials':'Cloud credentials stay excluded',
+                'known-coordinator-backup':'Coordinator credential backups stay excluded',
+                'private-recovery-pool':'Private recovery data stays excluded','git-metadata':'Git internals stay excluded'}
+            advisory_labels={'runtime-changing-file':'Contains database, WAL, log or cache files; they remain selectable and can grow quickly',
+                'large-file-no-admission-check':'Contains large files; history growth and disk demand are not yet calculated',
+                'unclassified-storage-content':'Contains unclassified storage data; review individual files before transfer'}
+            exclusions=sorted({exclusion_labels.get(reason,'Unsupported or protected descendants stay excluded') for reason in excluded})
+            advisories=sorted({advisory_labels.get(reason,'Review file size and expected growth before transfer') for reason in advisory})
+            nodes[path]=dict(id=encode_native_path(path),label=repr(os.fsdecode(path.split(b'/')[-1]))[1:-1],
+                bytes=sum(e.size for e in children if e.reason is None),estimate='History growth and disk overhead are not yet calculated',
+                exclusions=exclusions,advisories=advisories,children=[],unavailable=entry is None)
+            parent=path.rsplit(b'/',1)[0] if b'/' in path else None
+            if parent in nodes:nodes[parent]['children'].append(nodes[path])
+        return [node for path,node in nodes.items() if b'/' not in path or path.rsplit(b'/',1)[0] not in nodes]

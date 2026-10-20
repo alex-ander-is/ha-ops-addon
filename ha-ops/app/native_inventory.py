@@ -327,7 +327,7 @@ def _directory_at(root_fd, path, *, before_open=None):
         raise
 
 
-def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(), topology_verified=False):
+def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(), topology_verified=False, discovery_rules=None):
     """Inspect a supplied root. Synthetic evidence remains explicitly unverified.
 
     A mounted descendant is crossed only by explicit mount ID confirmation.
@@ -335,6 +335,14 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
     """
     policy = policy or Policy()
     scope = normalize_scope(selected)
+    if discovery_rules is not None:
+        from native_operations import _discovery,encode_native_path,discovery_rule_includes
+        discovery_rules=tuple(discovery_rules)
+        _discovery(dict(revision=0,rules=[dict(path=encode_native_path(path),include=include) for path,include in discovery_rules],exclude_digest=policy.digest))
+    include_roots=tuple(path for path,include in discovery_rules if include) if discovery_rules is not None else scope
+    def discovery_selected(path):
+        if discovery_rules is None:return any(beneath(path,p) for p in scope)
+        return discovery_rule_includes(path,discovery_rules)
     root = os.fsencode(os.path.abspath(root))
     mounts = tuple(mounts)
     try:
@@ -373,11 +381,11 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
     entries, issues, blockers, observations = [], [], [], []
     established = {}
     def chosen(path):
-        return policy.reason(path) is None and any(beneath(path, p) for p in scope)
+        return policy.reason(path) is None and discovery_selected(path)
     def parent_role(path):
         # Root and proper selected-route prefixes retain their safety role
         # even when first observed with an unsafe non-directory kind.
-        return not path or any(p.startswith(path + b"/") for p in scope)
+        return not path or any(p.startswith(path + b"/") for p in include_roots)
     def required(path):
         return parent_role(path) or chosen(path) or path in scope
     def issue(path, reason, blocking=False):
@@ -395,6 +403,7 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                 else "symlink" if stat.S_ISLNK(info.st_mode) else "special")
     def traversable(path):
         reason = policy.reason(path)
+        if discovery_rules is not None and not (chosen(path) or parent_role(path)):return False
         return reason is None or (reason == "service-data" and policy.scaffold(path))
     def unknown_or_relevant(path, error):
         # Only actual disappearance can reuse a known unsupported leaf's
@@ -464,7 +473,7 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                 issue(directory, "changed-directory-membership")
             def eligible(values):
                 return {name for name, obs in values.items()
-                        if policy.reason(directory + b"/" + name if directory else name) is None
+                        if (chosen(directory + b"/" + name if directory else name) if discovery_rules is not None else policy.reason(directory + b"/" + name if directory else name) is None)
                         and (stat.S_ISREG(obs[2]) or stat.S_ISDIR(obs[2]))}
             if directory and chosen(directory) and eligible(previous) != eligible(after_children):
                 issue(directory, "changed-selected-membership", True)
@@ -532,7 +541,7 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                     establish(path, _observation(info))
                     kind = kind_of(info)
                     reason = policy.reason(path)
-                    selected_path = any(beneath(path, p) for p in scope)
+                    selected_path = discovery_selected(path)
                     mount = mount_at(root.rstrip(b"/") + b"/" + path)
                     if kind in ("symlink", "special") and reason is None:
                         reason = "unsupported-" + kind
@@ -583,7 +592,7 @@ def inventory(root, selected=(), *, policy=None, mounts=(), confirmed_mounts=(),
                     close_owned(fd)
         # Prove required prefixes and exact selections without sibling listing.
         # Never reset an observation already established by the broad scan.
-        needed = {p for path in scope for p in
+        needed = {p for path in include_roots for p in
                   (b"/".join(path.split(b"/")[:i]) for i in range(1, len(path.split(b"/")) + 1))}
         needed.update(e.path for e in entries if e.selected)
         seen = {e.path for e in entries}

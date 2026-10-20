@@ -786,7 +786,9 @@ def test_required_parent_threeway_metadata_revalidation(tmp_path,current,expecte
     # Use actual route qualification and target compiler against real live inode.
     with __import__('native_preview')._route(w.preview.binding,parent,'directory') as (_,routes):pass
     w.preview._observed=SimpleNamespace(routes=routes)
-    prepared=SimpleNamespace(targets=((parent,Directory(uid,gid,0o750)),),preimages=(),review=SimpleNamespace(parents=(SimpleNamespace(path=parent,before=before,after=after),),selected=()))
+    from native_preview import Review,Draft,ParentDetail
+    prepared=SimpleNamespace(targets=((parent,Directory(uid,gid,0o750)),),preimages=(),
+        review=Review(Draft(str(uuid.uuid4()),'0'*64,'apply',1,(),()),(),(ParentDetail(parent,before,after,()),),()))
     path.chmod(current)
     if expected is None:
         with pytest.raises(Exception,match='apply-metadata-conflict'):w._current_targets(prepared)
@@ -936,3 +938,141 @@ def test_install_accepts_unrelated_absolute_ancestor_directory_churn(tmp_path,mo
     assert (r.root.stat().st_dev,r.root.stat().st_ino)==bound and selected.read_bytes()==b'git\n'
     assert any(call[0]=='stop' for call in adapter.calls) and w.recovery.discover() is None
     assert (tmp_path/'unrelated-install-child').is_dir()
+
+
+@pytest.mark.parametrize('absent',[False,True])
+def test_discovery_pending_selected_git_restore_without_prior_save(tmp_path,absent):
+    """A local checkbox policy is no baseline/publication prerequisite."""
+    import native_scope
+    import native_save
+    import native_operations
+    from test_native_save import reviewed,put
+    from native_topology_helpers import git,METADATA
+    r,w,_=rig(tmp_path)
+    from dataclasses import replace
+    import native_metadata
+    r.remote({A:b'git\n',B:b'base-b\n'},lambda manifest:native_metadata.Manifest(tuple(
+        replace(row,uid=123,gid=456,mode=0o4640) if row.path==A else
+        replace(row,uid=234,gid=567,mode=0o2710) if row.kind=='directory' else row
+        for row in manifest.entries)))
+    subprocess.run(['git','--git-dir='+str(r.root/METADATA),'push',os.fsdecode(w.transport.endpoint),r.source.remote_oid+':refs/heads/main'],check=True,capture_output=True)
+    owner=native_scope.NativeScope(native_save.NativeSave(r.preview,w.disk),w.operations)
+    # The remote already contains complete leaf/parent metadata. The discovery
+    # store has never acquired a baseline or any HA Save publication.
+    sibling=(r.root/os.fsdecode(B)).read_bytes()
+    remote=subprocess.check_output(['git','--git-dir='+os.fsdecode(w.transport.endpoint),'show-ref'])
+    if absent:
+        import shutil
+        shutil.rmtree(r.root/'homeassistant')
+    result=owner.build((b'homeassistant',),expected_revision=0)
+    assert result['published_policy'] is None and not result['apply_blocked']
+    snap=r.preview.build('apply');assert r.preview.draft.selected==()
+    row=next(row for row in snap.rows if row.path==A)
+    parents=tuple(row.parents)
+    r.preview.select(snap.snapshot_id,(A,),approved_parents=parents,resolutions={A:"git"})
+    review=r.preview.review(snap.snapshot_id);assert review.ready,review.blockers
+    prepared=w.prepare(review,str(uuid.uuid4()))
+    adapter=ProcessLifecycle(tmp_path/'scope-processes')
+    try:
+        with browser_receipt(w,prepared,tmp_path):
+            with pytest.raises(Exception):w.run(prepared,adapter,lambda:{'backups':[]})
+            result=w.run(prepared,adapter,lambda:{'backups':[]},bypass_backup=True)
+        assert result['status']==('WARNING' if absent else 'SUCCESS'),result
+        assert (r.root/os.fsdecode(A)).read_bytes()==b'git\n'
+        import stat
+        restored=(r.root/os.fsdecode(A)).stat()
+        assert (restored.st_uid,restored.st_gid,stat.S_IMODE(restored.st_mode))==(123,456,0o4640)
+        for path in parents:
+            restored=(r.root/os.fsdecode(path)).stat()
+            assert (restored.st_uid,restored.st_gid,stat.S_IMODE(restored.st_mode))==(234,567,0o2710)
+        if absent:assert not (r.root/os.fsdecode(B)).exists()
+        else:assert (r.root/os.fsdecode(B)).read_bytes()==sibling
+        assert subprocess.check_output(['git','--git-dir='+os.fsdecode(w.transport.endpoint),'show-ref'])==remote
+        state=w.operations.read();record=state['records'][state['workers'][prepared.operation]['record_id']]
+        assert record['identity']['discovery']==owner.diagnose()['active_policy']
+        assert record['identity']['scope']==state['active_scope'] and state['active_scope']['allowlist']==[]
+    finally:adapter.cleanup()
+
+
+@pytest.mark.parametrize('when',['before-prepare','after-stop'])
+def test_explicit_git_choice_stales_on_live_change_without_overwriting(tmp_path,when):
+    import native_scope,native_save
+    from test_native_save import put
+    r,w,_=rig(tmp_path)
+    owner=native_scope.NativeScope(native_save.NativeSave(r.preview,w.disk),w.operations)
+    owner.build((b'homeassistant',),expected_revision=0)
+    snapshot=r.preview.build('apply');r.preview.select(snapshot.snapshot_id,(A,),resolutions={A:'git'})
+    review=r.preview.review(snapshot.snapshot_id);assert review.ready
+    if when=='before-prepare':
+        put(r.root,A,b'newer live change')
+        with pytest.raises(Exception):w.prepare(review,str(uuid.uuid4()))
+        assert (r.root/os.fsdecode(A)).read_bytes()==b'newer live change'
+        return
+    prepared=w.prepare(review,str(uuid.uuid4()))
+    class Changed(Lifecycle):
+        def command(self,pending,*,timeout):
+            result=super().command(pending,timeout=timeout)
+            if pending['kind']=='stop' and pending['target']=='core':put(r.root,A,b'newer live change')
+            return result
+    adapter=Changed()
+    with browser_receipt(w,prepared,tmp_path):
+        with pytest.raises(Exception):w.run(prepared,adapter,lambda:{'backups':[]})
+        result=w.run(prepared,adapter,lambda:{'backups':[]},bypass_backup=True)
+    assert result['status']=='ERROR',result
+    assert (r.root/os.fsdecode(A)).read_bytes()==b'newer live change'
+
+
+@pytest.mark.parametrize('kind',['mixed','delete'])
+def test_discovery_mixed_keep_and_selected_delete_preserve_unselected_authority(tmp_path,kind):
+    import native_scope,native_save
+    from native_topology_helpers import METADATA
+    r,w,_=rig(tmp_path)
+    r.remote({} if kind=='delete' else {A:b'git selected',B:b'git kept'})
+    subprocess.run(['git','--git-dir='+str(r.root/METADATA),'push',os.fsdecode(w.transport.endpoint),r.source.remote_oid+':refs/heads/main'],check=True,capture_output=True)
+    r.live({A:b'selected live divergence',B:b'unselected live bytes'})
+    owner=native_scope.NativeScope(native_save.NativeSave(r.preview,w.disk),w.operations)
+    owner.build((b'homeassistant',),expected_revision=0)
+    snapshot=r.preview.build('apply')
+    selected=(A,) if kind=='delete' else (A,B)
+    choices={A:'git'} if kind=='delete' else {A:'git',B:'ha'}
+    r.preview.select(snapshot.snapshot_id,selected,approved_parents=tuple(row.path for row in snapshot.parents),resolutions=choices)
+    review=r.preview.review(snapshot.snapshot_id);assert review.ready,review.blockers
+    parent=(r.root/'homeassistant/p').stat();prepared=w.prepare(review,str(uuid.uuid4()))
+    assert B not in dict(prepared.targets)
+    adapter=Lifecycle()
+    with browser_receipt(w,prepared,tmp_path):
+        with pytest.raises(Exception,match='backup-missing'):w.run(prepared,adapter,lambda:{'backups':[]})
+        result=w.run(prepared,adapter,lambda:{'backups':[]},bypass_backup=True)
+    assert result['status'] in ('SUCCESS','WARNING'),result
+    if kind=='delete':assert not (r.root/os.fsdecode(A)).exists()
+    else:assert (r.root/os.fsdecode(A)).read_bytes()==b'git selected'
+    assert (r.root/os.fsdecode(B)).read_bytes()==b'unselected live bytes'
+    after=(r.root/'homeassistant/p').stat()
+    assert (parent.st_uid,parent.st_gid,parent.st_mode)==(after.st_uid,after.st_gid,after.st_mode)
+    record=w.operations.read()['records'][w.operations.read()['workers'][prepared.operation]['record_id']]
+    from native_operations import encode_native_path
+    assert encode_native_path(B) not in record['decisions']
+
+
+@pytest.mark.parametrize('absent',['deep','ancestor'])
+def test_discovery_restore_reincluded_directory_through_absent_scaffold(tmp_path,absent):
+    import native_scope,native_save,shutil
+    from native_topology_helpers import METADATA
+    r,w,_=rig(tmp_path);path=b'homeassistant/N/C/file'
+    r.remote({A:b'base\n',B:b'base-b\n',path:b'git nested\n'})
+    subprocess.run(['git','--git-dir='+str(r.root/METADATA),'push',os.fsdecode(w.transport.endpoint),r.source.remote_oid+':refs/heads/main'],check=True,capture_output=True)
+    r.live({A:b'base\n',B:b'base-b\n'})
+    shutil.rmtree(r.root/('homeassistant/N/C' if absent=='deep' else 'homeassistant/N'))
+    owner=native_scope.NativeScope(native_save.NativeSave(r.preview,w.disk),w.operations)
+    owner.build(((b'homeassistant',True),(b'homeassistant/N',False),(b'homeassistant/N/C',True)),expected_revision=0)
+    snapshot=r.preview.build('apply');row=next(row for row in snapshot.rows if row.path==path)
+    assert not snapshot.issues,snapshot.issues
+    r.preview.select(snapshot.snapshot_id,(path,),approved_parents=row.parents,resolutions={path:'git'})
+    review=r.preview.review(snapshot.snapshot_id);assert review.ready,review.blockers
+    prepared=w.prepare(review,str(uuid.uuid4()));adapter=Lifecycle()
+    with browser_receipt(w,prepared,tmp_path):
+        with pytest.raises(Exception,match='backup-missing'):w.run(prepared,adapter,lambda:{'backups':[]})
+        result=w.run(prepared,adapter,lambda:{'backups':[]},bypass_backup=True)
+    assert result['status']=='SUCCESS',result
+    assert (r.root/os.fsdecode(path)).read_bytes()==b'git nested\n'
+    assert (r.root/os.fsdecode(B)).read_bytes()==b'base-b\n'

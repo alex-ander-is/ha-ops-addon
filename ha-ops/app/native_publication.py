@@ -76,7 +76,7 @@ def object_id(kind,raw,object_format):
     return hashlib.new(object_format,kind+b' '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
 
 
-_TYPES = {cls.__name__:cls for cls in (save.Candidate,save.ScopeReview,save.ScopePolicy,save.HistoricalContext,save.ContentRef,preview.SourceObservation,preview.FileState,
+_TYPES = {cls.__name__:cls for cls in (save.Candidate,save.ScopeReview,save.ScopePolicy,save.DiscoveryPolicy,save.HistoricalContext,save.ContentRef,preview.SourceObservation,preview.FileState,
     preview.PathChange,preview.ParentDetail,preview.Review,preview.Draft,metadata.Record,
     metadata.ParentReview,metadata.Binding,inventory.Policy,inventory.Mount,Signature)}
 
@@ -103,7 +103,11 @@ def _decode(value):
     _fields(value,'type fields')
     _require(type(value['type']) is str,'registered descriptor type required')
     cls=_TYPES.get(value['type'])
-    _require(cls is not None and type(value['fields']) is dict and set(value['fields'])=={f.name for f in fields(cls)}, 'exact descriptor fields required')
+    _require(cls is not None and type(value['fields']) is dict, 'exact descriptor fields required')
+    expected={f.name for f in fields(cls)}
+    supplied=set(value['fields'])
+    optional={'baseline_policy','discovery_policy'} if cls is save.Candidate else ({'discovery_rules'} if cls is preview.SourceObservation else ({'resolutions'} if cls is preview.Draft else set()))
+    _require(supplied<=expected and expected-supplied<=optional, 'exact descriptor fields required')
     try: return cls(**{key:_decode(v) for key,v in value['fields'].items()})
     except (TypeError,ValueError) as error: raise InvalidState('invalid publication descriptor') from error
 
@@ -161,6 +165,9 @@ def _candidate_identity(candidate,commit_oid,endpoint,destination,local_ref,expe
     if candidate.active_policy is not None:
         _require(candidate.active_policy.allowlist==candidate.remote.scope and candidate.active_policy.exclude_digest==candidate.binding.policy.digest,'exact active Save policy required')
         result['scope']=candidate.active_policy.document()
+    if getattr(candidate,'baseline_policy',None) is not None:
+        result['discovery']=candidate.discovery_policy.document()
+        result['scope']=candidate.baseline_policy.document()
     if candidate.scope_review is not None:
         scope=candidate.scope_review
         result['direction']='scope';result['scope']=scope.old.document()
@@ -219,7 +226,7 @@ def validate_intent(payload, *, identity=None, namespace=None):
              decode_native_path(owner_identity['root']['path'],absolute=True)==candidate.binding.root and
              set(decode_native_path(p['path']) for p in owner_identity['paths'])==
                 set(r.path for r in candidate.selected)|{p for p,_ in candidate.parent_dependencies if p} and
-             set(decode_native_path(p) for p in owner_identity['scope']['allowlist'])==set(candidate.remote.scope) and
+             set(inventory.normalize_scope(decode_native_path(r['path']) for r in owner_identity['discovery']['rules'] if r['include']) if 'discovery' in owner_identity else (decode_native_path(p) for p in owner_identity['scope']['allowlist']))==set(candidate.remote.scope) and
              owner_identity['refs']['remote']=={'name':value['destination'],'oid':candidate.remote.remote_oid} and
              owner_identity['refs']['local']=={'name':value['local_ref'],'oid':value['expected_local']} and
              owner_identity['effect']=={'before':digest([candidate.remote.remote_oid,value['expected_local']]),
@@ -778,6 +785,7 @@ def validate_candidate(git,candidate,review):
     records=baseline.by_path
     expected={e.path:e for e in remote}
     for row in candidate.selected:
+        if dict(review.draft.resolutions).get(row.path)=="git":continue
         _require(row in review.selected and (row.after is None or row.after.record is not None),
                  'complete selected metadata required')
         if row.after is None:
@@ -788,7 +796,7 @@ def validate_candidate(git,candidate,review):
             expected[row.path]=TreeEntry(row.path,mode,row.after.oid,b'blob')
     necessary=metadata.ancestors(p for p,r in records.items() if r.kind=='file')
     fresh=dict(candidate.parent_dependencies)
-    approvals=tuple(p for p in candidate.approved_parents if p in necessary and fresh.get(p) is not None)
+    approvals=tuple(p for p in candidate.approved_parents if p in necessary and fresh.get(p) is not None and any(row.path.startswith(p+b"/") and dict(review.draft.resolutions).get(row.path)!="git" for row in candidate.selected))
     for path in approvals: records[path]=fresh[path]
     records={p:r for p,r in records.items() if r.kind=='file' or p in necessary}
     hybrid=metadata.Manifest(tuple(records[p] for p in sorted(records)))
@@ -1019,7 +1027,7 @@ class NativePublication:
             factory=lambda ns:_intent_bytes(candidate,review,raw,author,committer,message,self.transport,
                 local_ref,expected_local,identity,reflogs,parent_graph,ns)
             prepared=self.store.prepare_publication(expected_revision,identity,factory,
-                {encode_native_path(row.path):'ha' for row in candidate.selected},str(uuid.uuid4()),command_id)
+                {encode_native_path(row.path):dict(review.draft.resolutions).get(row.path,'ha') for row in candidate.selected},str(uuid.uuid4()),command_id)
             intent=validate_intent(prepared.artifact)
             with self._admission(prepared,intent) as admission, (self.transport.admitted(prepared,admission) if network else nullcontext()):
                 try:

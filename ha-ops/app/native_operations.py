@@ -192,6 +192,10 @@ def validate_identity(value, domain):
         keys += " migration"
     if domain == "scope":
         keys += " scope_transaction"
+    if "discovery" in value:
+        keys += " discovery"
+        _require(domain in ("save", "apply") and identity_codec(value)=="native-bytes-v1", "discovery content identity required")
+        _discovery(value["discovery"])
     _fields(value, keys)
     _require(domain in DOMAINS and value["direction"] == domain, "wrong domain")
     _text(value["execution_policy"])
@@ -249,6 +253,8 @@ def _decisions(value, identity):
             def inside(path):
                 index = bisect.bisect_right(roots, path) - 1
                 return index >= 0 and (path == roots[index] or path.startswith(roots[index] + "/"))
+            if "discovery" in identity:
+                inside=lambda path:discovery_includes(identity["discovery"],path)
             _require(all(inside(path) for path in value), "selection outside declared scope")
         else:
             _require(all(any(path == root or path.startswith(root + "/") for root in roots)
@@ -765,8 +771,9 @@ class NativeOperationStore:
         self._validate_scope_history(state)
 
     def _validate_v2(self, state, artifacts):
-        _fields(state, "schema revision instance_id updated_at app_version epoch records current workers active commands baseline_record_id baseline_scope active_scope generation retention checkpoint anchors baseline_provenance recovery" + (" scope_pending" if "scope_pending" in state else "") + (" scope_rules_record_id" if "scope_rules_record_id" in state else ""))
+        _fields(state, "schema revision instance_id updated_at app_version epoch records current workers active commands baseline_record_id baseline_scope active_scope generation retention checkpoint anchors baseline_provenance recovery" + (" scope_pending" if "scope_pending" in state else "") + (" scope_rules_record_id" if "scope_rules_record_id" in state else "") + (" discovery" if "discovery" in state else ""))
         _validate_scope_pending(state)
+        _validate_discovery(state)
         _require(type(state["schema"]) is int and state["schema"] == 2, "unsupported schema")
         _int(state["revision"])
         _int(state["epoch"])
@@ -1628,6 +1635,7 @@ class NativeOperationStore:
                 raise Conflict("native scope transaction unresolved")
             if state["active_scope"] is not None and identity["scope"] != state["active_scope"]:
                 raise Conflict("scope change requires completed publication")
+            _require(_discovery_matches(state,identity), "discovery changed; fresh Preview required")
             _require(state["schema"] == SCHEMA, "explicit schema upgrade required")
             key, size = self._produce_artifact(artifacts, producer)
             state["generation"] += 1
@@ -1672,7 +1680,8 @@ class NativeOperationStore:
 
     @staticmethod
     def _scope_matches(state, record):
-        return state["active_scope"] is not None and record["identity"]["scope"] == state["active_scope"]
+        return (state["active_scope"] is not None and record["identity"]["scope"] == state["active_scope"]
+                and _discovery_matches(state,record["identity"]))
 
     def review(self, expected_revision, record_id, decisions, approval_id, observation,*,capability=None):
         _id(approval_id)
@@ -2334,6 +2343,7 @@ def _prepare_publication(store, expected_revision, identity, artifact_factory, d
         if initial['active_scope'] is not None and (initial['active_scope'] != identity['scope'] or
                 identity_codec(initial['baseline_provenance']['identity']) != identity_codec(identity)):
             raise Conflict('incompatible publication baseline')
+        _require(_discovery_matches(initial,identity), 'discovery changed; fresh review required')
         if initial.get('scope_pending') is not None:
             _require(initial['scope_pending']['owner']==store.owner,'canonical scope owner changed; explicit reopen required')
         if domain=='scope':
@@ -2771,22 +2781,26 @@ def _validate_scope_pending(state):
 
 
 class PreparedScope:
-    def __init__(self,store,initial,state,artifact,operation_id,payloads=()):
+    def __init__(self,store,initial,state,artifact,operation_id,payloads=(),*,initial_bytes=_OMITTED):
         self.store=store; self.initial=canonical(initial); self.state=canonical(state)
         self.artifact=artifact; self.operation_id=operation_id; self.owner_id=store.owner
         self.payloads=tuple(payloads)
+        self.initial_bytes=self.initial if initial_bytes is _OMITTED else initial_bytes
         self.current=self.initial; self.used=False
-        self.seal=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads)
+        self.seal=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads,self.initial_bytes)
 
     def check(self):
         if (getattr(self.store,'_prepared_scope',None) is not self or self.store.owner!=self.owner_id or
-                getattr(self.store,'_scope_snapshot',None)!=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads) or
+                getattr(self.store,'_scope_snapshot',None)!=(self.initial,self.state,self.artifact,self.operation_id,self.owner_id,self.payloads,self.initial_bytes) or
                 (self.used,self.current)!=getattr(self.store,'_scope_progress',None)):
             raise Conflict('issued immutable scope preparation required')
         return self
 
 
 def _prepare_scope(store,expected_revision,identity,artifact,candidate_digest,transaction_id=None,*,payloads=()):
+    raise Conflict('legacy scope construction retired; use discovery review')
+
+def _retired_prepare_scope(store,expected_revision,identity,artifact,candidate_digest,transaction_id=None,*,payloads=()):
     validate_identity(identity,'scope')
     _require(identity['execution_policy']=='native-scope-v2' and type(artifact) is bytes,'native scope profile required')
     with store.mutex,_publication_observe(store) as (root,artifacts):
@@ -2980,3 +2994,132 @@ def _validate_scope_content(self,state,directory):
 
 
 NativeOperationStore._validate_scope_content=_validate_scope_content
+
+
+# Discovery is independent of published baseline/worker provenance. Its revision
+# never rewinds, including cancel/change-back, so old content grants cannot revive.
+def _validate_discovery(state):
+    if 'discovery' not in state:return
+    value=state['discovery']
+    _fields(value,'effective confirmed pending')
+    for name in ('effective','confirmed'):_discovery(value[name])
+    _require(value['confirmed']['revision']<=value['effective']['revision'],'discovery revision regressed')
+    _require(value['confirmed']['exclude_digest']==value['effective']['exclude_digest'],'discovery exclusion mismatch')
+    pending=value['pending']
+    if pending is not None:
+        _fields(pending,'id source')
+        _id(pending['id']);_hash(pending['source'])
+    else:
+        _require(value['confirmed']==value['effective'],'unconfirmed discovery policy')
+
+
+def _discovery_matches(state,identity):
+    discovery=state.get('discovery')
+    if discovery is None:return 'discovery' not in identity
+    return identity.get('discovery')==discovery['effective']
+
+
+def _discovery_policy(store,exclude_digest):
+    _hash(exclude_digest)
+    with store.mutex,_publication_observe(store) as (root,artifacts):
+        if root is None:state=store._initial_state()
+        else:
+            state=_parse(store._read_file(root,'state.json'));store._validate(state,artifacts)
+        current=state.get('discovery')
+        policy=current['effective'] if current else discovery_from_scope(state['active_scope'],exclude_digest)
+        _require(policy['exclude_digest']==exclude_digest,'discovery exclusion policy changed')
+        return copy.deepcopy(policy),copy.deepcopy(state['active_scope']),copy.deepcopy(current)
+
+
+def _prepare_discovery(store,expected_revision,proposed,source,*,action='review',review_id=None):
+    _discovery(proposed);_hash(source)
+    _require(action in ('review','confirm','cancel','re_review'),'invalid discovery action')
+    with store.mutex,_publication_observe(store) as (root,artifacts):
+        initial_bytes=store._read_file(root,'state.json') if root is not None else None
+        state=_parse(initial_bytes) if initial_bytes is not None else store._initial_state()
+        store._validate(state,artifacts);store._cas(state,expected_revision)
+        initial=copy.deepcopy(state)
+        if state['active'] or state['recovery'] or state.get('scope_pending'):
+            raise Conflict('native operation or legacy scope recovery unresolved')
+        previous=state.get('discovery')
+        old=previous['effective'] if previous else discovery_from_scope(state['active_scope'],proposed['exclude_digest'])
+        _require(old['exclude_digest']==proposed['exclude_digest'],'discovery exclusion policy changed')
+        confirmed=copy.deepcopy(previous['confirmed'] if previous else old)
+        if action=='review':
+            _require(proposed['revision']==old['revision']+1,'next discovery revision required')
+            pending=dict(id=str(uuid.uuid4()),source=source)
+            effective=copy.deepcopy(proposed)
+        else:
+            pending=previous and previous['pending']
+            if pending is None or pending['id']!=review_id:raise Conflict('current discovery review required')
+            if action=='re_review':
+                _require(proposed==old,'discovery review changed')
+                effective=copy.deepcopy(old);pending=dict(pending,source=source)
+            elif action=='confirm':
+                if source!=pending['source']:raise Conflict('source changed; explicit discovery review required')
+                _require(proposed==old,'discovery review changed')
+                effective=confirmed=copy.deepcopy(old)
+            else:
+                effective=dict(confirmed,revision=old['revision']+1);confirmed=copy.deepcopy(effective)
+            if action!='re_review':pending=None
+        state['discovery']=dict(effective=effective,confirmed=confirmed,pending=pending)
+        for record in state['records'].values():store._invalidate(record)
+        state['revision']+=1;state['updated_at']=_now()
+        store._maintain_anchors(state);store._compact_graph(state)
+        _publication_graph(store,state,artifacts,b'')
+        prepared=PreparedScope(store,initial,state,b'',str(uuid.uuid4()),initial_bytes=initial_bytes)
+        store._prepared_scope=prepared;store._scope_snapshot=prepared.seal
+        store._scope_progress=(False,prepared.initial)
+        return prepared
+
+
+def _accept_discovery(store,prepared,admission):
+    prepared.check();admission.qualify_scope(prepared)
+    _require(not prepared.used,'discovery recipe already consumed')
+    with store._locked() as (root,artifacts):
+        try:current=store._read_file(root,'state.json')
+        except FileNotFoundError:current=None
+        if current!=prepared.initial_bytes:raise Conflict('discovery preparation became stale')
+        key,size=store._produce_artifact(artifacts,(prepared.artifact,))
+        _require((key,size)==(hashlib.sha256(prepared.artifact).hexdigest(),len(prepared.artifact)),'discovery artifact mismatch')
+        store._write(root,'state.json',prepared.state)
+    prepared.used=True;prepared.current=prepared.state;store._scope_progress=(True,prepared.state)
+    admission.acknowledge_scope(prepared)
+    return copy.deepcopy(_parse(prepared.state)['discovery'])
+
+NativeOperationStore.discovery_policy=_discovery_policy
+NativeOperationStore.prepare_discovery=_prepare_discovery
+NativeOperationStore.accept_discovery=_accept_discovery
+
+
+def discovery_rule_includes(path,rules):
+    """One byte/component predicate shared by inventory, Preview and claims."""
+    selected=False
+    for prefix,include in rules:
+        if path==prefix or path.startswith(prefix+b'/'):selected=include
+    return selected
+
+
+def discovery_includes(policy,path):
+    return discovery_rule_includes(decode_native_path(path),
+        ((decode_native_path(rule['path']),rule['include']) for rule in policy['rules']))
+
+
+def discovery_from_scope(scope,exclude_digest):
+    return dict(revision=scope['revision'] if scope else 0,
+        rules=[dict(path=p,include=True) for p in scope['allowlist']] if scope else [],exclude_digest=exclude_digest)
+
+
+def _discovery(value):
+    _fields(value,'revision rules exclude_digest');_int(value['revision']);_hash(value['exclude_digest'])
+    _require(type(value['rules']) is list,'discovery rules required')
+    paths=[];prior=[]
+    for rule in value['rules']:
+        _fields(rule,'path include');decode_native_path(rule['path'])
+        _require(type(rule['include']) is bool,'explicit discovery rule required')
+        parent=False
+        for previous in prior:
+            if rule['path'].startswith(previous['path']+'/'):parent=previous['include']
+        _require(rule['include']!=parent,'redundant discovery rule')
+        paths.append(rule['path']);prior.append(rule)
+    _require(paths==sorted(set(paths)),'canonical ordered discovery rules required')

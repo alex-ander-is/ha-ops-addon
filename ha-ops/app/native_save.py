@@ -67,6 +67,22 @@ class ScopePolicy:
 
 
 @dataclass(frozen=True)
+class DiscoveryPolicy:
+    revision: int
+    rules: tuple
+    exclude_digest: str
+
+    def __post_init__(self):
+        from native_operations import _discovery
+        object.__setattr__(self,'rules',tuple(tuple(row) for row in self.rules))
+        _discovery(self.document())
+
+    def document(self):
+        from native_operations import encode_native_path
+        return dict(revision=self.revision,rules=[dict(path=encode_native_path(path),include=include) for path,include in self.rules],exclude_digest=self.exclude_digest)
+
+
+@dataclass(frozen=True)
 class ContentRef:
     key: str
     size: int
@@ -191,6 +207,8 @@ class Candidate:
     issued_parent_reviews: tuple[ParentDetail, ...]
     scope_review: ScopeReview | None = None
     active_policy: ScopePolicy | None = None
+    baseline_policy: ScopePolicy | None = None
+    discovery_policy: DiscoveryPolicy | None = None
 
     def __post_init__(self):
         from dataclasses import replace
@@ -207,6 +225,10 @@ class Candidate:
         for value in (self.manifest_digest, self.selection_digest, self.candidate_digest):
             if type(value) is not str or not re.fullmatch('[0-9a-f]{64}', value):
                 raise Blocked('exact-candidate-digest-required')
+        if self.discovery_policy is not None and (type(self.discovery_policy) is not DiscoveryPolicy or self.baseline_policy is None or (self.discovery_policy.rules!=self.remote.discovery_rules or self.remote.scope_revision!='discovery:'+str(self.discovery_policy.revision)+':'+__import__('native_operations').digest(self.discovery_policy.document()))):
+            raise Blocked('exact-discovery-candidate-policy-required')
+        if self.baseline_policy is not None and (type(self.baseline_policy) is not ScopePolicy or self.active_policy is None):
+            raise Blocked('exact-published-baseline-policy-required')
         if self.active_policy is not None and (type(self.active_policy) is not ScopePolicy or
                 self.scope_review is not None or self.active_policy.allowlist!=self.remote.scope or
                 self.active_policy.exclude_digest!=self.binding.policy.digest):
@@ -274,10 +296,23 @@ class NativeSave:
 
     def build(self, review, *, active_policy=None):
         preview, disk = self.preview, self.disk
+        baseline_policy=discovery_policy=None
+        if preview.discovery_store is not None:
+            from native_operations import decode_native_path
+            def policy(value):return ScopePolicy(value['revision'],tuple(decode_native_path(p) for p in value['allowlist']),value['exclude_digest'])
+            effective,baseline,_=preview.discovery_store.discovery_policy(preview.binding.policy.digest)
+            from native_inventory import normalize_scope
+            discovery_policy=DiscoveryPolicy(effective['revision'],tuple((decode_native_path(r['path']),r['include']) for r in effective['rules']),effective['exclude_digest'])
+            expected=ScopePolicy(effective['revision'],normalize_scope(path for path,include in discovery_policy.rules if include),effective['exclude_digest'])
+            if active_policy is not None and active_policy!=expected:raise Stale('discovery-save-policy-changed')
+            active_policy=expected
+            baseline_policy=policy(baseline or dict(revision=0,allowlist=[],exclude_digest=preview.binding.policy.digest))
         if active_policy is not None and (type(active_policy) is not ScopePolicy or
                 active_policy.exclude_digest!=preview.binding.policy.digest):
             raise Blocked('exact-active-save-policy-required')
         with preview.candidate_context(review) as observed:
+            if review.draft.resolutions and all(dict(review.draft.resolutions).get(row.path)=="git" for row in review.selected):
+                raise Blocked("whole-file-choices-have-no-save-effects")
             git, binding = preview.git, preview.binding
             if disk.root != binding.root or git.policy.repository_files != (metadata.MANIFEST_PATH,):
                 raise Blocked('exact-native-root-and-manifest-policy-required')
@@ -290,6 +325,7 @@ class NativeSave:
                 raise Stale('complete-remote-manifest-required')
             records = baseline.by_path
             for row in review.selected:
+                if dict(review.draft.resolutions).get(row.path)=="git":continue
                 if row.after is None:
                     records.pop(row.path, None)
                 else:
@@ -298,7 +334,7 @@ class NativeSave:
             files = {p for p, r in records.items() if r.kind == 'file'}
             necessary = metadata.ancestors(files)
             surviving_approvals = tuple(p for p in review.draft.approved_parents
-                                       if p in necessary and fresh.get(p) is not None)
+                                       if p in necessary and fresh.get(p) is not None and any(row.path.startswith(p+b"/") and dict(review.draft.resolutions).get(row.path)!="git" for row in review.selected))
             for path in surviving_approvals:
                 records[path] = fresh[path]
             # Reviewed absence removes no surviving remote directory record:
@@ -312,6 +348,7 @@ class NativeSave:
             expected = {e.path:e for e in remote}
             entries, removals, sources = [], [], []
             for row in review.selected:
+                if dict(review.draft.resolutions).get(row.path)=="git":continue
                 if row.after is None:
                     removals.append(row.path)
                     expected.pop(row.path)
@@ -341,6 +378,7 @@ class NativeSave:
                 with git.isolated_index(baseline_tree, operation_id=operation_id, owner_id=owner_id,
                                         admission=admission) as handle:
                     for row in review.selected:
+                        if dict(review.draft.resolutions).get(row.path)=="git":continue
                         if row.after is not None:
                             with self._stream(row, observed) as stream:
                                 result = git.write_blob_stream(stream, operation_id=operation_id,
@@ -374,7 +412,7 @@ class NativeSave:
                 review.draft.approved_parents, selection.parents, parents, routes, manifest_oid,
                 hashlib.sha256(payload).hexdigest(), selected_digest,
                 _digest((tree, baseline_tree, remote_kind, selected_digest, manifest_oid)),
-                remote_kind, review.parents, active_policy=active_policy)
+                remote_kind, review.parents, active_policy=active_policy,baseline_policy=baseline_policy,discovery_policy=discovery_policy)
         if active_policy is not None and active_policy.allowlist!=result.remote.scope:
             raise Stale('active-save-membership-mismatch')
         self._install_publication(result,review,None)

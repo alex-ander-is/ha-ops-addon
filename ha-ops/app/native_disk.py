@@ -2913,7 +2913,10 @@ class Admission:
         if self.plan.evidence.scope_preparation is not None:
             from native_operations import canonical
             prepared=self.plan.evidence.scope_preparation;prepared.check()
-            if state is None or canonical(state)!=prepared.current:
+            if state is None:
+                if prepared.initial_bytes is None and not prepared.used:return
+                raise Blocked('scope-owner-lifecycle-fenced')
+            if canonical(state)!=prepared.current:
                 raise Blocked('scope-owner-lifecycle-fenced')
             return
         if self.plan.kind == "publication":

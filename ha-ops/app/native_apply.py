@@ -369,6 +369,8 @@ class NativeApply:
         # Actual advertisement is the first observation. No recovery/service or
         # backup participant is touched on unreachable/stale remote.
         with self.preview.apply_context(review) as observed:
+            if review.draft.resolutions and all(dict(review.draft.resolutions).get(row.path)=="ha" for row in review.selected):
+                raise Refused("whole-file-choices-have-no-apply-effects")
             if self.recovery._pointer() is not None:
                 raise Refused('retained-recovery-point-blocks-apply')
             if ((self.operations.data_root/'native-operations/state.json').is_file() and
@@ -392,12 +394,18 @@ class NativeApply:
                 if live != row.before:
                     raise Refused('reviewed-live-preimage-changed')
                 remote, base = self._git_source(row.after,capability=capability), self._git_source(row.base,capability=capability)
+                choice=dict(review.draft.resolutions).get(row.path)
+                if choice is not None:
+                    preimages[row.path]=(live,raw)
+                    if choice=="git":targets[row.path]=remote
+                    continue
                 record = self._attributes(row.base.record if row.base else None,
                                           live.record if live else None, row.after.record if row.after else None)
                 targets[row.path] = self._merge_sources(row.path, raw, base, remote, record,capability=capability)
                 preimages[row.path] = (live, raw)
             for parent in review.parents:
-                if parent.path not in review.draft.approved_parents or parent.issues:
+                if review.draft.resolutions and all(dict(review.draft.resolutions).get(path)=="ha" for path in parent.dependents if path in review.draft.selected):continue
+                if parent.path not in review.draft.approved_parents or (parent.issues and not (parent.after is not None and set(parent.issues)<={"existence"} and any(q in dict(review.draft.resolutions) for q in parent.dependents))):
                     raise Refused('explicit-reviewed-parent-required')
                 if parent.after is not None:
                     r = parent.after
@@ -458,7 +466,7 @@ class NativeApply:
                 content_digest=parse(target.state)['digest'] if type(target) is SourceFile else (hashlib.sha256(target.data).hexdigest() if type(target) is File else None),
                 metadata_digest=None if target is None else digest([target.uid,target.gid,target.mode])))
         ref=dict(name=source.remote_ref,oid=source.remote_oid)
-        return dict(direction='apply',execution_policy='native-apply-v1',
+        identity=dict(direction='apply',execution_policy='native-apply-v1',
             scope=dict(revision=0,allowlist=sorted(encode_native_path(p) for p in source.scope),
                        exclude_digest=self.preview.binding.policy.digest),
             refs=dict(base=dict(name=source.base_ref or source.remote_ref,oid=source.base_oid or source.remote_oid),
@@ -468,6 +476,12 @@ class NativeApply:
             paths=sorted(paths,key=lambda p:p['path']),
             effect=dict(before=prepared.review.draft.source_digest,
                         after=digest([paths,hashlib.sha256(recovery.manifest).hexdigest(),prepared.operation,self.operations.owner])))
+        if self.preview.discovery_store is not None:
+            effective,baseline,_=self.operations.discovery_policy(self.preview.binding.policy.digest)
+            if source.scope_revision!='discovery:'+str(effective['revision'])+':'+digest(effective):raise Refused('discovery-changed-during-identity')
+            identity['discovery']=effective
+            identity['scope']=baseline or dict(revision=0,allowlist=[],exclude_digest=self.preview.binding.policy.digest)
+        return identity
 
     @staticmethod
     def _service_identity(state):
@@ -557,7 +571,7 @@ class NativeApply:
                     self._admission.extend(tuple((b'data/native-operations/control-'+str(i).encode(),control,'0'*64,'apply-operation-control') for i in range(2)),capability=capability)
                     record=self.operations.preview(current['revision'],'apply',identity,artifact,capability=capability)
                     record=self.operations.review(self.operations.read()['revision'],record['id'],
-                        {encode_native_path(p):'git' for p in prepared.review.draft.selected},str(uuid.uuid4()),dict(available=True,identity=identity),capability=capability)
+                        {encode_native_path(p):'git' for p in prepared.review.draft.selected if p in dict(prepared.targets)},str(uuid.uuid4()),dict(available=True,identity=identity),capability=capability)
                     _,worker=self.operations.claim(self.operations.read()['revision'],prepared.command,record['id'],
                         record['approval']['binding'],dict(available=True,identity=identity),
                         instance_id=record['instance_id'],generation=record['generation'],capability=capability)
@@ -837,21 +851,34 @@ class NativeApply:
                     raise Refused('captured-ancestor-route-changed')
         parent_paths={row.path for row in prepared.review.parents}
         for row in prepared.review.parents:
+            if prepared.review.draft.resolutions and all(dict(prepared.review.draft.resolutions).get(path)=="ha" for path in row.dependents if path in prepared.review.draft.selected):continue
             with preview._route(self.preview.binding,row.path,'directory',absent=True) as (fd,routes):
                 frozen=capture[row.path]
                 actual=None if frozen is None else metadata.Record(row.path,frozen['kind'],frozen['uid'],frozen['gid'],frozen['mode'],None)
                 for path,state in routes:
                     expected=original_routes.get(path)
                     if expected is not None and (state[:3]!=expected[:3] if path in parent_paths else state!=expected):raise Refused('reviewed-parent-route-changed')
+            if any(dict(prepared.review.draft.resolutions).get(path)=="git" for path in row.dependents) and actual!=row.before:
+                raise Refused("explicit-whole-file-choice-parent-changed")
+            # Required parent observation is not permission to add a new
+            # effect outside the exact prepared target closure.
+            if row.path not in result:continue
             merged=self._attributes(row.before,actual,row.after)
             result[row.path]=None if merged is None else Directory(merged.uid,merged.gid,merged.mode)
         for row in prepared.review.selected:
+            if dict(prepared.review.draft.resolutions).get(row.path)=="ha":continue
             state,raw=self._capture_live(row.path,capability=capability)
             current=self.recovery._observe(row.path)
             if raw is not None and any(parse(raw.state)[k]!=current[k] for k in ('uid','gid','mode','digest','size')):raise Refused('captured-source-policy-mismatch')
             if capture[row.path]!=current:raise Refused('selected-capture-unstable')
             old_state,old_raw=dict(prepared.preimages)[row.path]
             target=result[row.path]
+            if row.path in dict(prepared.review.draft.resolutions):
+                original=original_routes.get(row.path)
+                captured=capture[row.path]
+                if original is not None and captured is not None and (captured["dev"],captured["ino"])!=original[:2]:raise Refused("explicit-whole-file-choice-route-changed")
+                if state!=old_state:raise Refused("explicit-whole-file-choice-live-changed")
+                continue
             record=self._attributes(old_state.record if old_state else None,state.record if state else None,
                                     row.after.record if row.after else None)
             result[row.path]=self._merge_sources(row.path,raw,old_raw,target,record,capability=capability)
@@ -873,6 +900,7 @@ class NativeApply:
             row=next((r for r in prepared.review.selected if r.path==path),None)
             if row is None or key in journal['changed']:
                 raise Refused('affected-or-parent-live-state-changed')
+            if path in dict(prepared.review.draft.resolutions):raise Refused('explicit-whole-file-choice-live-changed')
             captured=store._observe(path)
             live,current=self._capture_live(path,capability=capability)
             old_state,base=dict(prepared.preimages)[path]

@@ -21,7 +21,7 @@ const context = {
   setTimeout: callback => { const id = ++timerId; timers.set(id, callback); return id; },
   clearTimeout: id => timers.delete(id),
 };
-const source = fs.readFileSync(sourcePath, 'utf8').replace(/^import .*;\n/gm, '');
+const source = fs.readFileSync(sourcePath, 'utf8').replace(/^import .*;\n/gm, '').replace(/^export (?=function )/gm, '');
 vm.runInNewContext(source, context, { filename: sourcePath });
 const App = registered.get('ha-ops-app');
 const Preview = registered.get('ha-ops-preview');
@@ -204,7 +204,7 @@ async function badges() {
   assert(renderText(app.render()).includes('.severity=pending decision .label=pending decision data-status-code=pending decision'),'pending status precedence changed');
   app.backendVersion=''; assert(renderText(app.render()).includes('severity="version" .label= data-testid="version-badge"'),'empty version bootstrap changed'); checks++;
   const original=fs.readFileSync(sourcePath,'utf8');
-  assert.equal((original.match(/<ha-ops-status-badge\b/g)||[]).length,4,'all four application badge sites share one component');
+  assert.equal((original.match(/<ha-ops-status-badge\b/g)||[]).length,5,'all five application badge sites share one component');
   assert.equal((original.match(/<vaadin-badge\b/g)||[]).length,1,'native markup belongs only to shared component');
   assert(!original.includes('class="badge')&&!original.includes('class=${`badge'));
   assert(!original.includes('--vaadin-badge-background: #fffbeb'));

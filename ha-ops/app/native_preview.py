@@ -34,7 +34,7 @@ foreign substitutions are retained. All namespace checks are cooperative.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import base64
 import codecs
 import hashlib
@@ -106,9 +106,11 @@ class SourceObservation:
     refreshed: bool = True
     base_ref: str | None = None
     base_oid: str | None = None
+    discovery_rules: tuple = field(default=(),repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, 'scope', tuple(self.scope))
+        object.__setattr__(self, 'discovery_rules', tuple(self.discovery_rules))
 
 
 @dataclass(frozen=True)
@@ -178,6 +180,13 @@ class Draft:
     generation: int
     selected: tuple[bytes, ...]
     approved_parents: tuple[bytes, ...]
+    resolutions: tuple = field(default=(),repr=False)
+
+    def __post_init__(self):
+        choices=tuple(tuple(row) for row in self.resolutions)
+        if (choices!=tuple(sorted(set(choices))) or any(type(path) is not bytes or path not in self.selected or choice not in ('git','ha') for path,choice in choices) or len({path for path,_ in choices})!=len(choices)):
+            raise Blocked('canonical-selected-whole-file-choices-required')
+        object.__setattr__(self,'resolutions',choices)
 
 
 @dataclass(frozen=True)
@@ -588,6 +597,7 @@ class NativePreview:
         self.scratch_root, self.timeout = os.fsencode(scratch_root), timeout
         self._lock = threading.Lock()
         self._generation = 0
+        self.discovery_store = None
         self._review_binding = None
         self._snapshot = self._observed = self._draft = self._review = None
 
@@ -623,6 +633,8 @@ class NativePreview:
                     or type(source.scope_revision) is not str or type(source.exclude_digest) is not str
                     or not source.exclude_digest):
                 raise Unavailable('fresh-source-observation-required')
+            if (source.discovery_rules or source.scope_revision.startswith('discovery:')) and self.discovery_store is None:
+                raise Blocked('canonical-discovery-store-required')
             scope = tuple(_path(p) for p in source.scope)
             if normalize_scope(scope) != scope:
                 raise Blocked('normalized-active-byte-scope-required')
@@ -640,6 +652,12 @@ class NativePreview:
                 if self.git.read_ref(ref).oid != oid:
                     raise Stale('observed-ref-mismatch')
                 self.git._object(oid, (b'commit', b'tree'))
+            if self.discovery_store is not None:
+                from dataclasses import replace
+                from native_operations import decode_native_path,digest
+                policy,_,_=self.discovery_store.discovery_policy(self.binding.policy.digest)
+                source=replace(source,scope=normalize_scope(decode_native_path(r["path"]) for r in policy["rules"] if r["include"]),
+                    scope_revision="discovery:"+str(policy["revision"])+":"+digest(policy),exclude_digest=policy["exclude_digest"],discovery_rules=tuple((decode_native_path(r["path"]),r["include"]) for r in policy["rules"]))
             return source, width
         except (PreviewFailure, Blocked):
             raise
@@ -665,6 +683,10 @@ class NativePreview:
             return None
 
     def _active(self, path, source):
+        if source.scope_revision.startswith("discovery:"):
+            from native_operations import discovery_rule_includes
+            selected=discovery_rule_includes(path,source.discovery_rules)
+            return selected and path != b".gitignore" and path not in self.binding.policy.repository_files
         return (path != b'.gitignore' and path not in self.binding.policy.repository_files
                 and any(beneath(path, p) for p in source.scope))
 
@@ -685,9 +707,10 @@ class NativePreview:
         bm = self._manifest(base, width, 'base', issues) if source.base_oid else None
         inv = inventory(self.binding.root, source.scope, policy=self.binding.policy,
                         mounts=self.binding.mounts, confirmed_mounts=self.binding.confirmed_mounts,
-                        topology_verified=self.binding.topology_verified)
+                        topology_verified=self.binding.topology_verified,
+                        discovery_rules=source.discovery_rules if source.scope_revision.startswith("discovery:") else None)
         issues.extend(inv.blockers)
-        paths = set(inv.managed_files)
+        paths = {path for path in inv.managed_files if self._active(path,source)}
         for e in remote + base:
             if self._active(e.path, source):
                 reason = self.binding.policy.reason(e.path)
@@ -745,7 +768,8 @@ class NativePreview:
                 issues.append(Issue(path, 'parent-unavailable:' + type(exc).__name__ + ':' + str(exc)))
         if scope_absence:
             for issue in tuple(issues):
-                if issue.path in source.scope and re.match(r'^selected-path-unavailable:\[Errno 2\](?: |$)',issue.reason):
+                included_roots=set(source.scope)|{path for path,include in source.discovery_rules if include}
+                if issue.path in included_roots and re.match(r'^selected-path-unavailable:\[Errno 2\](?: |$)',issue.reason):
                     with _route(self.binding,issue.path,'directory',absent=True) as (fd,seen):
                         if fd is None and not any(info[2]==stat.S_IFREG for _,info in seen):
                             proven_absent.add(issue.path);retain_routes(seen)
@@ -764,8 +788,8 @@ class NativePreview:
 
     def _observe(self):
         source, width = self._source()
-        first = self._observe_once(source, width)
-        last = self._observe_once(source, width)
+        first = self._observe_once(source, width, scope_absence=source.scope_revision.startswith("discovery:"))
+        last = self._observe_once(source, width, scope_absence=source.scope_revision.startswith("discovery:"))
         final, final_width = self._source()
         if first.digest != last.digest or final != source or width != final_width:
             raise Stale('complete-preview-source-changed')
@@ -1002,23 +1026,26 @@ class NativePreview:
                                 self._generation, (), ())
             return snapshot
 
-    def select(self, snapshot_id, selected_files, *, approved_parents=()):
+    def select(self, snapshot_id, selected_files, *, approved_parents=(), resolutions=None):
         with self._call():
             snapshot = self._current(snapshot_id)
             selected = tuple(_path(p) for p in selected_files)
             approved = tuple(_path(p) for p in approved_parents)
+            choices=tuple(sorted((resolutions or {}).items()))
+            if choices and (not snapshot.source.scope_revision.startswith("discovery:") or any(type(path) is not bytes or path not in selected or choice not in ("git","ha") for path,choice in choices)):
+                raise Blocked("explicit-selected-byte-path-direction-required")
             if len(set(selected)) != len(selected) or len(set(approved)) != len(approved):
                 raise Blocked('duplicate-selection-or-parent')
             rows = {r.path: r for r in snapshot.rows}
             if any(p not in rows or not rows[p].selectable for p in selected):
                 raise Blocked('current-selectable-row-required')
             parents = {p.path: p for p in snapshot.parents}
-            if any(p not in parents or parents[p].issues or not any(q in parents[p].dependents for q in selected)
+            if any(p not in parents or (parents[p].issues and not (parents[p].after is not None and set(parents[p].issues)<={"existence"} and any(dict(choices).get(q)==("git" if snapshot.direction=="apply" else "ha") for q in parents[p].dependents))) or not any(q in parents[p].dependents for q in selected)
                    for p in approved):
                 raise Blocked('related-resolved-parent-detail-required')
             self._revalidate(snapshot)
             self._draft = Draft(snapshot_id, snapshot.source_digest, snapshot.direction,
-                                self._generation, tuple(sorted(selected)), tuple(sorted(approved)))
+                                self._generation, tuple(sorted(selected)), tuple(sorted(approved)),choices)
             self._review = None
             return self._draft
 
@@ -1032,15 +1059,16 @@ class NativePreview:
             selected = tuple(r for r in snapshot.rows if r.path in draft.selected)
             parents = tuple(p for p in snapshot.parents if any(q in draft.selected for q in p.dependents))
             blockers = [i.reason for i in snapshot.issues]
+            choices=dict(draft.resolutions)
             for r in selected:
-                blockers.extend(r.issues)
-                if r.conflict != 'clean':
+                blockers.extend(issue for issue in r.issues if not (r.path in choices and issue.startswith("metadata-conflict:") and set(issue.split(":",1)[1].split(","))<={"kind","uid","gid","mode","existence"}))
+                if r.conflict != 'clean' and r.path not in choices:
                     blockers.append(encode_path(r.path) + ':' + r.conflict)
                 for side in (r.before, r.after):
                     if side is not None and side.record is None:
                         blockers.append('missing-restoration-metadata')
             for p in parents:
-                blockers.extend(p.issues)
+                blockers.extend(issue for issue in p.issues if not (issue=="existence" and p.after is not None and any(choices.get(q)==("git" if snapshot.direction=="apply" else "ha") for q in p.dependents)))
                 if p.path not in draft.approved_parents:
                     blockers.append('explicit-parent-review-required:' + encode_path(p.path))
             self._review_binding = (self.binding, self.git, self.git.policy)
