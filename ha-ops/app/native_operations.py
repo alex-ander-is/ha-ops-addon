@@ -1417,6 +1417,95 @@ class NativeOperationStore:
         except OSError as exc:
             self.cleanup_errors.append(str(exc))
 
+    @contextmanager
+    def compact_observe(self):
+        """Hold the canonical graph without creating, waiting, or rewriting it."""
+        if not self.mutex.acquire(blocking=False):
+            raise Conflict("operation owner busy")
+        try:
+            from native_disk import _directory
+            route_proof={}
+            with _directory(os.fsencode(self.data_root) + b"/native-operations",observations=route_proof) as root:
+                lock = os.open("lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=root)
+                artifacts = None
+                try:
+                    self._regular(lock)
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    artifacts = os.open("artifacts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root)
+                    _require(stat.S_IMODE(os.fstat(root).st_mode) == 0o700 and stat.S_IMODE(os.fstat(artifacts).st_mode) == 0o700, "unsafe owner directories")
+                    state = self._load(root, artifacts, create=False)
+                    route_proof[os.fsencode(self.data_root)+b"/native-operations/artifacts"]=(os.fstat(artifacts).st_dev,os.fstat(artifacts).st_ino,os.fstat(artifacts).st_mode)
+                    yield root, artifacts, state, lock,tuple(route_proof.items())
+                    _require(_scope_content_identity(os.fstat(lock)) == _scope_content_identity(os.stat("lock", dir_fd=root, follow_symlinks=False)), "owner lock replaced")
+                finally:
+                    if artifacts is not None: os.close(artifacts)
+                    os.close(lock)
+        finally:
+            self.mutex.release()
+
+    def compact_artifacts(self, state, artifacts, observations):
+        """Review only exact unreferenced content-addressed owned artifacts."""
+        marked = {record["artifact"] + ".diff" for record in state["records"].values()}
+        marked.update(ref.key + ".blob" for ref in self._scope_refs(state, artifacts))
+        prefix = os.fsencode(self.data_root) + b"/native-operations/artifacts/"
+        rows = []
+        for path, observed in observations:
+            if observed is None or not path.startswith(prefix):
+                continue
+            name = os.fsdecode(path[len(prefix):])
+            if "/" in name or name in marked or not re.fullmatch(r"[0-9a-f]{64}\.(diff|blob)", name):
+                continue
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=artifacts)
+            try:
+                self._regular(fd)
+                before = _scope_content_identity(os.fstat(fd))
+                entry = os.stat(name, dir_fd=artifacts, follow_symlinks=False)
+                _require(before == _scope_content_identity(entry), "changed obsolete artifact")
+                _require((entry.st_dev,entry.st_ino,entry.st_mode,entry.st_size,entry.st_nlink,entry.st_mtime_ns,entry.st_ctime_ns,entry.st_blocks) == observed, "stale obsolete artifact")
+                checksum = hashlib.sha256()
+                while True:
+                    chunk = os.read(fd, CHUNK_SIZE)
+                    if not chunk: break
+                    checksum.update(chunk)
+                _require(checksum.hexdigest() == name[:-5] and before == _scope_content_identity(os.fstat(fd)), "unowned obsolete artifact")
+                rows.append((name, before, entry.st_blocks * 512))
+            finally:
+                os.close(fd)
+        return tuple(rows)
+
+    def compact_remove(self, artifacts, rows, completed, *, dry_run=False, routes=()):
+        """Delete precisely the reviewed set under the caller's graph lock."""
+        from native_disk import _directory, _identity
+        def check_route():
+            _require(bool(routes),"issued cleanup ancestor proof required")
+            for path,expected in routes:
+                _require(_identity(os.stat(path,follow_symlinks=False))==expected,"reviewed cleanup ancestor changed")
+            with _directory(os.fsencode(self.data_root)+b"/native-operations/artifacts") as current:
+                _require(_identity(os.fstat(current))==_identity(os.fstat(artifacts)),"canonical cleanup descriptor changed")
+        check_route()
+        for name, identity, allocated in rows:
+            check_route()
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=artifacts)
+            try:
+                self._regular(fd)
+                self.fault("compact_before_unlink")
+                checksum = hashlib.sha256()
+                while True:
+                    chunk = os.read(fd, CHUNK_SIZE)
+                    if not chunk: break
+                    checksum.update(chunk)
+                _require(checksum.hexdigest() == name[:-5] and identity == _scope_content_identity(os.fstat(fd)) == _scope_content_identity(os.stat(name,dir_fd=artifacts,follow_symlinks=False)), "reviewed cleanup changed")
+                check_route()
+                if not dry_run:
+                    os.unlink(name, dir_fd=artifacts)
+                    completed.append(name)
+                    self.fault("compact_unlinked")
+            finally:
+                os.close(fd)
+        if not dry_run:
+            os.fsync(artifacts)
+            self.fault("compact_durable")
+
     def compact(self, expected_revision,*,capability=None):
         with self._locked() as (root, artifacts):
             state = self._load(root, artifacts)

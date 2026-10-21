@@ -90,7 +90,7 @@ def test_import_construction_and_snapshot_observe_without_writes(fixture):
     assert not (root / "data/native/disk-admission.lock").exists()
     app = Path(d.__file__).parent
     assert all("import native_disk" not in p.read_text() and "from native_disk" not in p.read_text()
-               for p in app.glob("*.py") if p.name not in ("native_disk.py", "native_git.py", "native_save.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_services.py", "native_operations.py"))
+               for p in app.glob("*.py") if p.name not in ("native_disk.py", "native_git.py", "native_save.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_services.py", "native_operations.py", "native_storage.py"))
 
 
 def test_categories_orphans_sparse_directories_and_original_exclusion(fixture):

@@ -1133,7 +1133,7 @@ class HaOpsFolderScope extends LitElement {
   }
   render(){return html`<section data-testid="folder-discovery"><h2>Folders for discovery and comparison</h2>
     <p>Choose folders to compare. Selecting a folder does not transfer or restore files. Each Save or Apply requires a separate whole-file selection and directional confirmation.</p>
-    <p>Secrets and private authorization data are always excluded. Databases, logs and caches may be selected; Git history can grow substantially. Calculate and Compact will be available in a later step.</p>
+    <p>Secrets and private authorization data are always excluded. Databases, logs and caches may be selected; Git history can grow substantially. Calculate and Compact are available in the qualified storage header.</p>
     ${(this.model.nodes||[]).map(node=>this.node(node))}
     ${this.model.pending?html`<p role="status">Pending local discovery policy is already used for fresh comparisons.</p>`:nothing}
     <vaadin-button ?disabled=${this.busy||this.model.blocked||!this.model.pending} @click=${()=>this.request("fresh_review",{review_id:this.model.pending?.id})}>Review current discovery policy</vaadin-button>
@@ -1142,6 +1142,62 @@ class HaOpsFolderScope extends LitElement {
     <p role="status">${this.error}</p></section>`;}
 }
 customElements.define("ha-ops-folder-scope",HaOpsFolderScope);
+
+class HaOpsStorage extends LitElement {
+  static properties={model:{type:Object},busy:{type:Boolean},error:{type:String},review:{type:Object}};
+  static styles=css`
+    :host{display:block;max-width:100%;font:14px system-ui;color:#243443}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}p{overflow-wrap:anywhere;line-height:1.45;margin:8px 0}
+    vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}
+    vaadin-button{margin:4px 0}table{border-collapse:collapse;width:100%;font-size:13px}td,th{text-align:left;padding:5px;overflow-wrap:anywhere}
+    .muted{color:#647383}.warning{color:#8a5400}vaadin-confirm-dialog{--vaadin-confirm-dialog-width:min(600px,calc(100vw - 24px))}
+    @media(max-width:600px){table{font-size:12px}td,th{padding:3px}}
+  `;
+  constructor(){super();this.model={};this.busy=false;this.error="";this.review=null;this.generation=0;this.lifetime=crypto.randomUUID();}
+  disconnectedCallback(){this.invalidate();super.disconnectedCallback();}
+  willUpdate(changed){if(changed.has("model")){const old=changed.get("model");if(old?.instance&&old.instance!==this.model?.instance)this.invalidate();}}
+  invalidate(){this.generation++;this.review=null;this.busy=false;}
+  request(action){
+    if(this.model?.qualified!==true||this.busy&&action!=="cancel")return;
+    const id=this.review?.id;
+    const generation=++this.generation;
+    this.busy=action!=="cancel";this.error="";
+    if(action!=="preview")this.review=null;
+    this.dispatchEvent(new CustomEvent("storage-request",{detail:{action,review_id:id,lifetime:this.lifetime,generation},bubbles:true,composed:true}));
+  }
+  accept(model,generation){if(!this.isConnected||generation!==this.generation)return;this.model=model;this.review=model.review||null;this.busy=false;}
+  fail(message,generation){if(!this.isConnected||generation!==this.generation)return;this.error=message;this.busy=false;this.review=null;}
+  size(value){return Number.isFinite(value)?`${value.toLocaleString()} bytes`:"Unknown";}
+  forecast(model){return html`<p>${model?.status==="none"?"No pending operation":model?.status==="known"?"Qualified pending peak":"Unknown pending peak"}${model?.reason&&model.status!=="none"?`: ${model.reason}`:""}</p>
+    ${(model?.volumes||[]).map(v=>html`<p>${v.volume}: additional peak ${this.size(v.additional_peak)}, reserve ${this.size(v.reserve)}, ${v.required_inodes} inodes; available ${this.size(v.available)}, ${v.available_inodes??"unknown"} inodes. ${v.status}</p>`)}`;}
+  render(){
+    if(this.model?.qualified!==true)return nothing;
+    const m=this.model.measurement,r=this.review,attempt=this.model.attempt,attemptProblem=Boolean(attempt&&attempt.status!=="completed");
+    return html`<section data-testid="native-storage"><div class="row"><strong>Storage</strong>
+      <vaadin-button ?disabled=${this.busy} @click=${()=>this.request("calculate")}>Calculate</vaadin-button>
+      <vaadin-button ?disabled=${this.busy} @click=${()=>this.request("preview")}>Compact</vaadin-button>
+      ${this.busy?html`<vaadin-progress-bar indeterminate aria-label="Storage action running"></vaadin-progress-bar>`:nothing}
+      <ha-ops-status-badge severity=${attemptProblem?(["failed","unavailable"].includes(attempt.status)?"error":"warning"):this.model.maintenance?.status==="uncertain"?"warning":"idle"} .label=${attemptProblem?attempt.status:this.model.maintenance?.status||"Diagnostic"}></ha-ops-status-badge></div>
+      <p>${m?`Last completed Calculate: ${new Date(m.completed_at*1000).toLocaleString()}`:"No completed Calculate"}</p>
+      ${m?html`<vaadin-details summary="Logical and physical usage"><table><thead><tr><th>Category</th><th>Logical</th><th>Physical allocated</th></tr></thead><tbody>${m.categories.map(c=>html`<tr><td>${({git:"Git metadata",staging:"Worktrees and staging",diff:"Diff artifacts",recovery:"Recovery data",service:"Service and control",authorization:"Browser authorization overhead"})[c.category]||"Unknown category"}</td><td>${this.size(c.logical_bytes)}</td><td>${this.size(c.allocated_bytes)}</td></tr>`)}</tbody></table>
+      ${m.volumes.map(v=>html`<p class=${v.warning?"warning":""}>${v.volume} (${v.filesystem}): ${this.size(v.available_bytes)} available; ${v.available_inodes??"unknown"} inodes. ${v.warning?"Below 500 MiB advisory":""}</p>`)}
+      ${this.forecast(m.pending)}</vaadin-details>`:nothing}
+      ${attemptProblem?html`<p role="alert">${this.model.attempt.error}. Previous completed measurement retained.</p>`:nothing}
+      ${this.model.maintenance?.message?html`<p role="status">${this.model.maintenance.message}</p>`:nothing}
+      <p role="alert">${this.error}</p>
+      <vaadin-confirm-dialog .opened=${Boolean(r)} header="Review local Compact" cancel-button-visible
+        .confirmText=${"Confirm Compact"} .cancelText=${"Cancel"}
+        @confirm=${()=>{if(this.review?.available&&!this.busy)this.request("confirm");}}
+        @cancel=${()=>this.request("cancel")}
+        @opened-changed=${event=>{if(!event.detail.value&&this.review&&!this.busy)this.request("cancel");}}>
+        ${r?html`<p>${r.actions.join(". ")}.</p><p>Approximate artifact savings: ${this.size(r.savings.artifact_allocated_bytes)}. Git savings: ${r.savings.git}.</p>
+          <p>${r.uncertainty}</p><p>Protected: ${r.protected.join(", ")}.</p>${this.forecast(r.forecast)}`:nothing}
+        <vaadin-button slot="confirm-button" ?disabled=${this.busy||!r?.available} @click=${()=>this.request("confirm")}>Confirm Compact</vaadin-button>
+      </vaadin-confirm-dialog>
+    </section>`;
+  }
+}
+customElements.define("ha-ops-storage",HaOpsStorage);
 
 class HaOpsApp extends LitElement {
   static properties = {
@@ -1287,6 +1343,7 @@ class HaOpsApp extends LitElement {
     if (this.httpPollTimer) clearTimeout(this.httpPollTimer);
     if (this.reconnectStableTimer) clearTimeout(this.reconnectStableTimer);
     this.shouldReconnect = false;
+    this.invalidateStorage();
     this.forgetCommandIntent();
     if (this.socket) this.socket.close();
     super.disconnectedCallback();
@@ -1296,6 +1353,24 @@ class HaOpsApp extends LitElement {
 
   updated() {
     if (!this.resizeObserver) this.observeLayout();
+  }
+
+  async storageRequest(event) {
+    if(this.view.native_storage?.qualified!==true)return;
+    const control=event.currentTarget,detail=event.detail,generation=detail.generation,version=this.backendVersion;
+    try{
+      const response=await fetch("api/v1/storage",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(detail)});
+      const model=await response.json();
+      if(!control.isConnected||generation!==control.generation||version!==this.backendVersion||this.view.native_storage?.qualified!==true)return;
+      if(!response.ok)throw Error(model.message||"Storage action unavailable");
+      control.accept(model,generation);
+      this.view={...this.view,native_storage:{...model,review:undefined}};
+    }catch(error){control.fail(error.message,generation);}
+  }
+
+  invalidateStorage() {
+    const control=this.querySelector("ha-ops-storage");
+    if(control){control.request("cancel");control.invalidate();}
   }
 
   async discoveryRequest(event) {
@@ -1473,6 +1548,7 @@ class HaOpsApp extends LitElement {
               <dt>${t("field.auth_mode")}</dt><dd>${this.view.auth_mode || ""}</dd>
               <dt>${t("field.last_run")}</dt><dd>${this.view.display_times?.last_run_at || this.state.last_run_at || ""}</dd>
             </dl>
+            ${this.view.native_storage?.qualified===true?html`<ha-ops-storage .model=${this.view.native_storage} @storage-request=${event=>this.storageRequest(event)}></ha-ops-storage>`:nothing}
             <p id="client-status" class="client-status" role="status">${this.clientError}</p>
             ${this.state.post_apply_save_recommended ? html`<div class="post-apply-alert" role="status">
               <strong>${t("notice.post_apply_save_title")}</strong>
@@ -1926,7 +2002,7 @@ class HaOpsApp extends LitElement {
   }
 
   observeBackendVersion(version) {
-    if (knownVersion(version) && knownVersion(this.backendVersion) && String(version) !== this.backendVersion) this.forgetCommandIntent();
+    if (knownVersion(version) && knownVersion(this.backendVersion) && String(version) !== this.backendVersion) {this.invalidateStorage();this.forgetCommandIntent();}
     if (!knownVersion(version) || !knownVersion(this.clientVersion)) {
       this.backendVersion = knownVersion(version) ? String(version) : this.backendVersion;
       this.versionMismatchOpen = false;
@@ -2133,7 +2209,7 @@ class HaOpsApp extends LitElement {
   }
 
   setConnection(connection) {
-    if (["connecting", "reconnecting", "unknown"].includes(connection)) this.forgetCommandIntent();
+    if (["connecting", "reconnecting", "unknown"].includes(connection)) {this.invalidateStorage();this.forgetCommandIntent();}
     if (connection !== "http" && this.httpPollTimer) {
       clearTimeout(this.httpPollTimer);
       this.httpPollTimer = null;

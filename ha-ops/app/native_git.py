@@ -540,6 +540,83 @@ class NativeGit:
                 for label,stream in (('stdin',process.stdin),('stdout',process.stdout),('stderr',process.stderr))
                 if stream is not None and stream not in close_attempted],__import__('sys').exc_info()[1])
 
+    def compact(self, capability):
+        """Exact reviewed maintenance; a guardian retains locks across caller death.
+
+        Linux subreaping plus a private session owns every Git descendant. The
+        guardian holds inherited flock descriptions until the group is killed
+        and all adopted children are reaped, including on parent pipe EOF.
+        """
+        from native_storage import _CompactExecution
+        if (type(capability) is not _CompactExecution or capability.owner._execution is not capability
+                or capability.owner.git is not self or not capability.admission.active):
+            raise InvalidInput("issued Compact execution required")
+        if not sys.platform.startswith("linux"):
+            raise InvalidInput("Linux maintenance guardian required")
+        command = ("-c", "pack.indexVersion=2", "-c", "pack.threads=1", "-c", "repack.writeBitmaps=false",
+                   "-c", "pack.writeReverseIndex=false", "-c", "core.fsync=pack,pack-metadata", "-c", "core.fsyncMethod=fsync", "repack", "-a", "-d",
+                   "--keep-unreachable", "-F", "--window=0", "--depth=0", "--threads=1",
+                   "--no-write-bitmap-index", "--no-write-midx", "-n")
+        self._config()
+        argv, env = self._argv(command)
+        return self._compact_guardian(argv, env, capability.fds)
+
+    def _compact_guardian(self, argv, env, locks):
+        # This is a private implementation seam, not a public arbitrary-command
+        # adapter. No shell, hooks, network or alternate maintenance recipe.
+        guardian = r'''
+import ctypes,os,select,signal,subprocess,sys,time
+control=int(sys.argv[1]);seconds=float(sys.argv[2]);command=sys.argv[3:]
+libc=ctypes.CDLL(None,use_errno=True)
+if libc.prctl(36,1,0,0,0)!=0:sys.exit(124)
+child=None;result=125
+try:
+    child=subprocess.Popen(command,stdin=subprocess.DEVNULL,start_new_session=True)
+    end=time.monotonic()+seconds
+    while child.poll() is None:
+        if time.monotonic()>=end or select.select([control],[],[],.05)[0] and not os.read(control,1):
+            break
+    else:result=child.returncode
+finally:
+    if child is not None:
+        try:os.killpg(child.pid,signal.SIGKILL)
+        except ProcessLookupError:pass
+        child.wait()
+        # As a subreaper, wait for every orphaned Git descendant before
+        # interpreter exit closes the inherited owner/admission locks.
+        while True:
+            try:os.waitpid(-1,0)
+            except ChildProcessError:break
+sys.exit(result if 0<=result<124 else 125)
+'''
+        read, write = os.pipe()
+        process = None
+        primary = None
+        try:
+            process = subprocess.Popen([sys.executable, "-c", guardian, str(read), str(self.timeout), *argv],
+                cwd=self.root, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                pass_fds=(read, *locks))
+            os.close(read); read = None
+            try:
+                output, error = process.communicate(timeout=self.timeout + 2)
+            except BaseException as exc:
+                primary = exc
+                os.close(write); write = None
+                # Guardian shutdown is cooperative: never kill it while it
+                # owns the only surviving copies of the flock descriptions.
+                try:process.communicate(timeout=5)
+                except subprocess.TimeoutExpired:
+                    exc.cleanup_errors = tuple(getattr(exc,"cleanup_errors",())) + ("maintenance guardian still owns locks; quiescence uncertain",)
+                raise
+            if process.returncode != 0 or error:
+                raise GitFailure("Compact failed or interrupted", stderr=error[:CHUNK])
+            return output
+        finally:
+            for descriptor in (read, write):
+                if descriptor is not None: os.close(descriptor)
+            if process is not None and process.poll() is not None:
+                _close_owned([(label, stream.close) for label,stream in (("guardian stdout",process.stdout),("guardian stderr",process.stderr))], primary or sys.exc_info()[1])
+
     def _config(self):
         if self._publication_profile is not None:
             self._publication_routes()

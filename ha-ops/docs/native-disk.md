@@ -406,3 +406,19 @@ reserves and inode floor across reopen. Targeted binding/current-state checks
 remain the recovery owner's responsibility and run before each syscall. Generic
 Plan issuance, one-shot Admission and existing namespace receipts are unchanged;
 serialized generic Plans still grant nothing. See [the recovery contract](native-recovery.md).
+
+## Dormant storage composition (6.20)
+
+[Native storage](native-storage.md) composes the existing snapshot/repack plan
+with an isolated qualified header, bounded durable display diagnostics and an
+exact reviewed executor. The `authorization` category includes the optional
+`data/direct-auth` anchor in the same inode-deduplicated snapshot and never
+becomes a cleanup target. Internal snapshot observations stay private.
+
+The narrow `storage_control` recipe permits only the two bounded atomic/failure
+controls for `data/native/storage-status.json`. It can record an incomplete
+accounting attempt by requalifying that exact diagnostic destination, preimage
+and full overlap envelope; unrelated incomplete category totals confer no Git
+execution authority. Repack still requires a complete initial snapshot. The
+immutable repack plan retains its original object tuples for targeted output
+proof, without another object enumeration or capacity sample during execution.

@@ -27,7 +27,7 @@ import uuid
 from native_inventory import Inventory, beneath, linux_mounts, path_bytes
 
 WARNING_BYTES = 500 * 1024**2
-CATEGORIES = ("git", "staging", "diff", "recovery", "service")
+CATEGORIES = ("git", "staging", "diff", "recovery", "service", "authorization")
 _THREAD_LOCKS = {}
 _THREAD_LOCKS_MUTEX = threading.Lock()
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
@@ -220,7 +220,7 @@ class Layout:
 
     @property
     def anchors(self):
-        return (b"data/native", b"data/native-operations") + self.legacy
+        return (b"data/native", b"data/native-operations", b"data/direct-auth") + self.legacy
 
 
 @dataclass(frozen=True)
@@ -1063,6 +1063,8 @@ class NativeDisk:
 
     def _category(self, path):
         relative = path[len(self.root) + 1:]
+        if beneath(relative, b"data/direct-auth"):
+            return "authorization"
         if beneath(relative, b"data/native/repository.git"):
             return "git"
         if beneath(relative, b"data/native/git-resources"):
@@ -1099,7 +1101,7 @@ class NativeDisk:
             value = _observation(s)
             observations[path] = value
             if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)):
-                issue("unsafe-private-object:" + repr(path))
+                issue("unsafe-authorization-storage" if beneath(path,self.root+b"/data/direct-auth") else "unsafe-private-object:" + repr(path))
                 return
             if not hasattr(s, "st_blocks"):
                 issue("unavailable-allocated-blocks")
@@ -1174,10 +1176,10 @@ class NativeDisk:
                             if _observation(os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)) != _observation(s):
                                 raise Blocked("changed-private-leaf")
                 except (OSError, ValueError) as exc:
-                    issue(str(exc) + ":" + repr(path))
+                    issue("unavailable-authorization-storage" if beneath(path,self.root+b"/data/direct-auth") else str(exc) + ":" + repr(path))
             for category, logical, allocated, key, links, names, path in objects.values():
                 if stat.S_ISREG(observations[path][2]) and links != len(names):
-                    issue("uncertain-cross-boundary-hardlink:" + repr(path))
+                    issue("uncertain-authorization-hardlink" if beneath(path,self.root+b"/data/direct-auth") else "uncertain-cross-boundary-hardlink:" + repr(path))
                 v = volumes[key]
                 control = logical if os.path.basename(path) in (b"state.json", b"journal.json", b"manifest.json") else 0
                 volumes[key] = replace(v, allocated=v.allocated + allocated,
@@ -1424,7 +1426,13 @@ class NativeDisk:
             raise Blocked("operation-bound-evidence-required")
         if snapshot.layout_digest != self.layout_digest:
             raise Blocked("different-layout-snapshot")
-        unknown = list(snapshot.issues)
+        diagnostic_control = kind == "storage_control"
+        if diagnostic_control and (len(evidence.controls)!=2 or any(control.target.path!=b"data/native/storage-status.json" or len(control.payload)>65536 for control in evidence.controls) or evidence.selected or evidence.copies or evidence.metadata or evidence.incoming is not None or evidence.publication is not None or evidence.scope_preparation is not None):
+            raise Blocked("exact bounded storage diagnostic recipe required")
+        # Incomplete accounting does not invent baseline capacity authority:
+        # this narrow recipe requalifies only its exact diagnostic destination,
+        # existing bounded preimage and full atomic/failure envelope.
+        unknown = [] if diagnostic_control else list(snapshot.issues)
         allocations, volumes, provenance = [], {v.key: v for v in snapshot.volumes}, [("root", snapshot.root_identity)]
         generated_controls = {}
         self._resource_bound = 0
@@ -1491,7 +1499,7 @@ class NativeDisk:
             return v
 
         try:
-            if not snapshot.complete:
+            if not snapshot.complete and not diagnostic_control:
                 raise Blocked("incomplete-accounting-no-git-content-observation")
             if state_bound:
                 v = add(b"data/native-operations", state_bound, "full-prospective-operation-state")
@@ -1869,11 +1877,14 @@ class NativeDisk:
             elif kind == "scope_control":
                 if scope_preparation is None or evidence.selected or evidence.candidate_manifest is not None:
                     raise Blocked("exact-scope-control-recipe-required")
+            elif kind == "storage_control":
+                pass  # Exact bounded diagnostic controls only; no Git mutation.
             elif kind == "repack":
                 width, config = self._profile()
                 objects = self._objects(width)
                 self._relevant_oids.update(oid for oid, _, _ in objects)
                 provenance.append(("all-local-objects", _digest(objects), config))
+                provenance.append(("maintenance-objects", objects))
                 pack = 12 + width + sum(1 + (size.bit_length() + 6) // 7 + _zbound(size)
                                         for _, _, size in objects)
                 index = 8 + 256 * 4 + len(objects) * (width + 4 + 4 + 8) + 2 * width

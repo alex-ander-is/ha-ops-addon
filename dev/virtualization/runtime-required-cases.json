@@ -1725,6 +1725,24 @@
       "nodeids": [
         "test_native_network_publication.py::test_original_app_generate_deploy_key_and_legacy_ssh_authentication"
       ]
+    },
+    "native-storage": {
+      "selectors": [
+        "test_native_storage.py::test_real_compact_retains_every_object_and_exact_cleanup",
+        "test_native_storage.py::test_sha256_compact_retains_every_object",
+        "test_native_storage.py::test_no_refs_no_savings_repeated_explicit_compact",
+        "test_native_compact.py::test_guardian_timeout_kills_descendants_before_unlock",
+        "test_native_compact.py::test_guardian_parent_death_holds_lock_until_descendants_quiescent",
+        "test_native_compact.py::test_actual_observed_allocation_below_fixed_peak"
+      ],
+      "nodeids": [
+        "test_native_storage.py::test_real_compact_retains_every_object_and_exact_cleanup",
+        "test_native_storage.py::test_sha256_compact_retains_every_object",
+        "test_native_storage.py::test_no_refs_no_savings_repeated_explicit_compact",
+        "test_native_compact.py::test_guardian_timeout_kills_descendants_before_unlock",
+        "test_native_compact.py::test_guardian_parent_death_holds_lock_until_descendants_quiescent",
+        "test_native_compact.py::test_actual_observed_allocation_below_fixed_peak"
+      ]
     }
   }
 }

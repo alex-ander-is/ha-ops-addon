@@ -611,3 +611,31 @@ intent/source/control/namespace deletion. Run the existing native Apply,
 recovery, operations, disk, metadata and dormancy contours together after changes
 to these boundaries. Opt-in ext4 proofs must use the same final resource recipe;
 older measurements do not qualify changed controls.
+
+## Dormant storage Calculate and Compact (6.20)
+
+Run the new storage tests with the existing local Linux runner. Generic Linux
+covers one-snapshot diagnostics, durable failure/lifecycle state, same-instance
+one-shot reviews, exact cleanup, real SHA-1/SHA-256 Git maintenance, no-ref
+no-op/repeated operation, process-tree timeout/caller-death quiescence, actual
+sampled allocation peak, and real byte ENOSPC in the container's private tmpfs.
+Use the existing bounded ext4 inode profile with its unchanged mandatory
+`test_native_ext4.py` matrix plus
+`test_native_compact.py::test_real_inode_exhaustion_in_wrapper_ext4`; profile skips
+outside that invocation are not proof of inode exhaustion.
+
+The reviewed original-image `native-storage` group in
+`runtime-required-cases.json` checks the exact Git 2.54 command, SHA-1/SHA-256
+object preservation, no-ref repeated operation, guardian timeout/caller death
+and measured peak. Its fixed selectors/node IDs and pinned manifest hash are
+required; the Debian development image does not qualify the App toolchain.
+
+Run `ha-ops/tests/browser/storage-compact.mjs` through the shared persistent
+Playwright runtime. It serves the actual rebuilt bundle and relays only the
+qualified storage request schema to a disposable Linux NativeStorage worker.
+Record desktop/mobile screenshots, opaque categories, timestamp/free/pending
+projection, separate confirm/cancel, one actual Compact, disabled Vaadin styles,
+late replies, restart/refresh persistence and the exact absent/false qualifier.
+Artifacts and owned-tab/process records belong outside tracked release inputs.
+The browser runner closes only its recorded tab and fixture, retaining the
+shared profile and every unrelated tab.
