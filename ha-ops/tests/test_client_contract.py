@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import threading
 from types import SimpleNamespace
@@ -596,3 +597,13 @@ class ClientContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(shutil.which("node"), "Node source guards run on the host; shipped browser proof is separate")
+def test_storage_header_physical_sum_logic():
+    subprocess.run(['node', str(APP.parent / 'tests/browser/storage-header-source.cjs'), 'overhead'], check=True)
+
+
+@unittest.skipUnless(shutil.which("node"), "Node source guards run on the host; shipped browser proof is separate")
+def test_storage_header_warning_priority_logic():
+    subprocess.run(['node', str(APP.parent / 'tests/browser/storage-header-source.cjs'), 'warning'], check=True)

@@ -1173,11 +1173,19 @@ class HaOpsStorage extends LitElement {
   render(){
     if(this.model?.qualified!==true)return nothing;
     const m=this.model.measurement,r=this.review,attempt=this.model.attempt,attemptProblem=Boolean(attempt&&attempt.status!=="completed");
-    return html`<section data-testid="native-storage"><div class="row"><strong>Storage</strong>
+    const lowDisk=Boolean(m?.volumes?.some(volume=>volume.warning===true));
+    const attemptError=attemptProblem&&["failed","unavailable"].includes(attempt.status);
+    const maintenanceWarning=["effect-started","uncertain"].includes(this.model.maintenance?.status);
+    const severity=attemptError?"error":attemptProblem||maintenanceWarning||lowDisk?"warning":"idle";
+    const label=attemptError?attempt.status:lowDisk?"WARNING":attemptProblem?attempt.status:this.model.maintenance?.status||"Diagnostic";
+    const physical=m?m.categories.reduce((total,category)=>total+category.allocated_bytes,0):null;
+    return html`<section data-testid="native-storage"><div class="row" data-testid="storage-header"><strong>Storage</strong>
+      <span data-testid="storage-overhead">HA Ops overhead: ${m?`${this.size(physical)} physical allocated`:"Unknown"}</span>
       <vaadin-button ?disabled=${this.busy} @click=${()=>this.request("calculate")}>Calculate</vaadin-button>
       <vaadin-button ?disabled=${this.busy} @click=${()=>this.request("preview")}>Compact</vaadin-button>
       ${this.busy?html`<vaadin-progress-bar indeterminate aria-label="Storage action running"></vaadin-progress-bar>`:nothing}
-      <ha-ops-status-badge severity=${attemptProblem?(["failed","unavailable"].includes(attempt.status)?"error":"warning"):this.model.maintenance?.status==="uncertain"?"warning":"idle"} .label=${attemptProblem?attempt.status:this.model.maintenance?.status||"Diagnostic"}></ha-ops-status-badge></div>
+      <ha-ops-status-badge severity=${severity} .label=${label}></ha-ops-status-badge></div>
+      ${lowDisk?html`<p class="warning" role="status">Below 500 MiB on at least one volume in this measurement.</p>`:nothing}
       <p>${m?`Last completed Calculate: ${new Date(m.completed_at*1000).toLocaleString()}`:"No completed Calculate"}</p>
       ${m?html`<vaadin-details summary="Logical and physical usage"><table><thead><tr><th>Category</th><th>Logical</th><th>Physical allocated</th></tr></thead><tbody>${m.categories.map(c=>html`<tr><td>${({git:"Git metadata",staging:"Worktrees and staging",diff:"Diff artifacts",recovery:"Recovery data",service:"Service and control",authorization:"Browser authorization overhead"})[c.category]||"Unknown category"}</td><td>${this.size(c.logical_bytes)}</td><td>${this.size(c.allocated_bytes)}</td></tr>`)}</tbody></table>
       ${m.volumes.map(v=>html`<p class=${v.warning?"warning":""}>${v.volume} (${v.filesystem}): ${this.size(v.available_bytes)} available; ${v.available_inodes??"unknown"} inodes. ${v.warning?"Below 500 MiB advisory":""}</p>`)}

@@ -36,8 +36,22 @@ def worker(output,nonce):
         tree=git(root,'mktree',input=b'100644 blob '+blob+b'\tfixture\n').strip()
         commit=git(root,'commit-tree',tree.decode(),input=b'fixture\n').strip();git(root,'update-ref','refs/heads/fixture',commit.decode())
         def reopen():return native_storage.NativeStorage(native_disk.NativeDisk(root),native_git.NativeGit(root),native_operations.NativeOperationStore(root/'data'))
-        mutations=0
-        def model():return dict(**owner.status(),revision=0,mutation_count=mutations)
+        mutations=0;counts={'snapshots':0}
+        def configure(current):
+            from dataclasses import replace
+            snapshot=current.disk.snapshot;volume=current.disk._volume
+            def take():counts['snapshots']+=1;return snapshot()
+            current.disk.snapshot=take
+            current.disk._volume=lambda *args:replace(volume(*args),available=native_disk.WARNING_BYTES-1)
+            return current
+        owner=configure(owner)
+        def model():return dict(**owner.status(),revision=0,mutation_count=mutations,snapshot_count=counts['snapshots'])
+        def header_cases():
+            measured=model()['measurement'];rows=[]
+            for available in (native_disk.WARNING_BYTES-1,native_disk.WARNING_BYTES,native_disk.WARNING_BYTES+1):
+                volume=native_disk.Volume((1,),(),available,100,4096,b'tmpfs',True)
+                rows.append(dict(available=available,warning=volume.warning))
+            return rows
         write(output/('ready-'+nonce+'.json'),model())
         deadline=time.monotonic()+240
         while time.monotonic()<deadline and not (output/('stop-'+nonce)).exists():
@@ -46,13 +60,14 @@ def worker(output,nonce):
                 if target.exists():continue
                 try:
                     value=json.loads(request.read_text());action=value.get('action')
-                    if action=='restart':owner.lifecycle('restart');owner=reopen();result=model()
+                    if action=='restart':owner.lifecycle('restart');owner=configure(reopen());result=model()
                     elif action=='refresh':owner.lifecycle('refresh');result=model()
                     elif action=='status':result=model()
+                    elif action=='header_cases':result=dict(**model(),header_cases=header_cases())
                     else:
                         result=owner.request(value)
                         if action=='confirm':mutations+=1
-                        result=dict(**result,revision=0,mutation_count=mutations)
+                        result=dict(**result,revision=0,mutation_count=mutations,snapshot_count=counts['snapshots'])
                     result=dict(ok=True,model=result)
                 except Exception as error:result=dict(ok=False,message=type(error).__name__+':'+str(error))
                 write(target,result)
@@ -101,6 +116,7 @@ def host():
                     self.send(200,dict(schema_version=1,revision=model['revision'],backend_version='fixture',state=dict(last_status='idle'),text=EN_TEXT,view=dict(branch='isolated fixture',native_storage=model if not route.startswith('/legacy/') else None)));return
                 if route.endswith('/api/direct-access/setup'):
                     self.send(200,dict(suggested_port=8100,https=False,nonce='opaque-fixture-only'));return
+                if route=='/fixture/header-cases':self.send(200,rpc(dict(action='header_cases')));return
                 if route=='/fixture/status':self.send(200,rpc(dict(action='status')));return
                 self.send(404,{})
             def do_POST(self):
