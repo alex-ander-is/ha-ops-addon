@@ -1,7 +1,7 @@
 # Dormant optional migration preparation (6.21)
 
-`app/native_migration.py` is an explicit Python diagnostic API. No production
-module imports it. It does not migrate files, initialize Git, create a native
+`app/native_migration.py` is an explicit Python diagnostic API. Only the dormant Disk recipe validator imports it; no production
+entrypoint imports it. It does not migrate files, initialize Git, create a native
 operation, select scope, restore consent, run a worker, or activate native mode.
 Steps 6.22–6.24 must obtain their own reviewed inputs and authority. A prepared
 observation, including one whose inputs are current, grants none of them.
@@ -9,7 +9,7 @@ observation, including one whose inputs are current, grants none of them.
 ## Caller contract
 
 Construct `Preparation(binding, app_identity=..., manifest_digest=...,
-options=...)` with a qualified `native_metadata.Binding`, current real mount
+options=..., disk=None)` with a qualified `native_metadata.Binding`, current real mount
 evidence, an explicit App/runtime compatibility identity, a SHA-256 commitment
 to the resolved legacy manifest, and a callable for current direct-access
 options. Construction is inert. The caller resolves legacy configuration first;
@@ -36,10 +36,12 @@ is a portable host-test seam only; Linux uses current kernel mountinfo.
 
 ## Explicit methods and lifecycle
 
-- `observe()` performs two complete observations and refuses cooperative churn.
+- `observe()` records two inventories and compares their canonical migration-input
+  projections. Native diagnostic membership and payload churn have no input authority.
 - `prepare(expected=...)` explicitly reobserves immediately before persisting.
   `expected=None` requires no existing candidate. Otherwise supply the digest
-  returned by the last read; a concurrent replacement raises `Conflict`.
+  returned by the last read; a detected concurrent candidate replacement raises
+  `Conflict`. A competing admission mutex may refuse before candidate CAS.
 - `read()` validates and returns persisted diagnostics, or `None` for absence.
   It does no source, Git, private-payload, worker or automatic validation work.
   Absence is returned only after safely acquiring the root and data anchors;
@@ -62,9 +64,11 @@ Independent filesystem traversal records regular files, directories including
 empty ones, unsupported symlink/special/hardlink leaves, ignored/untracked
 files, nested Git boundaries and exact byte names. The legacy route cannot overlap fixed auth/service/operation/recovery/native
 control/preparation namespaces. Known private directories
-are visible as excluded boundaries and are not traversed. Eligible regular
-contents are streamed into SHA-256 without a per-file size cap or retained
-payload. Numeric UID/GID, full `07777` mode, stat identity, size, mtime and ctime
+are visible as excluded boundaries and are not traversed. Eligible source regular contents and participating native destinations are streamed
+into SHA-256 without a per-file size cap or retained payload. Native-only objects
+carry explicit `diagnostic-only` reasons (with any unsupported-type detail), have
+no content digest, and produce diagnostic layout rows. Their disappearance during
+traversal is best-effort; unsafe routes and participating path failures still refuse. Numeric UID/GID, full `07777` mode, stat identity, size, mtime and ctime
 are recorded; legacy-root metadata has its own binding field outside the real
 filename namespace. No atime preservation is claimed.
 
@@ -157,3 +161,40 @@ for arbitrary byte paths, numeric owners and full special modes. Portable host
 checks and generic Linux tests do not qualify the original App image, physical
 native allocation, ACL/xattr restoration or any later filesystem transition.
 There is no new UI/browser contour. See the focused commands in `TESTING.md`.
+
+## Stable commitment and admitted persistence
+
+Schema 2 stores an `input_digest` of one shared canonical projection used by the
+observation double check, final preparation check and explicit revalidation.
+Complete Git index-only mappings participate even when the checkout leaf is
+absent. Mapped target roots and required ancestors retain device, inode, full
+mode, UID/GID and mount identity. Only native directory size, link count and
+mtime/ctime membership noise is normalized. Source directories and participating
+regular-file contents and metadata remain strict. Diagnostic descriptors remain
+in the saved review inventory; `current` validates inputs without refreshing that
+inventory. Earlier schema candidates are refused rather than silently upgraded.
+The projection is invariant under JSON serialization: required native-parent
+`before` and `after` descriptors are normalized independently, while source
+directory metadata remains exact. Excluded, retired and unresolved source rows
+retain strict source/index evidence; their live diagnostic counterparts and
+derived change labels do not enter the commitment.
+
+Persistence defaults to a genuine same-root NativeDisk; an explicit participant
+must use that root and its own issued layout/snapshot/plan. Serialize and validate
+the complete bounded candidate and choose its exact `.pending-<32 hex>` address
+before the one Disk snapshot. The explicit migration `storage_control` recipe
+accounts old/new/temporary overlap, required directories, the shared admission
+lock and failure reserves. No candidate mkdir/open/write/replace precedes guard
+entry. Directory and completed temporary-file receipts bind executor effects;
+targeted revalidation retains the initial forecast without charging own writes
+again. The common Disk mutex is acquired before the preparation-directory flock.
+
+Persistence requires qualified allocation/mount evidence and admitted idle
+operation state. Unsupported filesystems, incomplete accounting, stale routes,
+foreign locks and active or malformed competitors refuse before candidate writes.
+An observation can still show safe redacted pending-operation diagnostics.
+Both stale-marker branches use this same guard and one-snapshot path; an admission
+denial returns `unavailable`, retaining the previous candidate bytes. Existing
+CAS, owned-temp cleanup and post-replace `PersistenceUncertain` behavior remain.
+The fixed mutex can bootstrap from an existing `data` directory without creating
+`data/native`; it grants no migration execution authority.

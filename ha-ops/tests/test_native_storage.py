@@ -427,3 +427,19 @@ def test_foreign_or_unavailable_generation_never_adopts_old_error(storage):
     with mock.patch.object(old,'_mark_attempt',side_effect=d.Blocked('unsupported allocator')):
         with pytest.raises(d.Blocked):old.calculate()
     assert old.status()['attempt'] is None
+
+
+def test_calculate_default_layout_counts_candidate_and_pending_residue(storage):
+    root,s=storage
+    directory=root/'data/native-migration-preparation';directory.mkdir(mode=0o700)
+    (directory/'candidate.json').write_bytes(b'candidate'*1000)
+    (directory/('.pending-'+'a'*32)).write_bytes(b'residue'*2000)
+    for file in directory.iterdir():file.chmod(0o600)
+    baseline=s.disk.snapshot()
+    expected=next(row for row in baseline.categories if row[0]=='service')
+    with mock.patch.object(s.disk,'snapshot',wraps=s.disk.snapshot) as snapshot:
+        view=s.calculate();assert snapshot.call_count==1
+    actual=next(row for row in view['measurement']['categories'] if row['category']=='service')
+    assert actual['logical_bytes']==expected[1]
+    assert actual['allocated_bytes']==expected[2]
+    assert (directory/('.pending-'+'a'*32)).read_bytes()==b'residue'*2000

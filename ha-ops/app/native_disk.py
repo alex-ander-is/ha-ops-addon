@@ -26,6 +26,9 @@ import uuid
 
 from native_inventory import Inventory, beneath, linux_mounts, path_bytes
 
+ADMISSION_LOCK = b"data/.native-disk-admission.lock"
+MIGRATION_STORE = b"data/native-migration-preparation"
+
 WARNING_BYTES = 500 * 1024**2
 CATEGORIES = ("git", "staging", "diff", "recovery", "service", "authorization")
 _THREAD_LOCKS = {}
@@ -220,7 +223,7 @@ class Layout:
 
     @property
     def anchors(self):
-        return (b"data/native", b"data/native-operations", b"data/direct-auth") + self.legacy
+        return (b"data/native", b"data/native-operations", b"data/direct-auth", MIGRATION_STORE, ADMISSION_LOCK) + self.legacy
 
 
 @dataclass(frozen=True)
@@ -474,6 +477,7 @@ class _Context:
     prospective_owner: tuple | None
     prospective_shape: str | None
     publication_states: tuple = ()
+    capacity_witnesses: tuple = ()
 
 
 class NativeDisk:
@@ -1048,6 +1052,21 @@ class NativeDisk:
                     prospective = value
             state_limit = max(self._state_envelope(state) if state is not None else 0,
                               self._state_envelope(prospective) if prospective is not None else 0)
+        witnesses = {}
+        outputs=dict(plan.output_files)
+        for item in plan.provenance:
+            if item[0]!='destination': continue
+            path=self.root+b'/'+item[1]
+            current=os.path.dirname(path) if path in outputs else path
+            while not _optional_stat(current): current=os.path.dirname(current)
+            with _directory(current, observations=routes) as fd:
+                volume=self._volume(current,fd,mounts)
+                if volume.key in {d.volume for d in plan.decisions}:
+                    prior=witnesses.get(volume.key)
+                    if prior is None or len(current)>len(prior[0]):
+                        witnesses[volume.key]=(current,_identity(os.fstat(fd)),self._mount(current,os.fstat(fd),mounts)[1],volume.quantum,volume.filesystem)
+        if set(witnesses) != {d.volume for d in plan.decisions}:
+            raise Blocked('missing-capacity-witness')
         return _Context(snapshot, tuple(cache.items()), tuple(sources), tuple(sorted(routes.items())),
                         tuple(sorted(dependencies.items())), tuple(sorted(memberships.items())), tuple(sorted(owner_locks.items())), tuple(sorted(mount_proofs.items())), tuple(sorted(counts.items())),
                         self._resource_bound, self._resource_entry_bound,plan.network_cap,binding,
@@ -1059,7 +1078,7 @@ class NativeDisk:
                             ([len(plan.evidence.candidate_rules)] if plan.evidence.candidate_rules is not None else []))),
                         tuple(sorted(self._materialized_sizes.items())),
                         self._state_binding(prospective) if prospective is not None else None,
-                        self._state_shape(prospective) if prospective is not None else None, publication_states)
+                        self._state_shape(prospective) if prospective is not None else None, publication_states, tuple(sorted(witnesses.items(), key=repr)))
 
     def _category(self, path):
         relative = path[len(self.root) + 1:]
@@ -1073,6 +1092,8 @@ class NativeDisk:
             return "diff"
         if beneath(relative, b"data/native/recovery"):
             return "recovery"
+        if beneath(relative, MIGRATION_STORE) or relative == ADMISSION_LOCK:
+            return "service"
         if any(beneath(relative, p) for p in self.layout.legacy):
             return "staging"
         return "service"
@@ -1100,6 +1121,14 @@ class NativeDisk:
             key = (s.st_dev, s.st_ino)
             value = _observation(s)
             observations[path] = value
+            relative=path[len(self.root)+1:]
+            if beneath(relative,MIGRATION_STORE):
+                if relative==MIGRATION_STORE:
+                    safe=stat.S_ISDIR(s.st_mode) and stat.S_IMODE(s.st_mode)==0o700 and s.st_uid==os.geteuid()
+                else:
+                    name=relative[len(MIGRATION_STORE)+1:]
+                    safe=(name==b'candidate.json' or re.fullmatch(rb'\.pending-[0-9a-f]{32}',name)) and stat.S_ISREG(s.st_mode) and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600 and s.st_uid==os.geteuid()
+                if not safe: issue('unrecognized-or-unsafe-migration-storage-entry:'+repr(relative))
             if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)):
                 issue("unsafe-authorization-storage" if beneath(path,self.root+b"/data/direct-auth") else "unsafe-private-object:" + repr(path))
                 return
@@ -1159,7 +1188,7 @@ class NativeDisk:
                             finally:
                                 os.close(fd)
                         else:
-                            if stat.S_ISREG(s.st_mode):
+                            if stat.S_ISREG(s.st_mode) and not beneath(path,self.root+b"/data/direct-auth"):
                                 leaf = os.open(os.path.basename(path), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
                                 try:
                                     if _observation(os.fstat(leaf)) != _observation(s):
@@ -1171,9 +1200,14 @@ class NativeDisk:
                                     os.close(leaf)
                             else:
                                 v = self._volume(os.path.dirname(path), parent, mounts)
+                                if stat.S_ISREG(s.st_mode) and beneath(path,self.root+b"/data/direct-auth"):
+                                    if self._mount(path,s,mounts)[:2]!=self._mount(os.path.dirname(path),os.fstat(parent),mounts)[:2]:
+                                        raise Blocked('mounted-authorization-leaf-unavailable')
+                                    if s.st_uid!=os.geteuid(): issue('unsafe-authorization-storage')
                             merge_volume(v)
                             observe(path, s, forced or self._category(path), v.key)
-                            if _observation(os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)) != _observation(s):
+                            after=os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)
+                            if _observation(after) != _observation(s) or (after.st_uid,after.st_gid)!=(s.st_uid,s.st_gid):
                                 raise Blocked("changed-private-leaf")
                 except (OSError, ValueError) as exc:
                     issue("unavailable-authorization-storage" if beneath(path,self.root+b"/data/direct-auth") else str(exc) + ":" + repr(path))
@@ -1181,7 +1215,7 @@ class NativeDisk:
                 if stat.S_ISREG(observations[path][2]) and links != len(names):
                     issue("uncertain-authorization-hardlink" if beneath(path,self.root+b"/data/direct-auth") else "uncertain-cross-boundary-hardlink:" + repr(path))
                 v = volumes[key]
-                control = logical if os.path.basename(path) in (b"state.json", b"journal.json", b"manifest.json") else 0
+                control = logical if os.path.basename(path) in (b"state.json", b"journal.json", b"manifest.json", b"candidate.json") else 0
                 volumes[key] = replace(v, allocated=v.allocated + allocated,
                                        largest_control=max(v.largest_control, control))
             rows = tuple((c, sum(o[1] for o in objects.values() if o[0] == c),
@@ -1427,12 +1461,33 @@ class NativeDisk:
         if snapshot.layout_digest != self.layout_digest:
             raise Blocked("different-layout-snapshot")
         diagnostic_control = kind == "storage_control"
-        if diagnostic_control and (len(evidence.controls)!=2 or any(control.target.path!=b"data/native/storage-status.json" or len(control.payload)>65536 for control in evidence.controls) or evidence.selected or evidence.copies or evidence.metadata or evidence.incoming is not None or evidence.publication is not None or evidence.scope_preparation is not None):
-            raise Blocked("exact bounded storage diagnostic recipe required")
+        migration_control = diagnostic_control and any(beneath(c.target.path, MIGRATION_STORE) for c in evidence.controls)
+        if diagnostic_control:
+            if (evidence.selected or evidence.copies or evidence.metadata or evidence.replacements
+                    or evidence.incoming is not None or evidence.incoming_index is not None
+                    or evidence.publication is not None or evidence.scope_preparation is not None
+                    or evidence.materialize or evidence.base_tree is not None or evidence.diff is not None
+                    or evidence.commit is not None or evidence.ref is not None or evidence.reflog_entry is not None
+                    or evidence.candidate_manifest is not None or evidence.candidate_rules is not None
+                    or evidence.candidate_removals or evidence.candidate_final):
+                raise Blocked('exact bounded storage diagnostic recipe required')
+            if migration_control:
+                from native_migration import _validate_candidate, MAX_CONTROL
+                if (len(evidence.controls)!=2 or evidence.controls[0].target.path!=MIGRATION_STORE+b'/candidate.json'
+                        or not re.fullmatch(rb'data/native-migration-preparation/\.pending-[0-9a-f]{32}', evidence.controls[1].target.path)
+                        or any(c.target.kind!='file' or len(c.payload)>MAX_CONTROL
+                            or (c.operation_id,c.owner_id)!=(evidence.operation_id,evidence.owner_id) for c in evidence.controls)
+                        or evidence.controls[0].payload!=evidence.controls[1].payload):
+                    raise Blocked('exact migration candidate recipe required')
+                candidate=_validate_candidate(_control_json(evidence.controls[0].payload))
+                if (candidate['generation'],candidate['digest'])!=(evidence.operation_id,evidence.owner_id):
+                    raise Blocked('migration candidate owner binding required')
+            elif (len(evidence.controls)!=2 or any(c.target.path!=b'data/native/storage-status.json' or len(c.payload)>65536 for c in evidence.controls)):
+                raise Blocked('exact bounded storage diagnostic recipe required')
         # Incomplete accounting does not invent baseline capacity authority:
         # this narrow recipe requalifies only its exact diagnostic destination,
         # existing bounded preimage and full atomic/failure envelope.
-        unknown = [] if diagnostic_control else list(snapshot.issues)
+        unknown = [] if diagnostic_control and not migration_control else list(snapshot.issues)
         allocations, volumes, provenance = [], {v.key: v for v in snapshot.volumes}, [("root", snapshot.root_identity)]
         generated_controls = {}
         self._resource_bound = 0
@@ -1499,8 +1554,12 @@ class NativeDisk:
             return v
 
         try:
-            if not snapshot.complete and not diagnostic_control:
+            if not snapshot.complete and (not diagnostic_control or migration_control):
                 raise Blocked("incomplete-accounting-no-git-content-observation")
+            # The shared fixed lock is a projected executor infrastructure effect.
+            add(Target(ADMISSION_LOCK), 0, 'admission-lock-infrastructure', proof=('bytes',b''))
+            if namespace[self.root+b'/'+ADMISSION_LOCK] is not None:
+                allocations[:] = [a for a in allocations if a.output!='admission-lock-infrastructure']
             if state_bound:
                 v = add(b"data/native-operations", state_bound, "full-prospective-operation-state")
                 generated_controls[v.key] = state_bound
@@ -2297,6 +2356,25 @@ class NativeDisk:
             if _optional_stat(self.root + b"/" + legacy + b"/.git/index.lock"):
                 raise Blocked("competing-legacy-writer")
 
+    def _current_capacity(self, plan, context, *, realized_lock=False):
+        """Bounded fstatvfs witnesses; no tree observation or forecast renewal."""
+        mounts=linux_mounts() if os.path.exists('/proc/self/mountinfo') else None
+        witnesses=dict(context.capacity_witnesses)
+        for decision in plan.decisions:
+            path,identity,route,quantum,filesystem=witnesses[decision.volume]
+            with _directory(path) as fd:
+                if _identity(os.fstat(fd))!=identity:
+                    raise Blocked('changed-capacity-witness')
+                volume=self._volume(path,fd,mounts)
+                if (volume.key!=decision.volume or self._mount(path,os.fstat(fd),mounts)[1]!=route
+                        or volume.quantum!=quantum or volume.filesystem!=filesystem or not volume.supported):
+                    raise Blocked('changed-capacity-profile')
+            credit=[a for a in plan.allocations if realized_lock and a.volume==decision.volume and a.output=='admission-lock-infrastructure']
+            required=decision.additional_peak+decision.reserve-sum(a.allocated for a in credit)
+            inodes=decision.required_inodes-sum(a.inodes for a in credit)
+            if volume.available<required or volume.inodes is not None and volume.inodes<inodes:
+                raise InsufficientSpace('current-capacity-insufficient')
+
     @contextmanager
     def guard(self, plan):
         if self._plans.get(id(plan)) is not plan or plan.layout_digest != self.layout_digest:
@@ -2305,7 +2383,12 @@ class NativeDisk:
             raise Blocked("nested-or-competing-guard")
         if id(plan) not in self._contexts:
             raise Blocked("used-or-ended-diagnostic-plan")
-        lockpath = self.root + b"/data/native/disk-admission.lock"
+        if plan.unknown or not plan.decisions or self._contexts[id(plan)] is None:
+            raise Blocked('cannot-establish-admission:'+repr(plan.unknown))
+        if any(d.status=='insufficient-space' for d in plan.decisions):
+            raise InsufficientSpace('insufficient-space:'+repr(plan.decisions))
+        if any(d.status!='fits' for d in plan.decisions): raise Blocked('cannot-establish-admission')
+        lockpath = self.root + b'/' + ADMISSION_LOCK
         with _THREAD_LOCKS_MUTEX:
             local = _THREAD_LOCKS.setdefault(lockpath, threading.Lock())
         if not local.acquire(blocking=False):
@@ -2313,18 +2396,49 @@ class NativeDisk:
         fd = None
         primary = None
         try:
+            preflight=Admission(self,plan,None,lockpath,None)
+            preflight._check_namespace(except_path=lockpath)
+            preflight._validate_context()
             with _directory(os.path.dirname(lockpath)) as parent:
-                fd = os.open(os.path.basename(lockpath), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                             0o600, dir_fd=parent)
+                name=os.path.basename(lockpath)
+                flags=os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+                previous_lock=dict(plan.namespace).get(lockpath)
+                try:
+                    # A peer may have realized this exact infrastructure after
+                    # our snapshot. Acquiring it has no allocation demand.
+                    fd=os.open(name,flags,dir_fd=parent)
+                except FileNotFoundError:
+                    # A known inode is a strict namespace dependency, never a
+                    # bootstrap opportunity. This plan has no creation demand.
+                    if previous_lock is not None:
+                        raise Blocked('snapshot-known-admission-lock-missing') from None
+                    try:
+                        self._current_capacity(plan,preflight._context)
+                    except InsufficientSpace as shortage:
+                        # It may have appeared during the capacity check itself.
+                        # A present lock needs no allocation; qualify it below.
+                        try: fd=os.open(name,flags,dir_fd=parent)
+                        except FileNotFoundError: raise shortage
+                    else:
+                        try:
+                            fd=os.open(name,flags | os.O_CREAT | os.O_EXCL,0o600,dir_fd=parent)
+                        except FileExistsError:
+                            # A peer won only the absent-lock bootstrap. Never
+                            # recreate or overwrite the now-existing mutex.
+                            fd=os.open(name,flags,dir_fd=parent)
                 info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600:
+                if previous_lock is not None and _identity(info)!=previous_lock:
+                    raise Blocked('changed-admission-lock-before-entry')
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
                     raise Blocked("private-single-link-lock-required")
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError as exc:
                     raise Blocked("competing-process-guard") from exc
                 admission = Admission(self, plan, fd, lockpath, _identity(info))
+                admission._namespace[lockpath]=_identity(info)
                 try:
+                    self._current_capacity(plan,admission._context,realized_lock=True)
                     admission.revalidate()
                     self._active_operation = plan.evidence.operation_id
                     self._candidate_admission = admission if plan.kind in ("candidate", "publication", "scope_control") else None
@@ -2975,7 +3089,7 @@ class Admission:
         if self._disk.layout_digest != self._baseline.layout_digest:
             raise Blocked("changed-guard-layout")
         info = os.stat(self.path, follow_symlinks=False)
-        if _identity(info) != self.identity or info.st_nlink != 1 or _identity(os.fstat(self.fd)) != self.identity:
+        if _identity(info) != self.identity or info.st_nlink != 1 or info.st_uid!=os.geteuid() or _identity(os.fstat(self.fd)) != self.identity:
             raise Blocked("replaced-admission-lock")
         if self._baseline.unknown or not self._baseline.decisions or self._context is None:
             raise Blocked("cannot-establish-admission:" + repr(self._baseline.unknown))

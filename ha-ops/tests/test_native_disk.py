@@ -87,10 +87,10 @@ def test_import_construction_and_snapshot_observe_without_writes(fixture):
     assert report.complete, report.issues
     after = filesystem_evidence()
     assert before == after
-    assert not (root / "data/native/disk-admission.lock").exists()
+    assert not (root / "data/.native-disk-admission.lock").exists()
     app = Path(d.__file__).parent
     assert all("import native_disk" not in p.read_text() and "from native_disk" not in p.read_text()
-               for p in app.glob("*.py") if p.name not in ("native_disk.py", "native_git.py", "native_save.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_services.py", "native_operations.py", "native_storage.py"))
+               for p in app.glob("*.py") if p.name not in ("native_migration.py", "native_disk.py", "native_git.py", "native_save.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_services.py", "native_operations.py", "native_storage.py"))
 
 
 def test_categories_orphans_sparse_directories_and_original_exclusion(fixture):
@@ -554,8 +554,8 @@ def test_stale_same_inode_timestamp_source_and_lock_replacement(fixture):
                 guard.revalidate()
         plan = disk.project("scope", disk.snapshot(), request())
         with disk.guard(plan) as guard:
-            os.unlink(root / "data/native/disk-admission.lock")
-            write(root, "data/native/disk-admission.lock")
+            os.unlink(root / "data/.native-disk-admission.lock")
+            write(root, "data/.native-disk-admission.lock")
             with pytest.raises(d.Blocked, match="replaced-admission-lock"):
                 guard.revalidate()
 
@@ -1495,10 +1495,9 @@ def test_exact_prospective_owner_format_keeps_canonical_schema_validation(fixtur
 
 def forbid_full_phase_observations(disk, monkeypatch):
     def forbidden(*args, **kwargs):
-        raise AssertionError('phase attempted full accounting, capacity or Git enumeration')
-    for name in ('snapshot', 'project', '_scan', '_entries', '_objects', '_volume', '_destination', '_profile', '_git'):
+        raise AssertionError('phase attempted full accounting or Git enumeration')
+    for name in ('snapshot', 'project', '_scan', '_entries', '_objects', '_destination', '_profile', '_git'):
         monkeypatch.setattr(disk, name, forbidden)
-    monkeypatch.setattr(d.os, 'fstatvfs', forbidden)
 
 
 def test_one_initial_forecast_survives_phases_time_and_actual_own_index(fixture, monkeypatch):
@@ -2687,7 +2686,7 @@ def test_local_initial_io_failure_releases_fence_without_claiming_entry(fixture,
         plan = disk.project('scope', disk.snapshot(), request())
         original = os.open
         def fail_admission(path, *args, **kw):
-            if path in (b'disk-admission.lock', 'disk-admission.lock'):
+            if path in (b'.native-disk-admission.lock', '.native-disk-admission.lock') and args[0] & os.O_CREAT:
                 raise OSError(errno.ENOSPC, 'isolated admission lock allocation failure')
             return original(path, *args, **kw)
         with monkeypatch.context() as patch:
@@ -3734,3 +3733,83 @@ def test_known_reflog_complete_preimage_positive_keeps_frozen_floor(fixture, mon
         with disk.guard(plan) as admission:
             for _ in range(2): assert admission.revalidate() is plan
             assert (plan.allocations, plan.reserves, plan.decisions) == floor
+
+
+def test_default_candidate_and_pending_accounting_without_legacy_double_count(tmp_path):
+    root=Path(os.path.realpath(tmp_path));(root/'data').mkdir()
+    write(root,'data/native-migration-preparation/candidate.json',b'x'*6000)
+    write(root,'data/native-migration-preparation/.pending-'+('a'*32),b'y'*9000)
+    write(root,'data/.native-disk-admission.lock',b'')
+    (root/'data/native-migration-preparation').chmod(0o700)
+    for file in (root/'data/native-migration-preparation').iterdir():file.chmod(0o600)
+    disk=d.NativeDisk(root);snapshot=disk.snapshot()
+    overlap=d.NativeDisk(root,layout=d.Layout(legacy=(b'data/native-migration-preparation',))).snapshot()
+    assert snapshot.complete and overlap.complete
+    assert snapshot.categories==overlap.categories
+    service=next(row for row in snapshot.categories if row[0]=='service')
+    expected=sum(p.stat().st_blocks*512 for p in (root/'data/native-migration-preparation').iterdir())+(root/'data/native-migration-preparation').stat().st_blocks*512
+    assert service[1]==15000 and service[2]==expected
+    assert len([path for path,value in snapshot.observations if value is not None])==4
+
+
+def status_recipe():
+    payload=b'{"operation_id":"op","owner_id":"owner"}'
+    return d.Evidence('op','owner',controls=tuple(d.Control(b'data/native/storage-status.json',payload,'op','owner') for _ in range(2)))
+
+
+@pytest.mark.parametrize('resource',['bytes','inodes'])
+def test_preissued_disjoint_status_plan_checks_current_capacity_under_common_lock(fixture,monkeypatch,resource):
+    root,disk=fixture
+    write(root,'data/.native-disk-admission.lock',b'');os.chmod(root/'data/.native-disk-admission.lock',0o600)
+    second=d.NativeDisk(root);state={'bytes':10**9,'inodes':10**6};checks=[]
+    with operational(disk),operational(second):
+        for participant in (disk,second):
+            original=participant._volume
+            def volume(path,fd,mounts,original=original):
+                checks.append(path)
+                return replace(original(path,fd,mounts),available=state['bytes'],inodes=state['inodes'])
+            monkeypatch.setattr(participant,'_volume',volume)
+        # Different exact target kinds; both issue fits before either executor.
+        plan=disk.project('scope',disk.snapshot(),request())
+        delayed=second.project('storage_control',second.snapshot(),status_recipe())
+        assert all(row.status=='fits' for row in plan.decisions+delayed.decisions)
+        with disk.guard(plan):pass
+        decision=delayed.decisions[0]
+        state[resource]=decision.additional_peak+decision.reserve-1 if resource=='bytes' else decision.required_inodes-1
+        effects=[]
+        with pytest.raises(d.InsufficientSpace):
+            with second.guard(delayed):effects.append('write')
+        assert not effects
+        assert not (root/'data/native/storage-status.json').exists()
+
+
+def test_auth_snapshot_never_opens_payload_and_rejects_unsafe_leaf(fixture,monkeypatch):
+    root,disk=fixture;write(root,'data/direct-auth/tokens.json',b'private')
+    original=d.os.open
+    def unopened(path,*a,**kw):
+        assert os.fsencode(path)!=b'tokens.json'
+        return original(path,*a,**kw)
+    monkeypatch.setattr(d.os,'open',unopened)
+    assert disk.snapshot().complete
+    (root/'data/direct-auth/tokens.json').unlink();(root/'data/direct-auth/tokens.json').symlink_to('/etc/passwd')
+    assert not disk.snapshot().complete
+
+
+def test_unknown_candidate_store_residue_is_counted_as_issue_without_cleanup(tmp_path):
+    root=Path(os.path.realpath(tmp_path));(root/'data').mkdir()
+    path=Path(os.fsdecode(write(root,'data/native-migration-preparation/foreign',b'foreign'*1000)))
+    (root/'data/native-migration-preparation').chmod(0o700);path.chmod(0o600)
+    snapshot=d.NativeDisk(root).snapshot()
+    assert not snapshot.complete and any('migration-storage-entry' in item for item in snapshot.issues)
+    assert snapshot.logical==7000 and path.read_bytes()==b'foreign'*1000
+
+
+def test_stat_only_auth_leaf_retains_mount_route_qualification(fixture,monkeypatch):
+    root,disk=fixture;write(root,'data/direct-auth/tokens.json',b'private')
+    original=disk._mount
+    def route(path,info,mounts):
+        key,mount,fs,supported=original(path,info,mounts)
+        return (key,('foreign-leaf-route',),fs,supported) if path.endswith(b'/tokens.json') else (key,mount,fs,supported)
+    monkeypatch.setattr(disk,'_mount',route)
+    snapshot=disk.snapshot()
+    assert not snapshot.complete and 'unavailable-authorization-storage' in snapshot.issues

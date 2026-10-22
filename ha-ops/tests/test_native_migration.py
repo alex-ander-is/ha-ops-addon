@@ -15,9 +15,22 @@ import pytest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import native_migration as n
+import native_disk as disk_module
 from native_inventory import Mount, Policy, linux_mounts
 from native_metadata import Binding
 from direct_auth import Authority
+
+
+@pytest.fixture(autouse=True)
+def synthetic_host_allocation():
+    """Portable logic only; real Linux tests retain kernel allocation profiles."""
+    if sys.platform != 'linux':
+        original=disk_module.NativeDisk._mount
+        def mount(self,path,info,mounts):
+            key,identity,fs,supported=original(self,path,info,mounts)
+            return key,identity,b'tmpfs',True
+        with mock.patch.object(disk_module.NativeDisk,'_mount',mount): yield
+    else: yield
 
 
 def git(root,*args,input=None):
@@ -65,6 +78,7 @@ def frozen(root):
             result[os.fsencode(path.relative_to(root))]=(s.st_mode,s.st_uid,s.st_gid,s.st_mtime_ns,s.st_ctime_ns,raw)
     # /data membership legitimately gains the dedicated preparation directory.
     result.pop(b'data',None)
+    result.pop(b'data/.native-disk-admission.lock',None)
     return result
 
 
@@ -290,7 +304,7 @@ def test_strict_candidate_corruption_refusal(tmp_path,damage):
     if damage=='duplicate':path.write_bytes(b'{"schema":1,"schema":1}')
     elif damage in ('unknown','schema','path','digest'):
         if damage=='unknown':raw['operation']={}
-        if damage=='schema':raw['schema']=2
+        if damage=='schema':raw['schema']=3
         if damage=='path':raw['observation']['source'][0]['path']='Li4veA=='
         if damage=='digest':raw['digest']='0'*64
         path.write_bytes(n._json(raw))
@@ -304,7 +318,7 @@ def test_strict_candidate_corruption_refusal(tmp_path,damage):
 def test_no_authority_or_production_import():
     app=Path(n.__file__).parent
     for path in app.glob('*.py'):
-        if path.name=='native_migration.py':continue
+        if path.name in ('native_migration.py','native_disk.py'):continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node,ast.Import):assert all(i.name.split('.')[-1]!='native_migration' for i in node.names)
             if isinstance(node,ast.ImportFrom):
@@ -320,14 +334,16 @@ def test_pending_ha_ops_state_is_separate_safe_and_invalidates(tmp_path):
         save_push_retry_pending=True,last_diff='CANARY_DIFF_PAYLOAD')))
     write(root,b'data/native-operations/state.json',n._json(dict(active='CANARY_OPERATION_ID',
         workers={'x':{'phase':'accepted'}},records={'x':{}},scope_pending={'x':'CANARY_SCOPE_PAYLOAD'})))
-    before=frozen(root);first=p.prepare(expected=None)
+    before=frozen(root);first={'observation':p.observe()}
+    with pytest.raises(n.Blocked):p.prepare(expected=None)
+    assert p.read() is None
     assert frozen(root)==before
     op=first['observation']['operations']
     assert op['legacy']['summary']['active_present'] and op['native']['summary']['pending_present']
     assert op['native']['summary']['workers']==1 and 'pending-ha-ops-operation' in first['observation']['blockers']
     for canary in (b'CANARY_OPERATION_SECRET',b'CANARY_DIFF_PAYLOAD',b'CANARY_OPERATION_ID',b'CANARY_SCOPE_PAYLOAD'):
         assert canary not in n._json(first)
-    write(root,b'data/state.json',b'{}');assert p.revalidate()=='stale'
+    assert not (root/'data/native-migration-preparation').exists()
 
 
 def test_missing_index_secret_gets_excluded_before_layout(tmp_path):
@@ -397,7 +413,7 @@ def test_foreign_candidate_during_write_is_preserved(tmp_path,monkeypatch):
 def test_create_open_failure_preserves_absence(tmp_path,monkeypatch):
     root,repo,p=setup(tmp_path);original=os.open
     def denied(path,flags,*args,**kwargs):
-        if os.fsencode(path).startswith(b'.pending-'):raise OSError('fixture O_EXCL ENOSPC')
+        if flags & os.O_CREAT and os.fsencode(path).startswith(b'.pending-'):raise OSError('fixture O_EXCL ENOSPC')
         return original(path,flags,*args,**kwargs)
     monkeypatch.setattr(n.os,'open',denied)
     with pytest.raises(OSError):p.prepare(expected=None)
@@ -411,6 +427,7 @@ def test_independent_process_cas_has_exactly_one_winner(tmp_path):
         start.wait(5)
         try:queue.put(('prepared',p.prepare(expected=None)['digest']))
         except n.Conflict:queue.put(('conflict',None))
+        except n.Blocked:queue.put(('blocked',None))
         except BaseException as error:queue.put(('error',type(error).__name__))
     children=[ctx.Process(target=worker) for _ in range(2)]
     for child in children:child.start()
@@ -418,7 +435,8 @@ def test_independent_process_cas_has_exactly_one_winner(tmp_path):
     try:
         results=[queue.get(timeout=15) for _ in children]
         for child in children:child.join(5);assert child.exitcode==0
-        assert sorted(result[0] for result in results)==['conflict','prepared']
+        assert sum(result[0]=='prepared' for result in results)==1
+        assert all(result[0] in ('prepared','conflict','blocked') for result in results)
         assert p.read()['digest']==next(value for status,value in results if status=='prepared')
     finally:
         for child in children:
@@ -468,10 +486,10 @@ def test_native_unsupported_leaves_keep_detailed_blockers(tmp_path):
     (root/'homeassistant/link').symlink_to('/foreign')
     os.mkfifo(root/'homeassistant/fifo',0o600)
     ob=p.observe();native={n.decode_path(row['path']):row for row in ob['native']}
-    assert native[b'homeassistant/link']['reason']=='unsupported-symlink'
-    assert native[b'homeassistant/fifo']['reason']=='unsupported-special'
-    assert any(reason.startswith('unsupported-symlink:') for reason in ob['blockers'])
-    assert any(reason.startswith('unsupported-special:') for reason in ob['blockers'])
+    assert native[b'homeassistant/link']['reason']=='diagnostic-only:unsupported-symlink'
+    assert native[b'homeassistant/fifo']['reason']=='diagnostic-only:unsupported-special'
+    assert not any(reason.startswith('unsupported-symlink:') for reason in ob['blockers'])
+    assert not any(reason.startswith('unsupported-special:') for reason in ob['blockers'])
 
 
 def test_git_subprocess_never_reads_tracked_excluded_payloads(tmp_path):
@@ -716,3 +734,408 @@ def test_persisted_topology_covers_each_bound_anchor(tmp_path,damage):
     candidate['digest']=n._digest({k:v for k,v in candidate.items() if k!='digest'})
     (root/'data/native-migration-preparation/candidate.json').write_bytes(n._json(candidate))
     with pytest.raises(n.Blocked):p.read()
+
+@pytest.mark.parametrize('boundary',[1,2,3])
+def test_diagnostic_churn_never_reads_payload_or_changes_commitment(tmp_path,monkeypatch,boundary):
+    root,repo,p=setup(tmp_path)
+    db=root/'homeassistant/home-assistant_v2.db';db.write_bytes(b'diagnostic'*100000)
+    original=p._read;seen=[]
+    def read(fd,path,**kw):
+        seen.append(path)
+        assert path not in (b'homeassistant/home-assistant_v2.db',b'homeassistant/new-diagnostic/wal')
+        return original(fd,path,**kw)
+    monkeypatch.setattr(p,'_read',read)
+    observe=p._observe_once;calls=0
+    def changing():
+        nonlocal calls
+        calls+=1
+        if calls==boundary:
+            with db.open('ab') as stream:stream.write(b'churn')
+            write(root,b'homeassistant/new-diagnostic/wal',b'live')
+        return observe()
+    monkeypatch.setattr(p,'_observe_once',changing)
+    candidate=p.prepare(expected=None)
+    diagnostic=[r for r in candidate['observation']['native'] if (r['reason'] or '').startswith('diagnostic-only')]
+    assert diagnostic and all(row['object']['digest'] is None for row in diagnostic)
+    with db.open('ab') as stream:stream.write(b'more')
+    (root/'homeassistant/new-diagnostic/wal').unlink()
+    assert p.revalidate()=='current'
+    assert any(r['disposition']=='diagnostic-only' for r in candidate['observation']['rows'])
+
+
+@pytest.mark.parametrize('change',['index-only','absent-create','parent-mode','native-content','native-mode'])
+def test_real_participating_inputs_remain_strict(tmp_path,change):
+    root,repo,p=setup(tmp_path)
+    if change=='index-only':
+        write(repo,b'homeassistant/index-only',b'index');git(repo,'add','homeassistant/index-only')
+        (repo/'homeassistant/index-only').unlink();write(root,b'homeassistant/index-only',b'live')
+    if change=='absent-create':
+        write(repo,b'homeassistant/absent',b'index');git(repo,'add','homeassistant/absent')
+    p.prepare(expected=None)
+    if change=='index-only':write(root,b'homeassistant/index-only',b'changed')
+    elif change=='absent-create':write(root,b'homeassistant/absent',b'appeared')
+    elif change=='parent-mode':os.chmod(root/'homeassistant',0o750)
+    elif change=='native-mode':os.chmod(root/'homeassistant/a',0o600)
+    else:write(root,b'homeassistant/a',b'changed')
+    assert p.revalidate()=='stale'
+
+
+@pytest.mark.parametrize('operation',['create','replace','stale','failed-observation'])
+def test_each_candidate_persistence_has_one_real_disk_snapshot(tmp_path,monkeypatch,operation):
+    root,repo,p=setup(tmp_path)
+    first=None if operation=='create' else p.prepare(expected=None)
+    if operation=='stale':write(repo,b'homeassistant/a',b'changed')
+    if operation=='failed-observation':monkeypatch.setattr(p,'observe',mock.Mock(side_effect=n.Blocked('injected')))
+    with mock.patch.object(p.disk,'snapshot',wraps=p.disk.snapshot) as snapshot:
+        if operation in ('create','replace'):p.prepare(expected=None if first is None else first['digest'])
+        else:assert p.revalidate()==('stale' if operation=='stale' else 'unavailable')
+        assert snapshot.call_count==1
+    assert not (root/'data/native').exists()
+
+
+@pytest.mark.parametrize('unavailable',[False,True])
+def test_capacity_denial_cannot_claim_durable_stale(tmp_path,monkeypatch,unavailable):
+    root,repo,p=setup(tmp_path);p.prepare(expected=None)
+    path=root/'data/native-migration-preparation/candidate.json';before=path.read_bytes()
+    if unavailable:monkeypatch.setattr(p,'observe',mock.Mock(side_effect=n.Blocked('injected')))
+    else:write(repo,b'homeassistant/a',b'changed')
+    original=p.disk._volume
+    def full(*args,**kwargs):return dataclasses.replace(original(*args,**kwargs),available=0,inodes=0)
+    monkeypatch.setattr(p.disk,'_volume',full)
+    assert p.revalidate()=='unavailable' and path.read_bytes()==before
+    assert not list(path.parent.glob('.pending-*'))
+
+
+def test_unqualified_default_disk_refuses_before_candidate_mkdir(tmp_path,monkeypatch):
+    root,repo,p=setup(tmp_path)
+    original=p.disk._volume
+    monkeypatch.setattr(p.disk,'_volume',lambda *a,**kw:dataclasses.replace(original(*a,**kw),supported=False))
+    with pytest.raises(n.Blocked):p.prepare(expected=None)
+    assert not (root/'data/native-migration-preparation').exists()
+    assert not (root/'data/.native-disk-admission.lock').exists()
+
+
+def test_disappearing_diagnostic_entry_is_best_effort(tmp_path,monkeypatch):
+    root,repo,p=setup(tmp_path);write(root,b'homeassistant/diagnostic',b'live')
+    original=n.os.stat
+    def missing(path,*args,**kwargs):
+        if path==b'diagnostic':raise FileNotFoundError('diagnostic churn')
+        return original(path,*args,**kwargs)
+    monkeypatch.setattr(n.os,'stat',missing)
+    assert p.prepare(expected=None)['state']=='prepared'
+
+
+def migration_recipe(p):
+    observation=p.observe()
+    value=dict(schema=n.SCHEMA,generation='a'*32,state='prepared',observation=observation,
+               input_digest=n._digest(n._stability(observation)),digest='0'*64)
+    value['digest']=n._digest({k:v for k,v in value.items() if k!='digest'})
+    payload=n._json(value);name=b'.pending-'+b'b'*32
+    controls=tuple(disk_module.Control(p.store+b'/'+target,payload,value['generation'],value['digest']) for target in (b'candidate.json',name))
+    return value,payload,name,disk_module.Evidence(value['generation'],value['digest'],controls=controls)
+
+
+@pytest.mark.parametrize('first',['migration','status'])
+@pytest.mark.parametrize('resource',['bytes','inodes'])
+@pytest.mark.parametrize('fits',[False,True])
+def test_disjoint_preissued_migration_and_status_current_capacity(tmp_path,monkeypatch,first,resource,fits):
+    root,repo,p=setup(tmp_path);(root/'data/native').mkdir()
+    lock=root/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    status_disk=disk_module.NativeDisk(root);capacity={'bytes':10**9,'inodes':10**6};checks=[]
+    for disk in (p.disk,status_disk):
+        original=disk._volume
+        def volume(path,fd,mounts,original=original):
+            checks.append(path)
+            return dataclasses.replace(original(path,fd,mounts),available=capacity['bytes'],inodes=capacity['inodes'])
+        monkeypatch.setattr(disk,'_volume',volume)
+    value,payload,name,evidence=migration_recipe(p)
+    status_payload=b'{"operation_id":"status","owner_id":"owner"}'
+    status_evidence=disk_module.Evidence('status','owner',controls=tuple(disk_module.Control(b'data/native/storage-status.json',status_payload,'status','owner') for _ in range(2)))
+    with mock.patch.object(p.disk,'snapshot',wraps=p.disk.snapshot) as mscan,mock.patch.object(status_disk,'snapshot',wraps=status_disk.snapshot) as sscan:
+        migration_plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+        status_plan=status_disk.project('storage_control',status_disk.snapshot(),status_evidence)
+        assert mscan.call_count==sscan.call_count==1
+        assert all(d.status=='fits' for d in migration_plan.decisions+status_plan.decisions)
+        def execute(which):
+            disk,plan=(p.disk,migration_plan) if which=='migration' else (status_disk,status_plan)
+            before=len(checks)
+            with disk.guard(plan) as admission:
+                at_entry=len(checks)
+                assert at_entry-before==len(plan.decisions)
+                if which=='migration':
+                    with p._disk(create=True,admission=admission) as fd:p._save(fd,value,None,admission=admission,payload=payload,name=name)
+                else:
+                    target=root/'data/native/storage-status.json';target.write_bytes(status_payload);target.chmod(0o600)
+                # Own executor receipts never re-charge the original full peak.
+                if which=='migration':assert len(checks)==at_entry
+        execute(first)
+        second='status' if first=='migration' else 'migration'
+        delayed=status_plan if second=='status' else migration_plan
+        decision=delayed.decisions[0]
+        capacity[resource]=(decision.additional_peak+decision.reserve if resource=='bytes' else decision.required_inodes)+(1 if fits else -1)
+        if fits:execute(second)
+        else:
+            with pytest.raises(disk_module.InsufficientSpace):execute(second)
+            assert not (root/('data/native/storage-status.json' if second=='status' else 'data/native-migration-preparation')).exists()
+        assert mscan.call_count==sscan.call_count==1
+
+
+def test_only_data_bootstrap_boundary_credits_only_realized_shared_lock(tmp_path,monkeypatch):
+    root,repo,p=setup(tmp_path)
+    value,payload,name,evidence=migration_recipe(p)
+    original=p.disk._volume;capacity={'base':10**9,'credit':0};calls=[]
+    def volume(path,fd,mounts):
+        calls.append(path)
+        spent=capacity['credit'] if (root/'data/.native-disk-admission.lock').exists() else 0
+        return dataclasses.replace(original(path,fd,mounts),available=capacity['base']-spent,inodes=100000)
+    monkeypatch.setattr(p.disk,'_volume',volume)
+    with mock.patch.object(p.disk,'snapshot',wraps=p.disk.snapshot) as snapshot:
+        plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+        decision=plan.decisions[0]
+        capacity['base']=decision.additional_peak+decision.reserve
+        capacity['credit']=sum(a.allocated for a in plan.allocations if a.output=='admission-lock-infrastructure')
+        assert capacity['credit']>0
+        before=len(calls)
+        with p.disk.guard(plan) as admission:
+            at_entry=len(calls);assert at_entry-before==2
+            # Further own allocation cannot trigger a full-peak capacity charge.
+            capacity['base']=0
+            with p._disk(create=True,admission=admission) as fd:p._save(fd,value,None,admission=admission,payload=payload,name=name)
+            assert len(calls)==at_entry
+        assert snapshot.call_count==1
+    assert not (root/'data/native').exists() and p.read()==value
+
+
+@pytest.mark.parametrize('change',['key','quantum','unsupported'])
+def test_capacity_witness_profile_change_refuses_before_candidate_effect(tmp_path,monkeypatch,change):
+    root,repo,p=setup(tmp_path);value,payload,name,evidence=migration_recipe(p)
+    plan=p.disk.project('storage_control',p.disk.snapshot(),evidence);original=p.disk._volume
+    def changed(*a,**kw):
+        current=original(*a,**kw)
+        return dataclasses.replace(current,**({'key':('foreign',)} if change=='key' else {'quantum':current.quantum*2} if change=='quantum' else {'supported':False}))
+    monkeypatch.setattr(p.disk,'_volume',changed)
+    with pytest.raises(disk_module.Blocked):
+        with p.disk.guard(plan):raise AssertionError('candidate write admitted')
+    assert not (root/'data/native-migration-preparation').exists()
+    assert not (root/'data/.native-disk-admission.lock').exists()
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='real Linux streaming diagnostic-churn proof')
+def test_linux_streaming_recorder_and_diagnostic_directory_churn(tmp_path,monkeypatch):
+    import threading
+    root,repo,p=setup(tmp_path);db=root/'homeassistant/home-assistant_v2.db'
+    db.write_bytes(b'initial'*200000)
+    read=p._read
+    def no_diagnostic_payload(fd,path,**kwargs):
+        assert path!=b'homeassistant/home-assistant_v2.db'
+        return read(fd,path,**kwargs)
+    monkeypatch.setattr(p,'_read',no_diagnostic_payload)
+    stop=threading.Event();started=threading.Event();writes=[]
+    def recorder():
+        while not stop.is_set():
+            with db.open('ab') as stream:stream.write(b'wal-churn'*100)
+            directory=root/'homeassistant/diagnostic-churn'
+            try:directory.mkdir();directory.rmdir()
+            except FileNotFoundError:pass
+            writes.append(1);started.set();stop.wait(.001)
+    worker=threading.Thread(target=recorder);worker.start();assert started.wait(5)
+    try:
+        p.prepare(expected=None);assert p.revalidate()=='current'
+    finally:stop.set();worker.join(5)
+    assert not worker.is_alive() and writes
+
+
+@pytest.mark.parametrize('resource',['bytes','inodes'])
+def test_preissued_cross_process_status_plan_refuses_after_migration(tmp_path,monkeypatch,resource):
+    import multiprocessing
+    root,repo,p=setup(tmp_path);(root/'data/native').mkdir()
+    lock=root/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    ctx=multiprocessing.get_context('fork');capacity=ctx.Value('q',10**9)
+    status_disk=disk_module.NativeDisk(root)
+    for participant in (p.disk,status_disk):
+        original=participant._volume
+        def volume(path,fd,mounts,original=original):
+            return dataclasses.replace(original(path,fd,mounts),available=capacity.value if resource=='bytes' else 10**9,
+                                       inodes=capacity.value if resource=='inodes' else 10**6)
+        monkeypatch.setattr(participant,'_volume',volume)
+    value,payload,name,evidence=migration_recipe(p)
+    migration_plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+    status_payload=b'{"operation_id":"status","owner_id":"owner"}'
+    status_evidence=disk_module.Evidence('status','owner',controls=tuple(disk_module.Control(b'data/native/storage-status.json',status_payload,'status','owner') for _ in range(2)))
+    delayed=status_disk.project('storage_control',status_disk.snapshot(),status_evidence)
+    go=ctx.Event();result=ctx.Queue()
+    def status_worker():
+        if not go.wait(10):result.put('timeout');return
+        try:
+            with status_disk.guard(delayed):result.put('unsafe-admitted')
+        except disk_module.InsufficientSpace:result.put('refused-current-capacity')
+        except BaseException as exc:result.put(type(exc).__name__)
+    child=ctx.Process(target=status_worker);child.start()
+    try:
+        with p.disk.guard(migration_plan) as admission:
+            with p._disk(create=True,admission=admission) as fd:p._save(fd,value,None,admission=admission,payload=payload,name=name)
+        decision=delayed.decisions[0]
+        capacity.value=(decision.additional_peak+decision.reserve if resource=='bytes' else decision.required_inodes)-1
+        go.set();assert result.get(timeout=10)=='refused-current-capacity'
+        child.join(5);assert child.exitcode==0
+    finally:
+        if child.is_alive():child.terminate();child.join(5)
+    assert not (root/'data/native/storage-status.json').exists()
+
+
+def test_final_input_change_refuses_before_candidate_directory_creation(tmp_path,monkeypatch):
+    root,repo,p=setup(tmp_path);original=p._observe_once;calls=0
+    def changing():
+        nonlocal calls
+        calls+=1
+        if calls==3:write(repo,b'homeassistant/a',b'changed after initial observation')
+        return original()
+    monkeypatch.setattr(p,'_observe_once',changing)
+    with pytest.raises(n.Blocked,match='inputs-changed-before-persistence'):p.prepare(expected=None)
+    assert not (root/'data/native-migration-preparation').exists()
+
+
+def test_queued_diagnostic_directory_disappearance_has_no_stability_authority(tmp_path,monkeypatch):
+    root,repo,p=setup(tmp_path);directory=root/'homeassistant/queued-diagnostic';directory.mkdir()
+    original=p._directory;removed=[]
+    def disappeared(fd,path):
+        if path==b'homeassistant/queued-diagnostic':
+            directory.rmdir();removed.append(path);raise FileNotFoundError('queued diagnostic disappeared')
+        return original(fd,path)
+    monkeypatch.setattr(p,'_directory',disappeared)
+    assert p.prepare(expected=None)['state']=='prepared' and removed
+    assert p.revalidate()=='current'
+
+
+@pytest.mark.parametrize('target',[b'homeassistant/nested',b'addon_configs/slug'])
+def test_required_parent_projection_is_json_invariant_and_preserves_source_metadata(tmp_path,target):
+    root,repo,p=setup(tmp_path,mappings=((b'homeassistant',target),))
+    write(root,target+b'/a',b'live')
+    observation=p.observe()
+    assert any(row['disposition']=='required-parent' for row in observation['rows'])
+    assert n._stability(observation)==n._stability(json.loads(n._json(observation)))
+    candidate=p.prepare(expected=None)
+    assert p.read()==candidate and p.revalidate()=='current'
+    parent=target.split(b'/')[0]
+    write(root,parent+b'/diagnostic-sibling',b'churn')
+    assert p.revalidate()=='current'
+    os.chmod(os.fsdecode(os.fsencode(root)+b'/'+parent),0o750)
+    assert p.revalidate()=='stale'
+    candidate=p.prepare(expected=p.read()['digest'])
+    os.chmod(repo/'homeassistant',0o750)
+    assert p.revalidate()=='stale'
+
+
+@pytest.mark.parametrize('disposition',['excluded','excluded-index','retired','unresolved'])
+@pytest.mark.parametrize('boundary',[1,2,3,'revalidate'])
+def test_all_nonparticipating_derived_rows_exclude_live_diagnostics(tmp_path,monkeypatch,disposition,boundary):
+    root,repo,p=setup(tmp_path)
+    source=b'homeassistant/secrets.yaml' if disposition.startswith('excluded') else b'.storage_managed/core.config_entries.json' if disposition=='retired' else b'unmapped/path'
+    destination=b'homeassistant/secrets.yaml' if disposition.startswith('excluded') else b'homeassistant/diagnostic-retired' if disposition=='retired' else b'homeassistant/diagnostic-unresolved'
+    write(repo,source,b'source unchanged');write(root,destination,b'live before')
+    if disposition=='excluded-index':
+        git(repo,'add','-f',os.fsdecode(source));os.unlink(os.fsencode(repo)+b'/'+source)
+    original=p._observe_once;calls=0
+    def changing():
+        nonlocal calls
+        calls+=1
+        if calls==boundary:write(root,destination,b'live changed with new metadata and size')
+        return original()
+    monkeypatch.setattr(p,'_observe_once',changing)
+    candidate=p.prepare(expected=None)
+    assert n._stability(candidate['observation'])==n._stability(json.loads(n._json(candidate['observation'])))
+    write(root,destination,b'further live diagnostic churn')
+    assert n._stability(candidate['observation'])==n._stability(p.observe())
+    assert p.revalidate()=='current'
+    # The actual source descriptors/index remain strict, including exclusion.
+    if disposition!='excluded-index':os.chmod(os.fsdecode(os.fsencode(repo)+b'/'+source),0o600)
+    else:git(repo,'update-index','--force-remove',os.fsdecode(source))
+    assert p.revalidate()=='stale'
+
+
+@pytest.mark.parametrize('resource',['bytes','inodes'])
+def test_shared_lock_appearing_after_snapshot_retires_only_verified_infrastructure(tmp_path,monkeypatch,resource):
+    root,repo,p=setup(tmp_path);value,payload,name,evidence=migration_recipe(p)
+    plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+    decision=plan.decisions[0]
+    allocation=next(a for a in plan.allocations if a.output=='admission-lock-infrastructure')
+    lock=root/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    original=p.disk._volume;calls=[]
+    def fitting(*args,**kwargs):
+        calls.append(args[0])
+        return dataclasses.replace(original(*args,**kwargs),
+            available=decision.additional_peak+decision.reserve-(allocation.allocated if resource=='bytes' else 0),
+            inodes=decision.required_inodes-(allocation.inodes if resource=='inodes' else 0))
+    monkeypatch.setattr(p.disk,'_volume',fitting)
+    original_open=os.open;creations=[]
+    def no_recreation(path,flags,*args,**kwargs):
+        if os.fsencode(path)==b'.native-disk-admission.lock' and flags & os.O_CREAT:creations.append(path)
+        return original_open(path,flags,*args,**kwargs)
+    monkeypatch.setattr(os,'open',no_recreation)
+    with p.disk.guard(plan) as admission:
+        with p._disk(create=True,admission=admission) as fd:p._save(fd,value,None,admission=admission,payload=payload,name=name)
+    assert p.read()==value and len(calls)==1 and not creations
+
+
+@pytest.mark.parametrize('resource',['bytes','inodes'])
+def test_shared_lock_appearance_during_bootstrap_shortage_is_qualified(tmp_path,monkeypatch,resource):
+    root,repo,p=setup(tmp_path);_,_,_,evidence=migration_recipe(p)
+    plan=p.disk.project('storage_control',p.disk.snapshot(),evidence);decision=plan.decisions[0]
+    allocation=next(a for a in plan.allocations if a.output=='admission-lock-infrastructure')
+    original=p.disk._volume;lock=root/'data/.native-disk-admission.lock';calls=[]
+    def appeared(*args,**kwargs):
+        if not lock.exists():lock.write_bytes(b'');lock.chmod(0o600)
+        calls.append(args[0])
+        return dataclasses.replace(original(*args,**kwargs),available=decision.additional_peak+decision.reserve-(allocation.allocated if resource=='bytes' else 0),
+                                   inodes=decision.required_inodes-(allocation.inodes if resource=='inodes' else 0))
+    monkeypatch.setattr(p.disk,'_volume',appeared)
+    with p.disk.guard(plan):pass
+    assert len(calls)==2 and not (root/'data/native-migration-preparation').exists()
+
+
+@pytest.mark.parametrize('unsafe',['mode','symlink','hardlink'])
+def test_appeared_shared_lock_does_not_accept_foreign_or_linked_authority(tmp_path,unsafe):
+    root,repo,p=setup(tmp_path);_,_,_,evidence=migration_recipe(p)
+    plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+    lock=root/'data/.native-disk-admission.lock'
+    if unsafe=='symlink':lock.symlink_to('repo/homeassistant/a')
+    else:
+        lock.write_bytes(b'');lock.chmod(0o644 if unsafe=='mode' else 0o600)
+        if unsafe=='hardlink':os.link(lock,root/'data/foreign-lock-link')
+    with pytest.raises((OSError,disk_module.Blocked)):
+        with p.disk.guard(plan):raise AssertionError('unsafe authority admitted')
+    assert not (root/'data/native-migration-preparation').exists()
+
+
+def test_required_parent_replacement_retains_strict_identity(tmp_path):
+    root,repo,p=setup(tmp_path,mappings=((b'homeassistant',b'addon_configs/slug'),))
+    write(root,b'addon_configs/slug/a',b'live');p.prepare(expected=None)
+    (root/'addon_configs').rename(root/'retained-addon-configs')
+    write(root,b'addon_configs/slug/a',b'live')
+    assert p.revalidate()=='stale'
+
+
+@pytest.mark.parametrize('loss',['before-guard','during-open','after-open'])
+def test_snapshot_known_shared_mutex_loss_never_recreates_infrastructure(tmp_path,monkeypatch,loss):
+    root,repo,p=setup(tmp_path);lock=root/'data/.native-disk-admission.lock'
+    lock.write_bytes(b'');lock.chmod(0o600)
+    _,_,_,evidence=migration_recipe(p)
+    plan=p.disk.project('storage_control',p.disk.snapshot(),evidence)
+    assert not any(a.output=='admission-lock-infrastructure' for a in plan.allocations)
+    original_open=os.open;effects=[];removed=[]
+    with lock.open('rb') as held:
+        if loss=='before-guard':lock.unlink()
+        def race(path,flags,*args,**kwargs):
+            if os.fsencode(path)==b'.native-disk-admission.lock':
+                if flags & os.O_CREAT:effects.append('created-lock')
+                elif flags & os.O_RDWR and loss in ('during-open','after-open') and not removed:
+                    removed.append(True)
+                    if loss=='after-open':
+                        result=original_open(path,flags,*args,**kwargs);lock.unlink();return result
+                    lock.unlink()
+            return original_open(path,flags,*args,**kwargs)
+        monkeypatch.setattr(os,'open',race)
+        with pytest.raises((disk_module.Blocked,OSError)):
+            with p.disk.guard(plan):raise AssertionError('lost mutex authority admitted')
+        assert not effects and not lock.exists()
+    assert not (root/'data/native-migration-preparation').exists()

@@ -284,15 +284,28 @@ class TestQualification:
         rig=SaveRig(tmp_path);put(rig.root,A,b'selected\x00data')
         review=reviewed(rig,(A,));disk=d.NativeDisk(rig.root)
         counts={'snapshot':0,'project':0};plans=[];events=[];peak=[];admitted=[]
+        entry_checks=[];capacity_samples=[];sampling=[False];lock_present=[]
         def physical():
             return sum(os.lstat(os.path.join(parent,name)).st_blocks*512 for parent,dirs,files in
                        os.walk(rig.root/'data/native') for name in dirs+files)
         initial=physical()
         original_snapshot,original_project=disk.snapshot,disk.project
+        original_volume,original_capacity=disk._volume,disk._current_capacity
+        def capacity(*args,**kwargs):
+            assert disk._active_operation is None and not admitted
+            entry_checks.append(kwargs.get('realized_lock',False));sampling[0]=True
+            try:return original_capacity(*args,**kwargs)
+            finally:sampling[0]=False
+        def volume(*args,**kwargs):
+            assert sampling[0] and not admitted, 'executor resampled capacity'
+            capacity_samples.append(args[0]);return original_volume(*args,**kwargs)
+        monkeypatch.setattr(disk,'_current_capacity',capacity)
         def snapshot():counts['snapshot']+=1;return original_snapshot()
         def project(*a,**kw):
             counts['project']+=1;plan=original_project(*a,**kw);plans.append(plan)
-            for name in ('_scan','_volume','_destination','_objects','_git'):
+            lock_present.append((rig.root/'data/.native-disk-admission.lock').exists())
+            monkeypatch.setattr(disk,'_volume',volume)
+            for name in ('_scan','_destination','_objects','_git'):
                 monkeypatch.setattr(disk,name,lambda *a,**kw:pytest.fail('phase rescan/capacity/Git observation'))
             return plan
         monkeypatch.setattr(disk,'snapshot',snapshot);monkeypatch.setattr(disk,'project',project)
@@ -331,7 +344,10 @@ class TestQualification:
         monkeypatch.setattr(rig.adapter,'_run',run)
         candidate=s.NativeSave(rig.preview,disk).build(review)
         assert counts=={'snapshot':1,'project':1}
-        plan=plans[0];labels={a.output for a in plan.allocations}
+        plan=plans[0]
+        assert entry_checks==([True] if lock_present[0] else [False,True])
+        assert len(capacity_samples)==len(entry_checks)*len(plan.decisions)
+        labels={a.output for a in plan.allocations}
         assert {'generated-manifest-spool','generated-manifest-blob','complete-index','index-lock-overlap'}<=labels
         assert not any('commit' in x or 'reflog' in x or 'ref-' in x or 'worktree' in x for x in labels)
         assert max(peak)<=sum(a.allocated for a in plan.allocations)

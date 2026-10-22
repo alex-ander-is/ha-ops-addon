@@ -415,10 +415,61 @@ exact reviewed executor. The `authorization` category includes the optional
 `data/direct-auth` anchor in the same inode-deduplicated snapshot and never
 becomes a cleanup target. Internal snapshot observations stay private.
 
-The narrow `storage_control` recipe permits only the two bounded atomic/failure
-controls for `data/native/storage-status.json`. It can record an incomplete
+The `storage_control` kind accepts either the existing two bounded atomic/failure
+controls for `data/native/storage-status.json`, or the exact migration candidate
+recipe described below. Only the status variant may retain incomplete-accounting
+attempt diagnostics. It can record an incomplete
 accounting attempt by requalifying that exact diagnostic destination, preimage
 and full overlap envelope; unrelated incomplete category totals confer no Git
 execution authority. Repack still requires a complete initial snapshot. The
 immutable repack plan retains its original object tuples for targeted output
-proof, without another object enumeration or capacity sample during execution.
+proof, without another object enumeration. Guard entry performs a bounded current
+capacity check under the shared mutex; later execution revalidations do not
+resample or re-charge the full initial peak.
+
+## Migration candidate and common admission mutex
+
+Default Layout includes `data/native-migration-preparation` and the fixed
+`data/.native-disk-admission.lock`. Candidate files, pending residues and their
+directory count as service storage. Legacy anchor overlap cannot double-count
+inodes or change this classification. Foreign/unsupported entries are retained
+as accounting issues; they confer no cleanup authority. Authorization leaves are
+measured through parent-volume and stable no-follow stat evidence, never opened
+or read for their payload.
+
+The migration recipe accepts exactly a schema-validated candidate (at most 32
+MiB) and the same exact payload at its fixed `.pending-<32 hex>` address. Both
+controls declare the candidate generation and digest as operation/owner. It
+forbids selection, copies, metadata outputs, Git materialization and unrelated
+controls. Full atomic overlap, missing directory allocation, lock infrastructure
+and failure reserves are forecast before any candidate effect. Migration requires
+complete accounting; the existing status-only incomplete-attempt rule is unchanged.
+
+Every guard kind uses the same fixed mutex under existing `data`; no native-tree
+initialization is needed. Original refused/unknown decisions fail before lock
+creation. The lock must be a private, same-owner, single-link regular file.
+A bound existing destination-ancestor directory witnesses each planned volume.
+Before infrastructure creation, and again under the held mutex before yielding,
+current `_volume`/fstatvfs evidence must retain its route, device, allocation
+quantum, filesystem and writable profile. Current free bytes must cover frozen
+`additional_peak + reserve`; finite available inodes must cover `required_inodes`.
+Aliases never add capacity. A delayed disjoint plan cannot reuse earlier free
+capacity after another cooperative writer consumes it.
+
+Only the exact planned, descriptor-verified shared-lock allocation/inode is
+retired from outstanding demand after that infrastructure exists.
+An existing fixed mutex is opened without creation, checked and acquired before
+the current-capacity comparison. This includes one appearing after the snapshot
+or during the absent-lock bootstrap check. A mutex present in the snapshot is a strict inode dependency: if its name
+disappears, the stale plan refuses without recreating infrastructure. A genuinely
+snapshot-absent mutex requires full infrastructure capacity before exclusive creation; a peer winning that
+creation race is verified through the same existing-lock path. There is one
+bounded capacity check per planned volume under the mutex, plus a pre-creation
+check only when infrastructure creation may be needed. No executor
+allocation is credited back. Later receipts and targeted revalidations keep the
+original admitted envelope without charging the full peak against own writes.
+The mutex remains held for the guard lifetime; unrelated external writers can
+still cause ENOSPC, and existing persistence/uncertainty handling applies. Old
+`data/native/disk-admission.lock` files remain ordinarily accounted residue.
+Portable arithmetic tests use the existing explicitly synthetic mount seam;
+real Linux supported-filesystem tests remain a separate qualification.

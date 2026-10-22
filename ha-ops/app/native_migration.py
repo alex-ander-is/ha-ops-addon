@@ -22,10 +22,11 @@ import uuid
 from urllib.parse import urlsplit
 
 from native_git import parse_status
+from native_disk import NativeDisk, Control, Evidence, Blocked as DiskBlocked
 from native_inventory import (Blocked, Policy, path_bytes, beneath, linux_mounts,
                               _open_absolute_directory, _directory_at, Mount, _validate_mount)
 
-SCHEMA = 1
+SCHEMA = 2
 MAX_CONTROL = 32 * 1024 * 1024
 MAX_ROWS = 100000
 CHUNK = 65536
@@ -307,13 +308,42 @@ def _validate_observation(value):
             if row[key] is not None:
                 if row[key] in seen: raise Blocked('duplicate-diff-address')
                 seen.add(row[key])
-        if row['disposition'] not in ('mapped','unresolved','retired','excluded','native-only','required-parent'):
+        if row['disposition'] not in ('mapped','unresolved','retired','excluded','native-only','required-parent','diagnostic-only'):
             raise Blocked('invalid-diff-disposition')
         for key in ('before','after'):
             _validate_descriptor(row[key])
-        if (type(row['changes']) is not list or not row['changes'] or not all(type(change) is str for change in row['changes']) or len(set(row['changes']))!=len(row['changes']) or any(i not in ('move','addition','deletion','type','content','metadata','unchanged','collision') for i in row['changes'])
+        if (type(row['changes']) is not list or not row['changes'] or not all(type(change) is str for change in row['changes']) or len(set(row['changes']))!=len(row['changes']) or any(i not in ('move','addition','deletion','type','content','metadata','unchanged','collision','diagnostic') for i in row['changes'])
                 or type(row['index']) is not list or any(type(i) is not int or not 0 <= i < len(g['index']) for i in row['index'])):
             raise Blocked('invalid-diff-changes')
+
+
+def _stability(value):
+    """One commitment for every observation boundary; diagnostics have no vote."""
+    value = __import__('copy').deepcopy(value)
+    def stable(obj):
+        if obj is not None and obj['kind'] == 'directory':
+            # Never mutate an aliased descriptor: serialized observations have
+            # separate before/after/source/native objects, while fresh ones may
+            # share them. Source directory metadata must remain strict.
+            obj = {**obj, 'identity': list(obj['identity'])}
+            obj['size'] = 0
+            obj['identity'][3] = 0
+            obj['identity'][6:] = [0, 0, 0]
+        return obj
+    value['native'] = [row for row in value['native'] if not (row['reason'] or '').startswith('diagnostic-only')]
+    for row in value['native']: row['object'] = stable(row['object'])
+    value['rows'] = [row for row in value['rows'] if row['disposition'] != 'diagnostic-only']
+    for row in value['rows']:
+        if row['disposition'] in ('mapped', 'required-parent'):
+            row['before'] = stable(row['before'])
+            if row['disposition'] == 'required-parent': row['after'] = stable(row['after'])
+        else:
+            # Excluded/retired/unresolved rows still retain strict source/index
+            # evidence. Their live counterpart and changes derived from it are
+            # review diagnostics, including an index-only excluded source.
+            row['before'] = None
+            row['changes'] = ['diagnostic']
+    return value
 
 
 def _validate_candidate(value):
@@ -325,7 +355,7 @@ def _validate_candidate(value):
             or type(value['digest']) is not str or not _HEX.fullmatch(value['digest'])):
         raise Blocked('invalid-candidate-schema')
     _validate_observation(value['observation'])
-    if (value['input_digest'] != _digest(value['observation'])
+    if (value['input_digest'] != _digest(_stability(value['observation']))
             or value['digest'] != _digest({k:v for k,v in value.items() if k != 'digest'})):
         raise Blocked('candidate-digest-mismatch')
     return value
@@ -341,7 +371,7 @@ class Preparation:
     manifest_digest binds the already resolved legacy manifest, never its payload.
     """
     def __init__(self, binding, *, mappings=((b'homeassistant', b'homeassistant'),),
-                 app_identity, manifest_digest, options=lambda: {}):
+                 app_identity, manifest_digest, options=lambda: {}, disk=None):
         self.binding = binding
         self.policy = binding.policy
         self.root = os.fsencode(binding.root)
@@ -356,6 +386,9 @@ class Preparation:
         self.manifest = manifest_digest
         self.options = options
         self._store_fds={}
+        self.disk = disk if disk is not None else NativeDisk(self.root)
+        if not isinstance(self.disk, NativeDisk) or self.disk.root != self.root:
+            raise Blocked('same-root-native-disk-required')
         if type(self.app) is not str or not self.app or type(self.manifest) is not str or not _HEX.fullmatch(self.manifest):
             raise Blocked('explicit-app-and-manifest-identity-required')
         self.mappings = tuple(sorted((path_bytes(a), path_bytes(b)) for a,b in mappings))
@@ -455,17 +488,23 @@ class Preparation:
         if destination is not None: return self.policy.reason(destination)
         return None
 
-    def _scan(self,root,base,*,source):
+    def _scan(self,root,base,*,source,participating=frozenset()):
         result=[]; pending=[(base,b'')]
         while pending:
             absolute,relative=pending.pop()
-            fd=self._directory(root,absolute)
+            try: fd=self._directory(root,absolute)
+            except FileNotFoundError:
+                if source or absolute in participating: raise
+                continue
             try:
                 names=sorted(os.fsencode(n) for n in os.listdir(fd))
                 for name in names:
                     path=relative+b'/'+name if relative else name
                     full=absolute+b'/'+name
-                    info=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                    try: info=os.stat(name,dir_fd=fd,follow_symlinks=False)
+                    except FileNotFoundError:
+                        if source or full in participating: raise
+                        continue
                     self.binding.check(full,info,self._mounts())
                     destination=self._destination(path) if source else path
                     reason=self._reason(path,destination) if source else self.policy.reason(base+b'/'+path)
@@ -473,8 +512,9 @@ class Preparation:
                     if name==b'.git': reason='git-boundary'
                     if obj['kind'] in ('symlink','special'): reason=reason or 'unsupported-'+obj['kind']
                     if obj['kind']=='file' and info.st_nlink!=1: reason=reason or 'unsupported-hardlink'
-                    if obj['kind']=='file' and reason is None: obj['digest']=self._read(root,full)
-                    result.append(dict(path=encode_path(path),object=obj,reason=reason))
+                    if obj['kind']=='file' and reason is None and (source or full in participating): obj['digest']=self._read(root,full)
+                    diagnostic = not source and full not in participating
+                    result.append(dict(path=encode_path(path),object=obj,reason=('diagnostic-only'+(':'+reason if reason else '')) if diagnostic else reason))
                     if len(result)>MAX_ROWS: raise Blocked('inventory-resource-limit-incomplete')
                     if obj['kind']=='directory' and reason is None: pending.append((full,path))
             finally:
@@ -730,6 +770,18 @@ class Preparation:
                         raise Blocked('unverified-config-alias')
                 except (OSError,Blocked): blockers.append('unverified-config-alias')
             source=self._scan(root,self.legacy,source=True)
+            git=self._git(root,source);blockers.extend(git['issues'])
+            participating=set()
+            source_paths={decode_path(row['path']) for row in source if row['reason'] is None}
+            source_paths.update(decode_path(row['path']) for row in git['index'])
+            for path in source_paths:
+                destination=self._destination(path)
+                if destination is not None and self._reason(path,destination) is None:
+                    parts=destination.split(b'/')
+                    participating.update(b'/'.join(parts[:i]) for i in range(1,len(parts)+1))
+            for _,target in self.mappings:
+                parts=target.split(b'/')
+                participating.update(b'/'.join(parts[:i]) for i in range(1,len(parts)+1))
             native=[]
             # Scan each exact mapping target, preserving its own root and parents.
             all_native={}
@@ -748,17 +800,16 @@ class Preparation:
                 try:
                     info=self._lstat(root,target)
                     if stat.S_ISDIR(info.st_mode):
-                        for row in self._scan(root,target,source=False):
+                        for row in self._scan(root,target,source=False,participating=participating):
                             path=target+b'/'+decode_path(row['path']);row['path']=encode_path(path)
                             # Relative native scans classify using the full destination.
                             reason=row['reason'] or self.policy.reason(path);row['reason']=reason
-                            if row['object']['kind']=='file' and reason is None and row['object']['digest'] is None and row['object']['identity'][3]==1:
+                            if path in participating and row['object']['kind']=='file' and reason is None and row['object']['digest'] is None and row['object']['identity'][3]==1:
                                 row['object']['digest']=self._read(root,path)
                             if reason is not None: row['object']['digest']=None
                             all_native[path]=row
                 except FileNotFoundError: pass
             native=[all_native[p] for p in sorted(all_native)]
-            git=self._git(root,source);blockers.extend(git['issues'])
             private=self._private(root)
             operations=self._operations(root)
             if any(o['summary']['active_present'] or o['summary']['pending_present'] for o in operations.values()):
@@ -825,8 +876,8 @@ class Preparation:
             if path not in used:
                 parent=path in parents
                 rows.append(dict(source=None,destination=encode_path(path),
-                    disposition='required-parent' if parent else 'excluded' if native_reasons[path] is not None else 'native-only',
-                    before=obj,after=obj if parent else None,changes=['unchanged'] if parent else ['deletion'],index=[]))
+                    disposition='required-parent' if parent else 'diagnostic-only',
+                    before=obj,after=obj if parent else None,changes=['unchanged'] if parent else ['diagnostic'],index=[]))
         # Required destination parents are visible even when absent on both sides.
         for path in sorted(parents-set(destinations)-set(current)):
             blockers.append('unresolved-required-parent-metadata:'+encode_path(path))
@@ -835,16 +886,22 @@ class Preparation:
 
     def observe(self):
         first=self._observe_once();second=self._observe_once()
-        if first!=second: raise Blocked('inputs-changed-during-observation')
+        if _stability(first)!=_stability(second): raise Blocked('inputs-changed-during-observation')
         return first
 
     @contextmanager
-    def _disk(self,create=False):
+    def _disk(self,create=False,admission=None):
         with self._root() as root:
             data=self._directory(root,b'data')
             try:
                 if create:
-                    try: os.mkdir(b'native-migration-preparation',0o700,dir_fd=data)
+                    if admission is None: raise Blocked('candidate-admission-required')
+                    admission.revalidate()
+                    try:
+                        os.mkdir(b'native-migration-preparation',0o700,dir_fd=data)
+                        created=self._directory(root,self.store)
+                        try: admission.record_directory_creation(self.store,created)
+                        finally: os.close(created)
                     except FileExistsError: pass
                     os.fsync(data)
                 try: fd=self._directory(root,self.store)
@@ -906,16 +963,16 @@ class Preparation:
         with self._disk() as fd:
             return None if fd is None else self._load(fd)
 
-    def _save(self,fd,value,expected):
+    def _save(self,fd,value,expected,*,admission=None,payload=None,name=None):
         self._verified_store(fd)
         current=self._load(fd)
         original_identity=_stat(os.stat(b'candidate.json',dir_fd=fd,follow_symlinks=False)) if current is not None else None
         actual=current['digest'] if current is not None else None
         if actual!=expected: raise Conflict('candidate-cas-conflict')
-        value['digest']=_digest({k:v for k,v in value.items() if k!='digest'})
-        _validate_candidate(value);payload=_json(value)
-        if len(payload)>MAX_CONTROL: raise Blocked('candidate-resource-limit-incomplete')
-        name=('.pending-'+uuid.uuid4().hex).encode();file=None;owned=None;replaced=False
+        if admission is None or payload != _json(value) or name is None:
+            raise Blocked('candidate-admission-required')
+        admission.revalidate()
+        file=None;owned=None;replaced=False
         try:
             file=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
             owned=_stat(os.fstat(file))[:2]
@@ -925,11 +982,19 @@ class Preparation:
                 if count<=0: raise OSError('short-candidate-write')
                 view=view[count:]
             os.fsync(file)
+            # Preserve the candidate-specific CAS outcome before generic namespace
+            # receipts can diagnose the same noncooperative replacement.
+            again=self._load(fd)
+            current_identity=_stat(os.stat(b'candidate.json',dir_fd=fd,follow_symlinks=False)) if again is not None else None
+            if (again['digest'] if again else None)!=expected or current_identity!=original_identity: raise Conflict('candidate-cas-conflict')
+            admission.record_file_creation(self.store+b'/'+name,file)
+            admission.revalidate()
             if _stat(os.stat(name,dir_fd=fd,follow_symlinks=False))[:2]!=owned: raise Blocked('changed-candidate-temp')
             # Recheck CAS after writing, including noncooperative replacement.
             again=self._load(fd)
             current_identity=_stat(os.stat(b'candidate.json',dir_fd=fd,follow_symlinks=False)) if again is not None else None
             if (again['digest'] if again else None)!=expected or current_identity!=original_identity: raise Conflict('candidate-cas-conflict')
+            admission.revalidate()
             os.replace(name,b'candidate.json',src_dir_fd=fd,dst_dir_fd=fd);replaced=True
             try: os.fsync(fd)
             except OSError: raise PersistenceUncertain('candidate-replaced-directory-durability-uncertain') from None
@@ -941,14 +1006,34 @@ class Preparation:
                     if _stat(os.stat(name,dir_fd=fd,follow_symlinks=False))[:2]==owned: os.unlink(name,dir_fd=fd)
                 except FileNotFoundError: pass
 
+    def _persist(self,value,expected,*,observation=None,create=False):
+        # Freeze serialization and exact temp address before the sole Disk scan.
+        value['digest']=_digest({k:v for k,v in value.items() if k!='digest'})
+        _validate_candidate(value);payload=_json(value)
+        if len(payload)>MAX_CONTROL: raise Blocked('candidate-resource-limit-incomplete')
+        name=('.pending-'+uuid.uuid4().hex).encode()
+        operation=value['generation'];owner=value['digest']
+        controls=tuple(Control(self.store+b'/'+target,payload,operation,owner)
+                       for target in (b'candidate.json',name))
+        if self.disk.root!=self.root: raise Blocked('same-root-native-disk-required')
+        snapshot=self.disk.snapshot()
+        plan=self.disk.project('storage_control',snapshot,Evidence(operation,owner,controls=controls))
+        try:
+            # Common Disk mutex precedes store flock in every persistence path.
+            with self.disk.guard(plan) as admission:
+                if observation is not None and _stability(observation)!=_stability(self._observe_once()):
+                    raise Blocked('inputs-changed-before-persistence')
+                with self._disk(create=create,admission=admission) as fd:
+                    if fd is None: raise Blocked('missing-preparation-store')
+                    return self._save(fd,value,expected,admission=admission,payload=payload,name=name)
+        except DiskBlocked as exc:
+            raise Blocked(str(exc)) from exc
+
     def prepare(self,*,expected):
         observation=self.observe()
         value=dict(schema=SCHEMA,generation=uuid.uuid4().hex,state='prepared',observation=observation,
-                   input_digest=_digest(observation),digest='0'*64)
-        with self._disk(create=True) as fd:
-            # Full source/root/private recheck immediately before candidate publication.
-            if observation!=self._observe_once(): raise Blocked('inputs-changed-before-persistence')
-            return self._save(fd,value,expected)
+                   input_digest=_digest(_stability(observation)),digest='0'*64)
+        return self._persist(value,expected,observation=observation,create=True)
 
     def revalidate(self):
         try: candidate=self.read()
@@ -958,13 +1043,10 @@ class Preparation:
         try: current=self.observe()
         except (OSError,Blocked):
             candidate['state']='stale'
-            try:
-                with self._disk() as fd:
-                    if fd is None: return 'unavailable'
-                    self._save(fd,candidate,candidate['digest'])
-            except (OSError,Blocked): pass
+            try: self._persist(candidate,candidate['digest'])
+            except (OSError,Blocked,DiskBlocked): pass
             return 'unavailable'
-        if candidate['input_digest']==_digest(current):
+        if candidate['input_digest']==_digest(_stability(current)):
             try:
                 with self._disk() as fd:
                     if fd is None: return 'unavailable'
@@ -972,9 +1054,6 @@ class Preparation:
                     return 'current' if stored is not None and stored['digest']==candidate['digest'] else 'unavailable'
             except (OSError,Blocked): return 'unavailable'
         candidate['state']='stale'
-        try:
-            with self._disk() as fd:
-                if fd is None: return 'unavailable'
-                self._save(fd,candidate,candidate['digest'])
-        except (OSError,Blocked): return 'unavailable'
+        try: self._persist(candidate,candidate['digest'])
+        except (OSError,Blocked,DiskBlocked): return 'unavailable'
         return 'stale'
