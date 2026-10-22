@@ -733,7 +733,7 @@ def assert_dormant_import_contour(sources):
                     continue
                 # Only this named dormant observational peer may reuse NativeGit.
                 # Neither adapter may become an ordinary app entrypoint import.
-                assert (name, module) in (("native_disk.py", "native_git"), ("native_preview.py", "native_git"),
+                assert (name, module) in (("native_migration.py", "native_git"), ("native_disk.py", "native_git"), ("native_preview.py", "native_git"),
                     ("native_save.py", "native_git"), ("native_save.py", "native_disk"),
                     ("native_git.py", "native_disk"), ("native_operations.py", "native_git"), ("native_publication.py", "native_git"),
                     ("native_publication.py", "native_disk"), ("native_operations.py", "native_publication"),

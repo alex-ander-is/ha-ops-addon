@@ -639,3 +639,26 @@ late replies, restart/refresh persistence and the exact absent/false qualifier.
 Artifacts and owned-tab/process records belong outside tracked release inputs.
 The browser runner closes only its recorded tab and fixture, retaining the
 shared profile and every unrelated tab.
+
+## Dormant migration preparation (6.21)
+
+Run the explicit candidate observation/persistence group on the host and through
+the cached repository-owned Linux runner. No installation, download, live HA or
+configured remote is part of these commands:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
+```
+
+The Linux group proves real SHA-1/SHA-256 index/ref/ignored/pending inventory,
+staged/worktree/live separation, exact non-UTF8 paths, numeric ownership/full
+special modes, complete layout/content/metadata rows, independent process CAS,
+process death around replacement, persistence failures and auth/source
+invariance. Host skips do not establish Linux ownership/byte-path proof.
+Adjacent allowed checks are `test_native_inventory.py`, `test_native_git.py`,
+`test_native_metadata.py`, `test_native_operations.py`, `test_direct_auth.py`,
+and `test_release_readiness.py`. Production imports, migration execution,
+original-image/runtime admission and later activation are outside this step.
+The independent tester passes and foreman's final repository gate remain
+separate. See [the diagnostic-only contract](ha-ops/docs/native-migration.md).
