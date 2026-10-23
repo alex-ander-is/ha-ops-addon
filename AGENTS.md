@@ -23,6 +23,49 @@ flow, read `ha-ops/docs/service-branch-merge-contract.md`. It documents the
 parts of the branch, preview, conflict, `.storage`, and UI behavior that are
 intentional versus unsafe shortcuts.
 
+## Test scheduling and final coverage
+
+Read `TESTING.md` before choosing test commands. During development run the
+specific reproduction/regression and affected adjacent contracts. Freeze code
+before one final complete verification cycle; do not repeat the full suite per
+edit or reviewer. After a failure, rerun failed and affected dependent cases;
+repeat the whole cycle only when a change invalidates the other evidence.
+Preserve mandatory platform proofs and the final repository/pre-push gate.
+
+Before a long Linux run, cheaply verify dependencies, collected selectors,
+capacity, privileges and fixture-only Git author/committer identity. Pass all
+four `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and
+`GIT_COMMITTER_EMAIL` values explicitly using the fixture identity documented in
+`TESTING.md`; never rely on host/global Git config. The wrapper input excludes
+`.git`: execute tests requiring the actual checkout on the host and account
+for their exact collected IDs separately.
+
+Inspect resource use before parallel scheduling. Independent disposable
+Git/config fixtures and the migration matrix's independent deterministic shards
+can use bounded xdist workers; retain every required mutation boundary. Reuse
+applicable concurrency evidence or run a small representative overlap check
+before expanding an unqualified group. Record worker count, wall time and
+interference; do not assume that more workers or simultaneous full suites help.
+
+Run exact `statvfs` delta, ENOSPC, inode-exhaustion and exclusive-mount proofs
+sequentially on their own disposable volume without competing writers. Separate
+temporary directories on shared tmpfs do not isolate available bytes/inodes.
+For publication's isolated physical-delta proof use the documented `-n 1`
+invocation: its test selects that proof through `PYTEST_XDIST_WORKER_COUNT`.
+Parallel owned-block inventory assertions do not replace that measurement.
+Capacity-sensitive NativeApply and network publication cases also require
+this isolation when they depend on a free-space admission snapshot, even if
+they do not directly assert `statvfs` deltas.
+
+The foreman coordinates one coverage map for the sealed source snapshot:
+collected IDs, completed outcomes, justified skips and required Linux/runtime
+proofs. Final disjoint partitions must cover the complete required set. Reuse
+unchanged valid expensive proofs with explicit applicability; do not call an
+interrupted or failed overall invocation successful because a subset passed.
+Diagnose runner failures and recheck affected cases before qualifying delivery.
+Share execution evidence across roles without sharing unpublished independent
+review findings. Do not duplicate the full suite for each reviewer.
+
 ## Isolated development and test virtualization
 
 For HA Ops development, use the repository-owned local Linux virtualization
