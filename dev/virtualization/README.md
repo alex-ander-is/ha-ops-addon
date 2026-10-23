@@ -18,7 +18,7 @@ python3 dev/virtualization/ha_ops_dev.py status
 
 `setup` installs missing Colima and Docker CLI through Homebrew, checks their
 versions against `toolchain.json`, starts a
-2-CPU, 4-GiB-memory VM with a 12-GiB Docker disk and 8-GiB root disk, verifies its exact local Unix
+8-CPU, 8-GiB-memory VM with a 12-GiB Docker disk and 8-GiB root disk, verifies its exact local Unix
 socket, and builds a fingerprinted image only when its inputs change. It
 smoke-tests the image on every call. The VM is provisioned with only this
 directory as an explicit writable host share. The wrapper leaves the active
