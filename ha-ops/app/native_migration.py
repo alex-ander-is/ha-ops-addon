@@ -378,7 +378,7 @@ class Preparation:
         if self.root != os.fsencode(os.path.abspath(self.root)):
             raise Blocked('canonical-absolute-root-required')
         self.legacy = self.policy.legacy_repo
-        for reserved in (b'data/direct-auth',b'data/native-operations',b'data/native-services',b'data/native',b'data/native-migration-preparation'):
+        for reserved in (b'data/direct-auth',b'data/native-operations',b'data/native-services',b'data/native',b'data/native-migration-preparation',b'data/native-migration-transition'):
             if beneath(self.legacy,reserved) or beneath(reserved,self.legacy):
                 raise Blocked('legacy-private-service-route-overlap')
         self.store = b'data/native-migration-preparation'

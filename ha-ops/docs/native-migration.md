@@ -198,3 +198,113 @@ denial returns `unavailable`, retaining the previous candidate bytes. Existing
 CAS, owned-temp cleanup and post-replace `PersistenceUncertain` behavior remain.
 The fixed mutex can bootstrap from an existing `data` directory without creating
 `data/native`; it grants no migration execution authority.
+
+## Dormant local transition (6.22)
+
+`native_migration_transition.Transition` is a separate explicit Python
+participant. Production server, startup and frontend do not import or dispatch
+it. Construction and `read()` only expose saved evidence. A candidate is still
+diagnostic: a caller must request `confirm(candidate=..., operation=...,
+action='start', approved=True)` and pass its one-use, issuer-bound in-memory
+confirmation to `start()`. Use a fresh 32-character hexadecimal operation ID.
+Confirmation binds current App, manifest, policy, root, mount routes, direct
+configuration commitment and auth descriptors. Start explicitly revalidates the
+candidate before taking the shared admission mutex, then compares a pure current
+observation and candidate CAS under that mutex; no nested Preparation write
+path runs while admission is held.
+
+`read()` never repairs, creates, cleans or resumes. Reopen, refresh, process
+restart and App update never restore confirmation. Explicit `resume()` requires
+a newly issued confirmation with `action='resume'` and the exact saved operation
+and candidate. An incompatible App/runtime, changed direct configuration/auth,
+source/live descriptor drift, replaced output or ambiguous namespace refuses.
+Completed state grants no remote publication or native activation authority.
+There is no automatic cleanup, cancellation, rollback or deletion API.
+
+The private `data/native-migration-transition` store has mode `0700`; journal,
+partial controls and backup payloads have mode `0600`. The journal contains only
+fixed-address actions, canonical byte paths, complete source commitments,
+progress and inode receipts. It rejects duplicate/unknown keys, forged actions,
+invalid phases/sequences and unsafe descriptors. Its complete prospective
+receipt envelope must fit 8 MiB before transition effects. Metadata and targeted
+preservation projections are limited to 20,000 rows; payloads are streamed,
+without an arbitrary repository-byte ceiling. Git observations have the existing
+32 MiB output and ten-second deadline bounds. Exhaustion refuses completeness.
+One fixed `journal.pending` fragment bounds interrupted publication storage
+without a retry ceiling. Read exposes the intact canonical phase and retains
+the fragment. An explicit admitted worker settles only an exact prefix of its
+intended journal payload, with traced unlink and parent fsync before exclusive
+recreation. Foreign or incompatible fragments remain retained and refuse.
+
+The narrowly issued NativeDisk participant uses the existing process/thread
+mutex and flock before the transition directory lease. One real accounting
+snapshot charges backup/native payloads, every pending output inode, allocation
+rounding, extent/admin overhead, complete journal overlap and failure reserve.
+Already receipted outputs remain in current allocated storage; resume projects
+only remaining output and verifies any partial prefix before capacity credit.
+The original metadata already consumes current kernel capacity. Retirement is
+an atomic no-replace same-filesystem rename and does not allocate another copy.
+Unsupported allocation profiles and cross-filesystem retirement refuse.
+
+The executor first retains a full independent raw metadata backup, including
+config, hooks, every object/ref/reflog and the exact index or its absence. The
+private journal preserves original numeric file attributes separately from
+private backup access modes. It streams and independently reads back every
+payload, compares complete source pre/post commitments, verifies refs/object
+format, runs read-only `fsck` against the backup and native image, and checks
+staged object accessibility. Only a durably acknowledged recovery verification
+allows old `checkout/.git` to move into retained `retired.git` escrow. Both raw
+backup and original escrow remain available. A bundle or reconstructed index
+cannot substitute for this recovery evidence.
+
+The native image copies objects, HEAD, loose/packed refs and logs, with generated
+minimal config and an absent native index. It does not transplant old hooks,
+remote URLs, includes or filters. It publishes only through Linux
+`renameat2(RENAME_NOREPLACE)`; existing or raced destinations are retained.
+Canonical metadata is `data/native/repository.git`, explicitly paired with the
+root worktree. Root `.git` remains absent. Exact previously absent
+`repository-files`, saved `root-ignore-policy` and root `.gitignore` provide a
+deny-all scaffold with no selected live content. Preexisting output anchors
+refuse rather than being overwritten.
+
+Every executor mutation and persistence syscall passes through its action trace:
+exclusive create, each short-write continuation, mkdir, directory/file fsync,
+journal replacement, no-replace rename and checkout mtime restoration. Pending
+intents reconcile an already completed rename by exact inode or continue a
+verified private prefix under explicit resume; destructive renames are never
+repeated. Before the first journal payload, a fixed private `bootstrap.id` durably records
+the operation identity. If no canonical journal exists, public `read()` exposes
+`bootstrap-pending` diagnostics with the complete operation ID, or `None` for
+an empty/partial hexadecimal marker. This restores no permission: a fresh
+explicit start revalidates the candidate and addresses the exposed complete ID.
+An explicit admitted worker may settle an incomplete hexadecimal marker only
+when both canonical and pending journal are absent, proving that no payload or
+transition action could have begun. Foreign bytes and inconsistent fragments
+remain retained/refused. Repeated marker opens/writes/fsyncs and settlement
+unlink/parent-fsync boundaries are traced. Recovery does not depend on a vanished
+process remembering its UUID. This assumes cooperative writers under
+the common lock, not a hostile process with the same user identity. A partial
+output with foreign content, mode or identity refuses. Before retirement and
+publication, and on explicit resume after publication, the entire frozen native
+image membership is revalidated; unknown refs, objects, logs, files or empty
+directories cannot be adopted by a prior verification receipt. Journal replacement with
+failed parent fsync raises persistence uncertainty; it never reports completion.
+
+All nonservice children remain untouched, including live content, untracked and
+ignored files, auth state and nested repositories outside source boundaries.
+Source nested Git boundaries remain 6.21 blockers: confirmation refuses with
+zero transition effects rather than relaxing that safety rule. Independent test
+inventories check bytes, inode, link topology, modes, numeric owners and
+nanosecond mtime/ctime at every injected boundary. Exact containing service
+parents legitimately change membership. Checkout parent ctime changes when its
+`.git` leaves; its mode/owner/inode remain and its mtime is explicitly restored.
+No atime invariance is claimed.
+
+Terminal phase is `local-transition-complete-awaiting-review`. Step 6.23 must
+obtain separate diff approval, construct the layout-transform commit with old
+ancestry, route any still-active legacy workflow to retained metadata and
+reconcile publication. Step 6.24 owns root policy reconstruction after container
+replacement and activation. Current Save/Apply is not wired to this participant;
+an absent native index does not mean historical path layout is ready for it.
+Linux process-interruption proof does not qualify physical power loss or replace
+the original App/runtime/ext4 qualification boundary.

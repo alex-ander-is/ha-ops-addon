@@ -318,7 +318,7 @@ def test_strict_candidate_corruption_refusal(tmp_path,damage):
 def test_no_authority_or_production_import():
     app=Path(n.__file__).parent
     for path in app.glob('*.py'):
-        if path.name in ('native_migration.py','native_disk.py'):continue
+        if path.name in ('native_migration.py','native_disk.py','native_migration_transition.py'):continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node,ast.Import):assert all(i.name.split('.')[-1]!='native_migration' for i in node.names)
             if isinstance(node,ast.ImportFrom):

@@ -662,3 +662,44 @@ and `test_release_readiness.py`. Production imports, migration execution,
 original-image/runtime admission and later activation are outside this step.
 The independent tester passes and foreman's final repository gate remain
 separate. See [the diagnostic-only contract](ha-ops/docs/native-migration.md).
+
+## Dormant local migration transition (6.22)
+
+Run the focused portable group with `test_native_migration_transition.py` and
+`test_native_migration.py`. The transition group covers independent SHA1/SHA256
+raw backup and native continuity, exact staged index, absent index and
+unborn/detached HEAD, explicit one-use authority, lifecycle, stale/runtime drift,
+foreign prefixes, strict journals, destination races, storage refusal and
+short-write recovery. Source nested repositories remain preparation blockers;
+untouched nested repositories outside that source boundary remain preserved.
+
+The Linux every-mutation-boundary matrix derives its event sequence from the
+real executor, forks a process for every adjacent syscall boundary, exits with
+`os._exit` without cleanup, inventories all nonservice fixture objects, reopens
+without effects, and explicitly resumes. Eight deterministic shards per object format permit
+parallel execution without sampling boundaries. The matrix uses a compact real
+Git representation with packed history/staged/unreachable objects, explicit
+empty template/no-reflog fixture construction, and a multi-chunk pack payload.
+Each case clones pristine test metadata into independent inodes, prepares a
+fresh candidate and records its own complete nonservice inventory. Separate
+comprehensive fixtures retain sample hooks, loose/packed refs, logs and exact
+index variants. The primitive-coverage benchmark asserts every normal mutator
+class and multiple payload writes in both formats. Fresh-process bootstrap
+proofs discard the old UUID and recover only through public diagnostics:
+
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 -m pytest -n 4 -p no:cacheprovider -q \
+    -o tmp_path_retention_policy=failed \
+    ha-ops/tests/test_native_migration_transition.py
+```
+
+The portable host uses explicit synthetic allocation and no-replace adapters;
+it does not qualify Linux rename semantics. The matrix must execute on the
+isolated Linux runner. No live HA state, configured remotes, production dispatch,
+version, tag or publication participates. Process exits are not physical
+power-loss evidence. Final delivery must record the actual sealed snapshot and
+executed results; documentation alone is not a qualification claim.

@@ -173,6 +173,9 @@ class Policy:
             return "backup-root"
         if parts[0] in (b"proc", b"sys", b"dev", b"run", b"tmp", b"bin", b"sbin", b"usr", b"lib", b"lib64", b"etc", b"root", b"var", b"opt"):
             return "container-system-root"
+        # Recovery metadata cannot become content through scope expansion.
+        if beneath(path, b"data/native-migration-transition"):
+            return "service-data"
         if beneath(path, b"data"):
             if path in self.repository_files:
                 return None
