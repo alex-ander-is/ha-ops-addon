@@ -661,3 +661,144 @@ def test_partial_bootstrap_marker_settlement_boundaries(tmp_path,boundary,monkey
     else:
         with pytest.raises(Crash):obj.start(candidate=candidate['digest'],operation=operation,confirmation=confirmation)
     assert complete_from_public(p,candidate)['phase']==t.TERMINAL and freeze(root)==before
+
+
+def diagnostic_churn(root):
+    write(root,b'homeassistant/home-assistant_v2.db',b'database changed')
+    write(root,b'homeassistant/home-assistant_v2.db-wal',b'wal changed')
+    write(root,b'homeassistant/diagnostics/rotated.log',b'log changed')
+    old=root/'homeassistant/home-assistant.log'
+    if old.exists():old.unlink()
+
+
+def old_full_protected(transition):
+    # The schema-1 executor's original full-live baseline, independently built.
+    result=[]
+    for base in [transition.p.legacy]+[target for _,target in transition.p.mappings]:
+        full=Path(os.fsdecode(transition.root+b'/'+base))
+        if not full.exists():continue
+        for parent,dirs,files in os.walk(full):
+            relative=os.fsencode(Path(parent).relative_to(os.fsdecode(transition.root)))
+            if relative==transition.p.legacy:dirs[:]=[x for x in dirs if x!='.git']
+            info=os.lstat(parent)
+            result.append([n.encode_path(relative),t.identity(info) if relative==transition.p.legacy else n._stat(info)])
+            for name in files:
+                path=relative+b'/'+os.fsencode(name)
+                result.append([n.encode_path(path),n._stat(os.lstat(parent+'/'+name))])
+    return sorted(result)
+
+
+@pytest.mark.parametrize('old_schema',[False,True])
+@pytest.mark.parametrize('phase',['running','before-retirement','after-retirement'])
+def test_diagnostic_churn_survives_transition_and_terminal_resume(tmp_path,old_schema,phase):
+    root,repo,p,candidate=prepare(tmp_path)
+    class Crash(BaseException):pass
+    events=[];injected=[]
+    transition,operation,confirmation=begin(p,candidate)
+    baseline=old_full_protected(transition)
+    if old_schema:
+        original=transition._protected
+        def first():
+            transition._protected=original
+            return baseline
+        transition._protected=first
+    def trace(event):
+        events.append(event)
+        state=transition._journal
+        pending=state['pending']
+        retiring=pending is not None and state['actions'][pending]['kind']=='retire'
+        before=retiring and event[0]=='journal-parent-fsync'
+        after=event[0]=='rename-no-replace' and n.decode_path(event[1]).endswith(b'/retired.git')
+        if not injected and (before or phase=='after-retirement' and after):
+            if phase=='after-retirement' and not after:return
+            diagnostic_churn(root);injected.append(freeze(root))
+            if phase!='running':raise Crash()
+    transition.trace=trace
+    if phase=='running':
+        result=transition.start(candidate=candidate['digest'],operation=operation,confirmation=confirmation)
+    else:
+        with pytest.raises(Crash):transition.start(candidate=candidate['digest'],operation=operation,confirmation=confirmation)
+        reopened=t.Transition(p,trace=events.append)
+        confirmation=reopened.confirm(candidate=candidate['digest'],operation=operation,action='resume',approved=True)
+        result=reopened.resume(operation=operation,confirmation=confirmation)
+    assert result['phase']==t.TERMINAL and injected
+    assert freeze(root)==injected[0]
+    for _ in range(2):
+        diagnostic_churn(root);before=freeze(root);effects=[]
+        reopened=t.Transition(p,trace=effects.append)
+        confirmation=reopened.confirm(candidate=candidate['digest'],operation=operation,action='resume',approved=True)
+        assert reopened.resume(operation=operation,confirmation=confirmation)['phase']==t.TERMINAL
+        assert effects==[] and freeze(root)==before
+    for kind,path in events:
+        path=n.decode_path(path)
+        assert (path.startswith(t.STORE+b'/') or path==t.STORE or
+                path in (b'data/native',b'data/native/repository.git',b'data/native/repository-files',
+                         b'data/native/root-ignore-policy',b'.gitignore',b'data/repo',b'data/repo/.git'))
+
+
+@pytest.mark.parametrize('change',['mapped','source-file','source-membership','source-index','mapping','mapping-inode','absent-mapped'])
+def test_scoped_live_guard_retains_strict_inputs(tmp_path,change):
+    root,repo,p,candidate=prepare(tmp_path)
+    if change=='absent-mapped':
+        write(repo,b'homeassistant/new',b'new source');git(repo,'add','homeassistant/new')
+        candidate=p.prepare(expected=candidate['digest'])
+    class Crash(BaseException):pass
+    transition,operation,confirmation=begin(p,candidate)
+    def crash(event):
+        pending=transition._journal['pending']
+        if (event[0]=='journal-parent-fsync' and pending is not None and
+                transition._journal['actions'][pending]['kind']=='retire'):raise Crash()
+    transition.trace=crash
+    with pytest.raises(Crash):transition.start(candidate=candidate['digest'],operation=operation,confirmation=confirmation)
+    if change=='mapped':write(root,b'homeassistant/a',b'changed participating')
+    elif change=='source-file':write(repo,b'homeassistant/a',b'changed source')
+    elif change=='source-membership':write(repo,b'untracked-new',b'new source')
+    elif change=='source-index':git(repo,'update-index','--assume-unchanged','homeassistant/a')
+    elif change=='mapping':p.mappings=((b'homeassistant',b'different'),)
+    elif change=='mapping-inode':
+        (root/'homeassistant').rename(root/'old-homeassistant');shutil.copytree(root/'old-homeassistant',root/'homeassistant')
+    elif change=='absent-mapped':write(root,b'homeassistant/new',b'unexpected creation')
+    before=freeze(root);effects=[];reopened=t.Transition(p,trace=effects.append)
+    with pytest.raises(n.Blocked):
+        confirmation=reopened.confirm(candidate=candidate['digest'],operation=operation,action='resume',approved=True)
+        reopened.resume(operation=operation,confirmation=confirmation)
+    assert freeze(root)==before and (repo/'.git').is_dir()
+    assert not any(kind=='rename-no-replace' for kind,path in effects)
+
+
+def test_live_guard_never_enumerates_diagnostics(tmp_path,monkeypatch):
+    root,repo,p,candidate=prepare(tmp_path)
+    transition=t.Transition(p)
+    expected=transition._protected()
+    diagnostic_churn(root)
+    original=os.listdir
+    def listdir(fd):
+        if isinstance(fd,int) and os.fstat(fd).st_ino==(root/'homeassistant').stat().st_ino:
+            pytest.fail('live diagnostic tree enumerated')
+        return original(fd)
+    monkeypatch.setattr(os,'listdir',listdir)
+    assert transition._protected()==expected
+
+
+def test_old_schema_nested_mapping_anchors_use_candidate_evidence(tmp_path):
+    root,repo,p,candidate=prepare(tmp_path)
+    write(root,b'homeassistant/nested/a',b'live nested')
+    p=n.Preparation(binding(root),mappings=((b'homeassistant',b'homeassistant/nested'),),
+                    app_identity='fixture-app-1',manifest_digest='a'*64)
+    candidate=p.prepare(expected=candidate['digest'])
+    transition=t.Transition(p)
+    old=old_full_protected(transition)
+    assert n.encode_path(b'homeassistant') not in {row[0] for row in old}
+    assert transition._preserved(old)==transition._preserved(transition._protected())
+    (root/'homeassistant').rename(root/'old-homeassistant')
+    shutil.copytree(root/'old-homeassistant',root/'homeassistant')
+    assert transition._preserved(old)!=transition._preserved(transition._protected())
+
+
+@pytest.mark.parametrize('change',['missing','duplicate'])
+def test_scoped_saved_participating_rows_cannot_disappear(tmp_path,change):
+    root,repo,p,candidate=prepare(tmp_path);transition=t.Transition(p)
+    rows=transition._protected();target=n.encode_path(b'homeassistant/a')
+    if change=='missing':rows=[row for row in rows if row[0]!=target]
+    else:rows.append(next(row for row in rows if row[0]==target))
+    with pytest.raises(n.Blocked):transition._preserved(rows)

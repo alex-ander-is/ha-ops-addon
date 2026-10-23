@@ -170,8 +170,8 @@ class Transition:
         return [(r['path'], r['directory'], r['size'], r['digest']) for r in rows]
 
     def _protected(self):
-        """Exact descriptors of all existing nonservice objects, no auth reads."""
-        result=[];todo=[self.p.legacy]+[target for _,target in self.p.mappings if self._info(target) is not None]
+        """Strict checkout plus immutable candidate-scoped live descriptors."""
+        result=[];todo=[self.p.legacy]
         source=self.p.legacy+b'/.git'
         omitted=(STORE,source,b'data/native/repository.git',b'data/native/repository-files',
                  b'data/native/root-ignore-policy',b'.gitignore')
@@ -192,7 +192,58 @@ class Transition:
                         else:result.append([encode_path(child),_stat(info)])
                         if len(result)>MAX_ROWS:raise Blocked('preservation-resource-limit')
                 finally:os.close(fd)
+        existing={decode_path(row['path']) for row in self.p.read()['observation']['native']}
+        for path in self._live_scope():
+            info=self._info(path)
+            if info is None and path in existing:raise Blocked('missing-preservation-path')
+            if info is not None:
+                result.append([encode_path(path),identity(info) if stat.S_ISDIR(info.st_mode) else _stat(info)])
         return sorted(result)
+
+    def _live_scope(self):
+        accepted=self.p.read()
+        if self._journal is not None and accepted['digest']!=self._journal['candidate']:
+            raise Blocked('candidate-cas-conflict')
+        observation=accepted['observation']
+        if observation['binding']['mappings']!=[[encode_path(a),encode_path(b)] for a,b in self.p.mappings]:
+            raise Blocked('transition-mapping-drift')
+        paths={decode_path(row['destination']) for row in observation['rows']
+               if row['disposition'] in ('mapped','required-parent') and row['destination'] is not None}
+        paths.update(decode_path(pair[1]) for pair in observation['binding']['mappings'])
+        return {b'/'.join(path.split(b'/')[:i]) for path in paths for i in range(1,len(path.split(b'/'))+1)}
+
+    def _preserved(self, rows):
+        # Apply the same projection to old full-live schema-1 journals and fresh
+        # scoped snapshots. Absence remains absence: a newly created mapped path
+        # appears only in the current side and therefore refuses.
+        scope=self._live_scope();result=[];seen=set()
+        accepted=self.p.read()['observation']
+        expected={row['path'] for row in accepted['native'] if decode_path(row['path']) in scope}
+        for path,descriptor in rows:
+            raw=decode_path(path)
+            if beneath(raw,self.p.legacy) or raw in scope:
+                if path in seen:raise Blocked('duplicate-preservation-path')
+                seen.add(path)
+                if raw in scope and stat.S_ISDIR(descriptor[2]) and len(descriptor)==9:
+                    descriptor=descriptor[:3]+descriptor[4:6]
+                result.append([path,descriptor])
+        # Original schema-1 snapshots began at each mapping target, so their
+        # above-target anchors were omitted. Recover only those anchors from
+        # immutable accepted evidence, never from the mutable current tree.
+        targets=[decode_path(pair[1]) for pair in accepted['binding']['mappings']]
+        above={b'/'.join(target.split(b'/')[:i]) for target in targets
+               for i in range(1,len(target.split(b'/')))}
+        native={row['path']:row['object']['identity'] for row in accepted['native']}
+        for path in expected-seen:
+            if decode_path(path) not in above:raise Blocked('missing-preservation-path')
+            descriptor=native[path]
+            if not stat.S_ISDIR(descriptor[2]):raise Blocked('invalid-preservation-anchor')
+            result.append([path,descriptor[:3]+descriptor[4:6]])
+        return sorted(result)
+
+    def _check_protected(self):
+        if self._preserved(self._protected())!=self._preserved(self._journal['protected']):
+            raise Blocked('nonservice-descriptor-drift')
 
     def _runtime(self):
         with self.p._root() as root:
@@ -219,6 +270,7 @@ class Transition:
             if current is not None and current['phase']=='bootstrap-pending':raise Blocked('bootstrap-start-confirmation-required')
             if current is None or (current['operation'], current['candidate']) != (operation, candidate):
                 raise Blocked('addressed-transition-required')
+            self._live_scope()
             if current['runtime'] != self._runtime(): raise Blocked('incompatible-transition-runtime')
         return Confirmation(self._issuer, self._binding(operation, action, candidate))
 
@@ -566,6 +618,7 @@ class Transition:
             process.stdout.close();process.stderr.close()
 
     def _check_runtime(self):
+        self._live_scope()
         if self._runtime() != self._journal['runtime']: raise Blocked('transition-runtime-drift')
         if self.p.read()['digest'] != self._journal['candidate']: raise Blocked('candidate-cas-conflict')
 
@@ -662,7 +715,7 @@ class Transition:
             elif kind=='policy': receipt=self._file(path,POLICY)
             elif kind=='verify': receipt=self._verify()
             elif kind=='retire':
-                if self._protected()!=state['protected']:raise Blocked('nonservice-descriptor-drift')
+                self._check_protected()
                 self._check_receipts()
                 if not state['recovery']['verified']: raise Blocked('verified-recovery-required')
                 current=self._info(self.p.legacy+b'/.git')
@@ -820,7 +873,7 @@ class Transition:
                     fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
                     self._journal=self.read()
                     if self._journal!=state:raise Blocked('transition-cas-conflict')
-                    if self._protected()!=state['protected']:raise Blocked('nonservice-descriptor-drift')
+                    self._check_protected()
                     self._check_receipts()
                     return self._execute()
                 finally:os.close(fd)
