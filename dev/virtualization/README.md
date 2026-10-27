@@ -1,5 +1,81 @@
 # Local Linux test runner
 
+## Environment routing for native-tree steps 6.1–6.32
+
+Use the existing environments below; do not provision another VM for each task.
+Environment readiness is not evidence that an unimplemented step has passed.
+
+| Steps | Required environment |
+| --- | --- |
+| 6.1–6.11, 6.13, 6.15–6.16, 6.18, 6.21–6.23 | Cached Debian runner; use the opt-in ext4 profile for physical allocation/failure proofs. |
+| 6.12, 6.25 | Existing isolated SSH/HTTPS receiver fixtures in Colima; fixture credentials only. |
+| 6.14, 6.26 | Original Alpine App image and runtime admission; isolated Supervisor/HTTP/process fixtures for adapters. |
+| 6.17, 6.19–6.20, 6.24, 6.27 | Debian/Alpine participants plus shared Playwright and the rebuilt Vaadin bundle. |
+| 6.28 | Disposable App containers and persistent fixture data for replacement/restart scenarios. |
+| 6.29–6.31 | Combined runtime, browser, ext4 and lifecycle gates. Use HA Ops Lab for actual HAOS/Supervisor rehearsals; the fresh-install blockers below must be resolved. |
+| 6.32 | Existing Git/metadata fixtures; future format handling needs its own tests, not another VM. |
+
+Keep physical allocation, ENOSPC and exclusive ext4 proofs sequential. Separate
+temporary directories do not isolate shared capacity. Use the bounded worker
+counts in `TESTING.md` for other tests. Rebuild the original App image after App
+source changes; a retained older image does not contain newly added modules.
+
+### Native UTM laboratories
+
+The two ordinary, independent UTM VMs are named **HA Ops Lab** and **HAUI Lab**.
+Each has its own standalone disk, VM identity and MAC. Manage them through UTM's
+native CLI/API without `activate` or repeatedly opening their packages.
+Keep lifecycle/configuration changes confined to the VM for the current project.
+
+HA Ops Lab exposes Core at `http://127.0.0.1:18123` (guest port 80). Its direct
+HA Ops port is reserved at `http://127.0.0.1:18100` (guest port 8100); this endpoint
+requires an installed, running App and browser enrollment. HAUI Lab uses
+`http://127.0.0.1:28123` and is independent of HA Ops setup.
+
+HA Ops Lab has completed initial onboarding. Its disposable owner credentials
+are in ignored `.local/haops-lab-credentials.json`, mode `0600`. Never print that
+file, copy it into fixtures, or commit it. HAUI onboarding remains untouched.
+The current HA Ops build context is in the guest's
+`/mnt/data/supervisor/apps/local/ha_ops`; Supervisor 2026.10 uses `apps/local`,
+not the old `addons/local` host path. A later source change requires updating
+this copy deliberately before rebuilding. No production Git remote is configured.
+Use clean guest shutdown before changing UTM configuration; forced poweroff
+previously left an empty `.HA_VERSION` and prevented Core startup.
+
+### Shared browser reuse
+
+Use the shared Playwright runtime/profile documented in the workspace. If it is
+already running, preserve its existing pages and connect the repository browser
+tests using `HA_OPS_BROWSER_CDP_URL` with its actual local debugging endpoint.
+Do not assume a fixed debugging port or launch a second process on the profile.
+The existing `folder-scope.mjs` and `storage-compact.mjs` accept this variable and
+own/close only their newly created test pages. A profile-in-use error is not a
+reason to use a temporary profile or terminate another task's browser.
+
+### Fresh-install blockers observed on October 27, 2026
+
+The updated cached ARM64 App image builds and passes `native_runtime.qualify()`.
+Its complete `/app` manifest matches the current source. This does **not** prove
+a fresh Supervisor installation: an actual local install in HA Ops Lab failed.
+
+* Supervisor 2026.10.4 rejects the `@sha256:...` form in `build.yaml`'s
+  `build_from` values and falls back to `ghcr.io/home-assistant/base:latest`.
+  The supported build configuration must retain an explicitly qualified base;
+  silently accepting that fallback is not a fix.
+* The ARM64 APK lock currently contains four URLs returning HTTP 404:
+  `c-ares-1.34.8-r0.apk`, `ca-certificates-bundle-20260909-r0.apk`,
+  `curl-8.22.0-r0.apk` and `libexpat-2.8.5-r0.apk`. Retained build layers hide
+  this failure. The installer intentionally refuses an unavailable artifact.
+  Resolving artifact delivery or choosing a new runtime profile needs explicit
+  implementation and requalification; do not remove hashes/signature checks,
+  silently change versions, or treat a local cache as proof of fresh install.
+
+The local App was discovered but remains **uninstalled** after this failed
+attempt. No native activation, migration, Apply or production publication was
+performed. Resolve these packaging defects before claiming HAOS installation
+or step-6.29 end-to-end readiness. ARM64 execution does not qualify AMD64; the
+existing runtime document records that architecture's outstanding proof.
+
 `ha_ops_dev.py` owns a persistent Colima profile named `ha-ops-dev`. It is for
 development and tests only; nothing under this directory is copied into the
 HA Ops App image. The profile, its Docker images, and package cache survive
