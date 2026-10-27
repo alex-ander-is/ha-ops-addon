@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 import base64
 import copy
 import fcntl
+import contextvars
 import hashlib
 import hmac
 import json
@@ -29,6 +30,8 @@ from native_inventory import Inventory, beneath, linux_mounts, path_bytes
 ADMISSION_LOCK = b"data/.native-disk-admission.lock"
 MIGRATION_STORE = b"data/native-migration-preparation"
 TRANSITION_STORE = b"data/native-migration-transition"
+MIGRATION_GIT_STORE = b"data/native-migration-git-candidate"
+_MIGRATION_CAPACITY = contextvars.ContextVar('migration_git_capacity', default=None)
 
 WARNING_BYTES = 500 * 1024**2
 CATEGORIES = ("git", "staging", "diff", "recovery", "service", "authorization")
@@ -224,7 +227,7 @@ class Layout:
 
     @property
     def anchors(self):
-        return (b"data/native", b"data/native-operations", b"data/direct-auth", MIGRATION_STORE, TRANSITION_STORE, ADMISSION_LOCK) + self.legacy
+        return (b"data/native", b"data/native-operations", b"data/direct-auth", MIGRATION_STORE, TRANSITION_STORE, MIGRATION_GIT_STORE, ADMISSION_LOCK) + self.legacy
 
 
 @dataclass(frozen=True)
@@ -594,12 +597,20 @@ class NativeDisk:
 
     def _volume(self, path, fd, mounts):
         key, mount, fs, supported = self._mount(path, os.fstat(fd), mounts)
+        cache=_MIGRATION_CAPACITY.get()
+        cache_key=(id(self),key)
+        if cache is not None and cache_key in cache:
+            prior=cache[cache_key]
+            if prior.filesystem!=fs:raise Blocked('migration-capacity-profile-drift')
+            return replace(prior,mounts=(mount,),supported=prior.supported and supported)
         v = os.fstatvfs(fd)
         if v.f_frsize <= 0 or v.f_bavail < 0:
             raise Blocked("unavailable-capacity")
-        return Volume(key, (mount,), v.f_bavail * v.f_frsize,
+        result=Volume(key, (mount,), v.f_bavail * v.f_frsize,
                       v.f_favail if v.f_files > 0 else None, v.f_frsize, fs,
                       supported and not (v.f_flag & getattr(os, "ST_RDONLY", 1)))
+        if cache is not None:cache[cache_key]=result
+        return result
 
     def _destination(self, relative, mounts, *, namespace=None, file_target=False):
         relative = path_bytes(relative)
@@ -1093,7 +1104,7 @@ class NativeDisk:
             return "diff"
         if beneath(relative, b"data/native/recovery"):
             return "recovery"
-        if beneath(relative, MIGRATION_STORE) or beneath(relative, TRANSITION_STORE) or relative == ADMISSION_LOCK:
+        if beneath(relative, MIGRATION_STORE) or beneath(relative, TRANSITION_STORE) or beneath(relative, MIGRATION_GIT_STORE) or relative == ADMISSION_LOCK:
             return "service"
         if any(beneath(relative, p) for p in self.layout.legacy):
             return "staging"
@@ -1146,6 +1157,27 @@ class NativeDisk:
                     safe=(stat.S_ISDIR(s.st_mode) and stat.S_IMODE(s.st_mode)==0o700 or
                           stat.S_ISREG(s.st_mode) and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1) and s.st_uid==os.geteuid()
                 if not safe:issue('unrecognized-or-unsafe-transition-storage-entry:'+repr(relative))
+            if beneath(relative,MIGRATION_GIT_STORE):
+                suffix=relative[len(MIGRATION_GIT_STORE):].lstrip(b'/')
+                parts=suffix.split(b'/') if suffix else []
+                directory=stat.S_ISDIR(s.st_mode)
+                object_leaf=(len(parts)>5 and parts[4]==b'repository.git' and parts[5]==b'objects')
+                safe=(directory and stat.S_IMODE(s.st_mode)==0o700 or
+                      stat.S_ISREG(s.st_mode) and s.st_nlink==1
+                      and stat.S_IMODE(s.st_mode) in ((0o600,0o444) if object_leaf else (0o600,)))
+                if parts and parts[0] != b'candidate.json' and not re.fullmatch(rb'\.pending-[0-9a-f]{32}',parts[0]):
+                    safe=safe and bool(re.fullmatch(rb'[0-9a-f]{32}',parts[0]))
+                    if len(parts)>1:
+                        safe=safe and parts[1]==b'root'
+                    if len(parts)>2:
+                        safe=safe and parts[2]==b'data'
+                    if len(parts)>3:
+                        safe=safe and parts[3]==b'native'
+                    if len(parts)>4:
+                        safe=safe and parts[4] in (b'repository.git',b'git-resources')
+                elif parts:
+                    safe=safe and len(parts)==1 and not directory
+                if not safe or s.st_uid!=os.geteuid():issue('unrecognized-or-unsafe-migration-git-storage-entry:'+repr(relative))
             if not (stat.S_ISREG(s.st_mode) or stat.S_ISDIR(s.st_mode)):
                 issue("unsafe-authorization-storage" if beneath(path,self.root+b"/data/direct-auth") else "unsafe-private-object:" + repr(path))
                 return
@@ -2393,6 +2425,18 @@ class NativeDisk:
                 raise InsufficientSpace('current-capacity-insufficient')
 
     @contextmanager
+    def migration_git_candidate_guard(self, recipe):
+        from native_migration_git_candidate import Recipe
+        if type(recipe) is not Recipe:
+            raise Blocked('issued-migration-git-recipe-required')
+        recipe.check(self.root)
+        token=_MIGRATION_CAPACITY.set({})
+        try:
+            with self._migration_guard(recipe, candidate=True):
+                yield
+        finally:_MIGRATION_CAPACITY.reset(token)
+
+    @contextmanager
     def migration_transition_guard(self, recipe, effect):
         """One fixed dormant participant, independent of an existing native Git.
 
@@ -2404,6 +2448,11 @@ class NativeDisk:
         if type(recipe) is not Recipe:
             raise Blocked('issued-transition-recipe-required')
         recipe.check(self.root)
+        with self._migration_guard(recipe):
+            yield
+
+    @contextmanager
+    def _migration_guard(self, recipe, *, candidate=False):
         if self._active_operation is not None:
             raise Blocked('nested-or-competing-guard')
         snapshot = self.snapshot()
@@ -2439,7 +2488,8 @@ class NativeDisk:
                     inode_demand=recipe.entries+32
                     if (volume.available<demand+reserve or volume.inodes is not None and volume.inodes<inode_demand):
                         raise InsufficientSpace('insufficient-transition-space-or-inodes')
-                    with _directory(self.root) as root:
+                    if not candidate:
+                      with _directory(self.root) as root:
                         root_volume=self._volume(self.root,root,mounts)
                         if root_volume.key!=volume.key:
                             if not root_volume.supported:raise Blocked('unsupported-root-policy-allocation-profile')

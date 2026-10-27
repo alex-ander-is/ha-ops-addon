@@ -703,3 +703,26 @@ isolated Linux runner. No live HA state, configured remotes, production dispatch
 version, tag or publication participates. Process exits are not physical
 power-loss evidence. Final delivery must record the actual sealed snapshot and
 executed results; documentation alone is not a qualification claim.
+
+## Dormant migration Git candidate (6.23)
+
+Run `test_native_migration_git_candidate.py` with the preparation and transition
+focused groups. Use the cached Linux runner and all four fixture identity fields:
+
+```sh
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 -m pytest -p no:cacheprovider -n 2 -q ha-ops/tests/test_native_migration_git_candidate.py
+```
+
+The real SHA1/SHA256 fixtures prove frozen remote ancestry, independent object
+storage, exact tree/review/content, binary repository-only moves, source/index/
+canonical/recovery invariance, strict diagnostics, interruption, retained pending
+fragments, one accounting snapshot and sticky update/stale state. Root Linux
+additionally proves numeric ownership, full special modes and non-UTF8 paths.
+An opt-in `--ext4` invocation must include the unchanged `test_native_ext4.py`
+mandatory matrix plus the candidate file. `MIGRATION_GIT_EXT4` reports its separate
+observed allocation checkpoints and conservative bounds. Skips and checkpoint
+samples are not kernel exhaustion or physical power-loss proof. No live HA,
+network remote, installation, version bump, tag or publication participates.

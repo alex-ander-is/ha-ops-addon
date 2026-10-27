@@ -196,7 +196,7 @@ def test_journal_shape_corruption_and_foreign_prefix_refuse(tmp_path):
 def test_dormant_import_and_exact_syscall_trace_contract():
     app=Path(t.__file__).parent
     for path in app.glob('*.py'):
-        if path.name in ('native_migration_transition.py','native_disk.py'):continue
+        if path.name in ('native_migration_transition.py','native_disk.py','native_migration_git_candidate.py'):continue
         for node in ast.walk(ast.parse(path.read_text())):
             if isinstance(node,ast.Import):assert all(item.name!='native_migration_transition' for item in node.names)
             if isinstance(node,ast.ImportFrom):assert node.module!='native_migration_transition'

@@ -308,3 +308,54 @@ replacement and activation. Current Save/Apply is not wired to this participant;
 an absent native index does not mean historical path layout is ready for it.
 Linux process-interruption proof does not qualify physical power loss or replace
 the original App/runtime/ext4 qualification boundary.
+
+## Dormant Git layout candidate (6.23)
+
+`native_migration_git_candidate.Candidate` is an explicit local API. It requires
+one completed transition, the exact saved preparation and a direct frozen
+`refs/remotes/...` commit. It does not fetch or establish remote-server freshness.
+The tracked parent tree supplies content; staged, working, untracked and ignored
+checkout bytes remain retained separately. The new commit has that single parent.
+
+Every eligible parent leaf needs an explicit mapping. Declared
+`Policy.repository_files` leaves remain Git objects without live materialization;
+unknown leaves refuse. Retired and denied leaves have index-only removal rows.
+Managed metadata comes from frozen regular source descriptors and exact required
+parents, preserving numeric ownership, full modes and owner-execute semantics.
+The generated metadata manifest and literal allow rules are candidate objects;
+the installed deny-all policy remains unchanged.
+
+The builder copies object storage into an independent private native root below
+`data/native-migration-git-candidate/<operation>/root`. It uses existing Git
+plumbing, an empty isolated index and an exact deterministic commit identity.
+Canonical native, retired and recovery images are revalidated without mutation.
+Complete before/after rows, unchanged leaves, full metadata and content references
+are digest-bound in `candidate.json`. `read_content` streams either side from the
+verified private object database; binary bytes are never truncated into a preview.
+
+Construction requires one issued NativeDisk recipe, one accounting snapshot and
+one data-volume capacity observation before any candidate output. Full copied
+history, new Git objects, index/spool/journal resources, control overlap, inodes
+and retained failed generations are charged without allocation credit. Fewer than
+500 MB free remains advisory when the conservative forecast fits. Candidate
+checkpoints have a separate opt-in ext4 proof; host arithmetic tests do not
+qualify physical allocation or power-loss behavior.
+
+Publication of the diagnostic pointer uses a fresh addressed `.pending-<token>`
+control, exclusive creation, complete readback, CAS and file/directory fsync.
+Interrupted generations and pending fragments remain explicit charged evidence;
+fresh explicit operations can proceed, but addressed incomplete operations are
+never resumed implicitly. Directory-fsync failure reports uncertain persistence.
+No automatic cleanup or disposition API exists in this step.
+
+Read/reopen/refresh/restart never rebuild, resume, clean up or restore consent.
+Saved review stays immutable. Explicit `revalidate()` proves current local inputs;
+observed drift persists a sticky stale marker, including across A-B-A changes.
+A durable `validation: pending` pointer precedes every freshness observation.
+A crash or failed final write leaves it unavailable across restart, even after
+inputs return to old values; only a fresh explicit build can replace it. Admission
+failure performs no freshness observation. The immutable `candidate` digest binds
+the complete review; a separate pointer digest supplies CAS for diagnostic state.
+Unavailable stale persistence returns `unavailable`. An App identity update keeps
+diagnostics but requires revalidation; a saved `stale: false` is never authority.
+There are no approval, publication, activation, server or frontend entrypoints.

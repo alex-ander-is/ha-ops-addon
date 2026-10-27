@@ -411,7 +411,7 @@ def assert_metadata_dormancy(sources):
             else:
                 continue
             if "native_metadata" in modules:
-                assert name in ("native_preview.py", "native_save.py", "native_disk.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_operations.py"), name
+                assert name in ("native_migration_git_candidate.py", "native_preview.py", "native_save.py", "native_disk.py", "native_publication.py", "native_scope.py", "native_recovery.py", "native_apply.py", "native_operations.py"), name
 
 
 @pytest.mark.parametrize("name", ["server.py", "another_dormant.py"])

@@ -208,8 +208,10 @@ class Transition:
         if observation['binding']['mappings']!=[[encode_path(a),encode_path(b)] for a,b in self.p.mappings]:
             raise Blocked('transition-mapping-drift')
         paths={decode_path(row['destination']) for row in observation['rows']
-               if row['disposition'] in ('mapped','required-parent') and row['destination'] is not None}
-        paths.update(decode_path(pair[1]) for pair in observation['binding']['mappings'])
+               if row['disposition'] in ('mapped','required-parent') and row['destination'] is not None
+               and decode_path(row['destination']) not in self.p.policy.repository_files}
+        paths.update(decode_path(pair[1]) for pair in observation['binding']['mappings']
+                     if decode_path(pair[1]) not in self.p.policy.repository_files)
         return {b'/'.join(path.split(b'/')[:i]) for path in paths for i in range(1,len(path.split(b'/'))+1)}
 
     def _preserved(self, rows):
@@ -698,6 +700,22 @@ class Transition:
             backup=prefix+b'/backup'
             if self._contents(self._manifest(backup))!=self._contents(state['source_manifest']):
                 raise Blocked('verified-recovery-drift')
+
+    def completed_evidence(self, *, candidate, operation):
+        """Explicit read-only reproof after the authorized topology change."""
+        accepted = self.p.read()
+        state = self.read()
+        if (accepted is None or accepted['digest'] != candidate
+                or accepted['state'] != 'prepared' or accepted['observation']['blockers']
+                or state is None or state.get('phase') != TERMINAL
+                or state['operation'] != operation or state['candidate'] != candidate
+                or state['pending'] is not None or not state['recovery']['verified']):
+            raise Blocked('completed-current-transition-required')
+        self._journal = state
+        self._check_runtime()
+        self._check_protected()
+        self._check_receipts()
+        return state
 
     def _execute(self):
         state=self._journal;prefix=STORE+b'/'+state['operation'].encode()
