@@ -10,6 +10,43 @@ import pytest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import web
 import direct_access as d
+import native_migration_review_http as migration_http
+
+
+@pytest.mark.parametrize('path',[
+    '/diff-get?path=homeassistant/migration.yaml',
+    '/diff-get?path=%2Fapi%2Fv1%2Fmigration%2Freview',
+    '/api/hassio_ingress/migration-token/diff-get?path=migration.yaml',
+    '/api/v1/migration.yaml','/direct/api/migration-backup','/some-migration/review',
+])
+def test_unrelated_migration_names_are_not_reserved(path):
+    assert not migration_http.reserved(path)
+
+
+@pytest.mark.parametrize('path',[
+    '/api/v1/migration','/api/v1/migration/review?invalid=1',
+    '/api/v1/%256digration/decision/save','/API/V1/MIGRATION/state',
+    '/api/hassio_ingress/token/api/v1/migration/decision/apply',
+    '/direct/api/migration/decision/apply','/direct/api/%6digration/review',
+])
+def test_exact_native_namespace_variants_stay_reserved(path):
+    assert migration_http.reserved(path)
+
+
+@pytest.mark.parametrize('peer',[False,True])
+@pytest.mark.parametrize('path',['homeassistant/migration.yaml','homeassistant/%6digration.yaml'])
+def test_existing_diff_get_migration_paths_reach_legacy(peer,path):
+    spy=Spy() if peer else None
+    server=d.DirectServer(('127.0.0.1',0),web.create_handler(SimpleNamespace(),migration_review=spy))
+    threading.Thread(target=server.serve_forever,daemon=True).start()
+    try:
+        with mock.patch.object(web,'dispatch_command',return_value={'ok':True,'diff':'existing exact content'}) as dispatch:
+            code,value=req(server,'GET','/diff-get?path='+path)
+            assert code==200 and value['diff']=='existing exact content'
+            assert dispatch.call_args.args[1]=='diff_get'
+            assert dispatch.call_args.args[2]['path']=='homeassistant/migration.yaml'
+        assert spy is None or spy.calls==[]
+    finally:server.shutdown();server.server_close()
 
 
 class Spy:

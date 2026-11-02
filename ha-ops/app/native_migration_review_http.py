@@ -5,7 +5,7 @@ import json
 import re
 import secrets
 import threading
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from direct_auth import Refused, origin
 
@@ -14,9 +14,10 @@ ROUTES = ('state','review','decision','content-open','content-page','content-clo
 
 
 def reserved(path):
-    value=path
+    # Reserve only known path namespaces; query data is never routing authority.
+    value=urlsplit(path).path
     for _ in range(len(path)+1):
-        if 'migration' in value.lower():return True
+        if re.match(r'^(?:(?:/api/hassio_ingress/[^/?#]+)?/api/v1|/direct/api)/migration(?:/|$)',value,re.IGNORECASE):return True
         decoded=unquote(value)
         if decoded==value:return False
         value=decoded

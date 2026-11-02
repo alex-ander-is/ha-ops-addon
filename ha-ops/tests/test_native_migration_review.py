@@ -322,11 +322,25 @@ def test_completed_receipt_corruption_never_adopted_or_deleted(tmp_path,kind):
     else:
         spool=root/os.fsdecode(r.STORE)/owner._view['name'];spool.unlink();spool.write_bytes(b'foreign');spool.chmod(0o600)
     reopened=r.Review(c.Candidate(p))
-    # Unsafe metadata can refuse review itself; valid-looking corrupt controls refuse explicit open.
+    # Review itself must refuse: a later open failure cannot mask a challenge.
     with pytest.raises((n.Blocked,d.Blocked,OSError,TypeError)):
-        reviewed=reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
-        ref2=dict(ref,review_id=reviewed['review_id']);reopened.open_content(row=0,side='before',**ref2)
+        reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+    assert not reopened._challenges
     assert receipt.exists() or receipt.is_symlink()
+    os.close(owner._view['fd']);owner._view=None
+
+
+@pytest.mark.parametrize('action',['approve','refuse','dismiss'])
+def test_invalid_completed_evidence_after_review_never_saves_decision(tmp_path,action):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    owner.open_content(row=0,side='before',**ref)
+    receipt=next((root/os.fsdecode(r.STORE)).glob('completed-*.json'))
+    receipt.write_bytes(b'{}')
+    before={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file()}
+    with pytest.raises((n.Blocked,OSError,ValueError)):
+        owner.decide(action=action,**ref)
+    assert not owner._challenges and not (receipt.parent/'decision.json').exists()
+    assert before=={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file()}
     os.close(owner._view['fd']);owner._view=None
 
 
@@ -476,3 +490,52 @@ def test_retirement_quarantine_capture_crash_recovers_without_authority(tmp_path
         assert reopened._completed(fd,'b'*64,'c'*64)==[]
         assert (tmp_path/qname).is_dir() and list((tmp_path/qname).iterdir())==[]
     finally:os.close(fd)
+
+
+@pytest.mark.parametrize('control_private',[False,True])
+@pytest.mark.parametrize('payload_state',['canonical','private','absent','duplicate','corrupt','replaced','symlink','hardlink','mode','foreign'])
+def test_completed_probe_validates_all_retirement_payload_locations(tmp_path,control_private,payload_state):
+    from types import SimpleNamespace
+    owner=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)))
+    fd=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY)
+    name='view-'+'a'*32;control='completed-'+'a'*32+'.json';qname='retire-'+'a'*32
+    payload=tmp_path/name;payload.write_bytes(b'full bytes');payload.chmod(0o600)
+    info=r._stat(payload.stat());(tmp_path/qname).mkdir(mode=0o700);qinfo=(tmp_path/qname).stat()
+    value=dict(quarantine=[qname,qinfo.st_dev,qinfo.st_ino],schema=1,status='complete',name=name,candidate='b'*64,scope='c'*64,row=0,side='after',oid='d'*40,size=10,
+        sha256=hashlib.sha256(b'full bytes').hexdigest(),stat=info,store=[os.fstat(fd).st_dev,os.fstat(fd).st_ino])
+    try:
+        receipt=owner._save_receipt(fd,control,value,None)
+        if control_private:(tmp_path/control).rename(tmp_path/qname/'control')
+        private=tmp_path/qname/'payload'
+        if payload_state!='canonical':payload.rename(private)
+        if payload_state=='absent':private.unlink()
+        elif payload_state=='duplicate':payload.write_bytes(b'full bytes');payload.chmod(0o600)
+        elif payload_state=='corrupt':
+            private.write_bytes(b'evil bytes');os.utime(private,ns=(info[7],info[7]))
+        elif payload_state=='replaced':private.unlink();private.write_bytes(b'full bytes');private.chmod(0o600)
+        elif payload_state=='symlink':private.unlink();private.symlink_to(tmp_path/'missing')
+        elif payload_state=='hardlink':os.link(private,tmp_path/qname/'foreign')
+        elif payload_state=='mode':private.chmod(0o644)
+        elif payload_state=='foreign':(tmp_path/qname/'foreign').write_bytes(b'foreign')
+        before={str(x.relative_to(tmp_path)):r._stat(x.lstat()) for x in tmp_path.rglob('*')}
+        valid=payload_state=='canonical' or control_private and payload_state in ('private','absent')
+        if valid:assert owner._completed(fd,'e'*64,'f'*64)==[(control,receipt)]
+        else:
+            with pytest.raises((n.Blocked,OSError)):owner._completed(fd,'e'*64,'f'*64)
+        after={str(x.relative_to(tmp_path)):r._stat(x.lstat()) for x in tmp_path.rglob('*')}
+        assert before==after
+    finally:os.close(fd)
+
+
+def test_uncertain_instance_refuses_every_new_authority_boundary(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    grants=owner._challenges.copy();owner._uncertain=True
+    with pytest.raises(n.PersistenceUncertain):owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+    assert not owner._challenges
+    for operation in ('decision','open'):
+        owner._challenges=grants.copy()
+        with pytest.raises(n.PersistenceUncertain):
+            if operation=='decision':owner.decide(action='approve',**ref)
+            else:owner.open_content(row=0,side='before',**ref)
+        assert not owner._challenges
+    assert not (root/os.fsdecode(r.STORE)).exists()

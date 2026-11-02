@@ -212,6 +212,34 @@ class Review:
             if [now.st_dev,now.st_ino]!=[dev,ino]:raise Conflict('retirement-directory-replaced')
         finally:os.close(child)
 
+    def _completed_payload(self, fd, child, value, *, retiring):
+        """Read-only proof for either payload location, including settled deletion."""
+        present=[]
+        try:
+            for source,target in ((fd,value['name']),(child,'payload')):
+                try:file=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=source)
+                except FileNotFoundError:continue
+                present.append((source,target,file))
+            if len(present)>1:raise Conflict('duplicate-retirement-payload')
+            if not present:
+                if not retiring:raise Conflict('completed-spool-missing')
+                return
+            source,target,file=present[0]
+            if source!=fd and not retiring:raise Conflict('completed-spool-missing')
+            actual=_stat(os.fstat(file))
+            if actual[:8]!=value['stat'][:8] or source==fd and actual!=value['stat']:
+                raise Conflict('completed-spool-replaced')
+            digest=hashlib.sha256();offset=0
+            while offset<value['size']:
+                chunk=os.pread(file,min(PAGE,value['size']-offset),offset)
+                if not chunk:raise Conflict('completed-spool-incomplete')
+                digest.update(chunk);offset+=len(chunk)
+            if (digest.hexdigest()!=value['sha256'] or _stat(os.fstat(file))!=actual
+                    or _stat(os.stat(target,dir_fd=source,follow_symlinks=False))!=actual):
+                raise Conflict('completed-spool-corrupt')
+        finally:
+            for _,_,file in present:os.close(file)
+
     def _completed(self, fd, candidate, scope):
         names=set(os.listdir(fd));receipts=[];owned={'decision.json'}
         owned.update(n for n in names if re.fullmatch(r'\.pending-[0-9a-f]{32}',n))
@@ -224,38 +252,33 @@ class Review:
                 if not children:owned.add(qname);continue
                 if 'control' not in children:raise Conflict('unowned-retirement-payload')
                 value=self._receipt(child,'control',store_fd=fd,logical=logical)
-                # The receipt-bound private location is durable retirement intent.
-                if value['status'] not in ('complete','retiring'):raise Conflict('invalid-retirement-state')
-                with self._quarantine(fd,value):pass
+                if value is None:raise Conflict('retirement-control-missing')
+                # Captured immutable control is durable retirement intent.
+                with self._quarantine(fd,value) as held:
+                    self._completed_payload(fd,held,value,retiring=True)
                 owned.update((qname,value['name']));receipts.append((logical,value))
             finally:os.close(child)
         for name in sorted(n for n in names if n.startswith('completed-')):
-            value=self._receipt(fd,name);owned.update((name,value['name'],value['quarantine'][0]))
+            value=self._receipt(fd,name)
+            if value is None:raise Conflict('completed-control-missing')
+            owned.update((name,value['name'],value['quarantine'][0]))
             with self._quarantine(fd,value) as child:
                 if 'control' in os.listdir(child):raise Conflict('duplicate-retirement-control')
-                source=fd;target=value['name']
-                try:file=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=source)
-                except FileNotFoundError:
-                    if value['status']!='retiring':raise Conflict('completed-spool-missing')
-                    source=child;target='payload'
-                    try:file=os.open(target,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=source)
-                    except FileNotFoundError:file=None
-                else:
-                    if 'payload' in os.listdir(child):os.close(file);raise Conflict('duplicate-retirement-payload')
-                if file is not None:
-                    try:
-                        actual=_stat(os.fstat(file))
-                        if actual[:8]!=value['stat'][:8] or source==fd and actual!=value['stat']:raise Conflict('completed-spool-replaced')
-                        digest=hashlib.sha256();offset=0
-                        while offset<value['size']:
-                            chunk=os.pread(file,min(PAGE,value['size']-offset),offset)
-                            if not chunk:raise Conflict('completed-spool-incomplete')
-                            digest.update(chunk);offset+=len(chunk)
-                        if digest.hexdigest()!=value['sha256'] or _stat(os.fstat(file))!=actual or _stat(os.stat(target,dir_fd=source,follow_symlinks=False))!=actual:raise Conflict('completed-spool-corrupt')
-                    finally:os.close(file)
+                self._completed_payload(fd,child,value,retiring=value['status']=='retiring')
             receipts.append((name,value))
         if names-owned:raise Blocked('retained-review-content-requires-diagnosis')
         return receipts
+
+    def _available(self, fd, candidate, scope, grant=None):
+        """Shared pure admission proof, called with mutex/disk/store locks held."""
+        if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+        value,accepted=self.c.current_proof(self.c.read())
+        model=self._model(value,accepted)
+        if (candidate!=value['candidate'] or scope!=model['scope_digest']
+                or grant is not None and grant['model']!=_digest(model)):
+            raise Conflict('review-model-changed')
+        completed=[] if fd is None else self._completed(fd,candidate,scope)
+        return value,model,completed
 
     def _capture(self, source, name, child, target, expected):
         # Only the canonical namespace is untrusted. The exclusive private
@@ -371,15 +394,20 @@ class Review:
         ctx = _context(context)
         with self._mutex:
             self._challenges.pop(ctx,None)
-            if self.c.revalidate() != 'current': raise Conflict('new-current-review-required')
-            value = self.c.read()
-            model = self._model(value,self.p.read())
-            if candidate != value['candidate'] or scope != model['scope_digest']: raise Conflict('candidate-or-scope-changed')
-            with self._store() as fd: previous = self._decision(fd)
-            token = secrets.token_hex(32)
-            self._challenges[ctx] = dict(token=token,model=_digest(model),scope=model['scope_digest'],candidate=candidate,
-                previous=None if previous is None else previous['digest'])
-            return dict(model=model,review_id=token,status='current')
+            try:
+                if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+                if self.c.revalidate() != 'current': raise Conflict('new-current-review-required')
+                with self._admission(8192,8192):
+                    with self._store() as fd:
+                        value,model,_=self._available(fd,candidate,scope)
+                        previous=self._decision(fd)
+                        token = secrets.token_hex(32)
+                        self._challenges[ctx] = dict(token=token,model=_digest(model),scope=model['scope_digest'],candidate=candidate,
+                            previous=None if previous is None else previous['digest'])
+                        return dict(model=model,review_id=token,status='current')
+            except BaseException:
+                self._challenges.pop(ctx,None)
+                raise
 
     def _grant(self, context, review_id, candidate, scope):
         ctx = _context(context)
@@ -420,13 +448,12 @@ class Review:
         with self._mutex:
             ctx, grant = self._grant(context,review_id,candidate,scope)
             try:
+                if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                 if self.c.revalidate() != 'current': raise Conflict('new-current-review-required')
                 with self._admission(8192,8192):
-                    value,accepted=self.c.current_proof(self.c.read())
-                    model=self._model(value,accepted)
-                    if (candidate!=value['candidate'] or scope!=model['scope_digest'] or grant['model']!=_digest(model)):
-                        raise Conflict('review-model-changed')
+                    if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:
+                        value,model,_=self._available(fd,candidate,scope,grant)
                         decision=dict(schema=1,action=action,candidate=candidate,scope=scope,model=grant['model'],
                             preparation=value['preparation'],transition=value['transition'],runtime=_digest(value['runtime']),
                             review=_digest(review_id),previous=grant['previous'])
@@ -444,13 +471,13 @@ class Review:
         with self._mutex:
             ctx,grant=self._grant(context,review_id,candidate,scope)
             try:
+                if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                 info=self.c.content_info(candidate=candidate,row=row,side=side)
                 with self._admission(info['size'],8192,8192):
-                    value,accepted=self.c.current_proof(self.c.read())
-                    if value['candidate']!=candidate or self._model(value,accepted)['scope_digest']!=scope: raise Conflict('content-candidate-changed')
+                    if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:
+                        value,model,completed=self._available(fd,candidate,scope,grant)
                         previous=self._view
-                        completed=self._completed(fd,candidate,scope)
                         name='view-'+uuid.uuid4().hex
                         file=self._effect('review-content-open',lambda:os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd))
                         digest=hashlib.sha256();count=0
