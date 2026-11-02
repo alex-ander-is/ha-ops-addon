@@ -31,6 +31,7 @@ ADMISSION_LOCK = b"data/.native-disk-admission.lock"
 MIGRATION_STORE = b"data/native-migration-preparation"
 TRANSITION_STORE = b"data/native-migration-transition"
 MIGRATION_GIT_STORE = b"data/native-migration-git-candidate"
+MIGRATION_REVIEW_STORE = b"data/native-migration-review"
 _MIGRATION_CAPACITY = contextvars.ContextVar('migration_git_capacity', default=None)
 
 WARNING_BYTES = 500 * 1024**2
@@ -227,7 +228,7 @@ class Layout:
 
     @property
     def anchors(self):
-        return (b"data/native", b"data/native-operations", b"data/direct-auth", MIGRATION_STORE, TRANSITION_STORE, MIGRATION_GIT_STORE, ADMISSION_LOCK) + self.legacy
+        return (b"data/native", b"data/native-operations", b"data/direct-auth", MIGRATION_STORE, TRANSITION_STORE, MIGRATION_GIT_STORE, MIGRATION_REVIEW_STORE, ADMISSION_LOCK) + self.legacy
 
 
 @dataclass(frozen=True)
@@ -1104,7 +1105,7 @@ class NativeDisk:
             return "diff"
         if beneath(relative, b"data/native/recovery"):
             return "recovery"
-        if beneath(relative, MIGRATION_STORE) or beneath(relative, TRANSITION_STORE) or beneath(relative, MIGRATION_GIT_STORE) or relative == ADMISSION_LOCK:
+        if beneath(relative, MIGRATION_STORE) or beneath(relative, TRANSITION_STORE) or beneath(relative, MIGRATION_GIT_STORE) or beneath(relative, MIGRATION_REVIEW_STORE) or relative == ADMISSION_LOCK:
             return "service"
         if any(beneath(relative, p) for p in self.layout.legacy):
             return "staging"
@@ -1157,6 +1158,16 @@ class NativeDisk:
                     safe=(stat.S_ISDIR(s.st_mode) and stat.S_IMODE(s.st_mode)==0o700 or
                           stat.S_ISREG(s.st_mode) and stat.S_IMODE(s.st_mode)==0o600 and s.st_nlink==1) and s.st_uid==os.geteuid()
                 if not safe:issue('unrecognized-or-unsafe-transition-storage-entry:'+repr(relative))
+            if beneath(relative,MIGRATION_REVIEW_STORE):
+                suffix=relative[len(MIGRATION_REVIEW_STORE):].lstrip(b'/')
+                safe=(not suffix and stat.S_ISDIR(s.st_mode) and stat.S_IMODE(s.st_mode)==0o700 or
+                      bool(re.fullmatch(rb'(?:decision.json|completed-[0-9a-f]{32}\.json|\.pending-[0-9a-f]{32}|view-[0-9a-f]{32})',suffix))
+                      and stat.S_ISREG(s.st_mode) and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600)
+                parts=suffix.split(b'/')
+                if parts and re.fullmatch(rb'retire-[0-9a-f]{32}',parts[0]):
+                    safe=(len(parts)==1 and stat.S_ISDIR(s.st_mode) and stat.S_IMODE(s.st_mode)==0o700 or
+                          len(parts)==2 and parts[1] in (b'payload',b'control') and stat.S_ISREG(s.st_mode) and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o600)
+                if not safe or s.st_uid!=os.geteuid():issue('unrecognized-or-unsafe-review-storage-entry:'+repr(relative))
             if beneath(relative,MIGRATION_GIT_STORE):
                 suffix=relative[len(MIGRATION_GIT_STORE):].lstrip(b'/')
                 parts=suffix.split(b'/') if suffix else []
@@ -2423,6 +2434,15 @@ class NativeDisk:
             inodes=decision.required_inodes-sum(a.inodes for a in credit)
             if volume.available<required or volume.inodes is not None and volume.inodes<inodes:
                 raise InsufficientSpace('current-capacity-insufficient')
+
+    @contextmanager
+    def migration_review_guard(self, recipe):
+        from native_migration_review import Recipe
+        if type(recipe) is not Recipe: raise Blocked('issued-review-recipe-required')
+        recipe.check(self.root)
+        with self._migration_guard(recipe, candidate=True):
+            recipe.owner._recipes.pop(id(recipe), None)
+            yield
 
     @contextmanager
     def migration_git_candidate_guard(self, recipe):

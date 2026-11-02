@@ -331,6 +331,50 @@ class Candidate:
         base=STORE+b'/'+value['operation'].encode()+b'/root'
         NativeGit(self.root+b'/'+base).copy_blob(entry['oid'],destination)
 
+    def content_info(self, *, candidate, row, side):
+        """Exact immutable blob descriptor, without reading the blob into RAM."""
+        value = self.read()
+        if value is None or candidate != value['candidate']:
+            raise Conflict('candidate-cas-conflict')
+        if type(row) is not int or not 0 <= row < len(value['rows']) or side not in ('before', 'after'):
+            raise Blocked('invalid-content-reference')
+        entry = value['rows'][row][side]
+        if entry is None: raise Blocked('absent-content-reference')
+        base = STORE+b'/'+value['operation'].encode()+b'/root'
+        git = NativeGit(self.root+b'/'+base)
+        git._object(entry['oid'], b'blob')
+        raw = git._run(('cat-file', '-s', entry['oid']))
+        if not re.fullmatch(rb'(?:0|[1-9][0-9]*)\n', raw): raise Blocked('invalid-blob-size')
+        return dict(oid=entry['oid'], size=int(raw), path=entry['path'])
+
+    def current_proof(self, expected):
+        """Pure proof for callers already holding common disk admission."""
+        value = self.read()
+        if (value is None or value['candidate'] != expected['candidate'] or value['stale']
+                or value['validation'] != 'current'):
+            raise Conflict('current-candidate-required')
+        state, accepted, _, _ = self._proof(value['preparation'], value['transition_operation'],
+                                           _raw(value['parent_ref']), value['parent_oid'])
+        if state['digest'] != value['transition'] or state['runtime'] != value['runtime']:
+            raise Conflict('candidate-transition-drift')
+        return value, accepted
+
+    def saved_descriptor(self):
+        """Bounded no-follow control identity for a held immutable view."""
+        info=self._info(STORE+b'/candidate.json')
+        if (info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                or stat.S_IMODE(info.st_mode)!=0o600 or info.st_uid!=os.geteuid()):
+            raise Blocked('unsafe-candidate-control')
+        return _stat(info)
+
+    def saved_identity(self):
+        """Pointer-only check for immutable content-page receipts; no source IO."""
+        path = STORE+b'/candidate.json'
+        info = self._info(path)
+        if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.geteuid():
+            raise Blocked('unsafe-candidate-control')
+        return self._validate(json.loads(self.t._read(path, MAX_CONTROL), object_pairs_hook=_unique))['candidate']
+
     def _proof(self, expected_preparation, transition_operation, parent_ref, parent_oid):
         state=self.t.completed_evidence(candidate=expected_preparation,operation=transition_operation)
         accepted=self.p.read()

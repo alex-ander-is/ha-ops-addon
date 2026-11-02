@@ -1,3 +1,4 @@
+import "./migration-review.js";
 import { LitElement, css, html, nothing } from "lit";
 import "@vaadin/badge";
 import "@vaadin/button";
@@ -1543,6 +1544,7 @@ class HaOpsApp extends LitElement {
     return html`
       <main>
         <ha-ops-direct></ha-ops-direct>
+        ${(this.view.migration_review || window.__HA_OPS_MIGRATION_REVIEW__) ? html`<ha-ops-migration-review .endpoint=${(this.view.migration_review || window.__HA_OPS_MIGRATION_REVIEW__).endpoint}></ha-ops-migration-review>` : nothing}
         <div class="top-grid">
           <section class="card control-card">
             <div class="title-row"><h1>${t("title.site")}</h1><div class="header-badges">
@@ -2010,7 +2012,7 @@ class HaOpsApp extends LitElement {
   }
 
   observeBackendVersion(version) {
-    if (knownVersion(version) && knownVersion(this.backendVersion) && String(version) !== this.backendVersion) {this.invalidateStorage();this.forgetCommandIntent();}
+    if (knownVersion(version) && knownVersion(this.backendVersion) && String(version) !== this.backendVersion) {this.invalidateStorage();this.forgetCommandIntent();window.dispatchEvent(new Event("ha-ops-migration-reset"));}
     if (!knownVersion(version) || !knownVersion(this.clientVersion)) {
       this.backendVersion = knownVersion(version) ? String(version) : this.backendVersion;
       this.versionMismatchOpen = false;
@@ -2217,7 +2219,8 @@ class HaOpsApp extends LitElement {
   }
 
   setConnection(connection) {
-    if (["connecting", "reconnecting", "unknown"].includes(connection)) {this.invalidateStorage();this.forgetCommandIntent();}
+    if (["connecting", "reconnecting", "unknown"].includes(connection)) {this.invalidateStorage();this.forgetCommandIntent();window.dispatchEvent(new Event("ha-ops-migration-reset"));}
+    if (["connected", "http"].includes(connection) && this.connection!==connection) window.dispatchEvent(new Event("ha-ops-migration-refresh"));
     if (connection !== "http" && this.httpPollTimer) {
       clearTimeout(this.httpPollTimer);
       this.httpPollTimer = null;
@@ -2282,11 +2285,13 @@ class HaOpsDirect extends LitElement {
       await window.haOpsBootstrap;
       await this.api('api/session');
       this.snapshot = await this.api('api/status'); this.message = '';
-    } catch(error) { this.message = error.message; }
+      if(this.directUnavailable)this.renderRoot.querySelector('ha-ops-migration-review')?.load();
+      this.directUnavailable=false;
+    } catch(error) { this.message = error.message; this.directUnavailable=true; this.renderRoot.querySelector('ha-ops-migration-review')?.invalidate('Connection changed. Start a new explicit review.'); }
     if(this.isConnected) this.timer = setTimeout(()=>this.loadDirect(), 3000);
   }
   render() {
-    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.message || 'Remembered browser access is active.'}</p>${this.snapshot ? html`<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
+    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.message || 'Remembered browser access is active.'}</p>${this.snapshot ? html`${this.snapshot.migration_review ? html`<ha-ops-migration-review .endpoint=${this.snapshot.migration_review.endpoint}></ha-ops-migration-review>` : nothing}<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
     return html`<section data-testid="direct-access-entry"><h2>Direct recovery access</h2><p>Remember this browser for access while Core or ingress is unavailable. HTTP is supported on your trusted LAN; HTTPS is optional.</p><vaadin-text-field label="Direct address" placeholder="http://homeassistant.local:8100" .value=${this.address} @value-changed=${e=>{this.address=e.detail.value;}}></vaadin-text-field><p>Port 8100 is a suggestion. Enter the host port configured for HA Ops.</p><div class="actions"><vaadin-button ?disabled=${!this.setup || !this.address || this.busy} @click=${()=>this.allow()}>Allow this browser</vaadin-button><vaadin-button ?disabled=${!this.address} @click=${()=>this.open()}>Open in new window</vaadin-button><vaadin-button @click=${()=>{this.message='You can authorize this browser later. Ingress remains available.';}}>Set up later</vaadin-button></div><p role="status">${this.message}</p></section>`;
   }
 }

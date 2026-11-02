@@ -359,3 +359,84 @@ the complete review; a separate pointer digest supplies CAS for diagnostic state
 Unavailable stale persistence returns `unavailable`. An App identity update keeps
 diagnostics but requires revalidation; a saved `stale: false` is never authority.
 There are no approval, publication, activation, server or frontend entrypoints.
+
+### Dormant candidate review (6.24)
+
+`native_migration_review.Review` is an explicitly injected participant. Production
+startup does not construct it. The ingress and direct factories reserve migration
+routes before legacy suffix dispatch and return unavailable without the peer.
+Ingress uses the trusted Supervisor TCP peer and validated forwarded browser
+origin. Direct access independently requires an allowed origin and a remembered
+browser session. Exact Origin, process-scoped context CSRF, strict schemas and
+unambiguous framing protect every explicit review, decision and content request.
+An internal ingress Host may differ from the forwarded browser host.
+
+The complete review includes every immutable candidate row, before/after byte
+identities, Git actions, exact numeric candidate metadata, all ancestor paths,
+and available source/native metadata. Historical attributes absent from evidence
+are explicitly unknown. Content opens once into an admitted private spool and
+provides exact bounded byte pages (text, hex and base64), including the last byte
+and EOF. There is no total file-size ceiling. Retained or foreign spools are
+never silently adopted or deleted. Replacement and explicit close can retire
+only the exact current descriptor receipt.
+
+Explicit current review issues a process-only context challenge. Decisions check
+current candidate/preparation/transition/runtime/scope again under common disk
+admission and persist a canonical CAS record using file and directory fsync.
+Saved approve/refuse/dismiss records are diagnostics, never operation grants.
+Reload, reconnect, authentication, restart and update restore no challenge,
+content selection or command. Refusal/dismissal cannot hide the requirement on
+the next load. No publication or activation entrypoint exists here; the later
+publication step must independently check exact saved decision evidence and
+obtain its own explicit action.
+
+The review component advances one monotonic lifecycle epoch on every reset,
+load, disconnection and connection failure. Every asynchronous response and its
+busy-state cleanup belongs to that epoch; a late successful response cannot
+restore review authority, dismissal, byte selection or cursor. A new retained
+component load clears page-only dismissal and obtains diagnostic state only.
+Unavailable content evidence, including descriptor/cleanup checks, revokes the
+server challenge before any subsequent decision can use it.
+
+Completed byte spools have a private canonical `completed-<id>.json` ownership
+receipt, bound to the store and control inodes, exact spool descriptor, content
+hash, candidate/scope and row/blob identity. It contains no principal, view ID,
+review challenge or operation grant. Read-only diagnostics never adopt a spool.
+A new explicit current review/content-open verifies retained owned pairs and
+streams the requested current bytes anew before retiring those pairs. An intact
+older candidate's receipt permits private cache retirement only; it never makes
+older bytes part of the current review. Foreign, incomplete or corrupt pairs
+remain refusal diagnostics.
+
+Retirement first atomically captures the immutable completed control into its
+receipt-bound private directory, then captures and verifies the spool before
+private deletion. A later explicit open can settle an interrupted owned
+retirement even when the private payload has already been removed. Canonical
+replacements are preserved and refused. Admission includes the new spool,
+receipt publication, preallocated retirement directory and retained old-pair
+overlap. A receipt publication failure exposes no new view or review authority.
+
+Safe single-link owner-only `.pending-<id>` controls may coexist as retained
+baseline debt, like candidate pending diagnostics. They are never parsed,
+adopted, deleted or treated as ownership/consent; diagnostic reads preserve them.
+Their presence does not prevent an independent fresh current review/open.
+Unreceipted payloads and foreign, malformed or replaced completed pairs still
+refuse. Every retained pending byte/inode remains charged by disk admission.
+
+Each completed receipt also binds a preallocated private retirement directory.
+Retirement atomically captures canonical payload/control names there using
+no-replace rename, verifies captured ownership/content, and deletes only through
+the held private directory descriptor. A canonical replacement is preserved and
+refused, including a replacement arriving at the rename boundary. Interrupted
+captures remain receipt-addressed for a later explicit settlement. Unknown or
+foreign quarantine contents remain untouched. Empty private retirement
+directories remain inert, charged diagnostics; canonical path cleanup never
+uses a separate check followed by `unlink` or `rmdir`.
+
+The final retirement protocol captures the immutable completed control first;
+its receipt-bound private location itself records retirement intent. It never
+rewrites an existing canonical completed control. Initial control publication
+also uses atomic no-replace rename, so a newly appearing canonical file is
+preserved. Empty retirement directories are deliberately retained and included
+in diagnostics and baseline byte/inode accounting; this is not full directory
+cleanup and they never confer ownership of other entries or operation consent.

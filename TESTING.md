@@ -726,3 +726,55 @@ mandatory matrix plus the candidate file. `MIGRATION_GIT_EXT4` reports its separ
 observed allocation checkpoints and conservative bounds. Skips and checkpoint
 samples are not kernel exhaustion or physical power-loss proof. No live HA,
 network remote, installation, version bump, tag or publication participates.
+
+## Dormant migration review (6.24)
+
+Focused portable checks are `test_native_migration_review.py` and
+`test_native_migration_review_http.py`. Actual protected ingress/direct handler
+factories and real Authority authenticate HTTP fixtures; unauthorized requests
+must reach neither the domain nor legacy dispatch. Domain fixtures use genuine
+Candidate/Preparation/Transition/Git. Existing macOS allocation/no-replace
+adapters qualify portable logic only. Root-Linux byte-owner/full-mode and isolated
+ext4 allocation/overlap tests remain mandatory; host skips do not qualify them.
+
+The opt-in `ha-ops/tests/browser/migration-review.mjs` serves the rebuilt shipped
+bundle and real domain through actual protected handlers. Set the existing
+`HA_OPS_BROWSER_CDP_URL` and an external `HA_OPS_BROWSER_ARTIFACTS_DIR`. Use
+`--portable` only for supplemental macOS rendering; its result explicitly reports
+that Linux qualification is absent. The runner records and closes its owned tabs,
+checks exact binary EOF, disabled styles, refusal/dismiss reload, direct remembered
+access, stale decision refusal and desktop/mobile rendering. It preserves the
+shared persistent profile and pre-existing tabs. Run genuine Linux domain proofs
+through `dev/virtualization/ha_ops_dev.py`; never use live HA as a test runner.
+
+The migration browser's **default** backend starts the actual Candidate/Review
+worker through the approved Linux wrapper and relays strict nonce/request-bound
+IPC to the unchanged protected host ingress/direct handlers. It reports
+`linux-real-domain` only after worker readiness verifies actual `sys.platform ==
+'linux'`; a command-line flag alone never qualifies Linux. The wrapper's capacity
+and installation gates remain mandatory. If unavailable, the default flow fails
+closed rather than selecting macOS or live HA.
+
+With an existing dedicated-profile browser listening on the chosen CDP address:
+
+```sh
+HA_OPS_BROWSER_CDP_URL=http://127.0.0.1:9227 \
+HA_OPS_BROWSER_ARTIFACTS_DIR=/absolute/external/artifacts \
+/Users/purportex/Applications/Playwright/bin/playwright-node \
+  ha-ops/tests/browser/migration-review.mjs
+```
+
+Add `--portable` only for supplemental local-worker rendering. That worker always
+reports `portable-worker-real-domain` and its actual platform, including when
+executed on Linux; it never qualifies mandatory Linux evidence. The strict
+protocol/readiness/default-wrapper regressions are in
+`test_migration_review_bridge.py`. No browser or auth profile is copied.
+
+Completed-spool restart verification requires a fresh explicit review and exact
+binary EOF after backend reopen. `test_native_migration_review.py` covers durable
+ownership/control identity, interrupted retirement settlement, receipt write/
+fsync/replace failures and foreign/corrupt pairs. The migration browser runner
+now exercises worker restart while a completed binary view is retained, asserts
+no restored authority/selection or decision replay, then opens the full binary
+again after explicit review. Rerun the Review/Disk Linux cohort and isolated
+physical allocation/kernel-failure proofs after changes to this receipt contour.

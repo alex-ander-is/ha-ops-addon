@@ -106,3 +106,13 @@ The fixture deliberately does not launch a browser process. Its CDP connection
 is disconnected after owned-tab cleanup, preserving all existing pages and
 profile data. Missing CDP configuration fails immediately before fixture launch.
 This avoids ambiguous ownership of restored or startup tabs.
+
+Authenticated dormant migration requests keep the five-second socket I/O timeout
+and a ten-second absolute intake deadline. The protected adapter releases only
+the intake deadline after complete framing/body/schema, current authentication,
+Origin and context CSRF validation. GET diagnostics have the same handoff after
+authenticated header validation. Long domain review/decision/content work can
+then finish without the intake timer closing its connection. Expired intake
+never enters the domain, and a previously queued timer callback cannot close a
+request after the synchronized handoff. Other direct routes retain their
+existing ten-second request deadline. The handoff grants no migration consent.

@@ -1292,9 +1292,13 @@ def write_ws_frame(wfile, payload):
     wfile.flush()
 
 
-def create_handler(ctx):
+def create_handler(ctx, *, migration_review=None):
+    import native_migration_review_http as migration_http
+    migration_adapter = migration_http.Adapter(migration_review) if migration_review is not None else None
     class Handler(BaseHTTPRequestHandler):
         def send_html(self, content, status=200):
+            if migration_adapter is not None:
+                content = content.replace("</head>", '<script>window.__HA_OPS_MIGRATION_REVIEW__={endpoint:"api/v1/migration/"}</script></head>')
             self.send_response(status)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
@@ -1384,6 +1388,8 @@ def create_handler(ctx):
             return False
 
         def do_GET(self):
+            if migration_http.ingress(self, migration_adapter):
+                return
             if direct_access.ingress_request(self, ctx):
                 return
             parsed = urlparse(self.path)
@@ -1418,7 +1424,10 @@ def create_handler(ctx):
                 self.wfile.write(content)
                 return
             if route in {"/api/v1/state", "/debug-snapshot"}:
-                self.send_json(dispatch_command(ctx, "debug_snapshot"))
+                snapshot = dispatch_command(ctx, "debug_snapshot")
+                if migration_adapter is not None:
+                    snapshot.setdefault("view", {})["migration_review"] = {"endpoint": "api/v1/migration/"}
+                self.send_json(snapshot)
                 return
             if route == "/diff-get":
                 query = parse_qs(parsed.query)
@@ -1531,7 +1540,19 @@ def create_handler(ctx):
                 return
             self.send_html(render_page(ctx))
 
+        def migration_method(self):
+            if not migration_http.ingress(self, migration_adapter):
+                self.send_json(dict(ok=False, message=_("error.not_found")), status=405)
+
+        do_PUT = migration_method
+        do_PATCH = migration_method
+        do_DELETE = migration_method
+        do_OPTIONS = migration_method
+        do_HEAD = migration_method
+
         def do_POST(self):
+            if migration_http.ingress(self, migration_adapter):
+                return
             if direct_access.ingress_request(self, ctx):
                 return
             self._force_json = True

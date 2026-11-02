@@ -91,3 +91,26 @@ local-edit dismissal, empty reload decisions with no actionable old continuation
 normal Retry, fresh Retry and acknowledgement. Existing shared pages and profile
 are retained. Each runner records its exact harness PID/root and page ownership
 in `runtime.json`; preserve evidence before stopping only its recorded fixture.
+
+The opt-in migration candidate review runner is `migration-review.mjs`. It requires
+an existing dedicated-profile `HA_OPS_BROWSER_CDP_URL` and external artifact path.
+`--portable` explicitly selects supplemental macOS fixtures; it is not Linux
+ownership/accounting qualification. All domain and HTTP participants remain real.
+The fixture substitutes only isolated roots and trusted ingress transport. Native
+review remains absent from ordinary production startup.
+
+Migration review also holds successful real review/content-page responses across
+an offline event and verifies that late delivery cannot restore authority or
+bytes. Retained-component reload/online paths must restore the migration
+requirement after dismissal. `migration-review-lifecycle.mjs` supplements rendered
+proof with deferred state/review/decision/open/page/close and busy-ownership cases
+against the actual source methods; it is invoked by the portable pytest guard.
+
+Migration review defaults to the qualified Linux worker through
+`dev/virtualization/ha_ops_dev.py`; host HTTP handlers proxy only strict domain
+requests over owned IPC after actual authentication, Origin and CSRF checks.
+Readiness binds nonce, actual worker platform and explicit qualification mode.
+A non-Linux/default worker or malformed/mismatched response fails closed.
+`--portable` selects a supplemental local worker with an explicit portable label;
+it is never a Linux fallback. The exact invocation and prerequisites are in the
+migration-review section of `TESTING.md`.

@@ -7,6 +7,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 from urllib.parse import urlsplit
 
 from direct_auth import Authority, Refused, origin
@@ -112,7 +113,9 @@ class DirectServer(ThreadingHTTPServer):
         return super().server_close()
 
 
-def create_handler(authority, status=None, *, secure=False, configured_origin=None, readiness=None):
+def create_handler(authority, status=None, *, secure=False, configured_origin=None, readiness=None, migration_review=None):
+    import native_migration_review_http as migration_http
+    migration_adapter = migration_http.Adapter(migration_review) if migration_review is not None else None
     status = status or NativeStatus()
     if readiness is not None:readiness.attach_status(status)
 
@@ -123,7 +126,14 @@ def create_handler(authority, status=None, *, secure=False, configured_origin=No
         def setup(self):
             super().setup()
             self.connection.settimeout(5)
+            self._intake_lock = threading.Lock()
+            self._request_phase = 'intake'
+            self._intake_expires = time.monotonic() + 10
             def expire():
+                with self._intake_lock:
+                    if self._request_phase != 'intake':
+                        return
+                    self._request_phase = 'expired'
                 try:
                     self.connection.shutdown(socket.SHUT_RDWR)
                 except OSError:
@@ -132,11 +142,25 @@ def create_handler(authority, status=None, *, secure=False, configured_origin=No
             self.request_deadline.daemon = True
             self.request_deadline.start()
 
-        def finish(self):
-            try:
-                super().finish()
-            finally:
+        def validated_migration_input(self):
+            """Only the protected adapter may end the bounded intake phase.
+
+            Timer.cancel alone cannot fence a callback already selected by
+            Timer.run; both sides commit their phase under the same lock.
+            """
+            with self._intake_lock:
+                if self._request_phase != 'intake' or time.monotonic() >= self._intake_expires:
+                    self._request_phase = 'expired'
+                    self.request_deadline.cancel()
+                    raise Refused('Migration request intake expired')
+                self._request_phase = 'domain'
                 self.request_deadline.cancel()
+
+        def finish(self):
+            with self._intake_lock:
+                self._request_phase = 'finished'
+                self.request_deadline.cancel()
+            super().finish()
 
         def log_message(self, *_):
             pass  # Never include request URLs, cookies, fragments or exception text.
@@ -165,6 +189,11 @@ def create_handler(authority, status=None, *, secure=False, configured_origin=No
                 address = origin(('https' if secure else 'http') + '://' + self.headers['Host'])
                 if not (address == configured_origin or authority.allowed(address)):
                     return self.send(403, dict(message='Allow this address from Home Assistant ingress'))
+                if migration_http.reserved(self.path):
+                    if migration_adapter is None:
+                        return self.send(404, dict(ok=False, message='Migration review unavailable'))
+                    code, payload = migration_adapter.request(self, direct=True, authority=authority, address=address, validated_input=self.validated_migration_input)
+                    return self.send(code, payload)
                 # No path decoding, suffix dispatch, shell fallback or legacy handler.
                 if self.path == '/' and self.command == 'GET':
                     self.send_response(303)
@@ -191,7 +220,10 @@ def create_handler(authority, status=None, *, secure=False, configured_origin=No
                     auth = authority.authenticate(self.headers.get('Cookie'), address)
                     if not auth:
                         return self.send(401 if authority.permit(self.client_address[0]) else 429, dict(message='Allow this browser from Home Assistant ingress'))
-                    return self.send(200, dict(csrf=authority.session(auth[0])) if self.path.endswith('/session') else status.read())
+                    payload = dict(csrf=authority.session(auth[0])) if self.path.endswith('/session') else status.read()
+                    if migration_adapter is not None and self.path.endswith('/status'):
+                        payload = dict(payload, migration_review=dict(endpoint='/direct/api/migration/'))
+                    return self.send(200, payload)
                 # Optional dormant peer. Production start() supplies none, so
                 # authentication alone never enables an Apply/recovery action.
                 if readiness is not None and self.path == '/direct/api/apply-readiness':
