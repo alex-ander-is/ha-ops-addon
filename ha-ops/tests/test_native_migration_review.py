@@ -129,7 +129,7 @@ def test_invalid_range_invalidates_completion(tmp_path,offset):
 def test_spool_tamper_never_exposes_bytes_or_deletes_foreign(tmp_path,kind):
     root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
     view=owner.open_content(row=0,side='before',**ref)
-    target=root/os.fsdecode(r.STORE)/owner._view['name']
+    target=root/os.fsdecode(r.STORE)/owner._views.get(r._context(CONTEXT))['name']
     if kind=='replace':
         target.unlink();target.write_bytes(b'foreign')
     elif kind=='mutate':target.write_bytes(b'foreign')
@@ -143,7 +143,7 @@ def test_reopen_retains_spool_diagnostic_without_adoption(tmp_path):
     root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
     view=owner.open_content(row=0,side='before',**ref)
     reopened=r.Review(c.Candidate(p));diagnostic=reopened.diagnose()
-    assert diagnostic['retained'] and reopened._view is None and diagnostic['review_id'] is None
+    assert diagnostic['retained'] and not reopened._views and diagnostic['review_id'] is None
     with pytest.raises(n.Conflict):reopened.content_page(view_id=view['view_id'],offset=0,context=CONTEXT)
     with pytest.raises(n.Conflict):reopened.open_content(row=0,side='before',**ref)
     ref2=challenge(reopened)
@@ -153,7 +153,7 @@ def test_reopen_retains_spool_diagnostic_without_adoption(tmp_path):
     assert len(list((root/os.fsdecode(r.STORE)).glob('view-*')))==1
     assert len(list((root/os.fsdecode(r.STORE)).glob('completed-*.json')))==1
     reopened.close_content(context=CONTEXT)
-    os.close(owner._view['fd']);owner._view=None
+    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
 
 
 @pytest.mark.parametrize('limit',['available','inodes'])
@@ -200,8 +200,10 @@ def test_incomplete_spool_never_exposes_or_adopts_view(tmp_path,boundary):
         if event==boundary:raise OSError('interrupted content')
     owner.trace=crash
     with pytest.raises(OSError):owner.open_content(row=0,side='before',**ref)
-    assert owner._view is None
-    assert r.Review(c.Candidate(p)).diagnose()['retained']
+    assert not owner._views
+    assert not list((root/os.fsdecode(r.STORE)).glob('view-*'))
+    owner.trace=lambda event:None
+    retry=challenge(owner);owner.open_content(row=0,side='before',**retry)
     with pytest.raises(n.Conflict):owner.decide(action='approve',**ref)
 
 
@@ -303,11 +305,11 @@ def test_interrupted_owned_retirement_is_explicitly_settled_after_restart(tmp_pa
         if event==boundary:raise OSError('interrupted owned retirement')
     owner.trace=crash
     with pytest.raises(OSError):owner.close_content(context=CONTEXT)
-    reopened=r.Review(c.Candidate(p));assert reopened._view is None
+    reopened=r.Review(c.Candidate(p));assert not reopened._views
     ref2=challenge(reopened);new=reopened.open_content(row=0,side='before',**ref2)
     assert reopened.content_page(view_id=new['view_id'],offset=new['size'],context=CONTEXT)['eof']
     reopened.close_content(context=CONTEXT)
-    if owner._view:os.close(owner._view['fd']);owner._view=None
+    if owner._views.get(r._context(CONTEXT)):os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
 
 
 @pytest.mark.parametrize('kind',['corrupt','symlink','hardlink','replaced-spool'])
@@ -320,14 +322,14 @@ def test_completed_receipt_corruption_never_adopted_or_deleted(tmp_path,kind):
         receipt.rename(receipt.with_suffix('.foreign'));receipt.symlink_to(receipt.with_suffix('.foreign'))
     elif kind=='hardlink':os.link(receipt,receipt.with_suffix('.foreign'))
     else:
-        spool=root/os.fsdecode(r.STORE)/owner._view['name'];spool.unlink();spool.write_bytes(b'foreign');spool.chmod(0o600)
+        spool=root/os.fsdecode(r.STORE)/owner._views.get(r._context(CONTEXT))['name'];spool.unlink();spool.write_bytes(b'foreign');spool.chmod(0o600)
     reopened=r.Review(c.Candidate(p))
     # Review itself must refuse: a later open failure cannot mask a challenge.
     with pytest.raises((n.Blocked,d.Blocked,OSError,TypeError)):
         reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
     assert not reopened._challenges
     assert receipt.exists() or receipt.is_symlink()
-    os.close(owner._view['fd']);owner._view=None
+    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
 
 
 @pytest.mark.parametrize('action',['approve','refuse','dismiss'])
@@ -341,22 +343,21 @@ def test_invalid_completed_evidence_after_review_never_saves_decision(tmp_path,a
         owner.decide(action=action,**ref)
     assert not owner._challenges and not (receipt.parent/'decision.json').exists()
     assert before=={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file()}
-    os.close(owner._view['fd']);owner._view=None
+    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
 
 
-@pytest.mark.parametrize('boundary',['review-receipt-write','review-receipt-file-fsync','review-receipt-replace','review-receipt-directory-fsync'])
+@pytest.mark.parametrize('boundary',['review-receipt-open','review-receipt-write','review-receipt-file-fsync','review-receipt-replace','review-receipt-directory-fsync'])
 def test_receipt_publication_failure_never_exposes_view_or_authority(tmp_path,boundary):
     root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
     def crash(event):
         if event==boundary:raise OSError('receipt interrupted')
     owner.trace=crash
     with pytest.raises(OSError):owner.open_content(row=0,side='before',**ref)
-    assert owner._view is None and not owner._challenges
-    reopened=r.Review(c.Candidate(p));assert reopened._view is None and reopened.diagnose()['review_id'] is None
-    if boundary in ('review-receipt-replace','review-receipt-directory-fsync'):
-        ref2=challenge(reopened);new=reopened.open_content(row=0,side='before',**ref2)
-        assert reopened.content_page(view_id=new['view_id'],offset=new['size'],context=CONTEXT)['eof']
-        reopened.close_content(context=CONTEXT)
+    assert not owner._views and not owner._challenges
+    reopened=r.Review(c.Candidate(p));assert not reopened._views and reopened.diagnose()['review_id'] is None
+    ref2=challenge(reopened);new=reopened.open_content(row=0,side='before',**ref2)
+    assert reopened.content_page(view_id=new['view_id'],offset=new['size'],context=CONTEXT)['eof']
+    reopened.close_content(context=CONTEXT)
 
 
 def test_completed_control_identity_and_interrupted_retirement_protocol(tmp_path):
@@ -417,7 +418,7 @@ def test_interrupted_retirement_pending_is_preserved_while_fresh_review_works(tm
     pending.write_bytes(b'retained unrelated pending');pending.chmod(0o600)
     before=(r._stat(pending.stat()),pending.read_bytes())
     reopened=r.Review(c.Candidate(p));diagnostic=reopened.diagnose()
-    assert reopened._view is None and diagnostic['review_id'] is None and pending.name in diagnostic['retained']
+    assert not reopened._views and diagnostic['review_id'] is None and pending.name in diagnostic['retained']
     assert (r._stat(pending.stat()),pending.read_bytes())==before
     ref2=challenge(reopened);view=reopened.open_content(row=row,side='after',**ref2)
     pages=[reopened.content_page(view_id=view['view_id'],offset=i,context=CONTEXT) for i in range(0,len(payload),r.PAGE)]
@@ -425,7 +426,7 @@ def test_interrupted_retirement_pending_is_preserved_while_fresh_review_works(tm
     assert (r._stat(pending.stat()),pending.read_bytes())==before
     reopened.close_content(context=CONTEXT)
     assert (r._stat(pending.stat()),pending.read_bytes())==before
-    os.close(owner._view['fd']);owner._view=None
+    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
 
 
 @pytest.mark.parametrize('target_kind',['payload','receipt'])
@@ -454,7 +455,7 @@ def test_retirement_capture_preserves_canonical_replacements(tmp_path,target_kin
     def retire(path,*args,**kwargs):
         if path==private and boundary=='private-unlink' and not swapped:foreign()
         return unlink(path,*args,**kwargs)
-    owner._view=dict(fd=file,name=name,stat=info,context=r._context(CONTEXT))
+    owner._views[r._context(CONTEXT)]=dict(fd=file,name=name,stat=info,context=r._context(CONTEXT))
     try:
         with mock.patch.object(transition,'_rename_noreplace',capture),mock.patch.object(os,'unlink',retire),pytest.raises(n.Blocked):
             if entrypoint=='close':
@@ -484,7 +485,7 @@ def test_retirement_quarantine_capture_crash_recovers_without_authority(tmp_path
     try:
         with pytest.raises(OSError):owner._retire_receipt(fd,control,receipt)
         reopened=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)))
-        assert reopened._view is None and not reopened._challenges
+        assert not reopened._views and not reopened._challenges
         pairs=reopened._completed(fd,'b'*64,'c'*64);assert len(pairs)==1
         for logical,retained in pairs:reopened._retire_receipt(fd,logical,retained)
         assert reopened._completed(fd,'b'*64,'c'*64)==[]
@@ -539,3 +540,257 @@ def test_uncertain_instance_refuses_every_new_authority_boundary(tmp_path):
             else:owner.open_content(row=0,side='before',**ref)
         assert not owner._challenges
     assert not (root/os.fsdecode(r.STORE)).exists()
+
+
+@pytest.mark.parametrize('boundary',['review-content-open','review-content-write','review-content-file-fsync','timeout','short-write'])
+def test_caught_copy_failure_reclaims_only_pending_and_preserves_previous(tmp_path,boundary):
+    import subprocess
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    first=owner.open_content(row=0,side='before',**ref)
+    store=root/os.fsdecode(r.STORE);before={x.name:x.read_bytes() for x in store.glob('view-*')}
+    def crash(event):
+        if event==boundary:raise OSError('caught after syscall')
+    owner.trace=crash
+    with mock.patch.object(owner.c,'read_content',side_effect=lambda **kw: (kw['destination'].write(b'x'),(_ for _ in ()).throw(subprocess.TimeoutExpired('git',30)))) if boundary=='timeout' else mock.patch.object(os,'write',return_value=0) if boundary=='short-write' else __import__('contextlib').nullcontext():
+        with pytest.raises((OSError,subprocess.TimeoutExpired)):owner.open_content(row=0,side='before',**ref)
+    assert {x.name:x.read_bytes() for x in store.glob('view-*')}==before
+    assert not list(store.glob('.pending-*'))
+    assert owner.content_page(view_id=first['view_id'],offset=0,context=CONTEXT)['view_id']==first['view_id']
+    owner.trace=lambda event:None
+    reopened=r.Review(c.Candidate(p));fresh=challenge(reopened)
+    replacement=reopened.open_content(row=0,side='before',**fresh)
+    assert reopened.content_page(view_id=replacement['view_id'],offset=replacement['size'],context=CONTEXT)['eof']
+    reopened.close_content(context=CONTEXT);owner.forget(context=CONTEXT)
+
+
+def test_authenticated_context_views_remain_independent(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);a=challenge(owner)
+    other=('ingress','http://fixture.invalid','/api/hassio_ingress/other','other-user')
+    model=owner.diagnose()['model']
+    b=dict(candidate=model['candidate'],scope=model['scope_digest'],context=other)
+    av=owner.open_content(row=0,side='before',**a)
+    b['review_id']=owner.review(**b)['review_id']
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    bv=owner.open_content(row=0,side='before',**b)
+    assert len(owner._views)==2
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    with pytest.raises(n.Conflict):owner.content_page(view_id=av['view_id'],offset=0,context=other)
+    assert r._context(CONTEXT) in owner._challenges
+    b['review_id']=owner.review(candidate=b['candidate'],scope=b['scope'],context=other)['review_id']
+    bv=owner.open_content(row=0,side='before',**b)
+    owner.close_content(context=other)
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    b['review_id']=owner.review(candidate=b['candidate'],scope=b['scope'],context=other)['review_id']
+    bv=owner.open_content(row=0,side='before',**b);held=owner._views[r._context(other)]['fd']
+    owner.forget(context=other)
+    with pytest.raises(OSError):os.fstat(held)
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    assert owner.decide(action='approve',**a)['decision']['action']=='approve'
+    owner.close_content(context=CONTEXT)
+
+
+@pytest.mark.parametrize('character',['é','€','😀'])
+@pytest.mark.parametrize('split',[1,2,3])
+def test_utf8_window_preserves_whole_boundary_characters_and_exact_bytes(tmp_path,character,split):
+    encoded=character.encode()
+    if split>=len(encoded):pytest.skip('not an interior boundary')
+    payload=b'a'*(r.PAGE-split)+encoded+b'b'*(r.PAGE-len(encoded))+encoded+b'last'
+    def configure(root,repo):
+        write(repo,b'homeassistant/utf8',payload);git(repo,'add','.');git(repo,'commit','-qm','utf8')
+    root,repo,p,owner,value=setup_review(tmp_path,configure=configure);ref=challenge(owner)
+    row=next(i for i,x in enumerate(value['rows']) if x['after'] and n.decode_path(x['after']['path'])==b'homeassistant/utf8')
+    view=owner.open_content(row=row,side='after',**ref)
+    for offset in [r.PAGE,0,len(payload)-2,r.PAGE-1,2*r.PAGE]:
+        page=owner.content_page(view_id=view['view_id'],offset=offset,context=CONTEXT)
+        assert base64.b64decode(page['data'])==payload[offset:offset+r.PAGE]
+        assert page['text'] is not None
+        assert page['text'].encode()==payload[page['text_start']:page['text_end']]
+        assert offset-3<=page['text_start']<=offset
+        assert offset+len(base64.b64decode(page['data']))<=page['text_end']<=min(view['size'],offset+r.PAGE+3)
+    assert character in owner.content_page(view_id=view['view_id'],offset=r.PAGE,context=CONTEXT)['text']
+    owner.close_content(context=CONTEXT)
+
+
+@pytest.mark.parametrize('payload,valid',[(b'\xef\xbb\xbfA',True),(b'A\xef\xbb\xbfB',True),(b'\xf0\x9f',False),(b'\xc0\x80',False),(b'\xed\xa0\x80',False),(b'\x80\x80\x80\x80',False)])
+def test_text_window_strict_malformed_eof_and_bom(tmp_path,payload,valid):
+    owner=object.__new__(r.Review)
+    path=tmp_path/'payload';path.write_bytes(payload);fd=os.open(path,os.O_RDONLY)
+    try:
+        text,start,end=owner._text_window(dict(fd=fd,size=len(payload)),0,len(payload))
+        assert (text is not None)==valid
+        if valid:assert text.encode()==payload
+        assert owner._text_window(dict(fd=fd,size=len(payload)),len(payload),0)==('',len(payload),len(payload))
+    finally:os.close(fd)
+
+
+@pytest.mark.parametrize('boundary',['receipt-create','review-receipt-open','review-receipt-write','review-receipt-file-fsync','receipt-write-zero'])
+def test_prepublication_receipt_failure_preserves_old_view_and_fresh_retry(tmp_path,boundary):
+    import errno
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    old=owner.open_content(row=0,side='before',**ref)
+    original_open=os.open;original_write=os.write;promoted=False
+    def trace(event):
+        nonlocal promoted
+        if event=='review-content-promote':promoted=True
+        if event==boundary:raise OSError('receipt prepublication fault')
+    def fail_open(path,flags,*args,**kw):
+        if boundary=='receipt-create' and promoted and os.fsdecode(path).startswith('.pending-') and flags&os.O_CREAT:
+            raise OSError(errno.ENOSPC,'receipt create ENOSPC')
+        return original_open(path,flags,*args,**kw)
+    def fail_write(*args,**kw):
+        if boundary=='receipt-write-zero' and promoted:return 0
+        return original_write(*args,**kw)
+    owner.trace=trace
+    with mock.patch.object(os,'open',fail_open),mock.patch.object(os,'write',fail_write),pytest.raises(OSError):
+        owner.open_content(row=0,side='before',**ref)
+    owner.trace=lambda event:None
+    store=root/os.fsdecode(r.STORE)
+    assert len(list(store.glob('view-*')))==len(list(store.glob('completed-*')))==1
+    assert not list(store.glob('.pending-*'))
+    assert owner.content_page(view_id=old['view_id'],offset=0,context=CONTEXT)['data']
+    assert owner._uncertain is False
+    reopened=r.Review(c.Candidate(p));fresh=challenge(reopened)
+    replacement=reopened.open_content(row=0,side='before',**fresh)
+    assert reopened.content_page(view_id=replacement['view_id'],offset=replacement['size'],context=CONTEXT)['eof']
+    reopened.close_content(context=CONTEXT);owner.forget(context=CONTEXT)
+
+
+@pytest.mark.parametrize('case',['unchanged','foreign-before','changed-candidate','changed-model','foreign-after'])
+def test_binding_refresh_requires_previous_exact_pointer_and_current_model(case):
+    from types import SimpleNamespace
+    before=[1,2];after=[1,3];model={'scope':'same'};candidate='a'*64
+    owner=r.Review(SimpleNamespace(p=None,root=b'fixture',saved_descriptor=lambda:after))
+    view=dict(candidate_stat=before if case!='foreign-before' else [9,9],candidate=candidate,model=r._digest(model))
+    owner._views['context']=view
+    value={'candidate':candidate if case!='changed-candidate' else 'b'*64}
+    current=model if case!='changed-model' else {'scope':'changed'}
+    if case=='foreign-after':
+        owner.c.saved_descriptor=lambda:[9,9]
+        with pytest.raises(n.Conflict):owner._refresh_content_bindings((before,after),value,current)
+    else:owner._refresh_content_bindings((before,after),value,current)
+    assert (view['candidate_stat']==after)==(case=='unchanged')
+
+
+@pytest.mark.parametrize('failure',['unavailable','stale','exception'])
+def test_unsuccessful_revalidation_never_restores_content_binding(failure):
+    from types import SimpleNamespace
+    def revalidate():
+        if failure=='exception':raise OSError('unavailable pointer')
+        return failure
+    owner=r.Review(SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',saved_descriptor=lambda:[1,2],
+        read=lambda:{'candidate':'a'*64},revalidate=revalidate))
+    owner._model=lambda *args:{'scope_digest':'b'*64}
+    owner._views['context']={'candidate_stat':[1,2]};owner._challenges['context']={'token':'old'}
+    with pytest.raises((n.Conflict,OSError)):owner._revalidate_content_bindings()
+    assert owner._views['context']['candidate_stat'] is None and not owner._challenges
+
+
+def test_same_context_review_and_other_context_decision_preserve_unchanged_view(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);a=challenge(owner)
+    av=owner.open_content(row=0,side='before',**a)
+    a=challenge(owner)
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    other=('ingress','http://fixture.invalid','/api/hassio_ingress/other','other-user')
+    b={**a,'context':other};b.pop('review_id')
+    b['review_id']=owner.review(**b)['review_id']
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    owner.decide(action='approve',**b)
+    assert owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)['data']
+    owner.close_content(context=CONTEXT)
+
+
+def test_foreign_same_byte_candidate_pointer_is_not_rebound_by_explicit_review(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    av=owner.open_content(row=0,side='before',**ref)
+    pointer=root/os.fsdecode(c.STORE)/'candidate.json';foreign=pointer.with_name('.pending-'+'e'*32)
+    foreign.write_bytes(pointer.read_bytes());foreign.chmod(0o600);os.replace(foreign,pointer)
+    challenge(owner)
+    with pytest.raises(n.Conflict):owner.content_page(view_id=av['view_id'],offset=0,context=CONTEXT)
+    owner.forget(context=CONTEXT)
+
+
+@pytest.mark.parametrize('wrong',['candidate','scope'])
+def test_wrong_review_identity_has_no_shared_revalidation_or_other_context_effect(wrong):
+    from types import SimpleNamespace
+    from contextlib import contextmanager
+    candidate='a'*64;scope='b'*64;descriptor=[1,2]
+    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:{'candidate':candidate},
+        saved_descriptor=lambda:descriptor,revalidate=mock.Mock(side_effect=AssertionError('invalid request revalidated')))
+    owner=r.Review(source);owner._model=lambda *args:{'scope_digest':scope}
+    a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user')
+    view=dict(view_id='d'*64,context=a,candidate_stat=descriptor,fd=123,name='view-fixture',size=1,sha256='e'*64)
+    owner._views[a]=view;owner._challenges[a]={'token':'retained'}
+    @contextmanager
+    def store():yield 456
+    owner._store=store;owner._verify_view=lambda *args:None
+    owner._text_window=lambda *args:('x',0,1)
+    identity=dict(candidate=candidate,scope=scope);identity[wrong]='f'*64
+    with pytest.raises(n.Conflict):owner.review(context=other,**identity)
+    source.revalidate.assert_not_called()
+    assert owner._views[a] is view and view['candidate_stat']==descriptor
+    assert owner._challenges[a]=={'token':'retained'}
+    with mock.patch.object(os,'pread',return_value=b'x'):
+        assert owner.content_page(view_id=view['view_id'],offset=0,context=CONTEXT)['data']=='eA=='
+    assert owner._challenges[a]=={'token':'retained'}
+
+
+@pytest.mark.parametrize('method',['review','decide'])
+@pytest.mark.parametrize('failure',['bytes','inodes','enospc','io','store'])
+def test_later_request_failure_preserves_trusted_other_context_continuity(tmp_path,method,failure):
+    import errno
+    from types import SimpleNamespace
+    from contextlib import contextmanager
+    candidate='a'*64;scope='b'*64;descriptor=[1,2];model={'scope_digest':scope}
+    saved=dict(candidate=candidate,validation='current',stale=False)
+    def revalidate():descriptor[:]=[1,3];return 'current'
+    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:dict(saved),
+        saved_descriptor=lambda:list(descriptor),revalidate=revalidate)
+    owner=r.Review(source);owner._model=lambda *args:model
+    a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user');b=r._context(other)
+    payload=tmp_path/'held';payload.write_bytes(b'x');fd=os.open(payload,os.O_RDONLY)
+    owner._views[a]=dict(view_id='d'*64,context=a,candidate_stat=[1,2],candidate=candidate,model=r._digest(model),fd=fd,name='view-held',size=1,sha256='e'*64)
+    owner._challenges[a]={'token':'retained'}
+    owner._challenges[b]=dict(token='c'*64,candidate=candidate,scope=scope,model=r._digest(model),previous=None)
+    @contextmanager
+    def admission(*args):
+        if failure=='bytes':raise d.Blocked('insufficient-review-bytes')
+        if failure=='inodes':raise d.Blocked('insufficient-review-inodes')
+        if failure=='enospc':raise OSError(errno.ENOSPC,'second admission')
+        if failure=='io':raise OSError(errno.EIO,'second admission')
+        yield
+    @contextmanager
+    def store(*args,**kwargs):
+        if failure=='store':raise OSError(errno.EIO,'later store failure')
+        yield 456
+    owner._admission=admission;owner._store=store;owner._verify_view=lambda *args:None
+    try:
+        ref=dict(candidate=candidate,scope=scope,context=other)
+        if method=='decide':ref.update(review_id='c'*64,action='approve')
+        with pytest.raises((d.Blocked,OSError)):getattr(owner,method)(**ref)
+        assert owner._views[a]['candidate_stat']==descriptor==[1,3]
+        assert owner._challenges[a]=={'token':'retained'}
+        @contextmanager
+        def readable_store():yield 456
+        owner._store=readable_store
+        assert owner.content_page(view_id='d'*64,offset=0,context=CONTEXT)['data']=='eA=='
+        assert owner._challenges[a]=={'token':'retained'}
+    finally:os.close(fd)
+
+
+@pytest.mark.parametrize('failure',['candidate','model','pending','foreign-after'])
+def test_trusted_continuity_refuses_semantic_or_pointer_change(failure):
+    from types import SimpleNamespace
+    descriptor=[1,2];phase=False;candidate='a'*64
+    def revalidate():
+        nonlocal phase
+        phase=True;descriptor[:]=[1,3];return 'current'
+    def read():return dict(candidate='c'*64 if phase and failure=='candidate' else candidate,
+        validation='pending' if phase and failure=='pending' else 'current',stale=False)
+    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',saved_descriptor=lambda:list(descriptor),read=read,revalidate=revalidate)
+    owner=r.Review(source)
+    def model(*args):
+        if phase and failure=='foreign-after':descriptor[:]=[9,9]
+        return {'scope':'changed' if phase and failure=='model' else 'same'}
+    owner._model=model;owner._views['a']={'candidate_stat':[1,2]};owner._challenges['a']={'token':'old'}
+    with pytest.raises(n.Conflict):owner._revalidate_content_bindings()
+    assert owner._views['a']['candidate_stat'] is None and not owner._challenges

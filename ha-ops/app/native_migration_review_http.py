@@ -4,6 +4,7 @@ import hmac
 import json
 import re
 import secrets
+import subprocess
 import threading
 from urllib.parse import unquote, urlsplit
 
@@ -117,7 +118,7 @@ class Adapter:
             method={'review':'review','decision':'decide','content-open':'open_content','content-page':'content_page','content-close':'close_content'}[route]
             result=getattr(self.review,method)(context=context,**value)
             return 200,dict(ok=True,**(result or {}))
-        except (ValueError,OSError,RuntimeError,TypeError,RecursionError):
+        except (ValueError,OSError,RuntimeError,TypeError,RecursionError,subprocess.TimeoutExpired):
             return 403,dict(ok=False,message='Migration review unavailable. Start a new explicit review.')
 
 

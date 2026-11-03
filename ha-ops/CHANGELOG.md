@@ -2,6 +2,15 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.5.0
+
+Add private browser access and reliable dormant migration review
+
+- Add remembered private browser access with independent authentication, explicit authorization, and Vaadin UI improvements.
+- Add dormant native storage, Git, metadata, scope, review, recovery, and migration infrastructure with isolated Linux/runtime verification; production migration activation remains deferred.
+- Keep large migration content copies bounded by stdout progress, reclaim exact owned pending failures, and preserve retained views across independent authenticated contexts.
+- Show complete UTF-8 boundary characters with labeled text byte ranges while retaining exact raw byte, hex, base64, and SHA content evidence.
+
 ## 2.4.1
 
 Unify status and backup warning badges

@@ -880,10 +880,10 @@ sys.exit(result if 0<=result<124 else 125)
     def delete_ref(self, name, *, expected_old):
         return self._ref_change(name, None, expected_old)
 
-    def copy_blob(self, oid, destination):
-        return self._copy_object(oid, b"blob", destination)
+    def copy_blob(self, oid, destination, *, progress_timeout=False):
+        return self._copy_object(oid, b"blob", destination, progress_timeout=progress_timeout)
 
-    def _copy_object(self, oid, kind, destination):
+    def _copy_object(self, oid, kind, destination, *, progress_timeout=False):
         if kind not in (b"blob", b"tree", b"commit"):
             raise InvalidInput("unsupported-exact-stream-object-kind")
         self._object(oid, kind)
@@ -911,9 +911,13 @@ sys.exit(result if 0<=result<124 else 125)
                     if not chunk:
                         selector.unregister(key.fileobj)
                     elif key.fileobj is process.stdout:
+                        if size + len(chunk) > expected_size:
+                            raise GitFailure(kind.decode("ascii") + "-size-or-object-id-mismatch")
                         _write_all(destination, chunk)
                         digest.update(chunk)
                         size += len(chunk)
+                        if progress_timeout:
+                            deadline = time.monotonic() + self.timeout
                     elif len(errors) < CHUNK:
                         errors.extend(chunk[:CHUNK - len(errors)])
             process.wait(timeout=max(.001, deadline - time.monotonic()))

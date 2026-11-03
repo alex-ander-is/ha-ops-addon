@@ -73,6 +73,32 @@ def verify_ready(value,nonce,portable):
     return value
 
 
+def wait_response(process,target,nonce,key,*,clock=time.monotonic,sleep=time.sleep):
+    """Bound the known full-domain fixture work without changing App timeouts."""
+    deadline=clock()+120
+    while process.poll() is None and clock()<deadline:
+        if target.is_file():
+            response=read(target)
+            if (type(response) is not dict or set(response)!={'schema','nonce','id','ok','result'} or response['schema']!=1
+                    or type(response['schema']) is not int or response['nonce']!=nonce or response['id']!=key or type(response['ok']) is not bool):raise RuntimeError('Invalid worker response')
+            if not response['ok']:raise ValueError('Migration review worker refused')
+            return response['result']
+        sleep(min(.02,max(0,deadline-clock())))
+    raise RuntimeError('Migration worker response unavailable')
+
+
+def close_worker_views(owner):
+    """Release every test-owned context handle without removing durable evidence."""
+    views=list(owner._views.values())
+    owner._views.clear();owner._challenges.clear()
+    failure=None
+    for view in views:
+        try:os.close(view['fd'])
+        except OSError as exc:
+            if failure is None:failure=exc
+    if failure is not None:raise failure
+
+
 def worker(output,nonce,portable=False):
     if not portable and sys.platform!='linux':raise RuntimeError('Linux worker must execute on Linux')
     if not re.fullmatch('[0-9a-f]{32}',nonce):raise ValueError('invalid worker nonce')
@@ -85,6 +111,7 @@ def worker(output,nonce,portable=False):
             allocation=synthetic_host_allocation.__wrapped__();next(allocation);stack.callback(lambda:next(allocation,None))
             patch=pytest.MonkeyPatch();host_rename_adapter.__wrapped__(patch);stack.callback(patch.undo)
         def configure(root,repo):
+            put(repo,b'homeassistant/utf8',b'a'*16383+'é'.encode()+b'b'*16380+'😀'.encode()+b'last')
             put(repo,b'homeassistant/binary',bytes(range(256))*513+b'LAST-BYTE\xff')
             put(repo,b'homeassistant/literal-<img src=x onerror=alert(1)>',b'{"__proto__":{"polluted":true},"i18n":"literal"}')
             git(repo,'add','.');git(repo,'commit','-qm','complete review fixture')
@@ -105,7 +132,7 @@ def worker(output,nonce,portable=False):
                         method,params=request(value,nonce)
                         if method=='fixture-stale':p.app='fixture-app-updated';result=None
                         elif method=='fixture-restart':
-                            if owner._view:os.close(owner._view['fd'])
+                            close_worker_views(owner)
                             owner=r.Review(c.Candidate(p));result=None
                         else:result=getattr(owner,method)(**params)
                         response=dict(schema=1,nonce=nonce,id=value['id'],ok=True,result=result)
@@ -114,7 +141,7 @@ def worker(output,nonce,portable=False):
                     write(target,response)
                 stopped.wait(.02)
         finally:
-            if owner._view:os.close(owner._view['fd'])
+            close_worker_views(owner)
 
 
 @contextmanager
@@ -148,16 +175,8 @@ def backend(portable):
                 with lock:
                     incoming=output/('review-request-'+nonce+'-'+key+'.json')
                     target=output/('review-response-'+nonce+'-'+key+'.json')
-                    write(incoming,value);deadline=time.monotonic()+30
-                    while process.poll() is None and time.monotonic()<deadline:
-                        if target.is_file():
-                            response=read(target)
-                            if (type(response) is not dict or set(response)!={'schema','nonce','id','ok','result'} or response['schema']!=1
-                                    or type(response['schema']) is not int or response['nonce']!=nonce or response['id']!=key or type(response['ok']) is not bool):raise RuntimeError('Invalid worker response')
-                            if not response['ok']:raise ValueError('Migration review worker refused')
-                            return response['result']
-                        time.sleep(.02)
-                    raise RuntimeError('Migration worker response unavailable')
+                    write(incoming,value)
+                    return wait_response(process,target,nonce,key)
             yield rpc,readiness
         finally:
             if output is not None:write(output/('review-stop-'+nonce),{})

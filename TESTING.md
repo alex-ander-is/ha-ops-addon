@@ -778,3 +778,11 @@ now exercises worker restart while a completed binary view is retained, asserts
 no restored authority/selection or decision replay, then opens the full binary
 again after explicit review. Rerun the Review/Disk Linux cohort and isolated
 physical allocation/kernel-failure proofs after changes to this receipt contour.
+
+
+Migration content regressions additionally cover stdout-progress timeout scope,
+exact pending-copy cleanup, two independent authenticated contexts and strict
+UTF-8 text windows around all 2/3/4-byte boundary splits. Raw page bytes and SHA
+remain unchanged. The real Linux migration browser verifies first/next/reverse/
+direct-last split characters, labeled text ranges, and explicit malformed-text
+refusal. Run these on the same sealed source as Review/Disk/ext4 coverage.

@@ -329,7 +329,7 @@ class Candidate:
         entry = value['rows'][row][side]
         if entry is None: raise Blocked('absent-content-reference')
         base=STORE+b'/'+value['operation'].encode()+b'/root'
-        NativeGit(self.root+b'/'+base).copy_blob(entry['oid'],destination)
+        NativeGit(self.root+b'/'+base).copy_blob(entry['oid'],destination,progress_timeout=True)
 
     def content_info(self, *, candidate, row, side):
         """Exact immutable blob descriptor, without reading the blob into RAM."""

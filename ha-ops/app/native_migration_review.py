@@ -62,7 +62,7 @@ class Review:
         self.c, self.p, self.root = candidate, candidate.p, candidate.root
         self.trace = trace
         self._recipes, self._challenges = {}, {}
-        self._view = None
+        self._views = {}
         self._mutex = threading.RLock()
         self._uncertain = False
 
@@ -169,15 +169,16 @@ class Review:
             return value
         finally:os.close(file)
 
-    def _save_receipt(self, fd, name, value, expected):
+    def _save_receipt(self, fd, name, value, expected, *, before_publish=lambda:None):
         current=self._receipt(fd,name)
         if (None if current is None else current['digest'])!=expected:raise Conflict('completed-receipt-cas-conflict')
         if current is not None:raise Conflict('immutable-completed-receipt-required')
-        before=None
         value=copy.deepcopy(value);value.pop('digest',None)
         pending='.pending-'+uuid.uuid4().hex
-        file=self._effect('review-receipt-open',lambda:os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd))
+        file=os.open(pending,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+        publishing=False
         try:
+            self.trace('review-receipt-open')
             info=os.fstat(file);value['control']=[info.st_dev,info.st_ino]
             value['digest']=_digest(value);raw=_json(value)
             remaining=memoryview(raw)
@@ -186,18 +187,23 @@ class Review:
                 if n<=0:raise OSError('short-completed-receipt-write')
                 remaining=remaining[n:]
             self._effect('review-receipt-file-fsync',lambda:os.fsync(file));issued=_stat(os.fstat(file))
-        finally:os.close(file)
-        if (_stat(os.stat(pending,dir_fd=fd,follow_symlinks=False))!=issued or self._receipt(fd,name)!=current
-                or current is not None and _stat(os.stat(name,dir_fd=fd,follow_symlinks=False))!=before):
-            raise Conflict('completed-receipt-replaced')
-        try:
-            import native_migration_transition as transition
-            self._effect('review-receipt-replace',lambda:transition._rename_noreplace(fd,os.fsencode(pending),fd,os.fsencode(name)))
-            self._effect('review-receipt-directory-fsync',lambda:os.fsync(fd))
-        except BaseException as exc:
-            self._uncertain=True
-            raise PersistenceUncertain('completed-receipt-durability-uncertain') from exc
-        return value
+            if (_stat(os.stat(pending,dir_fd=fd,follow_symlinks=False))!=issued or self._receipt(fd,name)!=current):
+                raise Conflict('completed-receipt-replaced')
+            try:
+                import native_migration_transition as transition
+                before_publish();publishing=True
+                self._effect('review-receipt-replace',lambda:transition._rename_noreplace(fd,os.fsencode(pending),fd,os.fsencode(name)))
+                self._effect('review-receipt-directory-fsync',lambda:os.fsync(fd))
+            except BaseException as exc:
+                self._uncertain=True
+                raise PersistenceUncertain('completed-receipt-durability-uncertain') from exc
+            return value
+        finally:
+            try:
+                if not publishing:
+                    with self._quarantine(fd,value) as child:
+                        self._discard_owned(fd,pending,file,child,'control')
+            finally:os.close(file)
 
     @contextmanager
     def _quarantine(self, fd, value):
@@ -302,6 +308,15 @@ class Review:
         except FileNotFoundError:return True
         raise Conflict('retirement-source-reappeared')
 
+    def _discard_owned(self, fd, name, file, child, target):
+        """Reclaim an unpublished attempt only through its held private capture."""
+        expected=_stat(os.fstat(file))
+        if self._capture(fd,name,child,target,expected):
+            if _stat(os.stat(target,dir_fd=child,follow_symlinks=False))[:8]!=expected[:8]:
+                raise Conflict('pending-capture-replaced')
+            self._effect('review-pending-retire',lambda:os.unlink(target,dir_fd=child))
+            self._effect('review-pending-retire-fsync',lambda:os.fsync(child))
+
     def _retire_receipt(self, fd, name, value):
         with self._quarantine(fd,value) as child:
             captured=self._receipt(child,'control',store_fd=fd,logical=name)
@@ -390,13 +405,54 @@ class Review:
                 self._challenges.clear()
                 return dict(required=True,status='unavailable',model=None,decision=None,decision_authority=False,review_id=None)
 
+    def _revalidate_content_bindings(self):
+        """Finish trusted existing-view continuity before any requester-specific refusal.
+
+        Candidate.revalidate owns its durable fence and admission. These bounded
+        saved-state/model proofs only carry existing bindings; they grant nothing.
+        """
+        try:
+            before=self.c.saved_descriptor()
+            saved=self.c.read()
+            if saved is None:raise Conflict('new-current-review-required')
+            frozen=self._model(saved,self.p.read())
+            if self.c.saved_descriptor()!=before:raise Conflict('candidate-control-changed-before-revalidation')
+            if self.c.revalidate()!='current':raise Conflict('new-current-review-required')
+            after=self.c.saved_descriptor()
+            current=self.c.read()
+            if (current is None or current['stale'] or current['validation']!='current'
+                    or current['candidate']!=saved['candidate']):
+                raise Conflict('new-current-review-required')
+            model=self._model(current,self.p.read())
+            if _digest(model)!=_digest(frozen):raise Conflict('review-model-changed')
+            self._refresh_content_bindings((before,after),current,model)
+        except BaseException:
+            self._challenges.clear()
+            for view in self._views.values():view['candidate_stat']=None
+            raise
+
+    def _refresh_content_bindings(self, descriptors, value, model):
+        before,after=descriptors
+        if self.c.saved_descriptor()!=after:raise Conflict('candidate-control-changed-after-revalidation')
+        digest=_digest(model)
+        for view in self._views.values():
+            if (view['candidate_stat']==before and view['candidate']==value['candidate']
+                    and view['model']==digest):
+                view['candidate_stat']=after
+
     def review(self, *, candidate, scope, context):
         ctx = _context(context)
         with self._mutex:
             self._challenges.pop(ctx,None)
             try:
                 if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
-                if self.c.revalidate() != 'current': raise Conflict('new-current-review-required')
+                # Reject obsolete client identities before revalidation rotates the shared pointer.
+                saved=self.c.read()
+                if saved is None:raise Conflict('review-model-changed')
+                frozen=self._model(saved,self.p.read())
+                if candidate!=saved['candidate'] or scope!=frozen['scope_digest']:
+                    raise Conflict('review-model-changed')
+                self._revalidate_content_bindings()
                 with self._admission(8192,8192):
                     with self._store() as fd:
                         value,model,_=self._available(fd,candidate,scope)
@@ -423,8 +479,9 @@ class Review:
         value['digest'] = _digest(value)
         raw = _json(value)
         name = '.pending-'+uuid.uuid4().hex
-        file = self._effect('review-open', lambda: os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd))
+        file = os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
         try:
+            self.trace('review-open')
             view = memoryview(raw)
             while view:
                 n = self._effect('review-write',lambda:os.write(file,view))
@@ -449,7 +506,7 @@ class Review:
             ctx, grant = self._grant(context,review_id,candidate,scope)
             try:
                 if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
-                if self.c.revalidate() != 'current': raise Conflict('new-current-review-required')
+                self._revalidate_content_bindings()
                 with self._admission(8192,8192):
                     if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:
@@ -477,9 +534,16 @@ class Review:
                     if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:
                         value,model,completed=self._available(fd,candidate,scope,grant)
-                        previous=self._view
-                        name='view-'+uuid.uuid4().hex
-                        file=self._effect('review-content-open',lambda:os.open(name,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd))
+                        previous=self._views.get(ctx)
+                        identity=uuid.uuid4().hex
+                        pending='.pending-'+identity
+                        name='view-'+identity
+                        quarantine='retire-'+identity
+                        os.mkdir(quarantine,0o700,dir_fd=fd)
+                        child=os.open(quarantine,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                        file=None
+                        promoted=False
+                        publication_started=False
                         digest=hashlib.sha256();count=0
                         class Sink:
                             def write(inner,data):
@@ -492,40 +556,77 @@ class Review:
                                 count+=len(data);digest.update(data)
                                 return len(data)
                         try:
+                            qinfo=os.fstat(child)
+                            if (not stat.S_ISDIR(qinfo.st_mode) or stat.S_IMODE(qinfo.st_mode)!=0o700
+                                    or qinfo.st_uid!=os.geteuid() or os.listdir(child)
+                                    or _stat(qinfo)!=_stat(os.stat(quarantine,dir_fd=fd,follow_symlinks=False))):
+                                raise Conflict('retirement-directory-replaced')
+                            self.trace('review-content-quarantine-open')
+                            file=os.open(pending,os.O_RDWR|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=fd)
+                            self.trace('review-content-open')
                             self.c.read_content(candidate=candidate,row=row,side=side,destination=Sink())
                             if count!=info['size']:raise Conflict('content-size-changed')
                             self._effect('review-content-file-fsync',lambda:os.fsync(file))
                             receipt=_stat(os.fstat(file))
                             if receipt[3]!=1 or receipt[6]!=count or stat.S_IMODE(receipt[2])!=0o600: raise Conflict('content-descriptor-changed')
                             self.c.current_proof(value)
-                            view=dict(view_id=secrets.token_hex(32),name=name,fd=file,stat=receipt,size=count,sha256=digest.hexdigest(),
-                                candidate=candidate,context=ctx,row=row,side=side,oid=info['oid'],candidate_stat=self.c.saved_descriptor())
-                            self._verify_view(view,fd)
                             self._effect('review-content-directory-fsync',lambda:os.fsync(fd))
+                            import native_migration_transition as transition
+                            if _stat(os.stat(pending,dir_fd=fd,follow_symlinks=False))!=receipt:
+                                raise Conflict('review-pending-replaced')
+                            transition._rename_noreplace(fd,os.fsencode(pending),fd,os.fsencode(name))
+                            promoted=True
+                            receipt=_stat(os.fstat(file))
+                            self.trace('review-content-promote')
+                            view=dict(view_id=secrets.token_hex(32),name=name,fd=file,stat=receipt,size=count,sha256=digest.hexdigest(),
+                                candidate=candidate,context=ctx,row=row,side=side,oid=info['oid'],model=grant['model'],candidate_stat=self.c.saved_descriptor())
+                            self._verify_view(view,fd)
+                            self._effect('review-content-promotion-fsync',lambda:os.fsync(fd))
                             receipt_name='completed-'+name[5:]+'.json'
-                            quarantine='retire-'+name[5:]
-                            os.mkdir(quarantine,0o700,dir_fd=fd)
-                            qinfo=os.stat(quarantine,dir_fd=fd,follow_symlinks=False)
                             os.fsync(fd)
                             durable=dict(schema=1,status='complete',name=name,candidate=candidate,scope=scope,row=row,side=side,
                                 oid=info['oid'],size=count,sha256=digest.hexdigest(),stat=receipt,store=[os.fstat(fd).st_dev,os.fstat(fd).st_ino],quarantine=[quarantine,qinfo.st_dev,qinfo.st_ino])
-                            self._save_receipt(fd,receipt_name,durable,None)
-                            for old_name,old_value in completed:self._retire_receipt(fd,old_name,old_value)
+                            def publishing():
+                                nonlocal publication_started
+                                publication_started=True
+                            self._save_receipt(fd,receipt_name,durable,None,before_publish=publishing)
+                            active={v['name'] for key,v in self._views.items() if key!=ctx}
+                            for old_name,old_value in completed:
+                                if old_value['name'] not in active:self._retire_receipt(fd,old_name,old_value)
                             if previous:os.close(previous['fd'])
-                            self._view=view
+                            self._views[ctx]=view
                             file=None
                         finally:
-                            if file is not None:os.close(file)
+                            try:
+                                if file is not None and not publication_started:
+                                    # Promotion is reversible while receipt publication has not begun.
+                                    self._discard_owned(fd,name if promoted else pending,file,child,'payload')
+                            finally:
+                                if file is not None:os.close(file)
+                                os.close(child)
                 return {k:view[k] for k in ('view_id','size','sha256','candidate','row','side','oid')}
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
 
+    def _text_window(self, view, offset, length):
+        """Independent strict UTF-8 window, with at most three neighbor bytes per side."""
+        if offset==view['size']:return '',offset,offset
+        low=max(0,offset-3);high=min(view['size'],offset+length+3)
+        data=os.pread(view['fd'],high-low,low)
+        if len(data)!=high-low:raise Conflict('incomplete-content-text-window')
+        start=offset-low;end=offset+length-low
+        while start>0 and 0x80<=data[start]<=0xbf:start-=1
+        while end<len(data) and 0x80<=data[end]<=0xbf:end+=1
+        try:text=data[start:end].decode('utf-8',errors='strict')
+        except UnicodeDecodeError:text=None
+        return text,low+start,low+end
+
     def content_page(self, *, view_id, offset, context):
         ctx=_context(context)
         with self._mutex:
             try:
-                view=self._view
+                view=self._views.get(ctx)
                 if (view is None or type(view_id) is not str or not secrets.compare_digest(view_id,view['view_id'])
                         or ctx!=view['context'] or type(offset) is not int or not 0<=offset<=view['size']
                         or self.c.saved_descriptor()!=view['candidate_stat']):
@@ -533,9 +634,10 @@ class Review:
                 with self._store() as fd:
                     self._verify_view(view,fd)
                     raw=os.pread(view['fd'],min(PAGE,view['size']-offset),offset)
+                    text,text_start,text_end=self._text_window(view,offset,len(raw))
                     self._verify_view(view,fd)
                     if len(raw)!=min(PAGE,view['size']-offset):raise Conflict('incomplete-content-page')
-                return dict(view_id=view_id,offset=offset,total=view['size'],data=base64.b64encode(raw).decode(),eof=offset+len(raw)==view['size'],sha256=view['sha256'])
+                return dict(view_id=view_id,offset=offset,total=view['size'],data=base64.b64encode(raw).decode(),eof=offset+len(raw)==view['size'],sha256=view['sha256'],text=text,text_start=text_start,text_end=text_end)
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
@@ -544,7 +646,7 @@ class Review:
         ctx=_context(context)
         with self._mutex:
             try:
-                view=self._view
+                view=self._views.get(ctx)
                 if view is None:return
                 if view['context']!=ctx:raise Conflict('content-context-refused')
                 with self._admission(8192,8192):
@@ -554,11 +656,15 @@ class Review:
                         receipt=self._receipt(fd,name)
                         if receipt is None or receipt['stat']!=view['stat']:raise Conflict('completed-receipt-required')
                         self._retire_receipt(fd,name,receipt)
-                    os.close(view['fd']);self._view=None
+                    os.close(view['fd']);self._views.pop(ctx,None)
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
 
     def forget(self, *, context):
         """Page/lifecycle reset removes authority, never removes disk evidence."""
-        with self._mutex:self._challenges.pop(_context(context),None)
+        with self._mutex:
+            ctx=_context(context)
+            self._challenges.pop(ctx,None)
+            view=self._views.pop(ctx,None)
+            if view is not None:os.close(view['fd'])

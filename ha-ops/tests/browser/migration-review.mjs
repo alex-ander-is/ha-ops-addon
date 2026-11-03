@@ -71,7 +71,21 @@ try{
  const binary=component.locator('article[data-testid=migration-row]').filter({hasText:'homeassistant/binary'});await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);await binary.getByRole('button',{name:'Inspect after bytes',exact:true}).click();await settled();
  await component.getByRole('button',{name:'Last byte page',exact:true}).click();await settled();
  assert((await component.getByTestId('migration-byte-range').textContent()).includes('EOF true'),'last byte/EOF inaccessible');
+ assert((await component.getByTestId('migration-text').textContent()).includes('not valid UTF-8'),'malformed bytes lacked explicit text refusal');
  await component.getByRole('button',{name:'Close content',exact:true}).click();await settled();
+ const utf8=component.locator('article[data-testid=migration-row]').filter({hasText:'homeassistant/utf8'});
+ await utf8.locator('vaadin-details').last().evaluate(e=>e.opened=true);
+ await utf8.getByRole('button',{name:'Inspect after bytes',exact:true}).click();await settled();
+ assert((await component.getByTestId('migration-text').textContent()).includes('é'),'first byte page lost split UTF8');
+ assert((await component.getByTestId('migration-text-range').textContent()).includes('Text bytes 0–16385'),'text byte range was not labeled');
+ await component.getByRole('button',{name:'Next bytes',exact:true}).click();await settled();
+ assert((await component.getByTestId('migration-text').textContent()).includes('é'),'next byte page lost leading split UTF8');
+ await component.getByRole('button',{name:'Last byte page',exact:true}).click();await settled();
+ assert((await component.getByTestId('migration-text').textContent()).includes('😀last'),'direct last page lost split four-byte UTF8');
+ await component.getByRole('button',{name:'Previous bytes',exact:true}).click();await settled();
+ assert((await component.getByTestId('migration-text').textContent()).includes('é'),'reverse byte navigation lost UTF8');
+ await component.getByRole('button',{name:'Close content',exact:true}).click();await settled();
+
  await page.screenshot({path:path.join(artifacts,'desktop.png'),fullPage:true});
  await component.getByRole('button',{name:'Dismiss for this page',exact:true}).click();await settled();
  const decisionsBeforeReload=requests.filter(x=>x.path.endsWith('/decision')).length;

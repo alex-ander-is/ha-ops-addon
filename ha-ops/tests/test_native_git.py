@@ -374,7 +374,7 @@ def test_stream_timeout_and_stderr_drain_are_bounded(repo, monkeypatch):
     def argv(command, **kwargs):
         args, env = original(command, **kwargs)
         if tuple(command) == ("cat-file", "blob", oid):
-            args = [sys.executable, "-c", "import os,time;os.write(2,b'e'*200000);os.write(1,b'x'*100000);time.sleep(5)"]
+            args = [sys.executable, "-c", "import os,time;os.write(2,b'e'*200000);os.write(1,b'original');time.sleep(5)"]
         return args, env
     monkeypatch.setattr(adapter, "_argv", argv)
     adapter.timeout = .2
@@ -2775,3 +2775,49 @@ def test_materialization_publication_cleanup_refuses_substituted_temporary_file(
     monkeypatch.undo()
     os.unlink(state['path'])  # Only the foreign sentinel created by this fixture.
     assert adapter.resources() == ()
+
+
+@pytest.mark.parametrize('progress',[False,True])
+def test_exact_copy_progress_timeout_is_opt_in(repo,monkeypatch,progress):
+    root,adapter=repo
+    payload=b'abcdef';oid=adapter.write_blob_stream(payload).oid
+    original=adapter._argv;children=[];spawn=subprocess.Popen
+    def argv(command,**kwargs):
+        args,env=original(command,**kwargs)
+        if tuple(command)==('cat-file','blob',oid):
+            args=[sys.executable,'-c',"import os,time;[(os.write(1,bytes([v])),time.sleep(.08)) for v in b'abcdef']"]
+        return args,env
+    def record(*args,**kwargs):
+        child=spawn(*args,**kwargs);children.append(child);return child
+    monkeypatch.setattr(adapter,'_argv',argv);monkeypatch.setattr(subprocess,'Popen',record)
+    adapter.timeout=.25;sink=io.BytesIO()
+    if progress:
+        assert adapter.copy_blob(oid,sink,progress_timeout=True).size==len(payload)
+        assert sink.getvalue()==payload
+    else:
+        with pytest.raises(subprocess.TimeoutExpired):adapter.copy_blob(oid,sink)
+    assert all(child.poll() is not None for child in children)
+
+
+@pytest.mark.parametrize('producer',["import os,time;[(os.write(2,b'e'),time.sleep(.03)) for _ in range(100)]", "import os,time;os.write(1,b'original');os.close(1);os.close(2);time.sleep(5)"])
+def test_content_progress_requires_stdout_and_reaps_post_eof_stall(repo,monkeypatch,producer):
+    root,adapter=repo;oid=adapter.write_blob_stream(b'original').oid
+    original=adapter._argv;spawn=subprocess.Popen;children=[]
+    def argv(command,**kwargs):
+        args,env=original(command,**kwargs)
+        return ([sys.executable,'-c',producer],env) if tuple(command)==('cat-file','blob',oid) else (args,env)
+    def record(*args,**kwargs):
+        child=spawn(*args,**kwargs);children.append(child);return child
+    monkeypatch.setattr(adapter,'_argv',argv);monkeypatch.setattr(subprocess,'Popen',record);adapter.timeout=.2
+    with pytest.raises(subprocess.TimeoutExpired):adapter.copy_blob(oid,io.BytesIO(),progress_timeout=True)
+    assert all(child.poll() is not None for child in children)
+
+
+def test_oversized_exact_copy_never_writes_excess_bytes(repo,monkeypatch):
+    root,adapter=repo;oid=adapter.write_blob_stream(b'original').oid;original=adapter._argv
+    def argv(command,**kwargs):
+        args,env=original(command,**kwargs)
+        return ([sys.executable,'-c',"import os;os.write(1,b'x'*100000)"],env) if tuple(command)==('cat-file','blob',oid) else (args,env)
+    monkeypatch.setattr(adapter,'_argv',argv);sink=io.BytesIO()
+    with pytest.raises(n.GitFailure):adapter.copy_blob(oid,sink,progress_timeout=True)
+    assert len(sink.getvalue())<=len(b'original')

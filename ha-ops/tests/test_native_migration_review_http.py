@@ -11,6 +11,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'app'))
 import web
 import direct_access as d
 import native_migration_review_http as migration_http
+from test_native_migration_git_candidate import synthetic_host_allocation,host_rename_adapter
 
 
 @pytest.mark.parametrize('path',[
@@ -70,6 +71,7 @@ def listener(tmp_path,request):
     else:
         authority=d.Authority(tmp_path)
         handler=d.create_handler(authority,migration_review=spy)
+        spy.fixture_authority=authority
     server=d.DirectServer(('127.0.0.1',0),handler)
     address='http://127.0.0.1:'+str(server.server_port)
     headers={'Origin':address}
@@ -82,8 +84,8 @@ def listener(tmp_path,request):
     server.shutdown();server.server_close()
 
 
-def req(server,method,path,value=None,headers=None,raw=None):
-    connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=10)
+def req(server,method,path,value=None,headers=None,raw=None,*,timeout=10):
+    connection=http.client.HTTPConnection('127.0.0.1',server.server_port,timeout=timeout)
     data=raw if raw is not None else None if value is None else json.dumps(value)
     connection.request(method,path,data,headers or {})
     response=connection.getresponse();status=response.status;body=response.read();connection.close()
@@ -173,3 +175,66 @@ def test_ingress_internal_host_may_differ_from_forwarded_browser_origin(listener
     headers={**headers,'X-Forwarded-Host':'ha.fixture.invalid:8123','Origin':'http://ha.fixture.invalid:8123'}
     code,result=req(server,'GET',prefix+'state',headers=headers)
     assert code==200 and result['csrf'] and spy.calls
+
+
+@pytest.mark.parametrize('kind',['timeout','contexts','invalid-candidate','invalid-scope','resource-review','resource-decision'])
+def test_real_authenticated_content_failure_and_context_isolation(listener,tmp_path,kind):
+    import subprocess
+    import native_migration as native
+    import native_migration_review as review_domain
+    from test_native_migration_review import setup_review
+    original_req=req
+    def domain_req(*args,**kwargs):return original_req(*args,**kwargs,timeout=120)
+    server,spy,prefix,headers=listener
+    root,repo,p,owner,value=setup_review(tmp_path/'real-review')
+    for method in ('forget','diagnose','review','decide','open_content','content_page','close_content'):
+        setattr(spy,method,getattr(owner,method))
+    a=csrf(listener)
+    def explicit(h):
+        code,state=domain_req(server,'GET',prefix+'state',headers=h);assert code==200
+        h={**h,'Content-Type':'application/json','X-CSRF-Token':state['csrf']}
+        model=state['model'];ref=dict(candidate=model['candidate'],scope=model['scope_digest'])
+        code,grant=domain_req(server,'POST',prefix+'review',ref,h);assert code==200
+        return h,dict(**ref,review_id=grant['review_id'])
+    a,ar=explicit(a)
+    code,av=domain_req(server,'POST',prefix+'content-open',dict(**ar,row=0,side='before'),a);assert code==200
+    if kind=='timeout':
+        def fail(**kw):
+            kw['destination'].write(b'x');raise subprocess.TimeoutExpired('git',30)
+        with mock.patch.object(owner.c,'read_content',side_effect=fail):
+            code,error=domain_req(server,'POST',prefix+'content-open',dict(**ar,row=0,side='before'),a)
+        assert code==403 and error['ok'] is False and 'new explicit review' in error['message']
+        assert domain_req(server,'POST',prefix+'content-page',dict(view_id=av['view_id'],offset=0),a)[0]==200
+        a,ar=explicit(a)
+        assert domain_req(server,'POST',prefix+'content-open',dict(**ar,row=0,side='before'),a)[0]==200
+    else:
+        if prefix.startswith('/direct'):
+            authority=spy.fixture_authority;address=headers['Origin']
+            grant=authority.issue(authority.nonce(()),(),address).split('#grant=')[1]
+            b={**headers,'Cookie':authority.cookie(authority.exchange(grant,address))}
+        else:b={**headers,'X-Remote-User-Id':'second-authenticated-user'}
+        if kind.startswith('resource-'):
+            import errno
+            from contextlib import contextmanager
+            b,br=explicit(b)
+            @contextmanager
+            def no_space(*args):raise OSError(errno.ENOSPC,'second Review admission');yield
+            route='review' if kind=='resource-review' else 'decision'
+            body=dict(candidate=br['candidate'],scope=br['scope']) if route=='review' else dict(**br,action='approve')
+            with mock.patch.object(owner,'_admission',no_space):
+                assert domain_req(server,'POST',prefix+route,body,b)[0]==403
+        elif kind.startswith('invalid-'):
+            code,state=domain_req(server,'GET',prefix+'state',headers=b);assert code==200
+            b={**b,'Content-Type':'application/json','X-CSRF-Token':state['csrf']}
+            invalid=dict(candidate=ar['candidate'],scope=ar['scope']);invalid[kind[8:]]='f'*64
+            assert domain_req(server,'POST',prefix+'review',invalid,b)[0]==403
+        else:
+            b,br=explicit(b)
+            assert domain_req(server,'POST',prefix+'content-page',dict(view_id=av['view_id'],offset=0),a)[0]==200
+            assert domain_req(server,'POST',prefix+'content-open',dict(**br,row=0,side='before'),b)[0]==200
+            assert domain_req(server,'POST',prefix+'content-page',dict(view_id=av['view_id'],offset=0),b)[0]==403
+            assert domain_req(server,'GET',prefix+'state',headers=b)[0]==200
+        assert domain_req(server,'POST',prefix+'content-page',dict(view_id=av['view_id'],offset=0),a)[0]==200
+        assert domain_req(server,'POST',prefix+'decision',dict(**ar,action='approve'),a)[0]==200
+    for key in list(owner._views):
+        view=owner._views.pop(key);__import__('os').close(view['fd'])
