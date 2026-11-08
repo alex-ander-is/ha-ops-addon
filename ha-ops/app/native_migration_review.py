@@ -29,6 +29,7 @@ STORE = b'data/native-migration-review'
 PAGE = 16384
 VIEW_LEASE = 300
 LEASE_TICK = 30
+CLEANUP_ATTEMPTS = 3
 MAX_SIZE = (1 << 63)-1
 
 
@@ -84,9 +85,14 @@ class Review:
         self._timer=None
         self._closed=False
         self._cleanup_debt=False
+        self._cleanup_remaining=CLEANUP_ATTEMPTS
+        self._cleanup_error=None
         self.cleanup_diagnostic=None
 
     def _schedule(self):
+        if not self._views and not self._cleanup_debt and self._timer is not None:
+            timer,self._timer=self._timer,None
+            timer.cancel()
         if self._closed or self._timer is not None or not (self._views or self._cleanup_debt):return
         timer=None
         try:
@@ -112,6 +118,8 @@ class Review:
             raise
 
     def _retire_inactive(self):
+        # Every caller, including expiry and direct close, obeys the same bound.
+        if self._cleanup_remaining<=0:return
         try:
             with self.p.disk.migration_review_cleanup_guard(self):
                 with self._store() as fd:
@@ -119,17 +127,21 @@ class Review:
                         active={v['name'] for v in self._views.values()}
                         for name,value in self._completed(fd,None,None,active_names=active):
                             if value['name'] not in active:self._retire_receipt(fd,name,value)
+            self._cleanup_remaining=CLEANUP_ATTEMPTS
             self._cleanup_debt=False;self.cleanup_diagnostic=None;self._cleanup_error=None
         except (ValueError,OSError,RuntimeError) as error:
-            # Evidence failures retain their diagnostic without polling forever.
-            self._cleanup_debt=(isinstance(error,DiskBlocked) and str(error) in
+            self._cleanup_remaining=max(0,self._cleanup_remaining-1)
+            retryable=(isinstance(error,DiskBlocked) and str(error) in
                 ('nested-or-competing-guard','competing-process-guard') or
                 isinstance(error,OSError) and error.errno in
                 (errno.EAGAIN,errno.EWOULDBLOCK,errno.EINTR,errno.EIO,errno.EBUSY,errno.ETIMEDOUT))
+            if not retryable:self._cleanup_remaining=0
+            self._cleanup_debt=bool(self._cleanup_remaining)
             self.cleanup_diagnostic=str(error);self._cleanup_error=error
 
     def _sweep(self, *, reclaim=False):
         if self._closed:raise Conflict('review-closed')
+        if reclaim:self._cleanup_remaining=CLEANUP_ATTEMPTS
         now=self._clock();expired=False
         for ctx,view in list(self._views.items()):
             if now>=view['deadline']:
@@ -773,8 +785,9 @@ class Review:
                 raise
             finally:
                 self._views.pop(ctx,None);_close_handles({ctx:view})
-                self._cleanup_debt=True;self._schedule()
+                self._cleanup_debt=bool(self._cleanup_remaining);self._schedule()
             self._retire_inactive()
+            self._schedule()
             if self.cleanup_diagnostic:
                 self._challenges.pop(ctx,None)
                 raise self._cleanup_error
@@ -787,5 +800,5 @@ class Review:
             self._challenges.pop(ctx,None)
             view=self._views.pop(ctx,None)
             if view is not None:
-                _close_handles({ctx:view});self._cleanup_debt=True
+                _close_handles({ctx:view});self._cleanup_debt=bool(self._cleanup_remaining)
                 self._schedule()

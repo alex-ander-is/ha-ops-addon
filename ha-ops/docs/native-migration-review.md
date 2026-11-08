@@ -30,10 +30,18 @@ foreign, substituted and unowned evidence stays charged with an explicit cleanup
 diagnostic. Cleanup still verifies active receipts, locations and descriptor/path
 identity, but leaves their full payload hash to the strict explicit request.
 Inactive payloads retain both preflight and postcapture content verification.
-Known admission/store lock contention and transient I/O errors retry automatically.
+Known admission/store lock contention and transient I/O errors allow three failed
+cleanup passes per episode, including the initial pass and at most two automatic
+retries. Exhaustion parks cleanup before disk/store access and retains its error
+and evidence, including when another context continues page reads or heartbeats.
 Corrupt or unowned evidence and permanent filesystem errors retain diagnostics
 without automatic cleanup retries; healthy view leases still expire normally.
-A fresh explicit review or content-open retries cleanup after external repair.
+A fresh explicit review or content-open starts a new allowance after external
+repair. Its warning clears only after the entire cleanup pass succeeds, including
+both guard exits. Successful cleanup also restores the allowance. Page reads,
+heartbeats, expiry, close, forget and changed errors never replenish it. The
+allowance is private in-memory state; shutdown/restart/update never auto-resume
+cleanup or restore grants. A new owner waits for explicit review/open.
 Permanent I/O or unprovable ownership can retain bytes indefinitely.
 Empty private quarantines and inert pending fragments keep their existing policy.
 The allocation recipe retains eight new entries and conservative control overhead.

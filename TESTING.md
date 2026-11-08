@@ -748,6 +748,16 @@ constructor, daemon, start and cancellation failures with real descriptors.
 close reports EIO. Actual frontend method and served browser flows also cover
 Inspect then Dismiss, a dropped exact release and independent-context survival.
 
+`test_persistent_cleanup_prefix_eio_parks_all_passive_paths` injects EIO after a
+real owned multi-page payload prefix, before and after capture. It bounds failed
+passes and bytes across healthy page/renew traffic, close/forget and expiry.
+The adjacent cleanup regressions cover guard/store exit failures, direct close's
+two cleanup entries, real lock contention, explicit review/open recovery, mixed
+errors and a fresh owner's no-auto-resume lifecycle. Run the changed Review
+cohort in the Linux wrapper; portable adapters alone do not qualify Linux locks
+or namespace capture. Unchanged physical-allocation and served-browser proofs
+may be reused only with explicit source/fixture applicability.
+
 
 Focused portable checks are `test_native_migration_review.py` and
 `test_native_migration_review_http.py`. Actual protected ingress/direct handler

@@ -1153,3 +1153,256 @@ def test_cleanup_retry_classification_and_timer_recovery(cleanup_receipt,failure
     if retry:timers[-1].call()
     else:owner._sweep();assert payload.exists();owner._sweep(reclaim=True)
     assert not owner._cleanup_debt and owner.cleanup_diagnostic is None and owner._timer is None and not payload.exists()
+
+
+def healthy_cleanup_view(owner, directory, context, identity):
+    """Another genuine owned spool, kept active while an inactive one fails."""
+    payload=directory/('view-'+identity*32);payload.write_bytes(b'healthy text'*100);payload.chmod(0o600)
+    qname='retire-'+identity*32;(directory/qname).mkdir(mode=0o700)
+    qinfo=(directory/qname).stat();info=r._stat(payload.stat());fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+    value=dict(quarantine=[qname,qinfo.st_dev,qinfo.st_ino],schema=1,status='complete',name=payload.name,
+        candidate='b'*64,scope='c'*64,row=0,side='after',oid='d'*40,size=info[6],
+        sha256=hashlib.sha256(payload.read_bytes()).hexdigest(),stat=info,store=[os.fstat(fd).st_dev,os.fstat(fd).st_ino])
+    try:owner._save_receipt(fd,'completed-'+identity*32+'.json',value,None)
+    finally:os.close(fd)
+    ctx=r._context(context);held=os.open(payload,os.O_RDONLY)
+    owner.c.saved_descriptor=lambda:[1]
+    owner._views[ctx]=dict(name=payload.name,fd=held,stat=info,size=info[6],sha256=value['sha256'],
+        deadline=300,review_id='grant',view_id=identity*64,context=ctx,candidate_stat=[1])
+    owner._challenges[ctx]={'token':'grant'}
+    return held
+
+
+@pytest.mark.parametrize('phase',['preflight','postcapture'])
+def test_persistent_cleanup_prefix_eio_parks_all_passive_paths(cleanup_receipt,monkeypatch,phase):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    contexts=[CONTEXT,('direct','http://fixture','close'),('direct','http://fixture','forget')]
+    handles=[healthy_cleanup_view(owner,payload.parent,ctx,identity) for ctx,identity in zip(contexts,'ef9')]
+    info=payload.stat();identity=(info.st_dev,info.st_ino);original=os.pread
+    reads=[0];failures=[0];guards=[0];enabled=[True]
+    original_guard=owner.p.disk.migration_review_cleanup_guard
+    from contextlib import contextmanager
+    @contextmanager
+    def guard(review):
+        guards[0]+=1
+        with original_guard(review):yield
+    owner.p.disk.migration_review_cleanup_guard=guard
+    def read(file,size,offset):
+        current=os.fstat(file)
+        if (current.st_dev,current.st_ino)==identity:
+            if enabled[0] and offset>=r.PAGE and (phase=='preflight' or not payload.exists()):
+                failures[0]+=1
+                raise OSError(errno.EIO,'persistent read failure '+str(failures[0]))
+            data=original(file,size,offset);reads[0]+=len(data);return data
+        return original(file,size,offset)
+    monkeypatch.setattr(os,'pread',read)
+    owner._sweep(reclaim=True)
+    for tick in range(30,300,30):
+        now[0]=tick
+        owner.renew_content(view_id='e'*64,context=CONTEXT)
+        assert base64.b64decode(owner.content_page(view_id='e'*64,offset=0,context=CONTEXT)['data']).startswith(b'healthy')
+        timers[-1].call()
+    assert failures[0]==3 and guards[0]==3 and not owner._cleanup_debt
+    assert reads[0]==3*r.PAGE+(info.st_size if phase=='postcapture' else 0)
+    error=owner._cleanup_error;diagnostic=owner.cleanup_diagnostic;parked_reads=reads[0]
+    # A close may enter sweep and direct retirement in one call; neither may rearm.
+    with pytest.raises(OSError,match='persistent read failure'):owner.close_content(context=contexts[1])
+    owner.forget(context=contexts[2]);owner._retire_inactive();owner.sweep_content()
+    now[0]=1000;stale=timers[-1];stale.call();stale.call()
+    assert failures[0]==3 and guards[0]==3 and reads[0]==parked_reads
+    assert owner._cleanup_error is error and owner.cleanup_diagnostic==diagnostic
+    assert not owner._views and not owner._challenges and not owner._cleanup_debt and owner._timer is None
+    for held in handles:
+        with pytest.raises(OSError):os.fstat(held)
+    retained=payload if payload.exists() else payload.parent/receipt['quarantine'][0]/'payload'
+    assert retained.stat().st_ino==info.st_ino and retained.read_bytes()==b'full payload bytes'*2000
+    enabled[0]=False
+    owner._sweep(reclaim=True)
+    assert owner.cleanup_diagnostic is None and owner._cleanup_error is None and owner._cleanup_remaining==3
+    assert not retained.exists()
+
+
+@pytest.mark.parametrize('boundary',['store-exit','guard-exit'])
+def test_cleanup_full_pass_exit_failures_consume_budget(cleanup_receipt,boundary):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    from contextlib import contextmanager
+    # Active owned content lets each body finish without changing its evidence.
+    held=healthy_cleanup_view(owner,payload.parent,CONTEXT,'e')
+    owner._views['target']=dict(name=payload.name,fd=os.open(payload,os.O_RDONLY),deadline=300,review_id='target')
+    original=owner._store if boundary=='store-exit' else owner.p.disk.migration_review_cleanup_guard
+    calls=[0]
+    @contextmanager
+    def failed(*args,**kwargs):
+        calls[0]+=1
+        with original(*args,**kwargs) as value:yield value
+        raise OSError(errno.EIO,'failed '+boundary)
+    if boundary=='store-exit':owner._store=failed
+    else:owner.p.disk.migration_review_cleanup_guard=failed
+    owner._sweep(reclaim=True)
+    for _ in range(20):timers[-1].call()
+    assert calls[0]==3 and owner._cleanup_remaining==0 and not owner._cleanup_debt
+    assert owner.cleanup_diagnostic.endswith(boundary) and payload.exists() and os.fstat(held)
+    if boundary=='store-exit':owner._store=original
+    else:owner.p.disk.migration_review_cleanup_guard=original
+    owner._sweep(reclaim=True)
+    assert owner._cleanup_remaining==3 and owner._cleanup_error is None and owner.cleanup_diagnostic is None
+
+
+@pytest.mark.parametrize('entrypoint',['review','open'])
+def test_explicit_cleanup_retry_preserves_diagnostic_then_recovers(tmp_path,monkeypatch,entrypoint):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    owner.open_content(row=0,side='before',**ref)
+    target=owner._views[r._context(CONTEXT)]
+    # Keep the grant usable for an explicit open while making this spool inactive.
+    owner._views.pop(r._context(CONTEXT));os.close(target['fd'])
+    from contextlib import contextmanager
+    original=p.disk.migration_review_cleanup_guard;calls=[0]
+    @contextmanager
+    def failed(review):
+        calls[0]+=1;raise OSError(errno.EIO,'still broken '+str(calls[0]));yield
+    p.disk.migration_review_cleanup_guard=failed
+    owner._sweep(reclaim=True)
+    owner._sweep();owner._sweep()
+    assert calls[0]==3 and owner._cleanup_remaining==0
+    if entrypoint=='review':owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+    else:owner.open_content(row=0,side='before',**ref)
+    assert calls[0]==4 and owner._cleanup_remaining==2 and owner.cleanup_diagnostic=='[Errno 5] still broken 4'
+    # Explicit retry does not erase the previous warning before cleanup succeeds.
+    p.disk.migration_review_cleanup_guard=original
+    if entrypoint=='review':owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+    else:owner.open_content(row=0,side='before',**ref)
+    assert owner._cleanup_remaining==3 and owner.cleanup_diagnostic is None and owner._cleanup_error is None
+
+
+def test_cleanup_mixed_failure_episode_and_restart_stay_parked(cleanup_receipt):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    from contextlib import contextmanager
+    failures=iter([OSError(errno.EIO,'first'),OSError(errno.EINTR,'different'),d.Blocked('competing-process-guard')]);calls=[0]
+    @contextmanager
+    def failed(review):calls[0]+=1;raise next(failures);yield
+    owner.p.disk.migration_review_cleanup_guard=failed
+    owner._sweep(reclaim=True)
+    for _ in range(3):owner.sweep_content()
+    assert calls[0]==3 and owner._cleanup_remaining==0 and owner._timer is None
+    owner.shutdown()
+    fresh=r.Review(owner.c,clock=lambda:now[0],scheduler=lambda *a:pytest.fail('restart scheduled cleanup'))
+    assert not fresh._views and not fresh._challenges and not fresh._cleanup_debt and fresh._timer is None
+    fresh.sweep_content()
+    assert calls[0]==3 and payload.exists()
+
+
+def test_cleanup_close_double_entry_cannot_exceed_failure_budget(cleanup_receipt,monkeypatch):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    held=healthy_cleanup_view(owner,payload.parent,CONTEXT,'e')
+    original=os.pread;identity=(payload.stat().st_dev,payload.stat().st_ino);calls=[0]
+    def read(file,size,offset):
+        info=os.fstat(file)
+        if (info.st_dev,info.st_ino)==identity and offset>=r.PAGE:
+            calls[0]+=1;raise OSError(errno.EIO,'still unavailable')
+        return original(file,size,offset)
+    monkeypatch.setattr(os,'pread',read)
+    owner._sweep(reclaim=True)
+    with pytest.raises(OSError,match='still unavailable'):owner.close_content(context=CONTEXT)
+    assert calls[0]==3 and owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None
+    with pytest.raises(OSError):os.fstat(held)
+    for _ in range(20):owner.sweep_content()
+    assert calls[0]==3
+
+
+@pytest.mark.parametrize('persistent',[False,True])
+def test_real_cleanup_lock_contention_recovers_or_parks(cleanup_receipt,persistent):
+    import fcntl
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    # Keep the lock namespace separate from the isolated receipt-store adapter.
+    root=payload.parent.with_name(payload.parent.name+'-disk-root');(root/'data').mkdir(parents=True)
+    lock=root/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    disk=d.NativeDisk.__new__(d.NativeDisk);disk.root=os.fsencode(root);disk._active_operation=None
+    owner.root=disk.root;owner.p.disk=disk
+    competing=os.open(lock,os.O_RDWR);fcntl.flock(competing,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    try:
+        owner._sweep(reclaim=True)
+        assert isinstance(owner._cleanup_error,d.Blocked) and owner._cleanup_remaining==2
+        if persistent:
+            for _ in range(20):owner.sweep_content()
+            assert owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None
+    finally:os.close(competing)
+    if persistent:
+        owner.sweep_content();assert payload.exists()
+        owner._sweep(reclaim=True)
+    else:timers[-1].call()
+    assert not payload.exists() and owner._cleanup_remaining==3 and owner.cleanup_diagnostic is None
+
+
+def test_terminal_cleanup_failure_after_transient_parks_immediately(cleanup_receipt):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    from contextlib import contextmanager
+    failures=iter([OSError(errno.EIO,'transient'),n.Conflict('completed-spool-corrupt')]);calls=[0]
+    @contextmanager
+    def failed(review):calls[0]+=1;raise next(failures);yield
+    owner.p.disk.migration_review_cleanup_guard=failed
+    owner._sweep(reclaim=True);owner.sweep_content()
+    for _ in range(20):owner.sweep_content()
+    assert calls[0]==2 and owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None
+    assert owner.cleanup_diagnostic=='completed-spool-corrupt' and payload.exists()
+
+
+def test_cleanup_prefix_transient_recovers_and_success_replenishes(cleanup_receipt,monkeypatch):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    original=os.pread;identity=(payload.stat().st_dev,payload.stat().st_ino);failures=[0]
+    def read(file,size,offset):
+        info=os.fstat(file)
+        if (info.st_dev,info.st_ino)==identity and offset>=r.PAGE and not failures[0]:
+            failures[0]+=1;raise OSError(errno.EIO,'transient payload read')
+        return original(file,size,offset)
+    monkeypatch.setattr(os,'pread',read)
+    owner._sweep(reclaim=True)
+    assert owner._cleanup_remaining==2 and owner._cleanup_debt and payload.exists()
+    timers[-1].call()
+    assert not payload.exists() and owner._cleanup_remaining==3 and owner._cleanup_error is None and owner._timer is None
+    from contextlib import contextmanager
+    @contextmanager
+    def failed(review):raise OSError(errno.EIO,'another episode');yield
+    owner.p.disk.migration_review_cleanup_guard=failed
+    owner._retire_inactive()
+    assert owner._cleanup_remaining==2 and owner._cleanup_debt
+
+
+def test_real_cleanup_guard_exit_eio_counts_failed_empty_passes(cleanup_receipt,monkeypatch):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    root=payload.parent.with_name(payload.parent.name+'-disk-root');(root/'data').mkdir(parents=True)
+    lock=root/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    disk=d.NativeDisk.__new__(d.NativeDisk);disk.root=os.fsencode(root);disk._active_operation=None
+    owner.root=disk.root;owner.p.disk=disk
+    original_open,original_close=os.open,os.close;held=[None];failures=[0]
+    def opened(name,*args,**kwargs):
+        file=original_open(name,*args,**kwargs)
+        if name==d.ADMISSION_LOCK.split(b'/')[-1]:held[0]=file
+        return file
+    def closed(file):
+        original_close(file)
+        if file==held[0]:
+            held[0]=None;failures[0]+=1;raise OSError(errno.EIO,'guard exit failed')
+    monkeypatch.setattr(os,'open',opened);monkeypatch.setattr(os,'close',closed)
+    owner._sweep(reclaim=True)
+    assert not payload.exists() and owner._cleanup_remaining==2 and owner.cleanup_diagnostic
+    for _ in range(20):owner.sweep_content()
+    assert failures[0]==3 and owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None
+    assert disk._active_operation is None and not d._THREAD_LOCKS[disk.root+b'/'+d.ADMISSION_LOCK].locked()
+    monkeypatch.setattr(os,'close',original_close)
+    owner._sweep(reclaim=True)
+    assert owner._cleanup_remaining==3 and owner._cleanup_error is None and owner.cleanup_diagnostic is None
+
+
+def test_cleanup_reentrant_failure_cannot_underflow_and_rearm(cleanup_receipt):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    from contextlib import contextmanager
+    calls=[0];owner._cleanup_remaining=1
+    @contextmanager
+    def failed(review):
+        calls[0]+=1
+        if calls[0]==1:owner._retire_inactive()
+        raise OSError(errno.EIO,'nested failure');yield
+    owner.p.disk.migration_review_cleanup_guard=failed
+    owner._retire_inactive()
+    for _ in range(20):owner._retire_inactive();owner.sweep_content()
+    assert calls[0]==2 and owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None

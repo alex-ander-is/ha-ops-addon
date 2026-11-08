@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.5.3
+
+Stop persistent migration cleanup retries after three failed passes
+
+- Retain cleanup diagnostics and owned evidence after the initial failure and two retries; passive content activity cannot restart exhausted cleanup.
+- Keep healthy content leases expiring normally and allow deliberate review or content-open recovery after repair.
+- Cover partial payload EIO, real lock contention, cleanup guard exits, explicit retries, and shutdown lifecycle.
+
 ## 2.5.2
 
 Avoid redundant migration cleanup reads and terminal retries
