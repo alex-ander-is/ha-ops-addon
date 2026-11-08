@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import base64
 import copy
+import errno
 import fcntl
 import hashlib
 import json
@@ -20,6 +21,7 @@ import time
 import weakref
 
 from native_inventory import Blocked
+from native_disk import Blocked as DiskBlocked
 from native_migration import Conflict, PersistenceUncertain, MAX_CONTROL, _json, _digest, _unique, _stat, decode_path, encode_path
 from native_metadata import decode, ancestors
 
@@ -115,11 +117,16 @@ class Review:
                 with self._store() as fd:
                     if fd is not None:
                         active={v['name'] for v in self._views.values()}
-                        for name,value in self._completed(fd,None,None):
+                        for name,value in self._completed(fd,None,None,active_names=active):
                             if value['name'] not in active:self._retire_receipt(fd,name,value)
             self._cleanup_debt=False;self.cleanup_diagnostic=None;self._cleanup_error=None
         except (ValueError,OSError,RuntimeError) as error:
-            self._cleanup_debt=True;self.cleanup_diagnostic=str(error);self._cleanup_error=error
+            # Evidence failures retain their diagnostic without polling forever.
+            self._cleanup_debt=(isinstance(error,DiskBlocked) and str(error) in
+                ('nested-or-competing-guard','competing-process-guard') or
+                isinstance(error,OSError) and error.errno in
+                (errno.EAGAIN,errno.EWOULDBLOCK,errno.EINTR,errno.EIO,errno.EBUSY,errno.ETIMEDOUT))
+            self.cleanup_diagnostic=str(error);self._cleanup_error=error
 
     def _sweep(self, *, reclaim=False):
         if self._closed:raise Conflict('review-closed')
@@ -311,7 +318,7 @@ class Review:
             if [now.st_dev,now.st_ino]!=[dev,ino]:raise Conflict('retirement-directory-replaced')
         finally:os.close(child)
 
-    def _completed_payload(self, fd, child, value, *, retiring):
+    def _completed_payload(self, fd, child, value, *, retiring, hash_payload=True):
         """Read-only proof for either payload location, including settled deletion."""
         present=[]
         try:
@@ -328,18 +335,20 @@ class Review:
             actual=_stat(os.fstat(file))
             if actual[:8]!=value['stat'][:8] or source==fd and actual!=value['stat']:
                 raise Conflict('completed-spool-replaced')
-            digest=hashlib.sha256();offset=0
-            while offset<value['size']:
-                chunk=os.pread(file,min(PAGE,value['size']-offset),offset)
-                if not chunk:raise Conflict('completed-spool-incomplete')
-                digest.update(chunk);offset+=len(chunk)
-            if (digest.hexdigest()!=value['sha256'] or _stat(os.fstat(file))!=actual
+            if hash_payload:
+                digest=hashlib.sha256();offset=0
+                while offset<value['size']:
+                    chunk=os.pread(file,min(PAGE,value['size']-offset),offset)
+                    if not chunk:raise Conflict('completed-spool-incomplete')
+                    digest.update(chunk);offset+=len(chunk)
+                if digest.hexdigest()!=value['sha256']:raise Conflict('completed-spool-corrupt')
+            if (_stat(os.fstat(file))!=actual
                     or _stat(os.stat(target,dir_fd=source,follow_symlinks=False))!=actual):
                 raise Conflict('completed-spool-corrupt')
         finally:
             for _,_,file in present:os.close(file)
 
-    def _completed(self, fd, candidate, scope):
+    def _completed(self, fd, candidate, scope, *, active_names=frozenset()):
         names=set(os.listdir(fd));receipts=[];owned={'decision.json'}
         owned.update(n for n in names if re.fullmatch(r'\.pending-[0-9a-f]{32}',n))
         for qname in sorted(n for n in names if re.fullmatch(r'retire-[0-9a-f]{32}',n)):
@@ -354,7 +363,7 @@ class Review:
                 if value is None:raise Conflict('retirement-control-missing')
                 # Captured immutable control is durable retirement intent.
                 with self._quarantine(fd,value) as held:
-                    self._completed_payload(fd,held,value,retiring=True)
+                    self._completed_payload(fd,held,value,retiring=True,hash_payload=value['name'] not in active_names)
                 owned.update((qname,value['name']));receipts.append((logical,value))
             finally:os.close(child)
         for name in sorted(n for n in names if n.startswith('completed-')):
@@ -363,7 +372,7 @@ class Review:
             owned.update((name,value['name'],value['quarantine'][0]))
             with self._quarantine(fd,value) as child:
                 if 'control' in os.listdir(child):raise Conflict('duplicate-retirement-control')
-                self._completed_payload(fd,child,value,retiring=value['status']=='retiring')
+                self._completed_payload(fd,child,value,retiring=value['status']=='retiring',hash_payload=value['name'] not in active_names)
             receipts.append((name,value))
         if names-owned:raise Blocked('retained-review-content-requires-diagnosis')
         return receipts

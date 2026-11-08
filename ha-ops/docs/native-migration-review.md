@@ -13,7 +13,7 @@ Each authenticated context has at most one active content view. Views have a
 30-second browser heartbeat. At the expiry boundary a view cannot revive; a
 fresh explicit review/open is required. Hidden, frozen or offline pages may lose
 the lease. One weak daemon timer per Review sweeps every 30 seconds while views
-or cleanup debt remain. Shutdown cancels it, invalidates grants and closes all
+or retryable cleanup debt remain. Shutdown cancels it, invalidates grants and closes all
 owned descriptors; a finalizer also closes descriptors when an owner is collected.
 A successful terminal decision stops its view heartbeat, clears the viewer and
 best-effort releases its exact content, including dismissal with an open viewer.
@@ -27,7 +27,14 @@ retires provable inactive completed receipts through their existing private
 quarantine. Active other contexts remain protected and charged. Ordinary admission
 then takes a fresh snapshot; no presumed reclamation is subtracted. Corrupt,
 foreign, substituted and unowned evidence stays charged with an explicit cleanup
-diagnostic. Permanent I/O or unprovable ownership can retain bytes indefinitely.
+diagnostic. Cleanup still verifies active receipts, locations and descriptor/path
+identity, but leaves their full payload hash to the strict explicit request.
+Inactive payloads retain both preflight and postcapture content verification.
+Known admission/store lock contention and transient I/O errors retry automatically.
+Corrupt or unowned evidence and permanent filesystem errors retain diagnostics
+without automatic cleanup retries; healthy view leases still expire normally.
+A fresh explicit review or content-open retries cleanup after external repair.
+Permanent I/O or unprovable ownership can retain bytes indefinitely.
 Empty private quarantines and inert pending fragments keep their existing policy.
 The allocation recipe retains eight new entries and conservative control overhead.
 

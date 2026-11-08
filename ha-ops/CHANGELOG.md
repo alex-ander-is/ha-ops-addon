@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.5.2
+
+Avoid redundant migration cleanup reads and terminal retries
+
+- Keep active spool verification strict on explicit review and content open while cleanup checks ownership and location without rereading active payload bytes.
+- Retain corrupt cache diagnostics without automatic polling; retry transient lock and I/O failures and allow explicit review to retry after repair.
+- Check the actual private payload filename in retirement regression coverage.
+
 ## 2.5.1
 
 Bound migration content leases and preserve safe explicit deferral

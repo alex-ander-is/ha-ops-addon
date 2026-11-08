@@ -733,7 +733,7 @@ def assert_dormant_import_contour(sources):
                     continue
                 # Only this named dormant observational peer may reuse NativeGit.
                 # Neither adapter may become an ordinary app entrypoint import.
-                assert (name, module) in (("native_migration_git_candidate.py", "native_git"), ("native_migration_git_candidate.py", "native_disk"), ("native_migration.py", "native_git"), ("native_migration.py", "native_disk"), ("native_disk.py", "native_git"), ("native_preview.py", "native_git"),
+                assert (name, module) in (("native_migration_review.py", "native_disk"), ("native_migration_git_candidate.py", "native_git"), ("native_migration_git_candidate.py", "native_disk"), ("native_migration.py", "native_git"), ("native_migration.py", "native_disk"), ("native_disk.py", "native_git"), ("native_preview.py", "native_git"),
                     ("native_save.py", "native_git"), ("native_save.py", "native_disk"),
                     ("native_git.py", "native_disk"), ("native_operations.py", "native_git"), ("native_publication.py", "native_git"),
                     ("native_publication.py", "native_disk"), ("native_operations.py", "native_publication"),
@@ -763,6 +763,12 @@ def test_dormant_import_sentinel_detects_package_imported_aliases(module, packag
 
 
 def test_dormant_import_sentinel_allows_only_named_observational_peer():
+    app = Path(n.__file__).parent
+    assert_dormant_import_contour({path.name: path.read_text() for path in app.glob("*.py")})
+    assert_dormant_import_contour({"native_migration_review.py": "from native_disk import Blocked as DiskBlocked"})
+    for name in ("server.py", "another_dormant.py"):
+        with pytest.raises(AssertionError):
+            assert_dormant_import_contour({name: "from native_disk import Blocked as DiskBlocked"})
     assert_dormant_import_contour({"native_disk.py": "def observe():\n    from native_git import NativeGit"})
     assert_dormant_import_contour({"native_preview.py": "def observe():\n    from native_git import NativeGit"})
     with pytest.raises(AssertionError):

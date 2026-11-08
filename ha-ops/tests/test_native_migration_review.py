@@ -1,5 +1,6 @@
 """Real candidate, complete review and explicit diagnostic decision contracts."""
 import base64
+import errno
 import hashlib
 import os
 import sys
@@ -521,9 +522,10 @@ def test_retirement_quarantine_capture_crash_recovers_without_authority(tmp_path
     finally:os.close(fd)
 
 
+@pytest.mark.parametrize('hash_active',[False,True])
 @pytest.mark.parametrize('control_private',[False,True])
 @pytest.mark.parametrize('payload_state',['canonical','private','absent','duplicate','corrupt','replaced','symlink','hardlink','mode','foreign'])
-def test_completed_probe_validates_all_retirement_payload_locations(tmp_path,control_private,payload_state):
+def test_completed_probe_validates_all_retirement_payload_locations(tmp_path,control_private,payload_state,hash_active):
     from types import SimpleNamespace
     owner=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)))
     fd=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY)
@@ -548,9 +550,11 @@ def test_completed_probe_validates_all_retirement_payload_locations(tmp_path,con
         elif payload_state=='foreign':(tmp_path/qname/'foreign').write_bytes(b'foreign')
         before={str(x.relative_to(tmp_path)):r._stat(x.lstat()) for x in tmp_path.rglob('*')}
         valid=payload_state=='canonical' or control_private and payload_state in ('private','absent')
-        if valid:assert owner._completed(fd,'e'*64,'f'*64)==[(control,receipt)]
+        if hash_active and control_private and payload_state=='corrupt':valid=True
+        kwargs={'active_names':{name}} if hash_active else {}
+        if valid:assert owner._completed(fd,'e'*64,'f'*64,**kwargs)==[(control,receipt)]
         else:
-            with pytest.raises((n.Blocked,OSError)):owner._completed(fd,'e'*64,'f'*64)
+            with pytest.raises((n.Blocked,OSError)):owner._completed(fd,'e'*64,'f'*64,**kwargs)
         after={str(x.relative_to(tmp_path)):r._stat(x.lstat()) for x in tmp_path.rglob('*')}
         assert before==after
     finally:os.close(fd)
@@ -887,6 +891,7 @@ def test_cleanup_guard_precedes_admission_and_preserves_active_context(tmp_path)
     now=[0.];owner._clock=lambda:now[0];timers=[]
     owner._scheduler=lambda delay,call:timers.append(LeaseTimer(delay,call)) or timers[-1]
     a=owner.open_content(row=0,side='before',**ref);afd=owner._views[r._context(CONTEXT)]['fd']
+    a_name=owner._views[r._context(CONTEXT)]['name']
     other=('direct','http://fixture.invalid','other')
     model=owner.diagnose()['model'];grant=owner.review(candidate=model['candidate'],scope=model['scope_digest'],context=other)
     br=dict(candidate=model['candidate'],scope=model['scope_digest'],review_id=grant['review_id'],context=other)
@@ -896,7 +901,7 @@ def test_cleanup_guard_precedes_admission_and_preserves_active_context(tmp_path)
     from contextlib import contextmanager
     @contextmanager
     def guard(recipe):
-        assert not any(path.name=='view-'+a['view_id'] for path in (root/os.fsdecode(r.STORE)).iterdir())
+        assert not (root/os.fsdecode(r.STORE)/a_name).exists()
         with pytest.raises(OSError):os.fstat(afd)
         assert len(list((root/os.fsdecode(r.STORE)).glob('completed-*.json')))==1
         observed.append(True)
@@ -1033,3 +1038,118 @@ def test_real_timer_cancel_error_detaches_and_finishes_lifecycle(tmp_path,bounda
             with pytest.raises(OSError):os.fstat(fd)
     finally:
         cancel();old.join(1);owner.shutdown()
+
+
+@pytest.fixture
+def cleanup_receipt(tmp_path):
+    """Genuine immutable controls and payload; only store/lock plumbing is isolated."""
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    now=[0.];timers=[]
+    disk=SimpleNamespace(migration_review_cleanup_guard=lambda owner:nullcontext())
+    owner=r.Review(SimpleNamespace(p=SimpleNamespace(disk=disk),root=os.fsencode(tmp_path)),
+        clock=lambda:now[0],scheduler=lambda delay,call:timers.append(LeaseTimer(delay,call)) or timers[-1])
+    fd=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY)
+    name='view-'+'a'*32;control='completed-'+'a'*32+'.json';qname='retire-'+'a'*32
+    payload=tmp_path/name;payload.write_bytes(b'full payload bytes'*2000);payload.chmod(0o600)
+    info=r._stat(payload.stat());(tmp_path/qname).mkdir(mode=0o700);qinfo=(tmp_path/qname).stat()
+    value=dict(quarantine=[qname,qinfo.st_dev,qinfo.st_ino],schema=1,status='complete',name=name,
+        candidate='b'*64,scope='c'*64,row=0,side='after',oid='d'*40,size=info[6],
+        sha256=hashlib.sha256(payload.read_bytes()).hexdigest(),stat=info,store=[os.fstat(fd).st_dev,os.fstat(fd).st_ino])
+    receipt=owner._save_receipt(fd,control,value,None)
+    owner._store=lambda **kw:nullcontext(fd)
+    try:yield owner,fd,payload,control,receipt,now,timers
+    finally:owner.shutdown();os.close(fd)
+
+
+def payload_reads(monkeypatch,identity):
+    total=[0];pread=os.pread
+    def read(fd,size,offset):
+        data=pread(fd,size,offset);info=os.fstat(fd)
+        if (info.st_dev,info.st_ino)==identity:total[0]+=len(data)
+        return data
+    monkeypatch.setattr(os,'pread',read)
+    return total
+
+
+@pytest.mark.parametrize('control_private',[False,True])
+def test_cleanup_active_payload_checks_without_hashing(cleanup_receipt,monkeypatch,control_private):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    if control_private:payload.parent.joinpath(control).rename(payload.parent/receipt['quarantine'][0]/'control')
+    info=payload.stat();reads=payload_reads(monkeypatch,(info.st_dev,info.st_ino))
+    owner._views['healthy']=dict(name=payload.name,fd=os.open(payload,os.O_RDONLY),deadline=300,review_id='grant')
+    owner._retire_inactive()
+    assert reads[0]==0 and not owner._cleanup_debt and owner.cleanup_diagnostic is None
+    assert owner._completed(fd,None,None)==[(control,receipt)]
+    assert reads[0]==info.st_size
+
+
+@pytest.mark.parametrize('entrypoint',['review','open'])
+def test_explicit_request_hashes_existing_active_payload_once(tmp_path,monkeypatch,entrypoint):
+    payload=b'multi-page content'*3000
+    def configure(root,repo):
+        write(repo,b'homeassistant/read-count',payload)
+        git(repo,'add','.');git(repo,'commit','-qm','read-count')
+    root,repo,p,owner,value=setup_review(tmp_path,configure=configure);ref=challenge(owner)
+    row=next(i for i,x in enumerate(value['rows']) if x['after'] and n.decode_path(x['after']['path'])==b'homeassistant/read-count')
+    owner.open_content(row=row,side='after',**ref)
+    held=owner._views[r._context(CONTEXT)];info=os.fstat(held['fd'])
+    assert info.st_size>2*r.PAGE
+    other=('direct','http://fixture.invalid','other')
+    other_grant=owner.review(candidate=ref['candidate'],scope=ref['scope'],context=other)
+    reads=payload_reads(monkeypatch,(info.st_dev,info.st_ino))
+    if entrypoint=='review':owner.review(candidate=ref['candidate'],scope=ref['scope'],context=other)
+    else:owner.open_content(row=row,side='after',**{**ref,'context':other,'review_id':other_grant['review_id']})
+    assert reads[0]==info.st_size
+    assert os.fstat(held['fd'])
+
+
+def test_terminal_hash_failure_stops_repeated_reads_but_expires_healthy_view(cleanup_receipt,monkeypatch):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    # Preserve the receipt's own inode and the payload stat: this must reach SHA.
+    bad={**receipt,'sha256':'0'*64};bad['digest']=r._digest({k:v for k,v in bad.items() if k!='digest'})
+    payload.parent.joinpath(control).write_bytes(r._json(bad))
+    info=payload.stat();reads=payload_reads(monkeypatch,(info.st_dev,info.st_ino))
+    held,writer=os.pipe();os.close(writer)
+    owner._views['healthy']=dict(name='view-'+'e'*32,fd=held,deadline=300,review_id='grant')
+    owner._challenges['healthy']={'token':'grant'}
+    owner._sweep(reclaim=True)
+    assert reads[0]>=info.st_size and not owner._cleanup_debt
+    error=owner._cleanup_error;diagnostic=owner.cleanup_diagnostic;initial=reads[0]
+    assert 'corrupt' in diagnostic and payload.exists()
+    for tick in (30,60,90):
+        now[0]=tick;timers[-1].call()
+        assert reads[0]==initial and owner._cleanup_error is error and owner.cleanup_diagnostic==diagnostic
+        assert os.fstat(held) and owner._timer is timers[-1]
+    # Explicit reclaim retries and still refuses strict evidence.
+    owner._sweep(reclaim=True);assert reads[0]==initial+info.st_size
+    now[0]=300;timers[-1].call()
+    assert not owner._views and not owner._challenges and owner._timer is None and not owner._cleanup_debt
+    with pytest.raises(OSError):os.fstat(held)
+    # Repair same owned control; a future explicit request can settle it.
+    payload.parent.joinpath(control).write_bytes(r._json(receipt))
+    owner._sweep(reclaim=True)
+    assert owner.cleanup_diagnostic is None and not owner._cleanup_debt and not payload.exists()
+
+
+@pytest.mark.parametrize('failure,retry',[
+    (d.Blocked('nested-or-competing-guard'),True),(d.Blocked('competing-process-guard'),True),
+    (n.Blocked('nested-or-competing-guard'),False),(d.Blocked('unsafe-transition-admission-lock'),False),
+    (n.Conflict('completed-spool-corrupt'),False),(ValueError('invalid JSON'),False),(RuntimeError('invalid evidence'),False),
+    *[(OSError(number,'injected'),number in (errno.EIO,errno.EINTR,errno.EAGAIN)) for number in
+        (errno.EIO,errno.EINTR,errno.EAGAIN,errno.EACCES,errno.EPERM,errno.EROFS,errno.ELOOP,errno.ENOTDIR,errno.ENOENT)],
+])
+def test_cleanup_retry_classification_and_timer_recovery(cleanup_receipt,failure,retry):
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    from contextlib import contextmanager
+    original=owner.p.disk.migration_review_cleanup_guard
+    @contextmanager
+    def failed(owner):raise failure;yield
+    owner.p.disk.migration_review_cleanup_guard=failed
+    owner._sweep(reclaim=True)
+    assert owner._cleanup_debt is retry and owner._cleanup_error is failure and owner.cleanup_diagnostic==str(failure)
+    assert (owner._timer is not None) is retry and payload.exists()
+    owner.p.disk.migration_review_cleanup_guard=original
+    if retry:timers[-1].call()
+    else:owner._sweep();assert payload.exists();owner._sweep(reclaim=True)
+    assert not owner._cleanup_debt and owner.cleanup_diagnostic is None and owner._timer is None and not payload.exists()
