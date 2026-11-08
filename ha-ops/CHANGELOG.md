@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.5.1
+
+Bound migration content leases and preserve safe explicit deferral
+
+- Expire abandoned migration content views with exact authenticated lifecycle handling and owned cleanup before allocation admission.
+- Keep refusal and dismissal reachable when only obsolete cached content is invalid, while approval and inspection remain strict.
+
 ## 2.5.0
 
 Add private browser access and reliable dormant migration review

@@ -15,6 +15,18 @@ import native_disk as d
 from test_native_migration_git_candidate import ready,build,git,write,synthetic_host_allocation,host_rename_adapter
 from test_native_migration import binding
 
+@pytest.fixture(autouse=True)
+def close_review_instances(monkeypatch):
+    owners=[];original=r.Review.__init__
+    def init(owner,*args,**kwargs):original(owner,*args,**kwargs);owners.append(owner)
+    monkeypatch.setattr(r.Review,'__init__',init)
+    yield owners
+    for owner in owners:
+        for key,view in list(owner._views.items()):
+            if 'fd' not in view:owner._views.pop(key)
+        owner.shutdown()
+
+
 CONTEXT=('ingress','http://fixture.invalid','/api/hassio_ingress/fixture','fixture-user')
 
 
@@ -153,7 +165,7 @@ def test_reopen_retains_spool_diagnostic_without_adoption(tmp_path):
     assert len(list((root/os.fsdecode(r.STORE)).glob('view-*')))==1
     assert len(list((root/os.fsdecode(r.STORE)).glob('completed-*.json')))==1
     reopened.close_content(context=CONTEXT)
-    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
+    owner.shutdown()
 
 
 @pytest.mark.parametrize('limit',['available','inodes'])
@@ -309,7 +321,7 @@ def test_interrupted_owned_retirement_is_explicitly_settled_after_restart(tmp_pa
     ref2=challenge(reopened);new=reopened.open_content(row=0,side='before',**ref2)
     assert reopened.content_page(view_id=new['view_id'],offset=new['size'],context=CONTEXT)['eof']
     reopened.close_content(context=CONTEXT)
-    if owner._views.get(r._context(CONTEXT)):os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
+    if owner._views.get(r._context(CONTEXT)):owner.shutdown()
 
 
 @pytest.mark.parametrize('kind',['corrupt','symlink','hardlink','replaced-spool'])
@@ -324,26 +336,34 @@ def test_completed_receipt_corruption_never_adopted_or_deleted(tmp_path,kind):
     else:
         spool=root/os.fsdecode(r.STORE)/owner._views.get(r._context(CONTEXT))['name'];spool.unlink();spool.write_bytes(b'foreign');spool.chmod(0o600)
     reopened=r.Review(c.Candidate(p))
-    # Review itself must refuse: a later open failure cannot mask a challenge.
-    with pytest.raises((n.Blocked,d.Blocked,OSError,TypeError)):
-        reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
-    assert not reopened._challenges
+    if kind in ('corrupt','replaced-spool'):
+        grant=reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+        assert grant['allowed_actions']==['refuse','dismiss'] and not grant['content_available']
+    else:
+        with pytest.raises((n.Blocked,d.Blocked,OSError,TypeError)):
+            reopened.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+        assert not reopened._challenges
     assert receipt.exists() or receipt.is_symlink()
-    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
+    owner.shutdown()
 
 
 @pytest.mark.parametrize('action',['approve','refuse','dismiss'])
-def test_invalid_completed_evidence_after_review_never_saves_decision(tmp_path,action):
+def test_invalid_completed_evidence_after_review_only_blocks_approval(tmp_path,action):
     root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
     owner.open_content(row=0,side='before',**ref)
     receipt=next((root/os.fsdecode(r.STORE)).glob('completed-*.json'))
     receipt.write_bytes(b'{}')
     before={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file()}
-    with pytest.raises((n.Blocked,OSError,ValueError)):
-        owner.decide(action=action,**ref)
-    assert not owner._challenges and not (receipt.parent/'decision.json').exists()
-    assert before=={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file()}
-    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
+    if action=='approve':
+        with pytest.raises((n.Blocked,OSError,ValueError)):owner.decide(action=action,**ref)
+        assert not (receipt.parent/'decision.json').exists()
+    else:
+        result=owner.decide(action=action,**ref)
+        assert result['decision']['action']==action and result['required'] and not result['decision_authority']
+    assert not owner._challenges
+    after={str(x.relative_to(root)):x.read_bytes() for x in receipt.parent.rglob('*') if x.is_file() and x.name!='decision.json'}
+    assert before==after
+    owner.shutdown()
 
 
 @pytest.mark.parametrize('boundary',['review-receipt-open','review-receipt-write','review-receipt-file-fsync','review-receipt-replace','review-receipt-directory-fsync'])
@@ -426,7 +446,7 @@ def test_interrupted_retirement_pending_is_preserved_while_fresh_review_works(tm
     assert (r._stat(pending.stat()),pending.read_bytes())==before
     reopened.close_content(context=CONTEXT)
     assert (r._stat(pending.stat()),pending.read_bytes())==before
-    os.close(owner._views.get(r._context(CONTEXT))['fd']);owner._views.clear()
+    owner.shutdown()
 
 
 @pytest.mark.parametrize('target_kind',['payload','receipt'])
@@ -436,7 +456,9 @@ def test_retirement_capture_preserves_canonical_replacements(tmp_path,target_kin
     from types import SimpleNamespace
     from contextlib import nullcontext
     import native_migration_transition as transition
-    owner=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)));tmp_path.chmod(0o700)
+    disk=SimpleNamespace(migration_review_cleanup_guard=lambda owner:nullcontext())
+    timer=lambda delay,callback:SimpleNamespace(start=lambda:None,cancel=lambda:None)
+    owner=r.Review(SimpleNamespace(p=SimpleNamespace(disk=disk),root=os.fsencode(tmp_path)),scheduler=timer);tmp_path.chmod(0o700)
     fd=os.open(tmp_path,os.O_RDONLY|os.O_DIRECTORY)
     name='view-'+'a'*32;control='completed-'+'a'*32+'.json';qname='retire-'+'a'*32
     os.mkdir(qname,0o700,dir_fd=fd);qinfo=os.stat(qname,dir_fd=fd)
@@ -455,15 +477,21 @@ def test_retirement_capture_preserves_canonical_replacements(tmp_path,target_kin
     def retire(path,*args,**kwargs):
         if path==private and boundary=='private-unlink' and not swapped:foreign()
         return unlink(path,*args,**kwargs)
-    owner._views[r._context(CONTEXT)]=dict(fd=file,name=name,stat=info,context=r._context(CONTEXT))
+    owner._views[r._context(CONTEXT)]=dict(fd=file,name=name,stat=info,context=r._context(CONTEXT),
+        view_id='e'*64,review_id='f'*64,deadline=owner._clock()+r.VIEW_LEASE)
     try:
         with mock.patch.object(transition,'_rename_noreplace',capture),mock.patch.object(os,'unlink',retire),pytest.raises(n.Blocked):
             if entrypoint=='close':
-                with mock.patch.object(owner,'_admission',lambda *args:nullcontext()),mock.patch.object(owner,'_store',lambda **kw:nullcontext(fd)):
-                    owner.close_content(context=CONTEXT)
+                # Only lock/store plumbing is stubbed; _completed and the full
+                # receipt/capture/unlink ownership proof remain production code.
+                with mock.patch.object(owner,'_store',lambda **kw:nullcontext(fd)):
+                    owner.close_content(context=CONTEXT,view_id='e'*64)
             else:owner._retire_receipt(fd,control,receipt)
         assert swapped and (tmp_path/target).read_bytes()==b'foreign-user-evidence'
-    finally:os.close(file);os.close(fd)
+    finally:
+        owner.shutdown()  # close_content may already have consumed the view FD.
+        with pytest.raises(OSError):os.fstat(file)
+        os.close(fd)
 
 
 @pytest.mark.parametrize('capture_number',[1,2])
@@ -716,9 +744,9 @@ def test_wrong_review_identity_has_no_shared_revalidation_or_other_context_effec
     candidate='a'*64;scope='b'*64;descriptor=[1,2]
     source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:{'candidate':candidate},
         saved_descriptor=lambda:descriptor,revalidate=mock.Mock(side_effect=AssertionError('invalid request revalidated')))
-    owner=r.Review(source);owner._model=lambda *args:{'scope_digest':scope}
+    owner=r.Review(source);owner._retire_inactive=lambda:None;owner._model=lambda *args:{'scope_digest':scope}
     a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user')
-    view=dict(view_id='d'*64,context=a,candidate_stat=descriptor,fd=123,name='view-fixture',size=1,sha256='e'*64)
+    view=dict(view_id='d'*64,context=a,candidate_stat=descriptor,fd=123,deadline=owner._clock()+r.VIEW_LEASE,name='view-fixture',size=1,sha256='e'*64)
     owner._views[a]=view;owner._challenges[a]={'token':'retained'}
     @contextmanager
     def store():yield 456
@@ -732,6 +760,7 @@ def test_wrong_review_identity_has_no_shared_revalidation_or_other_context_effec
     with mock.patch.object(os,'pread',return_value=b'x'):
         assert owner.content_page(view_id=view['view_id'],offset=0,context=CONTEXT)['data']=='eA=='
     assert owner._challenges[a]=={'token':'retained'}
+    owner._views.clear()
 
 
 @pytest.mark.parametrize('method',['review','decide'])
@@ -745,12 +774,12 @@ def test_later_request_failure_preserves_trusted_other_context_continuity(tmp_pa
     def revalidate():descriptor[:]=[1,3];return 'current'
     source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:dict(saved),
         saved_descriptor=lambda:list(descriptor),revalidate=revalidate)
-    owner=r.Review(source);owner._model=lambda *args:model
+    owner=r.Review(source);owner._retire_inactive=lambda:None;owner._model=lambda *args:model
     a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user');b=r._context(other)
     payload=tmp_path/'held';payload.write_bytes(b'x');fd=os.open(payload,os.O_RDONLY)
-    owner._views[a]=dict(view_id='d'*64,context=a,candidate_stat=[1,2],candidate=candidate,model=r._digest(model),fd=fd,name='view-held',size=1,sha256='e'*64)
+    owner._views[a]=dict(view_id='d'*64,context=a,candidate_stat=[1,2],candidate=candidate,model=r._digest(model),fd=fd,deadline=owner._clock()+r.VIEW_LEASE,name='view-held',size=1,sha256='e'*64)
     owner._challenges[a]={'token':'retained'}
-    owner._challenges[b]=dict(token='c'*64,candidate=candidate,scope=scope,model=r._digest(model),previous=None)
+    owner._challenges[b]=dict(token='c'*64,candidate=candidate,scope=scope,model=r._digest(model),previous=None,allowed_actions=['approve','refuse','dismiss'],content_available=True)
     @contextmanager
     def admission(*args):
         if failure=='bytes':raise d.Blocked('insufficient-review-bytes')
@@ -774,7 +803,7 @@ def test_later_request_failure_preserves_trusted_other_context_continuity(tmp_pa
         owner._store=readable_store
         assert owner.content_page(view_id='d'*64,offset=0,context=CONTEXT)['data']=='eA=='
         assert owner._challenges[a]=={'token':'retained'}
-    finally:os.close(fd)
+    finally:owner.shutdown()
 
 
 @pytest.mark.parametrize('failure',['candidate','model','pending','foreign-after'])
@@ -794,3 +823,213 @@ def test_trusted_continuity_refuses_semantic_or_pointer_change(failure):
     owner._model=model;owner._views['a']={'candidate_stat':[1,2]};owner._challenges['a']={'token':'old'}
     with pytest.raises(n.Conflict):owner._revalidate_content_bindings()
     assert owner._views['a']['candidate_stat'] is None and not owner._challenges
+
+
+class LeaseTimer:
+    def __init__(self,delay,call):self.delay=delay;self.call=call;self.cancelled=False;self.started=False
+    def start(self):self.started=True
+    def cancel(self):self.cancelled=True
+
+
+def test_lease_exact_identity_idle_scheduler_and_gc(tmp_path,close_review_instances):
+    import gc,weakref
+    from types import SimpleNamespace
+    now=[0];timers=[]
+    def scheduler(delay,call):timer=LeaseTimer(delay,call);timers.append(timer);return timer
+    source=SimpleNamespace(p=SimpleNamespace(),root=b'fixture',saved_descriptor=lambda:[1])
+    owner=r.Review(source,clock=lambda:now[0],scheduler=scheduler)
+    owner._retire_inactive=lambda:None;owner._verify_view=lambda *a:None
+    from contextlib import contextmanager
+    @contextmanager
+    def store():yield 1
+    owner._store=store
+    def view(ctx,token):
+        path=tmp_path/token;path.write_bytes(b'abc');fd=os.open(path,os.O_RDONLY)
+        owner._views[r._context(ctx)]=dict(fd=fd,view_id=token,deadline=300,context=r._context(ctx),candidate_stat=[1],review_id='grant')
+        return fd
+    other=('direct','http://fixture','other')
+    a=view(CONTEXT,'a'*64);b=view(other,'b'*64);owner._schedule();assert len(timers)==1 and timers[0].delay==30
+    now[0]=299;owner.renew_content(context=other,view_id='b'*64)
+    with pytest.raises(n.Conflict):owner.renew_content(context=CONTEXT,view_id='c'*64)
+    now[0]=300;timers[0].call()
+    with pytest.raises(OSError):os.fstat(a)
+    assert os.fstat(b) and len(timers)==2
+    with pytest.raises(n.Conflict):owner.renew_content(context=CONTEXT,view_id='a'*64)
+    with pytest.raises(n.Conflict):owner.close_content(context=other,view_id='a'*64)
+    assert os.fstat(b)
+    owner.shutdown();assert timers[-1].cancelled
+    timers[-1].call();assert len(timers)==2
+    with pytest.raises(OSError):os.fstat(b)
+    garbage=r.Review(source,clock=lambda:now[0],scheduler=scheduler)
+    close_review_instances.remove(garbage)
+    payload=tmp_path/'gc-held';payload.write_bytes(b'x');fd=os.open(payload,os.O_RDONLY)
+    garbage._views['gc']={'fd':fd};garbage._schedule();reference=weakref.ref(garbage)
+    del garbage;gc.collect()
+    assert reference() is None
+    with pytest.raises(OSError):os.fstat(fd)
+    timers[-1].call()
+
+
+def test_lease_timer_failure_closes_handles(tmp_path):
+    from types import SimpleNamespace
+    class Broken(LeaseTimer):
+        def start(self):raise OSError('timer failed')
+    owner=r.Review(SimpleNamespace(p=None,root=b'fixture'),scheduler=Broken)
+    path=tmp_path/'held';path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY)
+    owner._views['ctx']={'fd':fd}
+    with pytest.raises(OSError,match='timer failed'):owner._schedule()
+    assert not owner._views
+    with pytest.raises(OSError):os.fstat(fd)
+
+
+def test_cleanup_guard_precedes_admission_and_preserves_active_context(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    now=[0.];owner._clock=lambda:now[0];timers=[]
+    owner._scheduler=lambda delay,call:timers.append(LeaseTimer(delay,call)) or timers[-1]
+    a=owner.open_content(row=0,side='before',**ref);afd=owner._views[r._context(CONTEXT)]['fd']
+    other=('direct','http://fixture.invalid','other')
+    model=owner.diagnose()['model'];grant=owner.review(candidate=model['candidate'],scope=model['scope_digest'],context=other)
+    br=dict(candidate=model['candidate'],scope=model['scope_digest'],review_id=grant['review_id'],context=other)
+    b=owner.open_content(row=0,side='before',**br)
+    now[0]=299;owner.renew_content(view_id=b['view_id'],context=other);now[0]=300
+    original=p.disk.migration_review_guard;observed=[]
+    from contextlib import contextmanager
+    @contextmanager
+    def guard(recipe):
+        assert not any(path.name=='view-'+a['view_id'] for path in (root/os.fsdecode(r.STORE)).iterdir())
+        with pytest.raises(OSError):os.fstat(afd)
+        assert len(list((root/os.fsdecode(r.STORE)).glob('completed-*.json')))==1
+        observed.append(True)
+        with original(recipe):yield
+    with mock.patch.object(p.disk,'migration_review_guard',guard):
+        # Review uses ordinary admission only after actual stale retirement.
+        owner.review(candidate=model['candidate'],scope=model['scope_digest'],context=CONTEXT)
+    assert observed
+    assert owner.content_page(view_id=b['view_id'],offset=0,context=other)['view_id']==b['view_id']
+
+
+def test_corrupt_cache_fresh_safe_review_never_upgrades(tmp_path):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    view=owner.open_content(row=0,side='before',**ref)
+    held=owner._views[r._context(CONTEXT)]
+    payload=root/os.fsdecode(r.STORE)/held['name'];payload.write_bytes(b'corrupt-cache');payload.chmod(0o600)
+    owner.forget(context=CONTEXT)
+    previous_bytes=payload.read_bytes()
+    for action in ('refuse','dismiss'):
+        grant=owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+        assert grant['allowed_actions']==['refuse','dismiss'] and grant['content_available'] is False
+        safe={**ref,'review_id':grant['review_id']}
+        with pytest.raises(n.Conflict):owner.open_content(row=0,side='before',**safe)
+        # A failed content attempt consumes authority, so obtain a fresh exact review.
+        safe['review_id']=owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)['review_id']
+        with pytest.raises(n.Conflict):owner.decide(action='approve',**safe)
+        safe['review_id']=owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)['review_id']
+        result=owner.decide(action=action,**safe)
+        assert result['required'] and not result['decision_authority'] and result['decision']['action']==action
+        assert payload.read_bytes()==previous_bytes
+    # A syntactically valid but unproved receipt also permits only safe actions.
+    receipt=next(payload.parent.glob('completed-*.json'));receipt.write_bytes(b'{}')
+    grant=owner.review(candidate=ref['candidate'],scope=ref['scope'],context=CONTEXT)
+    assert grant['allowed_actions']==['refuse','dismiss'] and not grant['content_available']
+    assert owner.decide(action='dismiss',**{**ref,'review_id':grant['review_id']})['required']
+    assert receipt.read_bytes()==b'{}' and payload.read_bytes()==previous_bytes
+
+
+def test_expiry_close_failure_does_not_retain_other_expired_descriptors(tmp_path):
+    from types import SimpleNamespace
+    now=[300.];timers=[]
+    owner=r.Review(SimpleNamespace(p=None,root=b'fixture'),clock=lambda:now[0],scheduler=lambda delay,call:timers.append(LeaseTimer(delay,call)) or timers[-1])
+    descriptors=[]
+    for index in range(3):
+        path=tmp_path/str(index);path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY);descriptors.append(fd)
+        owner._views[str(index)]={'fd':fd,'deadline':300 if index<2 else 600,'review_id':'old'}
+    os.close(descriptors[0])
+    def failed_cleanup():owner._cleanup_debt=True;owner.cleanup_diagnostic='retained foreign evidence'
+    owner._retire_inactive=failed_cleanup
+    owner._sweep()
+    assert list(owner._views)==['2'] and owner.cleanup_diagnostic=='retained foreign evidence'
+    with pytest.raises(OSError):os.fstat(descriptors[1])
+    assert os.fstat(descriptors[2])
+    with mock.patch.object(os,'pread',side_effect=AssertionError('expired bytes read')):
+        with pytest.raises(n.Conflict):owner.content_page(view_id='a'*64,offset=0,context=CONTEXT)
+
+
+@pytest.mark.parametrize('phase',['weakref','constructor','daemon','start','cancel'])
+def test_all_scheduler_setup_failures_release_owned_handles(tmp_path,phase):
+    from types import SimpleNamespace
+    class FailedTimer:
+        def __init__(self,delay,callback):self.callback=callback
+        def __setattr__(self,name,value):
+            if name=='daemon' and phase=='daemon':raise MemoryError('daemon setup')
+            object.__setattr__(self,name,value)
+        def start(self):raise MemoryError('start')
+        def cancel(self):
+            if phase=='cancel':raise OSError('cancel failed')
+    source=SimpleNamespace(p=None,root=os.fsencode(tmp_path))
+    owner=r.Review(source,**({} if phase=='constructor' else {'scheduler':FailedTimer}))
+    fds=[]
+    for index in range(2):
+        path=tmp_path/str(index);path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY);fds.append(fd)
+        owner._views[str(index)]={'fd':fd};owner._challenges[str(index)]={'token':'old'}
+    patch=(mock.patch.object(r.weakref,'ref',side_effect=MemoryError('weakref setup')) if phase=='weakref' else
+           mock.patch.object(r.threading,'Lock',side_effect=MemoryError('constructor')) if phase=='constructor' else __import__('contextlib').nullcontext())
+    with patch,pytest.raises(MemoryError):owner._schedule()
+    assert owner._timer is None and not owner._views and not owner._challenges
+    for fd in fds:
+        with pytest.raises(OSError):os.fstat(fd)
+    owner._schedule();assert owner._timer is None
+
+
+def test_review_cleanup_guard_close_error_releases_local_lock(tmp_path):
+    import errno
+    from types import SimpleNamespace
+    (tmp_path/'data').mkdir();lock=tmp_path/'data/.native-disk-admission.lock';lock.write_bytes(b'');lock.chmod(0o600)
+    disk=d.NativeDisk.__new__(d.NativeDisk);disk.root=os.fsencode(tmp_path);disk._active_operation=None
+    owner=r.Review(SimpleNamespace(p=SimpleNamespace(disk=disk),root=disk.root))
+    original_open,original_close=os.open,os.close;held=[None];failed=[False]
+    def opened(name,*args,**kwargs):
+        fd=original_open(name,*args,**kwargs)
+        if name==d.ADMISSION_LOCK.split(b'/')[-1]:held[0]=fd
+        return fd
+    def closed(fd):
+        original_close(fd)
+        if fd==held[0] and not failed[0]:failed[0]=True;raise OSError(errno.EIO,'close reported failure')
+    with mock.patch.object(os,'open',opened),mock.patch.object(os,'close',closed),pytest.raises(OSError) as error:
+        with disk.migration_review_cleanup_guard(owner):pass
+    assert error.value.errno==errno.EIO and disk._active_operation is None
+    assert not d._THREAD_LOCKS[disk.root+b'/'+d.ADMISSION_LOCK].locked()
+    with disk.migration_review_cleanup_guard(owner):pass
+
+
+@pytest.mark.parametrize('boundary',['shutdown','idle-sweep'])
+def test_real_timer_cancel_error_detaches_and_finishes_lifecycle(tmp_path,boundary):
+    from types import SimpleNamespace
+    now=[0.];owner=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)),clock=lambda:now[0]);owner._retire_inactive=lambda:None
+    fds=[]
+    for index in range(2):
+        path=tmp_path/str(index);path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY);fds.append(fd)
+        owner._views[str(index)]={'fd':fd,'deadline':300,'review_id':'old'};owner._challenges[str(index)]={'token':'old'}
+    owner._schedule();old=owner._timer;cancel=old.cancel;callback=old.function
+    def cancel_error():cancel();raise OSError('cancel after release')
+    old.cancel=cancel_error
+    try:
+        if boundary=='shutdown':
+            with pytest.raises(OSError):owner.shutdown()
+            owner.shutdown()
+        else:
+            now[0]=300
+            with pytest.raises(OSError):owner.sweep_content()
+        old.join(1)
+        assert owner._timer is None and not owner._views and not owner._challenges
+        for fd in fds:
+            with pytest.raises(OSError):os.fstat(fd)
+        callback();assert owner._timer is None
+        if boundary=='idle-sweep':
+            path=tmp_path/'new';path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY)
+            owner._views['new']={'fd':fd,'deadline':600,'review_id':'new'};owner._schedule();new=owner._timer
+            assert new is not old and new.is_alive()
+            callback();assert owner._timer is new and os.fstat(fd)
+            owner.shutdown();new.join(1)
+            with pytest.raises(OSError):os.fstat(fd)
+    finally:
+        cancel();old.join(1);owner.shutdown()

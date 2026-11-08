@@ -133,8 +133,8 @@ def test_actual_worker_lifecycle_closes_all_contexts_without_changing_persisted_
         receipt=tmp_path/('completed-'+label+'.json');receipt.write_bytes(('receipt-'+label).encode())
         persisted[payload]=payload.read_bytes();persisted[receipt]=receipt.read_bytes()
     real_review=domain.Review
-    def review(source):
-        owner=real_review(source);owners.append(owner)
+    def review(source,**kwargs):
+        owner=real_review(source,**kwargs);owners.append(owner)
         assert not owner._views and not owner._challenges
         if len(owners)==1:
             for label in ('a','b'):
@@ -169,3 +169,68 @@ def test_actual_worker_lifecycle_closes_all_contexts_without_changing_persisted_
         for fd in handles:
             try:os.close(fd)
             except OSError:pass
+
+
+@pytest.mark.parametrize('method,params',[
+ ('close_content',{'context':['principal'],'view_id':'a'*64}),
+ ('renew_content',{'context':['principal'],'view_id':'b'*64}),
+ ('fixture-corrupt',{}),('fixture-clean-cache',{}),('fixture-expire',{}),('fixture-near-expiry',{}),('fixture-tick',{}),
+])
+def test_lifecycle_fixture_rpc_exact_owned_methods(method,params):
+    parsed,actual=bridge.request(envelope(method=method,params=params),NONCE)
+    assert parsed==method
+    for extra in ({'approved':True},{'path':'/foreign'}):
+        with pytest.raises(ValueError):bridge.request(envelope(method=method,params={**params,**extra}),NONCE)
+    if 'view_id' in params:
+        without=params.copy();without.pop('view_id')
+        with pytest.raises(ValueError):bridge.request(envelope(method=method,params=without),NONCE)
+
+
+@pytest.mark.parametrize('scenario',['corrupt-and-clean','corrupt-refused','clean-refused'])
+def test_actual_worker_fault_controls_preserve_response_identity_and_owned_boundary(tmp_path,scenario):
+    import os
+    from contextlib import contextmanager,nullcontext
+    from types import SimpleNamespace
+    import native_migration_review as domain
+    import native_migration_git_candidate as candidate
+    import test_native_migration_git_candidate as fixture
+    private=tmp_path/'private';private.mkdir();owned=private/'candidate';owned.mkdir();(owned/'data').mkdir()
+    outside=tmp_path/'foreign';outside.mkdir();(outside/'data').mkdir()
+    selected=outside if scenario=='clean-refused' else owned
+    cache=selected/os.fsdecode(domain.STORE);cache.mkdir();payload=cache/'view-owned';payload.write_bytes(b'original')
+    if scenario!='corrupt-refused':(cache/('completed-'+'a'*32+'.json')).write_bytes(b'owned-receipt')
+    sentinel=tmp_path/'sentinel';sentinel.write_bytes(b'preserve')
+    owners=[];responses=[]
+    class Owner:
+        def __init__(self,source,**kwargs):self.root=source.root;self.closed=False;owners.append(self)
+        @contextmanager
+        def _store(self):
+            fd=os.open(cache,os.O_RDONLY|os.O_DIRECTORY)
+            try:yield fd
+            finally:os.close(fd)
+        def _receipt(self,fd,name):return {'name':'view-owned'}
+        def shutdown(self):self.closed=True
+    methods=['fixture-corrupt','fixture-clean-cache'] if scenario=='corrupt-and-clean' else ['fixture-corrupt' if scenario=='corrupt-refused' else 'fixture-clean-cache']
+    output=tmp_path/'ipc';output.mkdir()
+    for index,method in enumerate(methods):
+        key=f'{index+1:032x}'
+        bridge.write(output/('review-request-'+NONCE+'-'+key+'.json'),dict(schema=1,nonce=NONCE,id=key,method=method,params={}))
+    original_write=bridge.write
+    def written(path,value):
+        original_write(path,value)
+        if path.name.startswith('review-response-'):
+            responses.append(value)
+            if len(responses)==1 and scenario=='corrupt-and-clean':assert payload.read_bytes()==b'Xriginal'
+            if len(responses)==len(methods):original_write(output/('review-stop-'+NONCE),{})
+    with mock.patch.object(bridge.sys,'platform','linux'),mock.patch.object(bridge.signal,'signal'), \
+         mock.patch.object(bridge.tempfile,'TemporaryDirectory',return_value=nullcontext(str(private))), \
+         mock.patch.object(fixture,'ready',return_value=(selected,selected,SimpleNamespace(),{},{},'parent')), \
+         mock.patch.object(fixture,'build'),mock.patch.object(candidate,'Candidate',side_effect=lambda p:SimpleNamespace(root=os.fsencode(selected))), \
+         mock.patch.object(domain,'Review',Owner),mock.patch.object(bridge,'write',side_effect=written):
+        bridge.worker(output,NONCE,False)
+    assert len(responses)==len(methods)
+    for index,response in enumerate(responses):
+        assert response==dict(schema=1,nonce=NONCE,id=f'{index+1:032x}',ok=scenario=='corrupt-and-clean',result=None)
+    assert all(owner.closed for owner in owners) and sentinel.read_bytes()==b'preserve'
+    if scenario=='corrupt-and-clean':assert not cache.exists() and len(owners)==2
+    else:assert payload.read_bytes()==b'original' and cache.exists()

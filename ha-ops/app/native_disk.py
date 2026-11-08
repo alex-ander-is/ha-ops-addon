@@ -2445,6 +2445,36 @@ class NativeDisk:
             yield
 
     @contextmanager
+    def migration_review_cleanup_guard(self, owner):
+        """Exclude writers without allocating or forecasting reclaimable bytes."""
+        from native_migration_review import Review
+        if type(owner) is not Review or owner.root != self.root:
+            raise Blocked('issued-review-owner-required')
+        if self._active_operation is not None:raise Blocked('nested-or-competing-guard')
+        lockpath=self.root+b'/'+ADMISSION_LOCK
+        with _THREAD_LOCKS_MUTEX:
+            local=_THREAD_LOCKS.setdefault(lockpath,threading.Lock())
+        if not local.acquire(blocking=False):raise Blocked('nested-or-competing-guard')
+        fd=None
+        try:
+            with _directory(os.path.dirname(lockpath)) as parent:
+                fd=os.open(os.path.basename(lockpath),os.O_RDWR|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+                info=os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or info.st_uid!=os.geteuid()
+                        or stat.S_IMODE(info.st_mode)!=0o600):raise Blocked('unsafe-transition-admission-lock')
+                try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                except BlockingIOError:raise Blocked('competing-process-guard') from None
+                if _identity(info)!=_identity(os.stat(os.path.basename(lockpath),dir_fd=parent,follow_symlinks=False)):
+                    raise Blocked('transition-admission-lock-replaced')
+                self._active_operation='review-cleanup'
+                try:yield
+                finally:self._active_operation=None
+        finally:
+            try:
+                if fd is not None:os.close(fd)
+            finally:local.release()
+
+    @contextmanager
     def migration_git_candidate_guard(self, recipe):
         from native_migration_git_candidate import Recipe
         if type(recipe) is not Recipe:

@@ -16,6 +16,8 @@ import secrets
 import stat
 import threading
 import uuid
+import time
+import weakref
 
 from native_inventory import Blocked
 from native_migration import Conflict, PersistenceUncertain, MAX_CONTROL, _json, _digest, _unique, _stat, decode_path, encode_path
@@ -23,6 +25,8 @@ from native_metadata import decode, ancestors
 
 STORE = b'data/native-migration-review'
 PAGE = 16384
+VIEW_LEASE = 300
+LEASE_TICK = 30
 MAX_SIZE = (1 << 63)-1
 
 
@@ -57,14 +61,103 @@ def _attrs(obj):
     return None if obj is None else {k: obj[k] for k in ('uid', 'gid', 'mode', 'kind')}
 
 
+def _close_handles(views):
+    for view in list(views.values()):
+        try:os.close(view['fd'])
+        except OSError:pass
+    views.clear()
+
+
 class Review:
-    def __init__(self, candidate, *, trace=lambda event: None):
+    def __init__(self, candidate, *, trace=lambda event: None, clock=time.monotonic, scheduler=None):
         self.c, self.p, self.root = candidate, candidate.p, candidate.root
         self.trace = trace
         self._recipes, self._challenges = {}, {}
         self._views = {}
+        self._finalizer=weakref.finalize(self,_close_handles,self._views)
         self._mutex = threading.RLock()
         self._uncertain = False
+        self._clock=clock
+        self._scheduler=scheduler or threading.Timer
+        self._timer=None
+        self._closed=False
+        self._cleanup_debt=False
+        self.cleanup_diagnostic=None
+
+    def _schedule(self):
+        if self._closed or self._timer is not None or not (self._views or self._cleanup_debt):return
+        timer=None
+        try:
+            owner=weakref.ref(self)
+            def tick():
+                current=owner()
+                if current is None:return
+                with current._mutex:
+                    if current._timer is not timer or current._closed:return
+                    current._timer=None
+                    current._sweep()
+            timer=self._scheduler(LEASE_TICK,tick)
+            timer.daemon=True
+            self._timer=timer
+            timer.start()
+        except BaseException:
+            self._timer=None
+            try:
+                if timer is not None:timer.cancel()
+            except BaseException:pass
+            finally:
+                _close_handles(self._views);self._challenges.clear()
+            raise
+
+    def _retire_inactive(self):
+        try:
+            with self.p.disk.migration_review_cleanup_guard(self):
+                with self._store() as fd:
+                    if fd is not None:
+                        active={v['name'] for v in self._views.values()}
+                        for name,value in self._completed(fd,None,None):
+                            if value['name'] not in active:self._retire_receipt(fd,name,value)
+            self._cleanup_debt=False;self.cleanup_diagnostic=None;self._cleanup_error=None
+        except (ValueError,OSError,RuntimeError) as error:
+            self._cleanup_debt=True;self.cleanup_diagnostic=str(error);self._cleanup_error=error
+
+    def _sweep(self, *, reclaim=False):
+        if self._closed:raise Conflict('review-closed')
+        now=self._clock();expired=False
+        for ctx,view in list(self._views.items()):
+            if now>=view['deadline']:
+                self._views.pop(ctx);_close_handles({ctx:view});expired=True
+                grant=self._challenges.get(ctx)
+                if grant is not None and grant['token']==view['review_id']:self._challenges.pop(ctx,None)
+        if expired or reclaim or self._cleanup_debt:self._retire_inactive()
+        if not self._views and not self._cleanup_debt and self._timer is not None:
+            timer,self._timer=self._timer,None
+            timer.cancel()
+        self._schedule()
+
+    def sweep_content(self):
+        with self._mutex:self._sweep()
+
+    def shutdown(self):
+        with self._mutex:
+            self._closed=True
+            timer,self._timer=self._timer,None
+            try:
+                if timer is not None:timer.cancel()
+            finally:
+                self._challenges.clear()
+                _close_handles(self._views)
+
+    def renew_content(self, *, view_id, context):
+        ctx=_context(context)
+        with self._mutex:
+            self._sweep()
+            view=self._views.get(ctx)
+            if (view is None or type(view_id) is not str or not secrets.compare_digest(view_id,view['view_id'])
+                    or self.c.saved_descriptor()!=view['candidate_stat']):raise Conflict('invalid-content-view-reference')
+            with self._store() as fd:self._verify_view(view,fd)
+            view['deadline']=self._clock()+VIEW_LEASE
+            return dict(view_id=view_id)
 
     def _recipe(self, *sizes):
         value = Recipe(self, uuid.uuid4().hex, tuple(sizes), 8)
@@ -275,7 +368,7 @@ class Review:
         if names-owned:raise Blocked('retained-review-content-requires-diagnosis')
         return receipts
 
-    def _available(self, fd, candidate, scope, grant=None):
+    def _available(self, fd, candidate, scope, grant=None, *, completed=True):
         """Shared pure admission proof, called with mutex/disk/store locks held."""
         if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
         value,accepted=self.c.current_proof(self.c.read())
@@ -283,8 +376,8 @@ class Review:
         if (candidate!=value['candidate'] or scope!=model['scope_digest']
                 or grant is not None and grant['model']!=_digest(model)):
             raise Conflict('review-model-changed')
-        completed=[] if fd is None else self._completed(fd,candidate,scope)
-        return value,model,completed
+        receipts=[] if fd is None or not completed else self._completed(fd,candidate,scope)
+        return value,model,receipts
 
     def _capture(self, source, name, child, target, expected):
         # Only the canonical namespace is untrusted. The exclusive private
@@ -400,10 +493,10 @@ class Review:
                     decision = self._decision(fd)
                     retained = [] if fd is None else sorted(n for n in os.listdir(fd) if n != 'decision.json')
                 return dict(required=True,status='unavailable' if self._uncertain else 'absent' if value is None else value['validation'],
-                    model=model,decision=decision,decision_authority=False,retained=retained,review_id=None)
+                    model=model,decision=decision,decision_authority=False,retained=retained,cleanup_diagnostic=self.cleanup_diagnostic,review_id=None)
             except (ValueError,OSError,RuntimeError):
                 self._challenges.clear()
-                return dict(required=True,status='unavailable',model=None,decision=None,decision_authority=False,review_id=None)
+                return dict(required=True,status='unavailable',model=None,decision=None,decision_authority=False,cleanup_diagnostic=self.cleanup_diagnostic,review_id=None)
 
     def _revalidate_content_bindings(self):
         """Finish trusted existing-view continuity before any requester-specific refusal.
@@ -443,6 +536,7 @@ class Review:
     def review(self, *, candidate, scope, context):
         ctx = _context(context)
         with self._mutex:
+            self._sweep(reclaim=True)
             self._challenges.pop(ctx,None)
             try:
                 if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
@@ -455,12 +549,18 @@ class Review:
                 self._revalidate_content_bindings()
                 with self._admission(8192,8192):
                     with self._store() as fd:
-                        value,model,_=self._available(fd,candidate,scope)
+                        value,model,_=self._available(fd,candidate,scope,completed=False)
+                        available=True;diagnostic=None
+                        try:
+                            if fd is not None:self._completed(fd,candidate,scope)
+                        except (ValueError,OSError,RuntimeError) as error:
+                            available=False;diagnostic='Cached content unavailable. You can refuse or dismiss migration; approval and content inspection are unavailable.'
+                        actions=['approve','refuse','dismiss'] if available else ['refuse','dismiss']
                         previous=self._decision(fd)
                         token = secrets.token_hex(32)
                         self._challenges[ctx] = dict(token=token,model=_digest(model),scope=model['scope_digest'],candidate=candidate,
-                            previous=None if previous is None else previous['digest'])
-                        return dict(model=model,review_id=token,status='current')
+                            previous=None if previous is None else previous['digest'],allowed_actions=actions,content_available=available)
+                        return dict(model=model,review_id=token,status='current',allowed_actions=actions,content_available=available,cache_diagnostic=diagnostic)
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
@@ -503,14 +603,16 @@ class Review:
     def decide(self, *, review_id, candidate, scope, action, context):
         if action not in ('approve','refuse','dismiss'): raise Blocked('invalid-review-action')
         with self._mutex:
+            self._sweep()
             ctx, grant = self._grant(context,review_id,candidate,scope)
             try:
+                if action not in grant.get('allowed_actions',()):raise Conflict('review-action-unavailable')
                 if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                 self._revalidate_content_bindings()
                 with self._admission(8192,8192):
                     if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:
-                        value,model,_=self._available(fd,candidate,scope,grant)
+                        value,model,_=self._available(fd,candidate,scope,grant,completed=action=='approve')
                         decision=dict(schema=1,action=action,candidate=candidate,scope=scope,model=grant['model'],
                             preparation=value['preparation'],transition=value['transition'],runtime=_digest(value['runtime']),
                             review=_digest(review_id),previous=grant['previous'])
@@ -526,8 +628,10 @@ class Review:
 
     def open_content(self, *, review_id, candidate, scope, row, side, context):
         with self._mutex:
+            self._sweep(reclaim=True)
             ctx,grant=self._grant(context,review_id,candidate,scope)
             try:
+                if not grant.get('content_available',False):raise Conflict('review-content-unavailable')
                 if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                 info=self.c.content_info(candidate=candidate,row=row,side=side)
                 with self._admission(info['size'],8192,8192):
@@ -579,7 +683,7 @@ class Review:
                             receipt=_stat(os.fstat(file))
                             self.trace('review-content-promote')
                             view=dict(view_id=secrets.token_hex(32),name=name,fd=file,stat=receipt,size=count,sha256=digest.hexdigest(),
-                                candidate=candidate,context=ctx,row=row,side=side,oid=info['oid'],model=grant['model'],candidate_stat=self.c.saved_descriptor())
+                                candidate=candidate,context=ctx,row=row,side=side,oid=info['oid'],model=grant['model'],candidate_stat=self.c.saved_descriptor(),deadline=self._clock()+VIEW_LEASE,review_id=grant['token'])
                             self._verify_view(view,fd)
                             self._effect('review-content-promotion-fsync',lambda:os.fsync(fd))
                             receipt_name='completed-'+name[5:]+'.json'
@@ -596,6 +700,7 @@ class Review:
                             if previous:os.close(previous['fd'])
                             self._views[ctx]=view
                             file=None
+                            self._schedule()
                         finally:
                             try:
                                 if file is not None and not publication_started:
@@ -625,6 +730,7 @@ class Review:
     def content_page(self, *, view_id, offset, context):
         ctx=_context(context)
         with self._mutex:
+            self._sweep()
             try:
                 view=self._views.get(ctx)
                 if (view is None or type(view_id) is not str or not secrets.compare_digest(view_id,view['view_id'])
@@ -637,34 +743,40 @@ class Review:
                     text,text_start,text_end=self._text_window(view,offset,len(raw))
                     self._verify_view(view,fd)
                     if len(raw)!=min(PAGE,view['size']-offset):raise Conflict('incomplete-content-page')
+                view['deadline']=self._clock()+VIEW_LEASE
                 return dict(view_id=view_id,offset=offset,total=view['size'],data=base64.b64encode(raw).decode(),eof=offset+len(raw)==view['size'],sha256=view['sha256'],text=text,text_start=text_start,text_end=text_end)
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
 
-    def close_content(self, *, context):
+    def close_content(self, *, context, view_id=None):
         ctx=_context(context)
         with self._mutex:
+            self._sweep()
+            view=self._views.get(ctx)
+            if view is None:return
+            if view_id is not None and (type(view_id) is not str or not secrets.compare_digest(view_id,view['view_id'])):
+                raise Conflict('invalid-content-view-reference')
             try:
-                view=self._views.get(ctx)
-                if view is None:return
-                if view['context']!=ctx:raise Conflict('content-context-refused')
-                with self._admission(8192,8192):
-                    with self._store() as fd:
-                        self._verify_view(view,fd)
-                        name='completed-'+view['name'][5:]+'.json'
-                        receipt=self._receipt(fd,name)
-                        if receipt is None or receipt['stat']!=view['stat']:raise Conflict('completed-receipt-required')
-                        self._retire_receipt(fd,name,receipt)
-                    os.close(view['fd']);self._views.pop(ctx,None)
+                with self._store() as fd:self._verify_view(view,fd)
             except BaseException:
                 self._challenges.pop(ctx,None)
                 raise
+            finally:
+                self._views.pop(ctx,None);_close_handles({ctx:view})
+                self._cleanup_debt=True;self._schedule()
+            self._retire_inactive()
+            if self.cleanup_diagnostic:
+                self._challenges.pop(ctx,None)
+                raise self._cleanup_error
+
 
     def forget(self, *, context):
-        """Page/lifecycle reset removes authority, never removes disk evidence."""
+        """Explicit state reset removes authority, leaving evidence for owned cleanup."""
         with self._mutex:
             ctx=_context(context)
             self._challenges.pop(ctx,None)
             view=self._views.pop(ctx,None)
-            if view is not None:os.close(view['fd'])
+            if view is not None:
+                _close_handles({ctx:view});self._cleanup_debt=True
+                self._schedule()

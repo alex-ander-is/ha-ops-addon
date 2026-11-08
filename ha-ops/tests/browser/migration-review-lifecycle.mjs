@@ -7,12 +7,12 @@ import assert from 'node:assert/strict';
 const file=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'../../frontend/src/migration-review.js');
 const source=fs.readFileSync(file,'utf8').replace(/^import .*;$/gm,'').replace('export class','class')+'\nglobalThis.Review=HaOpsMigrationReview;';
 const listeners=new Map();
-const sandbox={LitElement:class{connectedCallback(){}disconnectedCallback(){}},html:()=>'',css:()=>'',nothing:null,customElements:{define(){}},window:{addEventListener(name,fn){listeners.set(name,fn);},removeEventListener(name,fn){if(listeners.get(name)===fn)listeners.delete(name);}},TextDecoder,Uint8Array};
+const sandbox={LitElement:class{connectedCallback(){}disconnectedCallback(){}},html:()=>'',css:()=>'',nothing:null,customElements:{define(){}},window:{addEventListener(name,fn){listeners.set(name,fn);},removeEventListener(name,fn){if(listeners.get(name)===fn)listeners.delete(name);}},TextDecoder,Uint8Array,fetch:async()=>({}),setInterval:()=>1,clearInterval:()=>{}};
 vm.runInNewContext(source,sandbox);
 const model={candidate:'candidate',scope_digest:'scope',complete:true};
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
-const fresh=()=>{const c=new sandbox.Review();c.model=model;c.state={csrf:'fixture',status:'current'};c.ready=true;c.reviewId='current';return c;};
+const fresh=()=>{const c=new sandbox.Review();c.model=model;c.state={csrf:'fixture',status:'current'};c.ready=true;c.reviewId='current';c.allowedActions=['approve','refuse','dismiss'];c.contentAvailable=true;return c;};
 let cases=0;
 for(const [name,start,waiting,result] of [
  ['review',c=>c.review(),'review',{model,status:'current',review_id:'late'}],
@@ -77,5 +77,17 @@ for(const reset of ['invalidate','failed-load','failed-action']){
  c.api=async()=>{calls++;return {model,status:'current',review_id:'unexpected'};};
  assert.equal(c.canReview(),false,reset+' retained readiness');await c.review();assert.equal(calls,0);
  c.api=async()=>({status:'current',model});await c.load();assert.equal(c.canReview(),true);assert.equal(c.reviewId,null);cases++;
+}
+for(const action of ['approve','refuse','dismiss']){
+ const c=fresh(),calls=[],released=[],cancelled=[];let queued;
+ sandbox.setInterval=callback=>{queued=callback;return 42;};sandbox.clearInterval=id=>cancelled.push(id);
+ c.content={view_id:'terminal-'+action};c.page={data:'old'};
+ c.release=content=>{if(content)released.push(content.view_id);};
+ c.api=async(route,value)=>{calls.push([route,value]);return {decision:{action}};};
+ c.startHeartbeat();await c.decide(action);await queued();
+ assert.equal(c.heartbeat,null);assert.equal(c.content,null);assert.equal(c.page,null);
+ assert.equal(c.hiddenPane,action==='dismiss');assert.deepEqual(cancelled,[42]);
+ assert.deepEqual(released,['terminal-'+action]);assert.equal(calls.length,1);assert.equal(calls[0][0],'decision');
+ cases++;
 }
 console.log(JSON.stringify({status:'passed',cases,source:'actual migration-review.js deferred lifecycle methods'}));

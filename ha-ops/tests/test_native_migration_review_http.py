@@ -55,6 +55,8 @@ class Spy:
     def forget(self,**kw):self.calls.append(('forget',kw))
     def diagnose(self):self.calls.append(('diagnose',{}));return dict(required=True,model=None)
     def review(self,**kw):self.calls.append(('review',kw));return dict(review_id='e'*64)
+    def close_content(self,**kw):self.calls.append(('close_content',kw))
+    def renew_content(self,**kw):self.calls.append(('renew_content',kw))
     def decide(self,**kw):self.calls.append(('decide',kw));return dict(decision_authority=False)
 
 
@@ -238,3 +240,20 @@ def test_real_authenticated_content_failure_and_context_isolation(listener,tmp_p
         assert domain_req(server,'POST',prefix+'decision',dict(**ar,action='approve'),a)[0]==200
     for key in list(owner._views):
         view=owner._views.pop(key);__import__('os').close(view['fd'])
+
+
+@pytest.mark.parametrize('route',['content-close','content-renew'])
+@pytest.mark.parametrize('case',['valid','missing','extra','bad-id','origin','csrf','duplicate','method'])
+def test_exact_view_lifecycle_routes_keep_protected_strict_protocol(listener,route,case):
+    server,spy,prefix,headers=listener;headers=csrf(listener);value={'view_id':'a'*64};raw=None;method='POST'
+    if case=='missing':value={}
+    if case=='extra':value['context']='forged'
+    if case=='bad-id':value['view_id']='x'
+    if case=='origin':headers['Origin']='http://attacker.invalid'
+    if case=='csrf':headers['X-CSRF-Token']='wrong'
+    if case=='duplicate':raw='{"view_id":"'+('a'*64)+'","view_id":"'+('b'*64)+'"}'
+    if case=='method':method='GET';value=None
+    code,_=req(server,method,prefix+route,value,headers,raw)
+    assert code==(200 if case=='valid' else 405 if case=='method' else 403)
+    assert len(spy.calls)==(1 if case=='valid' else 0)
+    if case=='valid':assert spy.calls[0][1]['view_id']=='a'*64 and 'context' in spy.calls[0][1]

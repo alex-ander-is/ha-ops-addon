@@ -2,19 +2,43 @@
 
 Migration review remains diagnostic and dormant: no saved decision, browser
 session, reload, backend restart, or App update authorizes publication or activation.
-A fresh explicit review is required after lifecycle reset. Browser reset clears
-content selection and in-flight responses; server forget closes only that
-context's active descriptor and drops its challenge. Completed receipts remain
-inert evidence and can be retired by a later explicit open with ownership proof.
+A fresh explicit review is required after lifecycle reset. Reset clears selection,
+challenge capabilities, dismissal, heartbeat and in-flight responses. Best-effort
+unload release captures the exact old view ID and authenticated endpoint; a late
+close can never close its replacement. State reset closes only its context and
+schedules owned cleanup. Restart and App update restore no ephemeral grants.
 
-Each authenticated context has at most one active content view. Opening,
-replacing, paging, closing, or forgetting another context preserves other active
-views and challenges. Retained views from all contexts and inert pending
-fragments remain charged by disk inventory. The admission recipe retains eight
-new entries: pending payload (later renamed), private retirement directory,
-receipt pending (later renamed), and conservative control/retirement overhead.
-Other contexts and previous completed payloads are baseline overlap, never
-subtracted before a replacement completes.
+Each authenticated context has at most one active content view. Views have a
+300-second monotonic lease, renewed by exact authenticated page reads and a
+30-second browser heartbeat. At the expiry boundary a view cannot revive; a
+fresh explicit review/open is required. Hidden, frozen or offline pages may lose
+the lease. One weak daemon timer per Review sweeps every 30 seconds while views
+or cleanup debt remain. Shutdown cancels it, invalidates grants and closes all
+owned descriptors; a finalizer also closes descriptors when an owner is collected.
+A successful terminal decision stops its view heartbeat, clears the viewer and
+best-effort releases its exact content, including dismissal with an open viewer.
+Lost release converges through expiry without affecting a healthy other context.
+Scheduler setup/start failure closes owned descriptors and invalidates grants.
+Normal idle retention is at most lease plus one tick, subject to process scheduling
+and I/O. Descriptor release precedes disk cleanup and survives cleanup failures.
+
+Before review/open allocation admission, a cleanup-only existing admission lock
+retires provable inactive completed receipts through their existing private
+quarantine. Active other contexts remain protected and charged. Ordinary admission
+then takes a fresh snapshot; no presumed reclamation is subtracted. Corrupt,
+foreign, substituted and unowned evidence stays charged with an explicit cleanup
+diagnostic. Permanent I/O or unprovable ownership can retain bytes indefinitely.
+Empty private quarantines and inert pending fragments keep their existing policy.
+The allocation recipe retains eight new entries and conservative control overhead.
+
+An explicit current candidate/scope/model review with only obsolete cached-content
+proof failure issues a restricted in-memory challenge: refuse/dismiss only, no
+content access or approval. The UI states the cache problem and visibly disables
+approval and inspection. Safe decisions still require current exact identity,
+authenticated context, token, ordinary write admission and previous-decision CAS.
+They never trust, repair, adopt or delete corrupt cache evidence. Approval and
+content-open retain strict completed proof. A restricted challenge cannot upgrade;
+fresh strict review is required. Saved decisions remain inert diagnostics.
 
 Full content uses bounded Git stdout streaming with an opt-in inactivity timeout.
 Only accepted stdout resets that deadline; metadata operations retain their total

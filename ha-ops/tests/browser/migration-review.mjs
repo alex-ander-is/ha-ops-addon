@@ -1,5 +1,6 @@
 /* Real rebuilt bundle + real Candidate/Review + actual protected adapters. */
 import {spawn} from 'node:child_process';
+import {intercept} from './migration-review-interception.mjs';
 import {mkdirSync,writeFileSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath,pathToFileURL} from 'node:url';
@@ -12,7 +13,8 @@ mkdirSync(artifacts,{recursive:true});
 const {chromium}=await import(pathToFileURL('/Users/purportex/Applications/Playwright/src/runtime.mjs'));
 const child=spawn('/usr/bin/python3',[path.join(here,'migration_review_fixture.py'),...(process.argv.includes('--portable')?['--portable']:[])],{cwd:repo,env:{...process.env,PYTHONDONTWRITEBYTECODE:'1'},stdio:['ignore','pipe','pipe']});
 let stderr='';child.stderr.on('data',b=>stderr+=b);
-const owned=[],ids=[],errors=[],requests=[];
+const owned=[],ids=[],errors=[],requests=[],interceptions=[];
+async function trackedIntercept(page,pattern,handle){const item=await intercept(page,pattern,handle);interceptions.push(item);return item;}
 function assert(value,message){if(!value)throw Error(message);}
 const bounded=(promise,label,ms=10000)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(Error(label+' timed out: '+stderr)),ms))]);
 try{
@@ -48,8 +50,8 @@ try{
  const reviewButton=component.getByRole('button',{name:'Review current candidate',exact:true});
  for(const status of ['stale','unavailable']){
   const stateRoute='**/api/v1/migration/state';
-  await page.route(stateRoute,async route=>{const response=await route.fetch();const body=await response.json();await route.fulfill({response,json:{...body,status}});});
-  await component.evaluate(e=>e.load());await settled();
+  const stateIntercept=await trackedIntercept(page,stateRoute,async(route,response)=>{const body=await response.json();await route.fulfill({response,json:{...body,status}});});
+  await stateIntercept.guard(async()=>{await component.evaluate(e=>e.load());await settled();});
   assert(await reviewButton.isDisabled(),status+' model left Review enabled');
   const before=requests.filter(x=>x.path.endsWith('/review')).length;
   await reviewButton.evaluate(e=>e.click());await component.evaluate(e=>e.review());
@@ -58,7 +60,7 @@ try{
   assert(style.background==='rgb(238, 238, 238)'&&style.border==='rgb(213, 217, 221)'&&style.color==='rgb(139, 146, 153)',status+' disabled Review style');
   if(status==='unavailable')await page.setViewportSize({width:390,height:844});
   await page.screenshot({path:path.join(artifacts,'review-'+status+'.png'),fullPage:true});
-  await page.unroute(stateRoute);await component.evaluate(e=>e.load());await settled();
+  await stateIntercept.close();await component.evaluate(e=>e.load());await settled();
   assert(await reviewButton.isEnabled()&&await approve.isDisabled(),'fresh state did not restore only explicit Review');
  }
  await page.setViewportSize({width:1280,height:900});
@@ -87,12 +89,30 @@ try{
  await component.getByRole('button',{name:'Close content',exact:true}).click();await settled();
 
  await page.screenshot({path:path.join(artifacts,'desktop.png'),fullPage:true});
+ await directReady('remembered initial enrollment');
+ assert(await directComponent.getByRole('button',{name:'Approve exact candidate and scope',exact:true}).isDisabled(),'direct remembered auth authorized consent');
+ // An inspected view is abandoned by Dismiss even when its exact release is lost.
+ // Keep an independently authenticated direct viewer alive through that expiry.
+ await directComponent.evaluate(async e=>{await e.review();const row=e.model.rows.find(r=>r.after_name?.includes('homeassistant/binary'));await e.open(row.index,'after');});
+ const independentView=await directComponent.evaluate(e=>e.content.view_id);
+ await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);
+ await binary.getByRole('button',{name:'Inspect after bytes',exact:true}).click();await settled();
+ const dismissedView=await component.evaluate(e=>e.content.view_id);
+ const releasePattern='**/api/v1/migration/content-close';
+ await page.route(releasePattern,route=>route.abort());
  await component.getByRole('button',{name:'Dismiss for this page',exact:true}).click();await settled();
+ assert(await component.evaluate(e=>e.hiddenPane&&e.heartbeat===null&&e.content===null&&e.page===null),'dismiss retained hidden content renewal');
+ await page.request.post(fixture.baseUrl+'fixture/near-expiry',{data:{}});
+ await directComponent.evaluate(async(e,id)=>e.api('content-renew',{view_id:id}),independentView);
+ await page.request.post(fixture.baseUrl+'fixture/tick',{data:{}});
+ assert(await component.evaluate(async(e,id)=>{try{await e.api('content-page',{view_id:id,offset:0});return false;}catch{return true;}},dismissedView),'lost dismiss release did not expire');
+ assert(await directComponent.evaluate(async(e,id)=>(await e.api('content-page',{view_id:id,offset:0})).view_id===id,independentView),'dismiss expiry affected independent viewer');
+ await directComponent.evaluate(e=>e.closeContent());
+ await page.unroute(releasePattern);
+
  const decisionsBeforeReload=requests.filter(x=>x.path.endsWith('/decision')).length;
  await page.reload();await settled();assert(await component.getByRole('button',{name:'Review current candidate',exact:true}).isVisible(),'dismissed requirement not restored');assert(await approve.isDisabled(),'reload restored grant');assert(requests.filter(x=>x.path.endsWith('/decision')).length===decisionsBeforeReload,'reload replayed consent');
  await component.getByRole('button',{name:'Review current candidate',exact:true}).click();await settled();await component.getByRole('button',{name:'Refuse migration',exact:true}).click();await settled();await page.reload();await settled();assert(await approve.isDisabled(),'refusal reload restored grant');
- await directReady('remembered initial enrollment');
- assert(await directComponent.getByRole('button',{name:'Approve exact candidate and scope',exact:true}).isDisabled(),'direct remembered auth authorized consent');
  await direct.reload();await directReady('remembered reload');
  // A real authenticated direct review and explicit approval may legitimately
  // exceed the listener's input-intake deadline; auth alone must still not consent.
@@ -121,13 +141,13 @@ try{
  async function delayedLifecycle(routeName,trigger){
   let held,ready;const reached=new Promise(resolve=>ready=resolve);
   const pattern='**/api/v1/migration/'+routeName;
-  await page.route(pattern,async route=>{const response=await route.fetch();held={route,response};ready();});
-  await trigger();await bounded(reached,'held '+routeName,120000);
+  const heldIntercept=await trackedIntercept(page,pattern,async(route,response)=>{held={route,response};ready();});
+  await heldIntercept.guard(async()=>{await trigger();await bounded(reached,'held '+routeName,120000);});
   await page.evaluate(()=>window.dispatchEvent(new Event('offline')));
   const delivered=page.waitForResponse(response=>response.url().endsWith('/migration/'+routeName));
   await held.route.fulfill({response:held.response});await (await delivered).finished();
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  await page.unroute(pattern);
+  await heldIntercept.close();
   assert(await component.evaluate(e=>e.reviewId===null&&e.content===null&&e.page===null),'late '+routeName+' revived review or bytes');
   assert(await approve.isDisabled(),'late '+routeName+' enabled approval');
   assert(await reviewButton.isDisabled(),'late '+routeName+' restored Review readiness');
@@ -139,8 +159,8 @@ try{
  await component.getByRole('button',{name:'Review current candidate',exact:true}).click();await settled();
  await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);
  await delayedLifecycle('content-page',()=>binary.getByRole('button',{name:'Inspect after bytes',exact:true}).click());
- // Explicitly retire only this fixture's held exact view; no page load performs cleanup.
- await component.evaluate(e=>e.api('content-close',{}));
+ // The lifecycle release carries the captured exact identity; lost release still expires.
+ assert(requests.some(x=>x.path.endsWith('/content-close')),'lifecycle did not request exact release');
  await page.evaluate(()=>window.dispatchEvent(new Event('online')));await settled();
  assert(await component.evaluate(e=>!e.hiddenPane&&e.reviewId===null),'reconnect restored dismissal or authority');
  // Completed private bytes survive backend restart as diagnostics, never page authority.
@@ -161,10 +181,39 @@ try{
  await component.getByRole('button',{name:'Last byte page',exact:true}).click();await settled();
  assert(await component.evaluate((e,old)=>e.page.eof&&e.content.sha256===old.sha256&&e.content.size===old.size,oldView),'fresh explicit restart review lost exact binary EOF');
  await component.getByRole('button',{name:'Close content',exact:true}).click();await settled();
- await component.getByRole('button',{name:'Review current candidate',exact:true}).click();await settled();await page.request.post(fixture.baseUrl+'fixture/stale',{data:{}});await approve.click();await settled();assert(await approve.isDisabled(),'stale candidate approval available');
+ // Expiry and obsolete cache failure use the actual qualified domain fixture.
+ await component.getByRole('button',{name:'Review current candidate',exact:true}).click();await settled();
+ await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);
+ await binary.getByRole('button',{name:'Inspect after bytes',exact:true}).click();await settled();
+ const expiring=await component.evaluate(e=>e.content.view_id);
+ await page.request.post(fixture.baseUrl+'fixture/expire',{data:{}});
+ assert(await component.evaluate(async(e,id)=>{try{await e.api('content-renew',{view_id:id});return false;}catch{return true;}},expiring),'expired lease revived');
+ await component.evaluate(e=>e.load());await settled();
+ await reviewButton.click();await settled();
+ await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);
+ await binary.getByRole('button',{name:'Inspect after bytes',exact:true}).click();await settled();
+ await page.request.post(fixture.baseUrl+'fixture/corrupt',{data:{}});
+ await component.evaluate(e=>e.load());await settled();
+ for(const action of ['refuse','dismiss']){
+  await reviewButton.click();await settled();
+  await binary.locator('vaadin-details').last().evaluate(e=>e.opened=true);
+  assert(await approve.isDisabled(),'corrupt cache enabled approval');
+  assert(await binary.getByRole('button',{name:'Inspect after bytes',exact:true}).isDisabled(),'corrupt cache enabled bytes');
+  assert(await component.evaluate(e=>e.allowedActions.join(',')==='refuse,dismiss'&&e.contentAvailable===false&&e.message.includes('Cached content unavailable')),'restricted cache capability missing');
+  const safe=component.getByRole('button',{name:action==='refuse'?'Refuse migration':'Dismiss for this page',exact:true});
+  assert(await safe.isEnabled(),'safe decision unreachable');
+  await page.screenshot({path:path.join(artifacts,'cache-'+action+'.png'),fullPage:true});
+  await safe.click();await settled();await page.reload();await settled();
+  assert(await component.evaluate(e=>e.reviewId===null&&!e.hiddenPane&&e.allowedActions.length===0&&!e.contentAvailable),'reload revived restricted grant');
+ }
+ // The cache-fault proof is complete; explicitly reset only this private fixture cache.
+ const cleanCache=await page.request.post(fixture.baseUrl+'fixture/clean-cache',{data:{}});assert(cleanCache.ok(),'owned fixture cache reset failed');
+ await component.evaluate(e=>e.load());await settled();
+ await component.getByRole('button',{name:'Review current candidate',exact:true}).click();await settled();assert(await approve.isEnabled(),'clean fixture did not restore full explicit review');await page.request.post(fixture.baseUrl+'fixture/stale',{data:{}});await approve.click();await settled();assert(await approve.isDisabled(),'stale candidate approval available');
  assert(errors.length===0,errors.join('\n'));
  writeFileSync(path.join(artifacts,'result.json'),JSON.stringify({status:'passed',source:fixture.source,directReviewApproveMilliseconds,disabledStyle,requests,ownedTabIds:ids,workerPlatform:fixture.worker_platform,mandatoryLinuxQualified:fixture.source==='linux-real-domain'&&fixture.worker_platform==='linux'},null,2));console.log(JSON.stringify({status:'passed',source:fixture.source,artifacts,ownedTabIds:ids}));
 }finally{
+ for(const interception of interceptions)await interception.close().catch(()=>{});
  for(const page of owned)if(!page.isClosed())await bounded(page.close(),'owned tab close');
  if(child.exitCode===null){const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGTERM');await bounded(exited,'owned fixture close',20000);}
 }

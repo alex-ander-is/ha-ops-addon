@@ -36,6 +36,7 @@ def timed_direct(tmp_path,monkeypatch):
         def open_content(self,**kw):return self.call('open_content',dict(view_id='f'*64))
         def content_page(self,**kw):return self.call('content_page',dict(data='',eof=True,total=0))
         def close_content(self,**kw):return self.call('close_content',None)
+        def renew_content(self,**kw):return self.call('renew_content',dict(view_id=kw['view_id']))
     authority=d.Authority(tmp_path)
     base=d.create_handler(authority,migration_review=Domain())
     class Handler(base):
@@ -66,7 +67,8 @@ def session(rig):
  ('decision',dict(candidate='a'*64,scope='b'*64,review_id='e'*64,action='approve'),'decide'),
  ('content-open',dict(candidate='a'*64,scope='b'*64,review_id='e'*64,row=0,side='after'),'open_content'),
  ('content-page',dict(view_id='f'*64,offset=0),'content_page'),
- ('content-close',{},'close_content'),
+ ('content-close',dict(view_id='f'*64),'close_content'),
+ ('content-renew',dict(view_id='f'*64),'renew_content'),
 ])
 def test_validated_domain_survives_queued_intake_expiry(timed_direct,route,body,call):
     rig=timed_direct;headers=session(rig)

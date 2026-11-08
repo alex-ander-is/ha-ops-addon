@@ -11,7 +11,7 @@ from urllib.parse import unquote, urlsplit
 from direct_auth import Refused, origin
 
 
-ROUTES = ('state','review','decision','content-open','content-page','content-close')
+ROUTES = ('state','review','decision','content-open','content-page','content-close','content-renew')
 
 
 def reserved(path):
@@ -105,7 +105,7 @@ class Adapter:
                 raise Refused('Review origin or CSRF refused')
             value=body(handler)
             fields={'review':{'candidate','scope'},'decision':{'review_id','candidate','scope','action'},
-                'content-open':{'review_id','candidate','scope','row','side'},'content-page':{'view_id','offset'},'content-close':set()}[route]
+                'content-open':{'review_id','candidate','scope','row','side'},'content-page':{'view_id','offset'},'content-close':{'view_id'},'content-renew':{'view_id'}}[route]
             if set(value)!=fields:raise Refused('Invalid review fields')
             if any(type(v) is not str for k,v in value.items() if k not in ('row','offset')):raise Refused('Invalid review fields')
             for key in ('candidate','scope','review_id','view_id'):
@@ -115,7 +115,7 @@ class Adapter:
             if 'action' in value and value['action'] not in ('approve','refuse','dismiss'):raise Refused('Invalid review decision')
             if 'side' in value and value['side'] not in ('before','after'):raise Refused('Invalid review side')
             if validated_input is not None:validated_input()
-            method={'review':'review','decision':'decide','content-open':'open_content','content-page':'content_page','content-close':'close_content'}[route]
+            method={'review':'review','decision':'decide','content-open':'open_content','content-page':'content_page','content-close':'close_content','content-renew':'renew_content'}[route]
             result=getattr(self.review,method)(context=context,**value)
             return 200,dict(ok=True,**(result or {}))
         except (ValueError,OSError,RuntimeError,TypeError,RecursionError,subprocess.TimeoutExpired):

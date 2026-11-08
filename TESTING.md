@@ -729,6 +729,26 @@ network remote, installation, version bump, tag or publication participates.
 
 ## Dormant migration review (6.24)
 
+Lease regressions use injected monotonic clocks and a deterministic scheduler:
+`test_lease_exact_identity_idle_scheduler_and_gc`,
+`test_lease_timer_failure_closes_handles`, and
+`test_cleanup_guard_precedes_admission_and_preserves_active_context`.
+`test_corrupt_cache_fresh_safe_review_never_upgrades` covers fresh restricted
+refusal/dismissal for corrupt payloads and receipt JSON without changing that
+evidence. The HTTP exact-view lifecycle matrix covers ingress and direct auth,
+origin/CSRF, strict shape, duplicate JSON, identity and methods. Browser fixtures
+expose only strict owned `fixture-corrupt` and injected-clock `fixture-expire`
+controls, not arbitrary paths. The served rebuilt browser flow checks exact
+release, expiry, cache warnings, disabled approval/inspection, reachable safe
+choices and cleared capabilities after reload. Worker restart/shutdown calls
+`Review.shutdown()` to cancel timers and close every context descriptor.
+`test_all_scheduler_setup_failures_release_owned_handles` injects weak-reference,
+constructor, daemon, start and cancellation failures with real descriptors.
+`test_review_cleanup_guard_close_error_releases_local_lock` proves retry after
+close reports EIO. Actual frontend method and served browser flows also cover
+Inspect then Dismiss, a dropped exact release and independent-context survival.
+
+
 Focused portable checks are `test_native_migration_review.py` and
 `test_native_migration_review_http.py`. Actual protected ingress/direct handler
 factories and real Authority authenticate HTTP fixtures; unauthorized requests

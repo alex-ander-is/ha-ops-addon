@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -24,8 +25,8 @@ METHODS={
  'diagnose':set(),'forget':{'context'},'review':{'candidate','scope','context'},
  'decide':{'review_id','candidate','scope','action','context'},
  'open_content':{'review_id','candidate','scope','row','side','context'},
- 'content_page':{'view_id','offset','context'},'close_content':{'context'},
- 'fixture-stale':set(),'fixture-restart':set(),
+ 'content_page':{'view_id','offset','context'},'close_content':{'context','view_id'},'renew_content':{'context','view_id'},
+ 'fixture-stale':set(),'fixture-restart':set(),'fixture-corrupt':set(),'fixture-clean-cache':set(),'fixture-expire':set(),'fixture-near-expiry':set(),'fixture-tick':set(),
 }
 
 
@@ -89,14 +90,19 @@ def wait_response(process,target,nonce,key,*,clock=time.monotonic,sleep=time.sle
 
 def close_worker_views(owner):
     """Release every test-owned context handle without removing durable evidence."""
-    views=list(owner._views.values())
-    owner._views.clear();owner._challenges.clear()
-    failure=None
-    for view in views:
-        try:os.close(view['fd'])
-        except OSError as exc:
-            if failure is None:failure=exc
-    if failure is not None:raise failure
+    owner.shutdown()
+
+
+def clean_fixture_cache(owner,root,temporary):
+    """Explicit fault-test reset, confined to this worker's private temp root."""
+    import native_migration_review as review
+    owned=Path(root).resolve(strict=True);workspace=Path(temporary).resolve(strict=True)
+    if owned==workspace or workspace not in owned.parents:raise ValueError('private worker root required')
+    cache=owned/os.fsdecode(review.STORE)
+    if cache.parent.resolve(strict=True)!=owned/'data' or cache.is_symlink():raise ValueError('private review cache required')
+    if cache.exists() and not cache.is_dir():raise ValueError('private review directory required')
+    close_worker_views(owner)
+    if cache.exists():shutil.rmtree(cache)
 
 
 def worker(output,nonce,portable=False):
@@ -116,7 +122,8 @@ def worker(output,nonce,portable=False):
             put(repo,b'homeassistant/literal-<img src=x onerror=alert(1)>',b'{"__proto__":{"polluted":true},"i18n":"literal"}')
             git(repo,'add','.');git(repo,'commit','-qm','complete review fixture')
         root,repo,p,prepared,state,parent=ready(Path(temporary)/'candidate',configure=configure)
-        build(p,prepared,state,parent);owner=r.Review(c.Candidate(p))
+        now=[time.monotonic()]
+        build(p,prepared,state,parent);owner=r.Review(c.Candidate(p),clock=lambda:now[0])
         write(output/('review-ready-'+nonce+'.json'),dict(schema=1,nonce=nonce,platform=sys.platform,
             mode='portable' if portable else 'linux',source='portable-worker-real-domain' if portable else 'linux-real-domain'))
         stopped=threading.Event()
@@ -127,17 +134,33 @@ def worker(output,nonce,portable=False):
                 for incoming in sorted(output.glob('review-request-'+nonce+'-*.json')):
                     target=incoming.with_name(incoming.name.replace('review-request-','review-response-',1))
                     if target.exists():continue
-                    value=read(incoming)
+                    envelope=read(incoming)
+                    request_id=envelope.get('id') if type(envelope) is dict else None
                     try:
-                        method,params=request(value,nonce)
+                        method,params=request(envelope,nonce)
                         if method=='fixture-stale':p.app='fixture-app-updated';result=None
+                        elif method=='fixture-corrupt':
+                            with owner._store() as fd:
+                                names=[n for n in os.listdir(fd) if n.startswith('completed-')]
+                                if not names:raise ValueError('owned completed fixture required')
+                                receipt=owner._receipt(fd,names[0])
+                                file=os.open(receipt['name'],os.O_WRONLY|os.O_NOFOLLOW,dir_fd=fd)
+                                try:os.pwrite(file,b'X',0);os.fsync(file)
+                                finally:os.close(file)
+                            result=None
+                        elif method in ('fixture-expire','fixture-near-expiry','fixture-tick'):
+                            now[0]+={'fixture-expire':r.VIEW_LEASE,'fixture-near-expiry':r.VIEW_LEASE-1,'fixture-tick':1}[method]
+                            owner.sweep_content();result=dict(active=len(owner._views))
+                        elif method=='fixture-clean-cache':
+                            clean_fixture_cache(owner,root,temporary)
+                            owner=r.Review(c.Candidate(p),clock=lambda:now[0]);result=None
                         elif method=='fixture-restart':
                             close_worker_views(owner)
-                            owner=r.Review(c.Candidate(p));result=None
+                            owner=r.Review(c.Candidate(p),clock=lambda:now[0]);result=None
                         else:result=getattr(owner,method)(**params)
-                        response=dict(schema=1,nonce=nonce,id=value['id'],ok=True,result=result)
+                        response=dict(schema=1,nonce=nonce,id=request_id,ok=True,result=result)
                     except (ValueError,OSError,RuntimeError,TypeError):
-                        response=dict(schema=1,nonce=nonce,id=value.get('id'),ok=False,result=None)
+                        response=dict(schema=1,nonce=nonce,id=request_id,ok=False,result=None)
                     write(target,response)
                 stopped.wait(.02)
         finally:
@@ -219,6 +242,8 @@ def main(portable):
                 self.headers['X-Forwarded-Host']=self.headers['Host'];self.headers['X-Forwarded-Proto']='http';self.headers['X-Ingress-Path']='/api/hassio_ingress/fixture';self.headers['X-Remote-User-Id']='fixture'
                 super().do_GET()
             def do_POST(self):
+                if self.path in ('/fixture/corrupt','/fixture/expire','/fixture/near-expiry','/fixture/tick','/fixture/clean-cache'):
+                    result=rpc('fixture-'+self.path.rsplit('/',1)[1],{});self.send_json(dict(ok=True,result=result));return
                 if self.path=='/fixture/stale':
                     rpc('fixture-stale',{});self.send_json(dict(ok=True));return
                 if self.path=='/fixture/restart':
