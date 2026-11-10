@@ -746,7 +746,8 @@ def test_wrong_review_identity_has_no_shared_revalidation_or_other_context_effec
     from types import SimpleNamespace
     from contextlib import contextmanager
     candidate='a'*64;scope='b'*64;descriptor=[1,2]
-    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:{'candidate':candidate},
+    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{'digest':'prepared'}),root=b'fixture',
+        read=lambda:{'candidate':candidate,'stale':False,'validation':'current','preparation':'prepared'},
         saved_descriptor=lambda:descriptor,revalidate=mock.Mock(side_effect=AssertionError('invalid request revalidated')))
     owner=r.Review(source);owner._retire_inactive=lambda:None;owner._model=lambda *args:{'scope_digest':scope}
     a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user')
@@ -774,9 +775,9 @@ def test_later_request_failure_preserves_trusted_other_context_continuity(tmp_pa
     from types import SimpleNamespace
     from contextlib import contextmanager
     candidate='a'*64;scope='b'*64;descriptor=[1,2];model={'scope_digest':scope}
-    saved=dict(candidate=candidate,validation='current',stale=False)
+    saved=dict(candidate=candidate,validation='current',stale=False,preparation='prepared')
     def revalidate():descriptor[:]=[1,3];return 'current'
-    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{}),root=b'fixture',read=lambda:dict(saved),
+    source=SimpleNamespace(p=SimpleNamespace(read=lambda:{'digest':'prepared'}),root=b'fixture',read=lambda:dict(saved),
         saved_descriptor=lambda:list(descriptor),revalidate=revalidate)
     owner=r.Review(source);owner._retire_inactive=lambda:None;owner._model=lambda *args:model
     a=r._context(CONTEXT);other=('ingress','http://fixture.invalid','/other','other-user');b=r._context(other)
@@ -1008,8 +1009,12 @@ def test_review_cleanup_guard_close_error_releases_local_lock(tmp_path):
 
 @pytest.mark.parametrize('boundary',['shutdown','idle-sweep'])
 def test_real_timer_cancel_error_detaches_and_finishes_lifecycle(tmp_path,boundary):
+    from contextlib import nullcontext
     from types import SimpleNamespace
-    now=[0.];owner=r.Review(SimpleNamespace(p=None,root=os.fsencode(tmp_path)),clock=lambda:now[0]);owner._retire_inactive=lambda:None
+    disk=SimpleNamespace(migration_review_cleanup_guard=lambda owner:nullcontext())
+    now=[0.];owner=r.Review(SimpleNamespace(p=SimpleNamespace(disk=disk),root=os.fsencode(tmp_path)),clock=lambda:now[0])
+    # Real successful empty-store retirement clears the finite expiry debt.
+    owner._store=lambda **kw:nullcontext(None)
     fds=[]
     for index in range(2):
         path=tmp_path/str(index);path.write_bytes(b'x');fd=os.open(path,os.O_RDONLY);fds.append(fd)
@@ -1026,6 +1031,7 @@ def test_real_timer_cancel_error_detaches_and_finishes_lifecycle(tmp_path,bounda
             with pytest.raises(OSError):owner.sweep_content()
         old.join(1)
         assert owner._timer is None and not owner._views and not owner._challenges
+        assert not owner._cleanup_debt
         for fd in fds:
             with pytest.raises(OSError):os.fstat(fd)
         callback();assert owner._timer is None
@@ -1406,3 +1412,304 @@ def test_cleanup_reentrant_failure_cannot_underflow_and_rearm(cleanup_receipt):
     owner._retire_inactive()
     for _ in range(20):owner._retire_inactive();owner.sweep_content()
     assert calls[0]==2 and owner._cleanup_remaining==0 and not owner._cleanup_debt and owner._timer is None
+
+
+@pytest.fixture
+def identity_cleanup(cleanup_receipt,monkeypatch):
+    """Cheap bounded metadata over the genuine owned, multi-page cleanup spool."""
+    from types import SimpleNamespace
+    from contextlib import contextmanager
+    owner,fd,payload,control,receipt,now,timers=cleanup_receipt
+    saved=dict(candidate=receipt['candidate'],preparation='prepared',stale=False,validation='current')
+    accepted={'digest':'prepared'};model=dict(candidate=saved['candidate'],scope_digest=receipt['scope'],complete=True)
+    descriptor=[1];grant=dict(token='f'*64,candidate=saved['candidate'],scope=receipt['scope'],
+        model=r._digest(model),content_available=True)
+    ref=dict(review_id=grant['token'],candidate=saved['candidate'],scope=receipt['scope'],context=CONTEXT)
+    def info(*,candidate,row,side):
+        if type(row) is not int or row!=0 or side not in ('before','after'):raise n.Blocked('invalid-content-reference')
+        if side=='before':raise n.Blocked('absent-content-reference')
+        return dict(size=1,oid='d'*40)
+    owner.c=SimpleNamespace(read=lambda:dict(saved),saved_descriptor=lambda:list(descriptor),content_info=info,
+        revalidate=mock.Mock(side_effect=AssertionError('invalid identity revalidated')))
+    owner.p.read=lambda:dict(accepted)
+    owner._model=lambda *args:dict(model)
+    original_guard=owner.p.disk.migration_review_cleanup_guard
+    counts=dict(guards=0,reads=0,failures=0,enabled=True,phase='preflight')
+    @contextmanager
+    def guard(review):
+        counts['guards']+=1
+        with original_guard(review):yield
+    owner.p.disk.migration_review_cleanup_guard=guard
+    original=os.pread;identity=(payload.stat().st_dev,payload.stat().st_ino)
+    def read(file,size,offset):
+        current=os.fstat(file)
+        if (current.st_dev,current.st_ino)==identity:
+            if counts['enabled'] and offset>=r.PAGE and (counts['phase']=='preflight' or not payload.exists()):
+                counts['failures']+=1;raise OSError(errno.EIO,'identity prefix EIO '+str(counts['failures']))
+            data=original(file,size,offset);counts['reads']+=len(data);return data
+        return original(file,size,offset)
+    monkeypatch.setattr(os,'pread',read)
+    def park(passes=3):
+        owner._sweep(reclaim=True)
+        for _ in range(passes-1):owner.sweep_content()
+        assert counts['guards']==passes and counts['failures']==passes
+    return owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park
+
+
+@pytest.mark.parametrize('phase',['preflight','postcapture'])
+@pytest.mark.parametrize('passes',[2,3])
+def test_identity_cleanup_invalid_matrix_never_enters_or_rearms(identity_cleanup,phase,passes):
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    counts['phase']=phase;park(passes)
+    before=(dict(counts),owner._cleanup_remaining,owner._cleanup_debt,owner._cleanup_error,owner.cleanup_diagnostic)
+    ctx=r._context(CONTEXT)
+    cases=['token','context','candidate','scope','obsolete','restricted','model','stale','pending','unchecked',
+        'absent','preparation','row','bool-row','side','absent-side','malformed-context',
+        'uncertain','metadata-error','review-candidate','review-scope','review-stale','review-pending',
+        'review-absent','review-preparation','review-context','review-uncertain','review-metadata-error']
+    for case in cases:
+        for _ in range(2):
+            owner._challenges[ctx]=dict(grant)
+            call=dict(ref);target=dict(row=0,side='after');original_read=owner.c.read
+            saved.update(stale=False,validation='current');accepted['digest']='prepared'
+            owner._uncertain=case in ('uncertain','review-uncertain')
+            if case in ('candidate','scope','context'):call[case]=('wrong',) if case=='context' else '0'*64
+            if case in ('token','obsolete'):call['review_id']='0'*64
+            if case=='restricted':owner._challenges[ctx]['content_available']=False
+            if case=='model':owner._challenges[ctx]['model']='0'*64
+            if case in ('stale','review-stale'):saved.update(stale=True,validation='stale')
+            if case in ('pending','unchecked','review-pending'):saved['validation']='pending' if case!='unchecked' else 'unchecked'
+            if case in ('absent','review-absent'):owner.c.read=lambda:None
+            if case in ('metadata-error','review-metadata-error'):
+                def failed():raise OSError(errno.EIO,'candidate metadata unavailable')
+                owner.c.read=failed
+            if case in ('preparation','review-preparation'):accepted['digest']='other-preparation'
+            if case=='row':target['row']=1
+            if case=='bool-row':target['row']=False
+            if case=='side':target['side']='invalid'
+            if case=='absent-side':target['side']='before'
+            if case=='malformed-context':call['context']=[]
+            if case.startswith('review-'):
+                call.pop('review_id')
+                if case=='review-candidate':call['candidate']='0'*64
+                if case=='review-scope':call['scope']='0'*64
+                if case=='review-context':call['context']=[]
+                request=lambda:owner.review(**call)
+            else:request=lambda:owner.open_content(**target,**call)
+            try:
+                with pytest.raises((ValueError,OSError,RuntimeError)):request()
+                # This is the baseline-negative assertion: unexpected guard/payload I/O.
+                assert counts==before[0],case
+                assert (owner._cleanup_remaining,owner._cleanup_debt)==before[1:3],case
+                assert owner._cleanup_error is before[3] and owner.cleanup_diagnostic==before[4],case
+                owner.c.revalidate.assert_not_called()
+            finally:owner.c.read=original_read
+
+
+@pytest.mark.parametrize('remaining',[0,2])
+@pytest.mark.parametrize('entrypoint',['review','open'])
+def test_identity_cleanup_invalid_request_expires_and_schedules_debt(identity_cleanup,remaining,entrypoint):
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    park(3 if remaining==0 else 1)
+    owner._cleanup_debt=False;owner._schedule()
+    ctx=r._context(CONTEXT);held=os.open(payload,os.O_RDONLY)
+    owner._views[ctx]=dict(fd=held,name=payload.name,deadline=300,review_id=grant['token'])
+    owner._challenges[ctx]=dict(grant);now[0]=300
+    before=dict(counts)
+    with pytest.raises(n.Conflict):
+        if entrypoint=='review':owner.review(candidate='wrong',scope=ref['scope'],context=CONTEXT)
+        else:owner.open_content(row=0,side='after',**{**ref,'review_id':'wrong'})
+    assert counts==before and owner._cleanup_remaining==remaining
+    assert owner._cleanup_debt is bool(remaining) and (owner._timer is not None) is bool(remaining)
+    assert ctx not in owner._views and ctx not in owner._challenges
+    with pytest.raises(OSError):os.fstat(held)
+    if remaining:
+        timers[-1].call()
+        assert counts['guards']==before['guards']+1 and owner._cleanup_remaining==remaining-1
+
+
+@pytest.mark.parametrize('boundary',['model','content-info','final-check'])
+def test_identity_cleanup_exact_expiry_during_metadata_refuses(identity_cleanup,boundary):
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    park();ctx=r._context(CONTEXT);held=os.open(payload,os.O_RDONLY)
+    owner._views[ctx]=dict(fd=held,name=payload.name,deadline=300,review_id=grant['token'])
+    owner._challenges[ctx]=grant
+    other=('direct','http://fixture','healthy');otherctx=r._context(other);otherfd=os.open(payload,os.O_RDONLY)
+    owner._views[otherctx]=dict(fd=otherfd,name=payload.name,deadline=600,review_id='healthy')
+    owner._challenges[otherctx]={'token':'healthy'};owner._schedule();now[0]=299.999
+    original=owner._model if boundary=='model' else owner.c.content_info if boundary=='content-info' else owner._sweep
+    def elapsed(*args,**kw):
+        now[0]=300
+        return original(*args,**kw)
+    if boundary=='model':owner._model=elapsed
+    elif boundary=='content-info':owner.c.content_info=elapsed
+    else:owner._sweep=elapsed
+    before=dict(counts)
+    with pytest.raises(n.Conflict):owner.open_content(row=0,side='after',**ref)
+    assert counts==before and owner._cleanup_remaining==0 and owner._challenges[otherctx]=={'token':'healthy'}
+    assert ctx not in owner._views and ctx not in owner._challenges and os.fstat(otherfd)
+    with pytest.raises(OSError):os.fstat(held)
+
+
+@pytest.mark.parametrize('boundary',['model','content-info','final-check','cleanup-exit'])
+def test_identity_cleanup_control_and_grant_fences(identity_cleanup,boundary):
+    from contextlib import contextmanager
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    park();ctx=r._context(CONTEXT);owner._challenges[ctx]=grant;before=dict(counts)
+    if boundary=='model':
+        def changed(*args):descriptor[0]+=1;return dict(model)
+        owner._model=changed
+    elif boundary=='content-info':
+        original=owner.c.content_info
+        def changed(**kw):descriptor[0]+=1;return original(**kw)
+        owner.c.content_info=changed
+    elif boundary=='final-check':
+        original=owner._sweep
+        def changed(**kw):owner._challenges.pop(ctx);return original(**kw)
+        owner._sweep=changed
+    else:
+        original=owner.p.disk.migration_review_cleanup_guard
+        @contextmanager
+        def changed(review):
+            with original(review):yield
+            owner._challenges.pop(ctx,None)
+        owner.p.disk.migration_review_cleanup_guard=changed
+        counts['enabled']=False
+    with pytest.raises(n.Conflict):owner.open_content(row=0,side='after',**ref)
+    if boundary=='cleanup-exit':
+        assert counts['guards']==before['guards']+1 and not payload.exists()
+        assert not any(p.name.startswith('.pending-') for p in payload.parent.iterdir())
+    else:assert counts==before and owner._cleanup_remaining==0
+
+
+@pytest.mark.parametrize('entrypoint',['review','open'])
+def test_identity_cleanup_real_pointer_replacement_during_preflight(tmp_path,entrypoint):
+    root,repo,p,owner,value=setup_review(tmp_path);ref=challenge(owner)
+    pointer=root/os.fsdecode(c.STORE)/'candidate.json';original=owner._model
+    guard=mock.Mock(side_effect=AssertionError('changed pointer entered cleanup'))
+    owner.p.disk.migration_review_cleanup_guard=guard
+    def replaced(*args):
+        result=original(*args);replacement=pointer.with_name('replacement.json')
+        replacement.write_bytes(pointer.read_bytes());replacement.chmod(0o600);replacement.replace(pointer)
+        return result
+    owner._model=replaced
+    with pytest.raises(n.Conflict):
+        if entrypoint=='review':owner.review(**{k:v for k,v in ref.items() if k!='review_id'})
+        else:owner.open_content(row=0,side='before',**ref)
+    guard.assert_not_called()
+
+
+@pytest.mark.parametrize('entrypoint',['review','open'])
+def test_identity_cleanup_real_current_request_recovers_prefix_eio(tmp_path,monkeypatch,entrypoint):
+    def configure(root,repo):
+        write(repo,b'homeassistant/identity-recovery',b'owned recovery payload'*2000)
+        git(repo,'add','.');git(repo,'commit','-qm','identity recovery payload')
+    root,repo,p,owner,value=setup_review(tmp_path,configure=configure);ref=challenge(owner)
+    row=next(i for i,x in enumerate(value['rows']) if x['after'] and n.decode_path(x['after']['path'])==b'homeassistant/identity-recovery')
+    owner.open_content(row=row,side='after',**ref)
+    held=owner._views.pop(r._context(CONTEXT));os.close(held['fd'])
+    retained=root/os.fsdecode(r.STORE)/held['name'];stat=retained.stat();original=os.pread
+    enabled=[True];failures=[0]
+    def read(file,size,offset):
+        current=os.fstat(file)
+        if enabled[0] and (current.st_dev,current.st_ino)==(stat.st_dev,stat.st_ino) and offset>=r.PAGE:
+            failures[0]+=1;raise OSError(errno.EIO,'real current request prefix EIO')
+        return original(file,size,offset)
+    monkeypatch.setattr(os,'pread',read)
+    owner._sweep(reclaim=True);owner.sweep_content();owner.sweep_content()
+    assert failures[0]==3 and owner._cleanup_remaining==0 and retained.exists() and owner.cleanup_diagnostic
+    enabled[0]=False
+    if entrypoint=='review':result=owner.review(**{k:v for k,v in ref.items() if k!='review_id'});assert result['content_available']
+    else:assert owner.open_content(row=row,side='after',**ref)['size']==stat.st_size
+    assert not retained.exists() and owner._cleanup_remaining==3 and owner.cleanup_diagnostic is None and owner._cleanup_error is None
+
+
+def test_identity_cleanup_real_persisted_states_and_targets_refuse_before_guard(tmp_path):
+    import copy
+    root,repo,p,owner,value=setup_review(tmp_path)
+    assert owner.c.read()['validation']=='unchecked'
+    ref=challenge(owner);ctx=r._context(CONTEXT);grant=dict(owner._challenges[ctx])
+    pointer=root/os.fsdecode(c.STORE)/'candidate.json';current=pointer.read_bytes()
+    guard=mock.Mock(side_effect=AssertionError('invalid persisted state/target entered cleanup'))
+    owner.p.disk.migration_review_cleanup_guard=guard;owner._cleanup_remaining=0
+    for status in ('stale','pending'):
+        changed=copy.deepcopy(owner.c.read());changed.update(validation=status,stale=status=='stale')
+        changed['digest']=r._digest({k:v for k,v in changed.items() if k!='digest'})
+        pointer.write_bytes(r._json(changed));pointer.chmod(0o600)
+        assert owner.c.read()['validation']==status
+        for method in ('review','open'):
+            owner._challenges[ctx]=dict(grant)
+            with pytest.raises(n.Conflict):
+                if method=='review':owner.review(**{k:v for k,v in ref.items() if k!='review_id'})
+                else:owner.open_content(row=0,side='before',**ref)
+        pointer.write_bytes(current);pointer.chmod(0o600)
+    absent=next((i,side) for i,row in enumerate(value['rows']) for side in ('before','after') if row[side] is None)
+    for row,side in ((False,'before'),(-1,'before'),(0,'invalid'),absent):
+        owner._challenges[ctx]=dict(grant)
+        with pytest.raises((n.Blocked,n.Conflict)):owner.open_content(row=row,side=side,**ref)
+    guard.assert_not_called();assert owner._cleanup_remaining==0
+
+
+@pytest.mark.parametrize('boundary',['expiry','revoke','revoke-postcleanup','mutate-grant'])
+def test_identity_cleanup_last_descriptor_precedes_pure_authorization(identity_cleanup,boundary):
+    from contextlib import contextmanager
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    park();ctx=r._context(CONTEXT);held=os.open(payload,os.O_RDONLY)
+    owner._views[ctx]=dict(fd=held,name='independent-held-view',deadline=300,review_id=grant['token'])
+    owner._challenges[ctx]=grant;owner._schedule();now[0]=299.999
+    before=dict(counts);original=owner.c.saved_descriptor;calls=[0];admissions=[]
+    def metadata():
+        calls[0]+=1;result=original()
+        if calls[0]==(4 if boundary=='revoke-postcleanup' else 3):
+            if boundary=='expiry':now[0]=300
+            elif boundary=='mutate-grant':grant['model']='0'*64
+            else:owner._challenges.pop(ctx,None)
+        return result
+    owner.c.saved_descriptor=metadata
+    @contextmanager
+    def stop_admission(*args):
+        admissions.append(True);raise AssertionError('detached grant reached ordinary admission');yield
+    owner._admission=stop_admission
+    if boundary=='revoke-postcleanup':counts['enabled']=False
+    with pytest.raises(n.Conflict):owner.open_content(row=0,side='after',**ref)
+    assert not admissions
+    if boundary=='revoke-postcleanup':
+        assert counts['guards']==before['guards']+1 and not payload.exists()
+        assert not any(p.name.startswith('.pending-') for p in payload.parent.iterdir())
+    else:assert counts==before and owner._cleanup_remaining==0
+    if boundary=='expiry':
+        assert ctx not in owner._views and ctx not in owner._challenges
+        with pytest.raises(OSError):os.fstat(held)
+
+
+@pytest.mark.parametrize('bookkeeping',['schedule','close'])
+def test_identity_cleanup_fresh_clock_follows_last_expiry_bookkeeping(identity_cleanup,monkeypatch,bookkeeping):
+    owner,payload,receipt,now,timers,saved,accepted,model,descriptor,grant,ref,counts,park=identity_cleanup
+    park();ctx=r._context(CONTEXT);held=os.open(payload,os.O_RDONLY)
+    owner._views[ctx]=dict(fd=held,name='independent-held-view',deadline=300,review_id=grant['token'])
+    owner._challenges[ctx]=grant;now[0]=299
+    original_descriptor=owner.c.saved_descriptor;calls=[0];advanced=[False]
+    def metadata():
+        calls[0]+=1
+        if calls[0]==2:now[0]=299.75
+        return original_descriptor()
+    owner.c.saved_descriptor=metadata
+    if bookkeeping=='schedule':
+        original=owner._schedule
+        def schedule():
+            original()
+            if calls[0]>=2 and not advanced[0]:advanced[0]=True;now[0]=300
+        owner._schedule=schedule
+    else:
+        otherfd=os.open(payload,os.O_RDONLY)
+        owner._views['earlier']=dict(fd=otherfd,name='earlier-held-view',deadline=299.5,review_id='earlier')
+        original=os.close
+        def close(file):
+            original(file)
+            if file==otherfd:advanced[0]=True;now[0]=300
+        monkeypatch.setattr(os,'close',close)
+    before=dict(counts)
+    with pytest.raises(n.Conflict):owner.open_content(row=0,side='after',**ref)
+    assert advanced[0] and counts==before and owner._cleanup_remaining==0
+    assert ctx not in owner._views and ctx not in owner._challenges
+    with pytest.raises(OSError):os.fstat(held)

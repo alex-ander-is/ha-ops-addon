@@ -758,6 +758,22 @@ cohort in the Linux wrapper; portable adapters alone do not qualify Linux locks
 or namespace capture. Unchanged physical-allocation and served-browser proofs
 may be reused only with explicit source/fixture applicability.
 
+`test_identity_cleanup_invalid_matrix_never_enters_or_rearms` reuses the real
+owned prefix-EIO spool with bounded saved-metadata adapters and checks invalid
+Review/open references with both pending and exhausted allowance, in both hash
+phases. The adjacent `identity_cleanup` cases cover exact expiry during metadata,
+finite asynchronous expiry debt, descriptor/grant fences, real candidate pointer
+replacement and successful public recovery with genuine Candidate/Preparation/Git.
+The baseline matrix must fail on extra cleanup guard entry and payload prefix
+reads, rather than an exception message or a missing helper. Saved eligibility
+can hash candidate artifacts; its zero-read claim applies to retained Review
+spools. Preserve the cleanup-before-revalidation/admission Linux proof.
+`test_identity_cleanup_last_descriptor_precedes_pure_authorization` covers exact
+expiry, grant revocation/mutation during the final descriptor read and revocation
+during post-cleanup metadata. `test_identity_cleanup_fresh_clock_follows_last_expiry_bookkeeping`
+advances time during scheduling/FD close and requires a fresh lease check before
+resetting parked cleanup, with no extra guard or retained payload reads.
+
 
 Focused portable checks are `test_native_migration_review.py` and
 `test_native_migration_review_http.py`. Actual protected ingress/direct handler

@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.5.4
+
+Validate explicit Review identities before resuming cache cleanup
+
+- Require exact eligible saved candidate and scope before Review cleanup retry, and a current model-bound content challenge before opening content.
+- Expire held views before validation without synchronous cleanup; preserve finite asynchronous cleanup debt and recheck grants and candidate descriptors at the reclamation boundary.
+- Cover invalid references, prefix EIO retry limits, metadata and lease races, pointer substitution, and valid recovery.
+
 ## 2.5.3
 
 Stop persistent migration cleanup retries after three failed passes

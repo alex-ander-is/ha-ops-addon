@@ -139,15 +139,26 @@ class Review:
             self._cleanup_debt=bool(self._cleanup_remaining)
             self.cleanup_diagnostic=str(error);self._cleanup_error=error
 
-    def _sweep(self, *, reclaim=False):
+    def _expire_content(self):
+        """Release expired descriptors without entering cleanup or rearming it."""
         if self._closed:raise Conflict('review-closed')
-        if reclaim:self._cleanup_remaining=CLEANUP_ATTEMPTS
         now=self._clock();expired=False
         for ctx,view in list(self._views.items()):
             if now>=view['deadline']:
                 self._views.pop(ctx);_close_handles({ctx:view});expired=True
                 grant=self._challenges.get(ctx)
                 if grant is not None and grant['token']==view['review_id']:self._challenges.pop(ctx,None)
+        # An early request refusal must not strand newly inactive owned spools.
+        if expired:self._cleanup_debt=bool(self._cleanup_remaining)
+        self._schedule()
+        return expired
+
+    def _sweep(self, *, reclaim=False, before_reclaim=None):
+        # A request callback owns the final expiry/metadata/authorization order.
+        expired=False if reclaim and before_reclaim is not None else self._expire_content()
+        if reclaim:
+            if before_reclaim is not None:before_reclaim()
+            self._cleanup_remaining=CLEANUP_ATTEMPTS
         if expired or reclaim or self._cleanup_debt:self._retire_inactive()
         if not self._views and not self._cleanup_debt and self._timer is not None:
             timer,self._timer=self._timer,None
@@ -554,19 +565,51 @@ class Review:
                     and view['model']==digest):
                 view['candidate_stat']=after
 
+    def _request_model(self, candidate, scope, grant=None):
+        """Bounded saved eligibility; full current proof still needs admission."""
+        if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+        descriptor=self.c.saved_descriptor()
+        saved=self.c.read()
+        allowed=('unchecked','current') if grant is None else ('current',)
+        if saved is None or saved['stale'] or saved['validation'] not in allowed:
+            raise Conflict('new-current-review-required')
+        accepted=self.p.read()
+        if accepted is None or accepted['digest']!=saved['preparation']:
+            raise Conflict('review-model-changed')
+        model=self._model(saved,accepted)
+        if (candidate!=saved['candidate'] or scope!=model['scope_digest']
+                or grant is not None and _digest(model)!=grant['model']):
+            raise Conflict('review-model-changed')
+        self._request_descriptor(descriptor)
+        return descriptor
+
+    def _request_descriptor(self, descriptor):
+        if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+        if self.c.saved_descriptor()!=descriptor:raise Conflict('candidate-control-changed-before-reclaim')
+
+    def _authorize_request(self, descriptor, validate=lambda:None):
+        # Closing FDs, scheduling and participant metadata can all take time or
+        # invalidate a grant. Only pure, fresh checks may follow them. Each
+        # repeated pass releases at least one newly expired held view.
+        while True:
+            self._expire_content()
+            self._request_descriptor(descriptor)
+            now=self._clock()
+            if self._closed:raise Conflict('review-closed')
+            if any(now>=view['deadline'] for view in self._views.values()):continue
+            if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+            validate()
+            return
+
     def review(self, *, candidate, scope, context):
-        ctx = _context(context)
         with self._mutex:
-            self._sweep(reclaim=True)
+            self._expire_content()
+            ctx = _context(context)
             self._challenges.pop(ctx,None)
             try:
-                if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                 # Reject obsolete client identities before revalidation rotates the shared pointer.
-                saved=self.c.read()
-                if saved is None:raise Conflict('review-model-changed')
-                frozen=self._model(saved,self.p.read())
-                if candidate!=saved['candidate'] or scope!=frozen['scope_digest']:
-                    raise Conflict('review-model-changed')
+                descriptor=self._request_model(candidate,scope)
+                self._sweep(reclaim=True,before_reclaim=lambda:self._authorize_request(descriptor))
                 self._revalidate_content_bindings()
                 with self._admission(8192,8192):
                     with self._store() as fd:
@@ -649,12 +692,20 @@ class Review:
 
     def open_content(self, *, review_id, candidate, scope, row, side, context):
         with self._mutex:
-            self._sweep(reclaim=True)
+            self._expire_content()
             ctx,grant=self._grant(context,review_id,candidate,scope)
             try:
                 if not grant.get('content_available',False):raise Conflict('review-content-unavailable')
-                if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
+                frozen_grant=copy.deepcopy(grant)
+                descriptor=self._request_model(candidate,scope,grant)
                 info=self.c.content_info(candidate=candidate,row=row,side=side)
+                def current_grant():
+                    current=self._challenges.get(ctx)
+                    if current is not grant or current!=frozen_grant or not current.get('content_available',False):
+                        raise Conflict('new-explicit-review-required')
+                def current_request():self._authorize_request(descriptor,current_grant)
+                self._sweep(reclaim=True,before_reclaim=current_request)
+                current_request()
                 with self._admission(info['size'],8192,8192):
                     if self._uncertain:raise PersistenceUncertain('review-durability-uncertain')
                     with self._store(create=True) as fd:

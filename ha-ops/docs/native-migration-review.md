@@ -36,8 +36,24 @@ retries. Exhaustion parks cleanup before disk/store access and retains its error
 and evidence, including when another context continues page reads or heartbeats.
 Corrupt or unowned evidence and permanent filesystem errors retain diagnostics
 without automatic cleanup retries; healthy view leases still expire normally.
-A fresh explicit review or content-open starts a new allowance after external
-repair. Its warning clears only after the entire cleanup pass succeeds, including
+A valid exact explicit Review or content-open starts a new allowance after external
+repair. Before cleanup, Review requires the saved eligible candidate and scope
+(including the initial unchecked candidate); content-open requires the exact
+current challenge, candidate, scope, full saved model and available row/side.
+Saved stale/pending candidates, invalid references and restricted content grants
+cannot enter cleanup or replenish its allowance. These saved-state checks may
+verify candidate artifacts; they do not read retained Review cache payloads.
+Expired descriptors close before request validation and again at the final
+authorization fence. New expiry cleanup debt keeps only its existing finite
+allowance and runs asynchronously after an invalid request; exhausted debt stays
+parked. The candidate descriptor and exact content grant must still match before
+reclamation; content-open checks its grant again after cleanup. Full current
+source/receipt proof remains mandatory under ordinary admission after cleanup.
+Descriptor reads and expiry bookkeeping finish before the final fresh clock,
+closed-owner and exact-grant checks. If bookkeeping crosses another view's lease,
+that descriptor is released before authorization is sampled again. No participant
+metadata runs between the final capability check and cleanup reset or admission.
+Its warning clears only after the entire cleanup pass succeeds, including
 both guard exits. Successful cleanup also restores the allowance. Page reads,
 heartbeats, expiry, close, forget and changed errors never replenish it. The
 allowance is private in-memory state; shutdown/restart/update never auto-resume
