@@ -1,5 +1,7 @@
 """Focused regressions for the static client command and preview boundary."""
 
+import copy
+import importlib.util
 import hashlib
 import json
 import re
@@ -23,6 +25,173 @@ import sync  # noqa: E402
 
 
 class ClientContractTests(unittest.TestCase):
+    def reset_legacy_state(self):
+        spec = importlib.util.spec_from_file_location("reset_fixture_contract", APP.parent / "tests/browser/reset_git_state_fixture.py")
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        return fixture.legacy_updates()
+
+    def test_reset_legacy_classifier_exact_binding_negatives(self):
+        original = self.reset_legacy_state()
+        owner = original["active_operation"]["command_id"]
+        self.assertTrue(state.reset_recovery_available(original))
+        mutations = [
+            (("active_operation", "command_id"), str(uuid.uuid4())),
+            (("active_operation", "command"), "apply"),
+            (("active_operation", "phase"), "dispatching"),
+            (("active_operation", "accepted_generation"), 303),
+            (("active_operation", "payload_sha256"), "bad"),
+            (("command_records", owner, "command_id"), str(uuid.uuid4())),
+            (("command_records", owner, "command"), "save"),
+            (("command_records", owner, "generation"), 303),
+            (("command_records", owner, "payload_sha256"), "bad"),
+            (("command_records", owner, "status"), "failed_unknown"),
+            (("command_records", owner, "result", "ok"), 0),
+            (("command_records", owner, "result", "status"), "warning"),
+            (("command_records", owner, "result", "safe_terminal"), True),
+            (("command_records", owner, "result", "message"), original["last_message"] + " extra"),
+            (("last_message",), original["last_message"][:-1]),
+            (("last_status",), "success"), (("last_action",), "preview"),
+            (("operation_generation",), 304), (("save_push_retry_pending",), True),
+            (("conflicts",), ["a"]), (("deleted_devices_pending_confirmation",), True),
+            (("save_intent",), {"phase": "precommit"}), (("apply_intent",), {"phase": "before_live_write"}),
+            (("reset_intent",), {}), (("reset_intent",), {"schema": 99}),
+            (("command_records", str(uuid.uuid4())), {"status": "failed_unknown", "command": "apply"}),
+        ]
+        for path, value in mutations:
+            with self.subTest(path=path):
+                candidate = copy.deepcopy(original)
+                cursor = candidate
+                for key in path[:-1]: cursor = cursor[key]
+                cursor[path[-1]] = value
+                self.assertFalse(state.reset_recovery_available(candidate))
+        self.assertFalse(state.reset_recovery_available(original, "other"))
+        custom = copy.deepcopy(original)
+        custom["last_message"] = custom["last_message"].replace("main", "custom")
+        custom["command_records"][owner]["result"]["message"] = custom["last_message"]
+        self.assertTrue(state.reset_recovery_available(custom, "custom"))
+
+    def test_reset_checkpoint_classifier_rejects_corrupt_bindings(self):
+        original = self.reset_legacy_state()
+        owner = original["active_operation"]["command_id"]
+        original["reset_intent"] = {"schema": 1, "phase": "publishing", "flow_id": owner, "owner_id": owner,
+            "accepted_generation": 304, "generation": 305, "repo": "/fixture/repo", "origin": "origin-hash", "branch": "main",
+            "original_tip": "a" * 40, "target_tip": "b" * 40, "recovery_ref": "refs/ha-ops/recovery/reset/" + "a" * 40,
+            "service_old": {name: None for name in state.RESET_SERVICE_BRANCHES},
+            "service_candidates": {name: "c" * 40 for name in state.RESET_SERVICE_BRANCHES}}
+        original["reset_intent"]["candidate_pins"] = dict(original["reset_intent"]["service_candidates"])
+        self.assertTrue(state.reset_recovery_available(original, "main"))
+        self.assertFalse(state.reset_recovery_available(original, "other"))
+        for key, value in {"schema": 2, "phase": "unknown", "flow_id": "bad", "owner_id": str(uuid.uuid4()),
+                           "accepted_generation": 303, "generation": 303, "repo": "", "origin": "", "branch": "",
+                           "original_tip": "bad", "target_tip": "bad", "recovery_ref": "refs/heads/main",
+                           "service_old": {}, "service_candidates": {}, "alignment_from": "bad"}.items():
+            with self.subTest(key=key):
+                candidate = copy.deepcopy(original); candidate["reset_intent"][key] = value
+                self.assertFalse(state.reset_recovery_available(candidate, "main"))
+
+    def test_reset_phase_candidate_map_grammar(self):
+        original = self.reset_legacy_state(); owner = original["active_operation"]["command_id"]
+        intent = {"schema": 1, "phase": "aligned", "flow_id": owner, "owner_id": owner,
+            "accepted_generation": 304, "generation": 305, "repo": "/fixture/repo", "origin": "origin-hash", "branch": "main",
+            "original_tip": "a" * 40, "target_tip": "b" * 40, "recovery_ref": "refs/ha-ops/recovery/reset/" + "a" * 40,
+            "service_old": {name: None for name in state.RESET_SERVICE_BRANCHES}, "service_candidates": {}}
+        maps = ({}, {"ha-ops/ha-live": "c" * 40}, {name: "c" * 40 for name in state.RESET_SERVICE_BRANCHES},
+                {"other": "c" * 40}, None, {"ha-ops/ha-live": "invalid", "ha-ops/base": "c" * 40},
+                {"ha-ops/ha-live": "c" * 41, "ha-ops/base": "c" * 40})
+        for phase in state.RESET_PHASES:
+            for candidates in maps:
+                with self.subTest(phase=phase, candidates=candidates):
+                    candidate = copy.deepcopy(original)
+                    candidate["reset_intent"] = {**intent, "phase": phase, "service_candidates": candidates}
+                    if phase in {"services_prepared", "publishing", "complete"}:
+                        candidate["reset_intent"]["candidate_pins"] = maps[2]
+                    expected = candidates == (maps[2] if phase in {"services_prepared", "publishing", "complete"} else {})
+                    self.assertEqual(state.reset_recovery_available(candidate, "main"), expected)
+
+    def test_reset_legacy_atomic_adoption_replay_competing_ids_and_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = state.OperationStore(Path(tmp) / "state.json")
+            original = self.reset_legacy_state()
+            store.write_state(original)
+            old = original["active_operation"]["command_id"]
+            store.begin_repair(); store.reconcile_startup_fence(); store.mark_repaired()
+            self.assertGreater(store.read_state()["operation_generation"], 305)
+            self.assertTrue(state.reset_recovery_available(store.read_state()))
+            generation = store.read_state()["operation_generation"]
+            with self.assertRaises(RuntimeError): store.claim_command(str(uuid.uuid4()), "reset_git_state", generation - 1, {})
+            barrier = threading.Barrier(2)
+            results = []
+            def claim():
+                candidate = str(uuid.uuid4()); barrier.wait()
+                try: results.append((candidate, store.claim_command(candidate, "reset_git_state", generation, {})[0]))
+                except RuntimeError: results.append((candidate, False))
+            workers = [threading.Thread(target=claim) for _ in range(2)]
+            for worker in workers: worker.start()
+            for worker in workers: worker.join()
+            self.assertEqual(sum(ok for _id, ok in results), 1)
+            winner = next(candidate for candidate, ok in results if ok)
+            current = store.read_state()
+            self.assertEqual(current["active_operation"]["command_id"], winner)
+            self.assertEqual(current["command_records"][old]["superseded_by"], winner)
+            self.assertEqual(current["command_records"][winner]["recovers_command_id"], old)
+            self.assertFalse(store.claim_command(winner, "reset_git_state", generation, {})[0])
+            # Old owner's late success, even with a plausible global success, cannot release replacement.
+            store.write_state({"last_status": "success"})
+            store.update_command(old, "terminal", {"ok": True, "safe_terminal": True})
+            self.assertEqual(store.read_state()["active_operation"]["command_id"], winner)
+
+    def test_reset_terminal_requires_typed_current_binding(self):
+        for mode in ("missing", "stale", "valid"):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                store = state.OperationStore(Path(tmp) / "state.json")
+                owner = str(uuid.uuid4()); store.claim_command(owner, "reset_git_state", 0, {}); store.update_command(owner, "running")
+                current = store.read_state()
+                result = {"ok": False, "status": "error", "safe_terminal": True}
+                if mode != "missing":
+                    result["reset_terminal_binding"] = {"operation": current["active_operation"], "generation": 0 if mode == "valid" else 1}
+                store.update_command(owner, "terminal", result)
+                self.assertEqual(store.read_state()["active_operation"] is None, mode == "valid")
+
+    def test_reset_accepted_rejection_requires_bound_no_effect_outcome(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = app_context.AppContext(data_dir=Path(tmp), config_dir=Path(tmp) / "live")
+            owner = str(uuid.uuid4()); ctx.claim_command(owner, "reset_git_state", 0, {})
+            ctx.update_command(owner, "terminal", {"ok": False, "safe_terminal": True})
+            self.assertIsNotNone(ctx.read_state()["active_operation"])
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = app_context.AppContext(data_dir=Path(tmp), config_dir=Path(tmp) / "live")
+            owner = str(uuid.uuid4())
+            result = web.dispatch_command(ctx, "reset_git_state", {"command_id": owner, "generation": 0, "payload": {}},
+                                          start_job=lambda *_args, **_kwargs: False)
+            self.assertFalse(result["ok"])
+            self.assertIsNone(ctx.read_state()["active_operation"])
+            self.assertIs(ctx.read_state()["command_records"][owner]["result"]["safe_terminal"], True)
+
+    def test_reset_late_dispatch_cannot_borrow_replacement_owner_or_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            import reset_git
+            ctx = app_context.AppContext(data_dir=Path(tmp), config_dir=Path(tmp) / "live")
+            owner = str(uuid.uuid4())
+            ctx.claim_command(owner, "reset_git_state", 0, {})
+            ctx.write_state({"last_message": "replacement log"})
+            self.assertTrue(ctx.run_lock.acquire(False))
+            outcome = ctx.run_reset_git_state_job(str(uuid.uuid4()), lock_acquired=True)
+            self.assertFalse(outcome)
+            self.assertEqual(ctx.read_state()["last_message"], "replacement log")
+            self.assertEqual(ctx.read_state()["active_operation"]["command_id"], owner)
+            self.assertTrue(ctx.run_lock.acquire(False))
+            ctx.run_lock.release()
+
+    def test_reset_stale_worker_cannot_publish_log_or_checkpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = state.OperationStore(Path(tmp) / "state.json")
+            owner = str(uuid.uuid4()); store.claim_command(owner, "reset_git_state", 0, {}); store.update_command(owner, "running")
+            operation = store.read_state()["active_operation"]
+            store.write_state({**state.ALL_PREVIEW_CLEAR_UPDATES, "last_message": "new state"})
+            with self.assertRaises(RuntimeError): store.publish_reset_state({"last_message": "stale"}, operation, 0)
+            self.assertEqual(store.read_state()["last_message"], "new state")
+
     def test_runtime_has_no_server_ui_renderer_and_client_owns_conflicts(self):
         self.assertFalse((APP / "ui.py").exists())
         for name in ("server.py", "web.py"):

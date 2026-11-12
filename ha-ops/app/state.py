@@ -33,9 +33,108 @@ EFFECTFUL_COMMANDS = frozenset({
 })
 
 
+RESET_PHASES = frozenset({"prepared", "preserved", "aligned", "services_prepared", "publishing", "complete"})
+RESET_SERVICE_BRANCHES = ("ha-ops/ha-live", "ha-ops/base")
+
+
+def canonical_uuid(value):
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
+def valid_reset_intent(intent, operation, records):
+    if not isinstance(intent, dict) or not isinstance(operation, dict):
+        return False
+    record = records.get(operation.get("command_id"))
+    return bool(
+        intent.get("schema") == 1 and intent.get("phase") in RESET_PHASES
+        and canonical_uuid(intent.get("flow_id"))
+        and intent.get("owner_id") == operation.get("command_id")
+        and isinstance(record, dict) and record.get("command") == "reset_git_state"
+        and intent.get("accepted_generation") == operation.get("accepted_generation") == record.get("generation")
+        and type(intent.get("generation")) is int and intent["generation"] >= record["generation"]
+        and all(isinstance(intent.get(key), str) and intent[key] for key in ("repo", "origin", "branch"))
+        and all(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(intent.get(key) or "")) for key in ("original_tip", "target_tip"))
+        and intent.get("recovery_ref") == "refs/ha-ops/recovery/reset/" + intent["original_tip"]
+        and ("alignment_from" not in intent or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(intent["alignment_from"])))
+        and isinstance(intent.get("service_old"), dict) and set(intent["service_old"]) == set(RESET_SERVICE_BRANCHES)
+        and all(value is None or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(value)) for value in intent["service_old"].values())
+        and ("service_local_old" not in intent or isinstance(intent["service_local_old"], dict)
+             and set(intent["service_local_old"]) == set(RESET_SERVICE_BRANCHES)
+             and all(value is None or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(value)) for value in intent["service_local_old"].values()))
+        and ("candidate_pins" not in intent or isinstance(intent["candidate_pins"], dict)
+             and set(intent["candidate_pins"]) == set(RESET_SERVICE_BRANCHES)
+             and all(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(value)) for value in intent["candidate_pins"].values()))
+        and isinstance(intent.get("service_candidates"), dict)
+        and set(intent["service_candidates"]) <= set(RESET_SERVICE_BRANCHES)
+        and all(re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", str(value)) for value in intent["service_candidates"].values())
+        and (set(intent["service_candidates"]) == set(RESET_SERVICE_BRANCHES)
+             and intent.get("candidate_pins") == intent["service_candidates"]
+             if intent["phase"] in {"services_prepared", "publishing", "complete"} else not intent["service_candidates"])
+    )
+
+
+def reset_other_recovery_blocks(current):
+    for key in ("save_intent", "apply_intent"):
+        intent = current.get(key)
+        if intent:
+            if not isinstance(intent, dict):
+                return True
+            record = (current.get("command_records") or {}).get(intent.get("operation_id"))
+            result = record.get("result") if isinstance(record, dict) else None
+            if (not isinstance(record, dict) or record.get("command") != key.removesuffix("_intent")
+                or record.get("status") != "terminal" or not isinstance(result, dict)
+                or not (result.get("ok") is True or result.get("safe_terminal") is True)):
+                return True
+    return False
+
+
+def reset_recovery_available(state, branch=None):
+    """Recognize only the old no-effect refusal or a bound Reset checkpoint."""
+    operation = state.get(ACTIVE_OPERATION_KEY)
+    if not isinstance(operation, dict) or operation.get("command") != "reset_git_state" or operation.get("phase") != "recovery_required":
+        return False
+    owner = operation.get("command_id")
+    records = state.get("command_records")
+    if not canonical_uuid(owner) or not isinstance(records, dict):
+        return False
+    record = records.get(owner)
+    if (not isinstance(record, dict) or record.get("command_id") != owner or record.get("command") != "reset_git_state"
+        or record.get("payload_sha256") != operation.get("payload_sha256")
+        or record.get("payload_sha256") != hashlib.sha256(b"{}").hexdigest()
+        or type(record.get("generation")) is not int
+        or type(operation.get("accepted_generation")) is not int
+        or record.get("generation") < 0 or record.get("generation") != operation.get("accepted_generation")
+        or int(state.get("operation_generation") or 0) < record["generation"] + 1):
+        return False
+    if (state.get("last_status") == "running" or state.get("save_push_retry_pending") or state.get("conflicts") or state.get("deleted_devices_pending_confirmation")
+        or deleted_devices_recovery_active(state) or state.get(DOCKER_PRUNE_FENCE_KEY)
+        or reset_other_recovery_blocks(state)
+        or any(not isinstance(item, dict) or key != owner and item.get("status") in {"accepted", "running", "failed_unknown"}
+               for key, item in records.items())):
+        return False
+    if state.get("reset_intent") is not None:
+        return (record.get("status") in {"terminal", "failed_unknown"}
+                and valid_reset_intent(state["reset_intent"], operation, records)
+                and (branch is None or state["reset_intent"]["branch"] == branch))
+    branch = branch or state.get("reset_repo_branch") or "main"
+    message = (f"Local {branch} contains commits absent from origin/{branch}. "
+               "Preserve or publish them before this operation; HA Ops will not reset the branch.")
+    result = record.get("result")
+    return bool(record.get("status") == "terminal" and isinstance(result, dict)
+                and result.get("ok") is False and result.get("status") == "error"
+                and result.get("safe_terminal") is False and result.get("message") == message
+                and state.get("last_action") == "reset_git_state" and state.get("last_status") == "error"
+                and state.get("last_message") == message)
+
+
 def active_operation_blocks(state, action=None):
     operation = state.get(ACTIVE_OPERATION_KEY)
     if not operation:
+        return False
+    if action == "reset_git_state" and reset_recovery_available(state):
         return False
     if not isinstance(operation, dict) or operation.get("phase") == "recovery_required":
         return True
@@ -522,6 +621,7 @@ def default_state():
         "save_push_retry_commit": None,
         "save_intent": None,
         "apply_intent": None,
+        "reset_intent": None,
         DOCKER_PRUNE_FENCE_KEY: None,
         "conflicts": [],
         "conflict_type": None,
@@ -781,6 +881,10 @@ class OperationStore:
             ):
                 current[ACTIVE_OPERATION_KEY] = None
                 current.update(ALL_PREVIEW_CLEAR_UPDATES)
+            elif operation.get("command") == "reset_git_state":
+                current[ACTIVE_OPERATION_KEY] = {**operation, "phase": "recovery_required"}
+                current.update(ALL_PREVIEW_CLEAR_UPDATES)
+                current.update(last_status="error", last_action="reset_git_state")
             elif operation["phase"] == "accepted":
                 command_id = operation.get("command_id")
                 record = records.get(command_id)
@@ -978,7 +1082,7 @@ class OperationStore:
             self._condition.notify_all()
             return current
 
-    def claim_command(self, command_id, command, generation, payload, validate=None, immediate=False):
+    def claim_command(self, command_id, command, generation, payload, validate=None, immediate=False, reset_branch=None):
         """Durably claim one browser mutation before any work is scheduled."""
         try:
             parsed = uuid.UUID(str(command_id))
@@ -1003,10 +1107,14 @@ class OperationStore:
                 return False, dict(existing)
             if self._readiness != READINESS_REPAIRED:
                 raise RuntimeError(READINESS_BLOCKED_MESSAGE)
-            if current.get(ACTIVE_OPERATION_KEY):
+            adopting_reset = command == "reset_git_state" and payload == {} and reset_recovery_available(current, reset_branch)
+            old_owner = (current.get(ACTIVE_OPERATION_KEY) or {}).get("command_id") if adopting_reset else None
+            if current.get(ACTIVE_OPERATION_KEY) and not adopting_reset:
                 raise RuntimeError("Another operation is active or requires recovery.")
-            if any(record.get("status") in {"accepted", "running", "failed_unknown"} for record in records.values()):
+            if any(record.get("status") in {"accepted", "running", "failed_unknown"} and key != old_owner for key, record in records.items()):
                 raise RuntimeError("Another command is active or has an uncertain outcome.")
+            if command == "reset_git_state" and reset_other_recovery_blocks(current):
+                raise RuntimeError("Apply or Save recovery must be resolved before Reset Git State.")
             cancelling_pending_save = command == "clear_preview" and payload.get("direction") == "save"
             if current.get("save_push_retry_pending") and command not in {"save", "clear_display_state"} and not cancelling_pending_save:
                 raise RuntimeError(_("message.save_push_retry_still_pending"))
@@ -1035,6 +1143,12 @@ class OperationStore:
                 "job_id": canonical_id,
                 "result": {"ok": True, "message": "Selection updated."} if immediate else None,
             }
+            if adopting_reset:
+                records[old_owner] = {**records[old_owner], "status": "terminal", "superseded_by": canonical_id}
+                record["recovers_command_id"] = old_owner
+                if current.get("reset_intent"):
+                    current["reset_intent"] = {**current["reset_intent"], "owner_id": canonical_id,
+                                               "accepted_generation": current_generation, "generation": current_generation}
             records[canonical_id] = record
             current["command_records"] = records
             if command in EFFECTFUL_COMMANDS:
@@ -1054,6 +1168,29 @@ class OperationStore:
             self._change_sequence += 1
             self._condition.notify_all()
             return True, dict(record)
+
+    def settle_reset_pin_cleanup(self, command_id, expected_cleanup):
+        """Retire only a completed Reset's exact cleanup receipt, without its fence."""
+        with self._condition:
+            current = read_state(self.path, hydrate_diffs=False)
+            record = (current.get("command_records") or {}).get(command_id)
+            result = record.get("result") if isinstance(record, dict) else None
+            if (not isinstance(record, dict) or record.get("command") != "reset_git_state" or record.get("status") != "terminal"
+                or not isinstance(result, dict) or result.get("ok") is not True or result.get("reset_candidate_cleanup") != expected_cleanup):
+                return False
+            current["command_records"][command_id] = {**record, "result": {**result, "reset_candidate_cleanup": None}}
+            self.write_state({"command_records": current["command_records"]})
+            return True
+
+    def publish_reset_state(self, updates, operation, generation):
+        """Publish only while the captured Reset owner and generation remain current."""
+        with self._condition:
+            self.assert_repaired_for_current_preview_read("reset-publication")
+            current = read_state(self.path, hydrate_diffs=False)
+            if (current.get(ACTIVE_OPERATION_KEY) != operation
+                or current.get("operation_generation") != generation):
+                raise RuntimeError("Reset ownership changed; explicit recovery is required.")
+            return self.write_state(updates) if updates else current
 
     def publish_preview_state(self, updates, expected_operation, generation, expected_check=None):
         """Linearize every Preview publication with its original ownership."""
@@ -1080,6 +1217,21 @@ class OperationStore:
             record = records.get(str(command_id))
             if record is None:
                 return None
+            if status == "terminal" and record.get("command") == "reset_git_state":
+                result = dict(result) if isinstance(result, dict) else {"ok": False}
+                binding = result.pop("reset_terminal_binding", None)
+                if (not isinstance(binding, dict) or self._readiness != READINESS_REPAIRED
+                    or binding.get("operation") != current.get(ACTIVE_OPERATION_KEY)
+                    or binding.get("generation") != current.get("operation_generation")
+                    or (current.get(ACTIVE_OPERATION_KEY) or {}).get("command_id") != str(command_id)):
+                    result.update(ok=False, safe_terminal=False, status="error", message="Reset ownership changed; explicit recovery is required.")
+                elif result.get("ok") is True:
+                    if (current.get("reset_intent") or {}).get("phase") != "complete":
+                        result.update(ok=False, safe_terminal=False, status="error")
+                    else:
+                        current["reset_intent"] = None
+                elif result.get("safe_terminal") is True and current.get("reset_intent") is not None:
+                    result["safe_terminal"] = False
             if status == "terminal" and record.get("command") == "preview" and isinstance(result, dict):
                 result = dict(result)
                 binding = result.pop("preview_terminal_binding", None)
@@ -1134,7 +1286,7 @@ class OperationStore:
                           and (current.get("preview_backup_check") or {}).get("generation") == current.get("operation_generation")):
                         current["preview_backup_refusal"] = result["preview_backup_refusal"]
                         current[ACTIVE_OPERATION_KEY] = None
-                    elif operation.get("phase") == "accepted" or isinstance(result, dict) and (
+                    elif (operation.get("phase") == "accepted" and record.get("command") != "reset_git_state") or isinstance(result, dict) and (
                         result.get("ok") is True or result.get("safe_terminal") is True
                     ):
                         current[ACTIVE_OPERATION_KEY] = None

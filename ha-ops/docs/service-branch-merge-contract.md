@@ -26,7 +26,29 @@ branches. That is expected. It changes Git service refs only; it must not write
 live Home Assistant config.
 
 Reset Git State is a recovery action for stale or inconsistent preview graphs.
-It must not rewrite `repo_branch` and must not write live Home Assistant config.
+It preserves the previous local `repo_branch` tip under
+`refs/ha-ops/recovery/reset/<commit>`, aligns the clean local branch with its
+fetched remote tip, and must not push the remote user branch or write live
+Home Assistant config. Uncommitted, untracked, and ignored files refuse Reset.
+A durable Reset checkpoint and explicit service-ref leases protect interrupted
+publication. Service export/staging/commits run in an isolated checkout anchored
+to the immutable fetched target; interrupted construction leaves no generated
+dirt in the canonical checkout. Only verified flow-owned scratch is removed
+after a run or by the next explicit Reset; startup does not replay construction. Candidate commits gain flow-owned Git pins
+before a resumable ready checkpoint is written. A pending pin manifest only
+permits cleanup and reconstruction; it never authorizes publication. Pins stay
+until terminal success clears the intent, then exact expected-OID retirement
+runs. A retirement failure preserves the successful result and can be retried by
+a later successful explicit Reset. Verified owned scratch is also reaped when
+resuming already prepared candidates; foreign paths and refs are preserved. Scratch ownership markers are removed
+only after all owned payload entries are confirmed gone; interrupted payload,
+marker, and empty-directory retirement remain explicitly retryable. Successful
+pin cleanup settles its exact terminal receipt so later resets do not repeat
+Git reads for already retired flows.
+Reload, restart, and version update never retry automatically;
+only another explicit Reset can adopt recognized recovery evidence. The exact
+legacy unpublished-commit refusal also offers this explicit recovery through
+the UI. Unknown operations and Apply/Save recovery remain fenced.
 It rebuilds `ha-ops/ha-live` from the current `repo_branch` plus a fresh live
 export, moves `ha-ops/base` to the resulting merge base, and force-with-lease
 pushes only those HA Ops service branches.

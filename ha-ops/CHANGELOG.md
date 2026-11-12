@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.6.0
+
+Recover divergent Git state through Reset Git State
+- Preserve the previous local user-branch tip in a durable local recovery reference before aligning the clean checkout with origin.
+- Build service candidates in an isolated checkout and publish only HA Ops service branches with explicit expected-tip leases; never push the remote user branch or change live Home Assistant files.
+- Offer Reset recovery for the exact legacy failed-Reset fence and bound interrupted checkpoints, with explicit retries after reload, restart, or update.
+- Keep unknown operations, Apply/Save recovery, dirty checkout files, and concurrent branch changes fenced; clear old previews and decisions after recovery.
+
 ## 2.5.4
 
 Validate explicit Review identities before resuming cache cleanup

@@ -567,7 +567,7 @@ EN_TEXT = {
     "text.no_retained_devices": "No retained devices candidates found.",
     "text.no_targets": "No target preview yet. Run an apply after configuring the repository.",
     "text.no_unresolved_git_conflicts": "No unresolved Git conflicts.",
-    "text.reset_git_state": "Rebuilds HA Ops service branches when previews look stale or inconsistent. Does not apply to Home Assistant or rewrite main.",
+    "text.reset_git_state": "Preserves the previous local tip, aligns the clean local user branch with origin, and rebuilds HA Ops service branches. Does not change live Home Assistant files or the remote user branch.",
     "text.rollback_available": "- rollback: available",
     "text.rollback_status_unavailable": "- rollback status unavailable: {error}",
     "text.raw_diff_loads_on_expand": "Raw registry diff loads only when this section is expanded.",

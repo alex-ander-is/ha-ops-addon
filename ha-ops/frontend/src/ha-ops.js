@@ -1417,6 +1417,17 @@ class HaOpsApp extends LitElement {
       || Boolean(this.state.docker_build_cache_prune_fence);
   }
 
+  resetBlocked() {
+    const recoverable = this.state.reset_recovery?.available === true
+      && this.state.reset_recovery.operation_id === this.state.active_operation?.command_id;
+    return Boolean(this.commandIntent || this.acceptedCommandId || this.uncertainCommandId)
+      || this.replayPending || !["connected", "http"].includes(this.connection) || this.isRunning()
+      || (Boolean(this.state.active_operation) && !recoverable) || this.versionMismatchOpen
+      || Boolean(this.state.deleted_devices_recovery_phase && this.state.deleted_devices_recovery_phase !== "none")
+      || Boolean(this.state.docker_build_cache_prune_fence) || Boolean(this.state.deleted_devices_pending_confirmation)
+      || Boolean(this.state.save_push_retry_pending) || Boolean(this.state.conflicts?.length);
+  }
+
   gitAccessBlocked() {
     return this.mutationBlocked() || Boolean(this.state.deleted_devices_pending_confirmation)
       || Boolean(this.state.save_push_retry_pending) || this.versionMismatchOpen;
@@ -1589,7 +1600,7 @@ class HaOpsApp extends LitElement {
                 <p>Preview has not been built. You can continue to review changes; Apply will check the backup again.</p>
               </div>` : nothing}</section>
               <section class="action-section"><h2>${t("heading.reset_git_state")}</h2><div class="action-row">
-                ${this.actionButton("reset_git_state", t("action.reset_git_state"), { disabled: controlsBlocked, confirm: t("confirm.reset_git_state") })}
+                ${this.actionButton("reset_git_state", t("action.reset_git_state"), { disabled: this.resetBlocked(), confirm: "Preserve the previous local Git tip, align the local user branch with origin, and rebuild HA Ops service branches? Live Home Assistant files stay unchanged." })}
               </div></section>
               <section class="action-section"><h2>${t("heading.disk_usage")}</h2><div class="action-row">
                 ${this.actionButton("disk_usage", t("action.check_disk_usage"), { disabled: controlsBlocked })}
@@ -1621,9 +1632,9 @@ class HaOpsApp extends LitElement {
         </div>
         ${this.state.active_operation?.phase === "recovery_required" ? html`
           <section class="card wide" role="alert" data-testid="operation-recovery">
-            <h2>${t("heading.manual_recovery")}</h2>
-            <p>${t("notice.operation_uncertain").replace("{command}", this.state.active_operation.command || "Operation")}</p>
-            <p>${this.state.active_operation.evidence?.guidance || this.state.active_operation.message || t("notice.inspect_affected_state")}</p>
+            <h2>${this.state.reset_recovery?.available ? "Git recovery available" : t("heading.manual_recovery")}</h2>
+            <p>${this.state.reset_recovery?.available ? "Click Reset Git State to preserve local history and rebuild the Git service branches." : t("notice.operation_uncertain").replace("{command}", this.state.active_operation.command || "Operation")}</p>
+            ${this.state.reset_recovery?.available ? nothing : html`<p>${this.state.active_operation.evidence?.guidance || this.state.active_operation.message || t("notice.inspect_affected_state")}</p>`}
             ${this.state.active_operation.evidence?.kind ? html`<p>${t("recovery.observed_kind", { kind: this.state.active_operation.evidence.kind.replaceAll("_", " ") })}</p>` : nothing}
             ${Number.isInteger(this.state.active_operation.evidence?.observed_path_count) ? html`
               <p>${t("recovery.observed_paths", { count: this.state.active_operation.evidence.observed_path_count })}</p>` : nothing}
@@ -1785,7 +1796,7 @@ class HaOpsApp extends LitElement {
 
   async dispatchCommand(command, action, payload = {}) {
     // Fence synchronously, before a response or Lit's disabled rendering can arrive.
-    if (this.commandIntent || (["apply", "save"].includes(command) && this.mutationBlocked())
+    if (this.commandIntent || (command === "reset_git_state" && this.resetBlocked()) || (["apply", "save"].includes(command) && this.mutationBlocked())
       || (command === "generate_key" && this.gitAccessBlocked())) return;
     const envelope = {
       command_id: uuid(),

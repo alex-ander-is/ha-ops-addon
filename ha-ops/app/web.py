@@ -686,7 +686,16 @@ def start_reserved_background(ctx, target, *args, state_updates=None, lock_acqui
                             result["preview_terminal_binding"] = {
                                 "operation": outcome.operation, "generation": outcome.generation, "check": check,
                             }
+                    if action == "reset_git_state":
+                        import reset_git
+                        result = reset_git.outcome_result(outcome) if isinstance(outcome, reset_git.ResetOutcome) else {
+                            "ok": False, "status": "error", "safe_terminal": False, "message": "Reset did not return a bound outcome."}
                     ctx.update_command(command_id, "terminal", result)
+                    if action == "reset_git_state" and isinstance(outcome, reset_git.ResetOutcome) and outcome.ok:
+                        try:
+                            reset_git.retire_completed_candidate_pins(ctx)
+                        except Exception:
+                            pass
                 except BaseException as exc:
                     ctx.update_command(command_id, "terminal", {"ok": False, "message": str(exc)})
                     raise
@@ -795,6 +804,8 @@ def _snapshot_payload(ctx):
          if isinstance(operation.get("evidence"), dict) else None}
         if isinstance(operation, dict) else None
     )
+    state["reset_recovery"] = {"available": state_store.reset_recovery_available(ctx.read_state(), ctx.load_options().get("repo_branch", "main")),
+                               "operation_id": operation.get("command_id") if isinstance(operation, dict) else None}
     state["docker_build_cache_prune_fence"] = bool(raw_state.get(state_store.DOCKER_PRUNE_FENCE_KEY))
     accepted_job = command_in_flight(raw_state)
     if state["active_operation"] or state.get("last_status") == "running" or accepted_job:
@@ -907,11 +918,16 @@ def dispatch_command(ctx, command, body=None, start_job=None):
 
     def finalize_rejected(command_id, ok, message=None):
         if command_id and not ok:
-            ctx.update_command(
-                command_id,
-                "terminal",
-                {"ok": False, "message": message or state_store.READINESS_BLOCKED_MESSAGE},
-            )
+            result = {"ok": False, "message": message or state_store.READINESS_BLOCKED_MESSAGE}
+            if command == "reset_git_state":
+                current = ctx.read_state()
+                operation = current.get(state_store.ACTIVE_OPERATION_KEY) or {}
+                if operation.get("command_id") == command_id and operation.get("phase") == "accepted":
+                    import reset_git
+                    result = reset_git.outcome_result(reset_git.ResetOutcome(
+                        False, result["message"], operation, current["operation_generation"],
+                        no_effect=current.get("reset_intent") is None))
+            ctx.update_command(command_id, "terminal", result)
 
     if command == "state_get" or command == "replay":
         return command_result(True, "state snapshot", **_snapshot_payload(ctx))
@@ -1151,7 +1167,7 @@ def dispatch_command(ctx, command, body=None, start_job=None):
         finalize_rejected(command_id, ok)
         return command_result(ok, _("message.save_started") if ok else state_store.READINESS_BLOCKED_MESSAGE)
     job_commands = {
-        "reset_git_state": (ctx.run_reset_git_state_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.git_state_reset_started"),
+        "reset_git_state": (ctx.run_reset_git_state_job, [command_id], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.git_state_reset_started"),
         "disk_usage": (ctx.run_disk_usage_job, [], None, "message.disk_usage_started"),
         "deleted_devices_preview": (ctx.run_deleted_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.deleted_devices_check_started"),
         "retained_devices_preview": (ctx.run_retained_devices_preview_job, [], state_store.ALL_PREVIEW_CLEAR_UPDATES, "message.retained_devices_check_started"),

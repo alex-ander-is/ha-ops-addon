@@ -12092,6 +12092,620 @@ devices:
                 server.app_context.git_ops.assert_no_untracked_files(repo, ctx.run_command)
             self.assertEqual(hidden_file.read_text(), "keep me\n")
 
+    def reset_fixture(self, root, service_checkout=False, unpublished=False):
+        spec = importlib.util.spec_from_file_location("reset_git_state_fixture", ROOT / "tests/browser/reset_git_state_fixture.py")
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        ctx = fixture.FixtureContext(root)
+        ctx.releases_dir.mkdir(parents=True, exist_ok=True)
+        ctx.repair_startup_state()
+        repo, original, target = fixture.seed_incident(ctx, service_checkout, unpublished)
+        return fixture, ctx, repo, original, target
+
+    def test_reset_exact_force_update_legacy_incident(self):
+        for service_checkout in (False, True):
+            with self.subTest(service_checkout=service_checkout), tempfile.TemporaryDirectory() as tmp:
+                fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), service_checkout)
+                self.assertEqual(self.git(["rev-list", "--left-right", "--count", "main...origin/main"], repo).stdout.strip(), "1\t1")
+                live_before = {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()}
+                import web
+                preview_id = str(uuid.uuid4())
+                preview = web.dispatch_command(ctx, "preview", {"command_id": preview_id,
+                    "generation": ctx.read_state()["operation_generation"], "payload": {}})
+                self.assertTrue(preview["ok"], preview)
+                self.assertTrue(self.wait_until(lambda: (ctx.read_state()["command_records"].get(preview_id) or {}).get("status") == "terminal"))
+                preview_result = ctx.read_state()["command_records"][preview_id]["result"]
+                self.assertIs(preview_result["ok"], False)
+                self.assertIs(preview_result["safe_terminal"], True)
+                self.assertIn("commits absent from origin", ctx.read_state()["last_message"])
+                ctx.write_state({**fixture.legacy_updates(), "last_preview_paths": ["old"], "last_save_preview_paths": ["old"],
+                                 "apply_preview_selected_paths": ["old"], "save_preview_selected_paths": ["old"]})
+                # Model the exact old accepted304 -> preview-clear305 transition.
+                ctx.operation_store.write_state({"operation_generation": 305})
+                self.assertEqual(ctx.read_state()["active_operation"]["accepted_generation"], 304)
+                new_id = str(uuid.uuid4())
+                import web
+                if not service_checkout:
+                    old_records = set(ctx.read_state()["command_records"])
+                    response = self.post_json_context(web, ctx, "/reset-git-state")
+                    self.assertEqual(response.responses, [200])
+                    result = json.loads(response.wfile.getvalue())
+                    new_id = (set(ctx.read_state()["command_records"]) - old_records).pop()
+                else:
+                    result = web.dispatch_command(ctx, "reset_git_state", {"command_id": new_id, "generation": 305, "payload": {}},
+                                                  start_job=lambda target, *args, **kw: web.start_reserved_background(ctx, target, *args, **kw))
+                self.assertTrue(result["ok"], result)
+                self.assertTrue(self.wait_until(lambda: (ctx.read_state()["command_records"].get(new_id) or {}).get("status") == "terminal"))
+                after = ctx.read_state()
+                self.assertTrue(after["command_records"][new_id]["result"]["ok"], after)
+                self.assertIsNone(after["active_operation"])
+                self.assertIsNone(after["reset_intent"])
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+                self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/main"], repo).stdout.split()[0], target)
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertEqual(live_before, {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()})
+                for key in ("last_preview_paths", "last_save_preview_paths", "apply_preview_selected_paths", "save_preview_selected_paths"):
+                    self.assertEqual(after[key], [])
+
+    def test_reset_preserves_truly_unpublished_tip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True, True)
+            self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+            self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+
+    def test_reset_refuses_dirty_files_before_preserving_or_aligning(self):
+        for kind in ("tracked", "staged", "untracked", "ignored"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+                path = repo / "homeassistant/configuration.yaml" if kind in {"tracked", "staged"} else repo / "user-document.txt"
+                if kind == "ignored":
+                    (repo / ".git/info/exclude").write_text("user-document.txt\n")
+                path.write_text("must survive\n")
+                if kind == "staged":
+                    self.git(["add", "-A"], repo)
+                self.assertFalse(ctx.run_reset_git_state_job())
+                self.assertEqual(path.read_text(), "must survive\n")
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), original)
+                self.assertIsNone(ctx.read_state()["reset_intent"])
+                self.assertIsNone(ctx.read_state()["active_operation"])
+
+    def test_reset_first_checkpoint_failure_distinguishes_before_write_from_lost_ack(self):
+        for before in (True, False):
+            with self.subTest(before=before), tempfile.TemporaryDirectory() as tmp:
+                fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                ctx.write_state(fixture.legacy_updates())
+                old_records = set(ctx.read_state()["command_records"])
+                actual = ctx.operation_store.publish_reset_state; fired = [False]
+                refs = self.git(["for-each-ref", "--format=%(refname) %(objectname)"], repo).stdout
+                remote = self.git(["ls-remote", "--heads", "origin"], repo).stdout
+                live = {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()}
+                def publish(updates, operation, generation):
+                    if not fired[0] and (updates.get("reset_intent") or {}).get("phase") == "prepared":
+                        fired[0] = True
+                        if not before: actual(updates, operation, generation)
+                        raise OSError("injected first prepared checkpoint I/O failure")
+                    return actual(updates, operation, generation)
+                ctx.operation_store.publish_reset_state = publish
+                self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0])
+                ctx.operation_store.publish_reset_state = actual
+                initial = ctx.read_state(); owner = (set(initial["command_records"]) - old_records).pop()
+                result = initial["command_records"][owner]["result"]
+                self.assertIs(result["ok"], False); self.assertIs(result["safe_terminal"], before)
+                self.assertEqual(initial["active_operation"] is None, before)
+                self.assertEqual(initial["reset_intent"] is None, before)
+                if not before: self.assertEqual(initial["reset_intent"]["phase"], "prepared")
+                self.assertEqual(self.git(["for-each-ref", "--format=%(refname) %(objectname)"], repo).stdout, refs)
+                self.assertEqual(self.git(["ls-remote", "--heads", "origin"], repo).stdout, remote)
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), original)
+                self.assertEqual(live, {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()})
+                self.git(["reflog", "expire", "--expire=now", "--all"], repo); self.git(["gc", "--prune=now"], repo)
+                actual_run = ctx.run_command; calls = []
+                def observe(command, **kwargs): calls.append(command); return actual_run(command, **kwargs)
+                ctx.run_command = observe
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                self.assertEqual(calls, [])
+                ctx.run_command = actual_run
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertIsNone(ctx.read_state()["active_operation"]); self.assertIsNone(ctx.read_state()["reset_intent"])
+
+    def test_reset_first_checkpoint_refusal_cannot_release_replacement_unknown_fence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+            actual = ctx.operation_store.publish_reset_state; fired = [False]; replacement = str(uuid.uuid4())
+            def publish(updates, operation, generation):
+                if not fired[0] and (updates.get("reset_intent") or {}).get("phase") == "prepared":
+                    fired[0] = True
+                    ctx.write_state({"active_operation": {"command": "unknown", "command_id": replacement, "phase": "recovery_required"}})
+                    raise OSError("first checkpoint failed after ownership replacement")
+                return actual(updates, operation, generation)
+            ctx.operation_store.publish_reset_state = publish
+            self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0])
+            ctx.operation_store.publish_reset_state = actual
+            self.assertEqual(ctx.read_state()["active_operation"]["command_id"], replacement)
+            self.assertFalse(__import__("state").reset_recovery_available(ctx.read_state()))
+            self.assertFalse(ctx.run_reset_git_state_job())
+            self.assertEqual(ctx.read_state()["active_operation"]["command_id"], replacement)
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), original)
+
+    def test_reset_pending_pin_manifest_rebuilds_objects_removed_by_gc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+            actual_publish = ctx.operation_store.publish_reset_state; fired = [False]
+            def publish(updates, op, generation):
+                result = actual_publish(updates, op, generation); intent = updates.get("reset_intent") or {}
+                if (not fired[0] and intent.get("phase") == "aligned" and intent.get("candidate_pins")
+                    and not intent.get("service_candidates")):
+                    fired[0] = True; raise RuntimeError("stop after pending manifest, before any pin")
+                return result
+            ctx.operation_store.publish_reset_state = publish
+            self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0])
+            ctx.operation_store.publish_reset_state = actual_publish
+            intent = ctx.read_state()["reset_intent"]
+            self.assertEqual(intent["service_candidates"], {})
+            oid = intent["candidate_pins"]["ha-ops/ha-live"]
+            self.git(["reflog", "expire", "--expire=now", "--all"], repo); self.git(["gc", "--prune=now"], repo)
+            self.assertNotEqual(ctx.run_command(["git", "cat-file", "-e", oid], cwd=repo).returncode, 0)
+            ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+            self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+            self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+            self.assertIsNone(ctx.read_state()["reset_intent"])
+
+    def test_reset_mutation_boundary_sweep_survives_prune_and_explicit_reopen(self):
+        boundaries = ("import_after", "pending_after", "pin1_before", "pin1_after", "pin2_before", "pin2_after",
+                      "prepared_after", "local1_before", "local1_after", "local2_before", "local2_after",
+                      "push1_before", "push1_ack", "push2_before", "push2_ack", "complete_after",
+                      "terminal_before", "terminal_after", "retire_before")
+        for boundary in boundaries:
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                actual_run = ctx.run_command; actual_publish = ctx.operation_store.publish_reset_state; actual_update = ctx.update_command
+                fired = [False]; counts = {"pin": 0, "local": 0, "push": 0}
+                live = {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()}
+                def stop(): fired[0] = True; raise RuntimeError("injected mutation boundary: " + boundary)
+                def run(command, **kwargs):
+                    label = None
+                    if command[:3] == ["git", "fetch", "--no-tags"]: label = "import"
+                    if command[:3] == ["git", "update-ref", "--no-deref"] and len(command) > 3:
+                        if command[3].startswith("refs/ha-ops/reset-candidates/"):
+                            counts["pin"] += 1; label = "pin" + str(counts["pin"])
+                        elif command[3].startswith("refs/heads/ha-ops/"):
+                            counts["local"] += 1; label = "local" + str(counts["local"])
+                        elif command[3] == "-d": label = "retire"
+                    if command[:2] == ["git", "push"]:
+                        counts["push"] += 1; label = "push" + str(counts["push"])
+                    if not fired[0] and boundary == str(label) + "_before": stop()
+                    result = actual_run(command, **kwargs)
+                    if not fired[0] and boundary in {str(label) + "_after", str(label) + "_ack"}: stop()
+                    return result
+                def publish(updates, op, generation):
+                    result = actual_publish(updates, op, generation)
+                    intent = updates.get("reset_intent") or {}
+                    label = ("pending" if intent.get("phase") == "aligned" and intent.get("candidate_pins") and not intent.get("service_candidates")
+                             else "prepared" if intent.get("phase") == "services_prepared"
+                             else "complete" if intent.get("phase") == "complete" else None)
+                    if not fired[0] and boundary == str(label) + "_after": stop()
+                    return result
+                def update(owner, status, result=None):
+                    if status == "terminal" and not fired[0] and boundary == "terminal_before": stop()
+                    record = actual_update(owner, status, result)
+                    if status == "terminal" and not fired[0] and boundary == "terminal_after": stop()
+                    return record
+                ctx.run_command = run; ctx.operation_store.publish_reset_state = publish; ctx.update_command = update
+                try:
+                    ctx.run_reset_git_state_job()
+                except RuntimeError as exc:
+                    self.assertIn("injected mutation boundary", str(exc))
+                finally:
+                    ctx.run_command = actual_run; ctx.operation_store.publish_reset_state = actual_publish; ctx.update_command = actual_update
+                self.assertTrue(fired[0])
+                intent = ctx.read_state()["reset_intent"]
+                if boundary == "retire_before":
+                    self.assertEqual(ctx.read_state()["last_status"], "success")
+                    self.assertIsNone(intent)
+                self.git(["reflog", "expire", "--expire=now", "--all"], repo)
+                self.git(["gc", "--prune=now"], repo)
+                if intent and intent["service_candidates"]:
+                    for oid in intent["service_candidates"].values(): self.git(["cat-file", "-e", oid], repo)
+                startup_calls = []
+                def observe(command, **kwargs): startup_calls.append(command); return actual_run(command, **kwargs)
+                ctx.run_command = observe
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                self.assertEqual(startup_calls, [])
+                ctx.run_command = actual_run
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/main"], repo).stdout.split()[0], target)
+                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertEqual(live, {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()})
+                self.assertIsNone(ctx.read_state()["reset_intent"]); self.assertIsNone(ctx.read_state()["active_operation"])
+                self.assertEqual(self.git(["for-each-ref", "--format=%(refname)", "refs/ha-ops/reset-candidates"], repo).stdout.strip(), "")
+
+    def test_reset_scratch_cleanup_substeps_keep_recovery_authority(self):
+        for boundary in ("payload_partial", "marker_before", "marker_after", "rmdir_before", "rmdir_after"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                import reset_git
+                actual_rm = reset_git.shutil.rmtree; actual_unlink = Path.unlink; actual_rmdir = Path.rmdir
+                fired = [False]
+                def rm(path, *args, **kwargs):
+                    if not fired[0] and boundary == "payload_partial" and Path(path).parent.parent.name == "reset-builds":
+                        fired[0] = True
+                        file = next(child for child in Path(path).rglob("*") if child.is_file() and not child.is_symlink())
+                        actual_unlink(file)
+                        raise OSError("injected partial payload removal")
+                    return actual_rm(path, *args, **kwargs)
+                def unlink(path, *args, **kwargs):
+                    if not fired[0] and path.name == "owner.json" and boundary.startswith("marker_"):
+                        fired[0] = True
+                        if boundary == "marker_after": actual_unlink(path, *args, **kwargs)
+                        raise OSError("injected marker retirement")
+                    return actual_unlink(path, *args, **kwargs)
+                def rmdir(path, *args, **kwargs):
+                    if not fired[0] and path.parent.name == "reset-builds" and boundary.startswith("rmdir_"):
+                        fired[0] = True
+                        if boundary == "rmdir_after": actual_rmdir(path, *args, **kwargs)
+                        raise OSError("injected empty directory retirement")
+                    return actual_rmdir(path, *args, **kwargs)
+                reset_git.shutil.rmtree = rm; Path.unlink = unlink; Path.rmdir = rmdir
+                try: self.assertFalse(ctx.run_reset_git_state_job())
+                finally: reset_git.shutil.rmtree = actual_rm; Path.unlink = actual_unlink; Path.rmdir = actual_rmdir
+                self.assertTrue(fired[0])
+                intent = ctx.read_state()["reset_intent"]
+                self.assertEqual(intent["phase"], "services_prepared")
+                scratch = ctx.work_dir / "reset-builds" / intent["flow_id"]
+                if scratch.exists() and any(scratch.iterdir()): self.assertTrue((scratch / "owner.json").is_file())
+                self.git(["reflog", "expire", "--expire=now", "--all"], repo); self.git(["gc", "--prune=now"], repo)
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                self.assertEqual(list((ctx.work_dir / "reset-builds").iterdir()), [])
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+
+    def test_reset_pin_retirement_receipt_failure_preserves_success(self):
+        for boundary in ("before", "after"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                actual = ctx.operation_store.settle_reset_pin_cleanup; fired = [False]
+                def settle(owner, cleanup):
+                    if not fired[0]:
+                        fired[0] = True
+                        if boundary == "after": actual(owner, cleanup)
+                        raise RuntimeError("injected cleanup receipt failure")
+                    return actual(owner, cleanup)
+                ctx.operation_store.settle_reset_pin_cleanup = settle
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                self.assertTrue(fired[0]); self.assertEqual(ctx.read_state()["last_status"], "success")
+                self.assertIsNone(ctx.read_state()["active_operation"]); self.assertIsNone(ctx.read_state()["reset_intent"])
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                for record in ctx.read_state()["command_records"].values():
+                    if record.get("command") == "reset_git_state" and record.get("result", {}).get("ok") is True:
+                        self.assertIsNone(record["result"].get("reset_candidate_cleanup"))
+                self.assertEqual(self.git(["for-each-ref", "--format=%(refname)", "refs/ha-ops/reset-candidates"], repo).stdout.strip(), "")
+
+    def test_reset_pin_retirement_preserves_foreign_ref_and_symbolic_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+            import reset_git
+            actual = ctx.run_command
+            def refuse_retirement(command, **kwargs):
+                if command[:4] == ["git", "update-ref", "--no-deref", "-d"]:
+                    return subprocess.CompletedProcess(command, 1, "", "injected retirement refusal")
+                return actual(command, **kwargs)
+            ctx.run_command = refuse_retirement
+            self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+            ctx.run_command = actual
+            record = next(record for record in ctx.read_state()["command_records"].values() if record.get("result", {}).get("reset_candidate_cleanup"))
+            cleanup = record["result"]["reset_candidate_cleanup"]
+            refs = {name: reset_git.candidate_pin_ref(cleanup["flow_id"], name, oid) for name, oid in cleanup["candidates"].items()}
+            live_ref = refs["ha-ops/ha-live"]; base_ref = refs["ha-ops/base"]
+            self.git(["update-ref", live_ref, original], repo)
+            self.git(["symbolic-ref", base_ref, "refs/heads/main"], repo)
+            reset_git.retire_completed_candidate_pins(ctx)
+            self.assertEqual(self.git(["rev-parse", live_ref], repo).stdout.strip(), original)
+            self.assertEqual(self.git(["symbolic-ref", base_ref], repo).stdout.strip(), "refs/heads/main")
+            self.assertIsNone(ctx.read_state()["command_records"][record["command_id"]]["result"]["reset_candidate_cleanup"])
+            self.assertEqual(ctx.read_state()["last_status"], "success")
+            self.assertIsNone(ctx.read_state()["active_operation"])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+
+    def test_reset_scratch_bootstrap_and_foreign_paths_are_retryable(self):
+        for kind in ("mkdir_after", "marker_before", "marker_partial", "marker_after", "foreign", "symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                actual_write = Path.write_text; actual_mkdir = Path.mkdir
+                fired = [False]; foreign = []
+                def write(path, content, *args, **kwargs):
+                    if path.name == "owner.json" and not fired[0] and kind.startswith("marker_"):
+                        fired[0] = True
+                        if kind == "marker_partial": actual_write(path, "partial marker owned by no verified flow"); foreign.append(path)
+                        if kind == "marker_after": actual_write(path, content, *args, **kwargs)
+                        raise OSError("injected marker write boundary")
+                    return actual_write(path, content, *args, **kwargs)
+                def mkdir(path, *args, **kwargs):
+                    result = actual_mkdir(path, *args, **kwargs)
+                    if not fired[0] and path.parent.name == "reset-builds" and kind == "mkdir_after":
+                        fired[0] = True; raise OSError("injected mkdir boundary")
+                    return result
+                if kind in {"foreign", "symlink"}:
+                    real_publish = ctx.operation_store.publish_reset_state
+                    def publish(updates, op, generation):
+                        result = real_publish(updates, op, generation); intent = updates.get("reset_intent") or {}
+                        if not fired[0] and intent.get("phase") == "aligned":
+                            fired[0] = True; root = ctx.work_dir / "reset-builds"; root.mkdir()
+                            path = root / intent["flow_id"]
+                            if kind == "foreign": path.mkdir(); file = path / "foreign-user-data"; file.write_text("must survive"); foreign.append(file)
+                            else:
+                                dest = ctx.work_dir / "foreign-destination"; dest.mkdir(); file = dest / "foreign-user-data"; file.write_text("must survive")
+                                path.symlink_to(dest, target_is_directory=True); foreign.extend([path, file])
+                        return result
+                    ctx.operation_store.publish_reset_state = publish
+                Path.write_text = write; Path.mkdir = mkdir
+                try: first = ctx.run_reset_git_state_job()
+                finally:
+                    Path.write_text = actual_write; Path.mkdir = actual_mkdir
+                    if kind in {"foreign", "symlink"}: ctx.operation_store.publish_reset_state = real_publish
+                self.assertTrue(fired[0])
+                if kind not in {"foreign", "symlink"}:
+                    self.assertFalse(first)
+                    ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                    self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                else: self.assertTrue(first, ctx.read_state()["last_message"])
+                for path in foreign: self.assertTrue(path.exists() or path.is_symlink())
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertIsNone(ctx.read_state()["reset_intent"])
+
+    def test_reset_isolated_build_preserves_concurrent_canonical_edits(self):
+        for seam in ("addons", "checkout", "stage"):
+            with self.subTest(seam=seam), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+                actual = ctx.run_command; get_addons = ctx.get_installed_addons
+                fired = [False]; checkouts = [0]; pushes = []
+                path = repo / "homeassistant/configuration.yaml"
+                def edit():
+                    fired[0] = True; path.write_text("concurrent user bytes must survive\n")
+                def addons():
+                    result = get_addons()
+                    if seam == "addons": edit()
+                    return result
+                def run(command, **kwargs):
+                    result = actual(command, **kwargs)
+                    if command == ["git", "checkout", "main"] and Path(kwargs.get("cwd")) == repo:
+                        checkouts[0] += 1
+                        if seam == "checkout" and checkouts[0] == 2: edit()
+                    if seam == "stage" and command[:3] == ["git", "add", "-A"] and not fired[0]: edit()
+                    if command[:2] == ["git", "push"]: pushes.append(command)
+                    return result
+                ctx.get_installed_addons = addons; ctx.run_command = run
+                self.assertFalse(ctx.run_reset_git_state_job())
+                self.assertTrue(fired[0]); self.assertEqual(pushes, [])
+                self.assertEqual(path.read_text(), "concurrent user bytes must survive\n")
+                self.assertIsNotNone(ctx.read_state()["reset_intent"])
+                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+
+    def test_reset_isolated_build_failures_resume_after_real_store_reopen(self):
+        for seam in ("stage", "commit"):
+            with self.subTest(seam=seam), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                actual = ctx.run_command; fired = [False]
+                def run(command, **kwargs):
+                    matches = (seam == "stage" and command[:3] == ["git", "add", "-A"]
+                               or seam == "commit" and "commit" in command and command[-1] == "Reset HA live export")
+                    if matches and not fired[0]:
+                        fired[0] = True
+                        raise RuntimeError("injected isolated export construction failure")
+                    return actual(command, **kwargs)
+                ctx.run_command = run
+                self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0])
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertEqual(list((ctx.work_dir / "reset-builds").iterdir()), [])
+                self.assertEqual(ctx.read_state()["reset_intent"]["phase"], "aligned")
+                ctx.run_command = actual
+                # A hard process death may leave only this isolated owned tree;
+                # startup does nothing, and the next explicit successor reaps it.
+                intent = ctx.read_state()["reset_intent"]
+                orphan = ctx.work_dir / "reset-builds" / intent["flow_id"]
+                orphan.mkdir()
+                (orphan / "owner.json").write_text(json.dumps({"schema": 1, "flow_id": intent["flow_id"],
+                    "identity": intent["identity"], "owner_id": intent["owner_id"]}))
+                (orphan / "incomplete-generated-export").write_text("owned scratch only")
+                before = self.git(["show-ref"], repo).stdout
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path); ctx.repair_startup_state()
+                self.assertEqual(self.git(["show-ref"], repo).stdout, before)
+                self.assertTrue(orphan.exists())
+                self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                self.assertEqual(self.repo_status(repo), "")
+                self.assertEqual(list((ctx.work_dir / "reset-builds").iterdir()), [])
+
+    def test_reset_immutable_builder_refuses_concurrent_local_user_ref(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+            actual = ctx.run_command; fired = [False]; pushes = []; concurrent = [None]
+            def run(command, **kwargs):
+                if command[:4] == ["git", "checkout", "-B", "ha-ops/ha-live"] and not fired[0]:
+                    fired[0] = True
+                    tree = self.git(["rev-parse", target + "^{tree}"], repo).stdout.strip()
+                    concurrent[0] = self.git(["commit-tree", tree, "-p", target, "-m", "concurrent C"], repo).stdout.strip()
+                    self.git(["update-ref", "refs/heads/main", concurrent[0], target], repo)
+                if command[:2] == ["git", "push"]: pushes.append(command)
+                return actual(command, **kwargs)
+            ctx.run_command = run
+            self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0]); self.assertEqual(pushes, [])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), concurrent[0])
+            self.assertIsNotNone(ctx.read_state()["reset_intent"])
+
+    def test_reset_final_checkout_rechecks_remote_before_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+            actual = ctx.run_command; fired = [False]; concurrent = [None]
+            def run(command, **kwargs):
+                result = actual(command, **kwargs)
+                if (command == ["git", "checkout", "main"] and not fired[0]
+                    and (ctx.read_state()["reset_intent"] or {}).get("phase") == "publishing"):
+                    fired[0] = True; seed = ctx.dev_harness_root / "seed-repo"
+                    (seed / "homeassistant/configuration.yaml").write_text("# final remote C\ndefault_config:\n")
+                    self.git_commit_all(seed, "Remote C during final checkout"); self.git(["push", "origin", "main"], seed)
+                    concurrent[0] = self.git(["rev-parse", "main"], seed).stdout.strip()
+                return result
+            ctx.run_command = run
+            self.assertFalse(ctx.run_reset_git_state_job()); self.assertTrue(fired[0])
+            self.assertIsNotNone(ctx.read_state()["active_operation"]); self.assertIsNotNone(ctx.read_state()["reset_intent"])
+            ctx.run_command = actual
+            self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), concurrent[0])
+            self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + target], repo).stdout.strip(), target)
+
+    def test_reset_partial_candidate_checkpoint_refuses_before_any_git_work(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+            real_publish = ctx.operation_store.publish_reset_state; fired = [False]
+            def publish(updates, op, generation):
+                result = real_publish(updates, op, generation)
+                if (updates.get("reset_intent") or {}).get("phase") == "aligned" and not fired[0]:
+                    fired[0] = True; raise RuntimeError("stop at aligned")
+                return result
+            ctx.operation_store.publish_reset_state = publish; self.assertFalse(ctx.run_reset_git_state_job())
+            ctx.operation_store.publish_reset_state = real_publish
+            intent = ctx.read_state()["reset_intent"]; intent["service_candidates"] = {"ha-ops/ha-live": target}
+            ctx.write_state({"reset_intent": intent})
+            calls = []; actual = ctx.run_command
+            def run(command, **kwargs): calls.append(command); return actual(command, **kwargs)
+            ctx.run_command = run
+            self.assertFalse(ctx.run_reset_git_state_job()); self.assertEqual(calls, [])
+            self.assertEqual(ctx.read_state()["reset_intent"]["phase"], "aligned")
+
+    def test_reset_stale_worker_stops_after_blocking_git_before_next_effect(self):
+        for boundary in ("fetch", "build", "push"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+                actual = ctx.run_command
+                fired = [False]
+                pushes = []
+                def run(command, **kwargs):
+                    if command[:2] == ["git", "push"]: pushes.append(command)
+                    result = actual(command, **kwargs)
+                    matches = (boundary == "fetch" and command[:3] == ["git", "fetch", "origin"]
+                               or boundary == "build" and command[:4] == ["git", "checkout", "-B", "ha-ops/ha-live"]
+                               or boundary == "push" and command[:2] == ["git", "push"])
+                    if matches and not fired[0]:
+                        fired[0] = True
+                        ctx.write_state({**__import__("state").ALL_PREVIEW_CLEAR_UPDATES, "last_message": "newer owner's log"})
+                    return result
+                ctx.run_command = run
+                self.assertFalse(ctx.run_reset_git_state_job())
+                self.assertTrue(fired[0])
+                self.assertEqual(ctx.read_state()["last_message"], "newer owner's log")
+                self.assertIsNotNone(ctx.read_state()["active_operation"])
+                self.assertLessEqual(len(pushes), 1 if boundary == "push" else 0)
+                self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/main"], repo).stdout.split()[0], target)
+                if boundary == "fetch": self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), original)
+
+    def test_reset_preservation_failures_never_align_or_push(self):
+        for kind in ("ref_failure", "collision", "symbolic", "missing_remote", "fetch_failure", "branch_alias"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp), True)
+                recovery = "refs/ha-ops/recovery/reset/" + original
+                if kind == "collision":
+                    self.git(["update-ref", recovery, target], repo)
+                if kind == "symbolic":
+                    self.git(["symbolic-ref", recovery, "refs/heads/main"], repo)
+                if kind == "missing_remote":
+                    self.git(["--git-dir", str(ctx.dev_harness_root / "remote.git"), "update-ref", "-d", "refs/heads/main"], repo)
+                    self.git(["update-ref", "-d", "refs/remotes/origin/main"], repo)
+                if kind == "branch_alias":
+                    options = ctx.load_options(); options["repo_branch"] = "ha-ops/ha-live"; ctx.options_path.write_text(json.dumps(options))
+                before = self.git(["show-ref"], repo).stdout
+                remote_before = self.git(["ls-remote", "origin"], repo).stdout
+                actual = ctx.run_command
+                def run(command, **kwargs):
+                    if (kind == "ref_failure" and command[:4] == ["git", "update-ref", "--no-deref", recovery]
+                        or kind == "fetch_failure" and command[:3] == ["git", "fetch", "origin"]):
+                        return subprocess.CompletedProcess(command, 1, "", "injected refusal")
+                    return actual(command, **kwargs)
+                ctx.run_command = run
+                self.assertFalse(ctx.run_reset_git_state_job())
+                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), original)
+                self.assertEqual(self.git(["ls-remote", "origin"], repo).stdout, remote_before)
+                self.assertEqual(self.git(["branch", "--show-current"], repo).stdout.strip(), "ha-ops/ha-live")
+                self.assertEqual(self.git(["show-ref"], repo).stdout, before)
+
+    def test_reset_remote_main_race_requires_explicit_successor_and_preserves_intermediate_tip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+            actual = ctx.run_command
+            fired = [False]
+            new_target = [None]
+            def run(command, **kwargs):
+                if command[:2] == ["git", "push"] and not fired[0]:
+                    fired[0] = True
+                    seed = ctx.dev_harness_root / "seed-repo"
+                    (seed / "homeassistant/configuration.yaml").write_text("# C\ndefault_config:\n")
+                    self.git_commit_all(seed, "remote C racing reset")
+                    self.git(["push", "origin", "main"], seed)
+                    new_target[0] = self.git(["rev-parse", "main"], seed).stdout.strip()
+                return actual(command, **kwargs)
+            ctx.run_command = run
+            self.assertFalse(ctx.run_reset_git_state_job())
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+            self.assertIsNotNone(ctx.read_state()["reset_intent"])
+            ctx.run_command = actual
+            self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+            self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), new_target[0])
+            for tip in (original, target):
+                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + tip], repo).stdout.strip(), tip)
+
+    def test_reset_checkpoint_restart_lost_ack_and_service_race(self):
+        for boundary in ("prepared", "preserved", "aligned", "publishing", "complete", "lost_ack", "service_race"):
+            with self.subTest(boundary=boundary), tempfile.TemporaryDirectory() as tmp:
+                _fixture, ctx, repo, original, target = self.reset_fixture(Path(tmp))
+                real_publish = ctx.operation_store.publish_reset_state
+                real_run = ctx.run_command
+                fired = [False]
+                def publish(updates, op, generation):
+                    result = real_publish(updates, op, generation)
+                    if not fired[0] and (updates.get("reset_intent") or {}).get("phase") == boundary:
+                        fired[0] = True
+                        raise RuntimeError("simulated persisted-boundary process stop")
+                    return result
+                def run(command, **kwargs):
+                    if command[:2] == ["git", "push"] and not fired[0] and boundary in {"lost_ack", "service_race"}:
+                        fired[0] = True
+                        if boundary == "service_race":
+                            self.git(["--git-dir", str(ctx.dev_harness_root / "remote.git"), "update-ref", "refs/heads/ha-ops/ha-live", original], repo)
+                        result = real_run(command, **kwargs)
+                        if boundary == "lost_ack":
+                            raise RuntimeError("simulated lost successful push ACK")
+                        return result
+                    return real_run(command, **kwargs)
+                ctx.operation_store.publish_reset_state = publish
+                ctx.run_command = run
+                self.assertFalse(ctx.run_reset_git_state_job())
+                self.assertTrue(fired[0])
+                ctx.operation_store.publish_reset_state = real_publish
+                ctx.run_command = real_run
+                # Genuine store reopen/startup; no Git command may run automatically.
+                ctx.operation_store = ctx.operation_store.__class__(ctx.state_path)
+                before = self.git(["show-ref"], repo).stdout
+                ctx.repair_startup_state()
+                self.assertEqual(self.git(["show-ref"], repo).stdout, before)
+                self.assertTrue(__import__("state").reset_recovery_available(ctx.read_state()))
+                if boundary == "service_race":
+                    self.assertFalse(ctx.run_reset_git_state_job())
+                    self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/ha-ops/ha-live"], repo).stdout.split()[0], original)
+                else:
+                    self.assertTrue(ctx.run_reset_git_state_job(), ctx.read_state()["last_message"])
+                    self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                    self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+                    self.assertEqual(len(self.git(["for-each-ref", "--format=%(refname)", "refs/ha-ops/recovery/reset"], repo).stdout.splitlines()), 1)
+
     def test_unpushed_local_commit_survives_rejected_repo_reset(self):
         server = load_server()
         with tempfile.TemporaryDirectory() as tmp:
@@ -12119,7 +12733,6 @@ devices:
         actions = (
             ("preview", "run_preview_job"),
             ("apply", "run_apply_job"),
-            ("reset", "run_reset_git_state_job"),
         )
         for action, method in actions:
             with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:

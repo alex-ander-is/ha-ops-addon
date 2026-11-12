@@ -137,3 +137,35 @@ const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
     result = subprocess.run([node, "-e", script, runner, stage], capture_output=True, text=True, timeout=15)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(result.stdout)["result"] == "passed"
+
+
+def test_reset_restart_update_expires_both_preview_families_without_replay(tmp_path):
+    import importlib.util
+    import sys
+    app = Path(__file__).resolve().parents[1] / "app"
+    sys.path.insert(0, str(app))
+    import state
+    spec = importlib.util.spec_from_file_location("reset_preview_fixture", app.parent / "tests/browser/reset_git_state_fixture.py")
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    store = state.OperationStore(tmp_path / "state.json")
+    store.write_state({**fixture.legacy_updates(), "last_preview_paths": ["old"], "last_save_preview_paths": ["old"],
+                       "apply_preview_selected_paths": ["old"], "save_preview_selected_paths": ["old"],
+                       "apply_preview_resolutions": {"old": "ha"}, "save_preview_resolutions": {"old": "git"},
+                       "apply_backup_refusal": {"old": True}, "preview_backup_refusal": {"old": True}})
+    store = state.OperationStore(store.path)
+    store.begin_repair(); store.reconcile_startup_fence(); store.mark_repaired()
+    result = store.read_state()
+    assert state.reset_recovery_available(result)
+    for key in ("last_preview_paths", "last_save_preview_paths", "apply_preview_selected_paths", "save_preview_selected_paths"):
+        assert result[key] == []
+    for key in ("apply_preview_resolutions", "save_preview_resolutions"):
+        assert result[key] == {}
+    assert result["apply_backup_refusal"] is None
+    assert result["preview_backup_refusal"] is None
+    assert result["command_records"] == store.read_state()["command_records"]
+    assert result["active_operation"]["phase"] == "recovery_required"
+    assert result["last_action"] == "reset_git_state"
+    # Version repair runs the same fence-preserving startup route, with no worker.
+    store.begin_repair(); store.reconcile_startup_fence(); store.mark_repaired()
+    assert state.reset_recovery_available(store.read_state())

@@ -135,6 +135,7 @@ class AppContext:
     def claim_command(self, command_id, command, generation, payload, validate=None, immediate=False):
         return self.operation_store.claim_command(
             command_id, command, generation, payload, validate=validate, immediate=immediate,
+            reset_branch=self.load_options().get("repo_branch", "main") if command == "reset_git_state" else None,
         )
 
     def update_command(self, command_id, status, result=None):
@@ -1377,8 +1378,8 @@ class AppContext:
     def run_save_preview_job(self, lock_acquired=False):
         return job_logic.run_save_preview_job(self.job_deps(), lock_acquired=lock_acquired)
 
-    def run_reset_git_state_job(self, lock_acquired=False):
-        return job_logic.run_reset_git_state_job(self.job_deps(), lock_acquired=lock_acquired)
+    def run_reset_git_state_job(self, command_id=None, lock_acquired=False):
+        return job_logic.run_reset_git_state_job(self, command_id=command_id, lock_acquired=lock_acquired)
 
     def build_disk_usage_summary(self):
         docker_capability_status = self.docker_build_cache_capability()

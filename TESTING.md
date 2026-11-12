@@ -1,5 +1,35 @@
 # Testing HA Ops
 
+## Reset Git State recovery
+
+The portable regressions in `test_server.py` reproduce the published A / forced
+sibling B divergence and the exact legacy Reset ledger (accepted generation 304,
+current generation 305). They exercise actual HTTP/shared WebSocket dispatch,
+clean and service-branch checkouts, durable local recovery refs, explicit service
+leases, restart checkpoints, lost push acknowledgment, races, and dirty-file
+refusals. `test_client_contract.py` covers exact admission and stale ownership;
+`test_preview_decisions.py` covers restart/update decision expiry.
+
+For rendered proof, start `ha-ops/tests/browser/reset_git_state_fixture.py` with
+all four fixture Git identity variables below. It prints a disposable localhost
+URL and uses the rebuilt shipped bundle and actual production Reset worker.
+Run the async function in `ha-ops/tests/browser/reset-git-state.mjs` through the
+configured shared-profile Playwright MCP `browser_run_code`, replacing only its
+fixture URL and external artifact directory placeholders. It records/closes its
+own tab, checks native confirmation and disabled styles, executes recovery,
+verifies actual Git/live bytes, and reloads with empty decisions. The fixture's
+case/gate/proof routes are registered only in that test process. Stop its owned
+process after verification; SIGTERM removes only its own temporary root.
+
+```sh
+GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+PYTHONDONTWRITEBYTECODE=1 python3 ha-ops/tests/browser/reset_git_state_fixture.py
+```
+
+The foreman owns the final isolated Linux matrix. No live HA or configured
+production remote is a test target.
+
 ## Dormant folder discovery (6.19)
 
 Use `test_native_scope.py` for state-only discovery admission, canonical prefix
