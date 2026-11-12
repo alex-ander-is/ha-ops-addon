@@ -26,7 +26,7 @@ class PrePushHookTests(unittest.TestCase):
         python = self.fake_bin / "python3"
         python.write_text(
             '#!/bin/sh\n'
-            'if [ "$1" = "-m" ]; then\n'
+            'if [ "$1" = "dev/test_runner.py" ]; then\n'
             '  printf "%s\\n" "$*" >> "$PYTHON_COMMAND_LOG"\n'
             '  exit 0\n'
             'fi\n'
@@ -109,7 +109,7 @@ class PrePushHookTests(unittest.TestCase):
         self.assertIn("Running parallel test group", result.stdout)
         self.assertEqual(
             self.python_command_log.read_text(),
-            "-m pytest -n auto ha-ops/tests\n",
+            "dev/test_runner.py -- -n auto ha-ops/tests\n",
         )
 
     def test_rejects_push_when_remote_main_moved(self):

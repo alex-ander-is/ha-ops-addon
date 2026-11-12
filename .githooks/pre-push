@@ -98,4 +98,4 @@ fi
 
 echo "Running HA Ops tests before push..."
 echo "Running parallel test group..."
-python3 -m pytest -n auto ha-ops/tests
+python3 dev/test_runner.py -- -n auto ha-ops/tests

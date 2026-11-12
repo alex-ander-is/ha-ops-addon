@@ -1,5 +1,80 @@
 # Testing HA Ops
 
+## Protected normal test execution
+
+Use `python3 dev/test_runner.py -- <pytest arguments>` for normal host tests.
+Pre-push keeps the complete original suite and uses this runner. It forces
+`faulthandler_timeout=0` after configuration, environment and CLI overrides,
+keeps fatal faulthandler enabled, and disables xdist worker restarts and known
+retry plugins. Selectors, worker count, capture and pytest exit semantics remain
+pytest's. The pinned development dependencies are required. CLI `@file` arguments
+(one argument per line) and the positional `--` terminator are supported.
+Config/PYTEST_ADDOPTS terminators or argument files, `-o addopts=...`, disabled
+required plugins, disabled autoload and retry options are refused with exit 2.
+
+The external POSIX supervisor has a 1800-second whole-run deadline; an explicit
+positive finite `--deadline SECONDS` before the runner's `--` changes it.
+Timeout/interrupt stops only the owned process group with bounded TERM/KILL and
+pipe draining; it never requests a timed frame dump. A direct child's negative
+raw returncode identifies its signal. Docker client status, container ExitCode
+and OOMKilled are separate observations; exit 137 alone proves no signal.
+SIGKILL cannot provide a final child traceback. Owned leader PID/PGID identify
+only that invocation and never authorize later signaling of recycled IDs. Signal,
+reap or capture refusal remains red with bounded errors and independent cleanup
+and finalization attempts; cleanup is recorded incomplete/unknown when unproven. Progress is the last observed
+terminal milestone, not proof of the exact crashing test. Detached host sessions
+are outside process-group containment; the Linux container adds an ownership
+boundary. This prevents the reproduced timed-dump trigger on these paths, not
+arbitrary native memory defects or test code directly calling faulthandler.
+
+Each run prints a unique private evidence directory under
+`dev/virtualization/.local/diagnostics` (override with `--artifacts PATH` on the
+host). Its atomic manifest records running/final status, deadline, raw status,
+versions and capture limits. Separate stdout/stderr prefix files retain at most 1 MiB
+each, with separate 64 KiB redacted `.tail.log` files retaining final progress;
+capture keeps draining after the prefix cap. Console writes are nonblocking and
+continue independently of file limits; stalled sinks drop output without queues
+or writer threads, and the manifest records written/dropped byte counts. Initial
+path notices and final error notices follow the same bounded console policy. Redaction keeps finite per-stream key/separator/quoted-value state across reads
+and lines, including pretty JSON, blank gaps and unfinished quotes. Lines over
+8 KiB quarantine the unresolved remainder of that stream instead of releasing
+possible credentials; unresolved structured/block credential values use the same
+conservative omission. The manifest records this quarantine. Other streams remain
+independent. Complete quoted/keyed password/token/secret/API-key values, Authorization
+Bearer/Basic credentials are redacted before console and files. URLs containing
+userinfo or any recognized credential label anywhere in their raw region are
+omitted whole; ordinary credential-free URLs and surrounding progress remain.
+Arbitrary unlabelled secrets
+cannot be recognized, so use fixture-only inputs. No environment dump is stored.
+Both successful and failed evidence is retained until explicit exact-run cleanup;
+a later run never overwrites it. To remove one reviewed run, remove only its
+printed directory. No automatic retention daemon or broad cleanup is used.
+
+`ha_ops_dev.py run` recognizes `python[3[.VERSION]] -m pytest`, `pytest`, and the
+canonical runner, optionally preceded by `env NAME=VALUE ...`, and applies the
+same policy on ordinary and ext4 routes. It preserves fixture Git identities
+and stores nested evidence on the writable output bind, copying it before owned
+fixture deletion. Unsupported env flags are refused. Outer container logs are
+captured with bounded storage before exact owner-checked removal, including wait
+failure. Arbitrary shell/Python commands are explicit diagnostic opt-outs with
+only the outer container watchdog/evidence. Raw `python3 -m pytest` outside this
+wrapper is also an explicit diagnostic opt-out. The specialized original-App
+runtime qualification harness retains its separately pinned exact-profile
+contract; it is not covered by this canonical-runner guarantee.
+
+Unexpected ordinary crash or hang blocks delivery. Autonomously read the
+preserved output, last progress, raw status, versions and effective configuration;
+isolate test/config/runtime/product versus diagnostic causes with a minimal
+independent reproducer and controls. Check authoritative Python/pytest upstream
+bugs and the project's Backlog, then propose and implement an evidence-backed
+remedy within the agreed scope, including a test rewrite, config/runtime change
+or product fix when supported. Wider outcome changes need user agreement.
+Logging and stopping alone does not finish triage. Never retry until green,
+skip/xfail, raise timeouts or globally label crashes expected to bypass analysis.
+Only an explicitly named isolated crash/stress fixture may pass after its parent
+asserts the intended child's status and retained evidence. There is no global
+expected-crash switch.
+
 ## Reset Git State recovery
 
 The portable regressions in `test_server.py` reproduce the published A / forced
@@ -49,7 +124,7 @@ qualification.
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
   env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
       GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-  python3 -m pytest -p no:cacheprovider -q \
+  python3 dev/test_runner.py -- -p no:cacheprovider -q \
     ha-ops/tests/test_native_scope.py ha-ops/tests/test_native_apply_integration.py
 /Users/purportex/Applications/Playwright/bin/playwright-node \
   ha-ops/tests/browser/folder-scope.mjs
@@ -69,7 +144,7 @@ Use the existing isolated Linux runner; no live HA services or configured remote
 
 ```sh
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
-  python3 -m pytest -p no:cacheprovider -q \
+  python3 dev/test_runner.py -- -p no:cacheprovider -q \
   ha-ops/tests/test_native_apply.py ha-ops/tests/test_native_apply_integration.py
 ```
 
@@ -96,9 +171,9 @@ boundary; record actual final snapshot results before delivery.
 ## Dormant service lifecycle (6.16)
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_services.py
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_server.py -k 'retained_mqtt or declares_mqtt'
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_services.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_services.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_server.py -k 'retained_mqtt or declares_mqtt'
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_services.py
 ```
 
 The focused portable suite checks full frozen inventory, ordering, original
@@ -132,7 +207,7 @@ Run commands from the repository root with the dependencies pinned in
 ## Full verification
 
 ```sh
-python3 -m pytest -n auto ha-ops/tests
+python3 dev/test_runner.py -- -n auto ha-ops/tests
 ```
 
 For the isolated Linux runner, pass fixture-only Git identities explicitly and
@@ -143,7 +218,7 @@ relying on the host Git configuration or accumulating old fixtures on tmpfs:
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
   env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
       GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-  python3 -m pytest -n 2 -p no:cacheprovider \
+  python3 dev/test_runner.py -- -n 2 -p no:cacheprovider \
     -o tmp_path_retention_policy=failed ha-ops/tests \
     -k 'not test_clean_git_checkout_imports_server and not test_generated_frontend_bundle_has_narrow_whitespace_check_exception'
 ```
@@ -152,7 +227,7 @@ The read-only runner input intentionally excludes `.git`. Run the two tests
 that inspect the actual repository from the host checkout instead:
 
 ```sh
-python3 -m pytest -p no:cacheprovider -q \
+python3 dev/test_runner.py -- -p no:cacheprovider -q \
   ha-ops/tests/test_server.py::ServerTests::test_clean_git_checkout_imports_server \
   ha-ops/tests/test_server.py::ServerTests::test_generated_frontend_bundle_has_narrow_whitespace_check_exception
 ```
@@ -186,19 +261,19 @@ pytest items including the preview decision guards (2746 total); remaining
 
 ```sh
 # Server and workflows
-python3 -m pytest -n auto ha-ops/tests/test_server.py
+python3 dev/test_runner.py -- -n auto ha-ops/tests/test_server.py
 # Backups
-python3 -m pytest -n auto ha-ops/tests/test_backup_continuation.py
+python3 dev/test_runner.py -- -n auto ha-ops/tests/test_backup_continuation.py
 # Client commands
-python3 -m pytest ha-ops/tests/test_client_contract.py
+python3 dev/test_runner.py -- ha-ops/tests/test_client_contract.py
 # Preview decisions (requires Node)
-python3 -m pytest ha-ops/tests/test_preview_decisions.py
+python3 dev/test_runner.py -- ha-ops/tests/test_preview_decisions.py
 # Registry and layout
-python3 -m pytest ha-ops/tests/test_registry_diff.py ha-ops/tests/test_heap_layout.py
+python3 dev/test_runner.py -- ha-ops/tests/test_registry_diff.py ha-ops/tests/test_heap_layout.py
 # Release safeguards
-python3 -m pytest ha-ops/tests/test_release_readiness.py ha-ops/tests/test_pre_push_hook.py ha-ops/tests/test_release_script.py
+python3 dev/test_runner.py -- ha-ops/tests/test_release_readiness.py ha-ops/tests/test_pre_push_hook.py ha-ops/tests/test_release_script.py
 # Local virtualization wrapper
-python3 -m pytest ha-ops/tests/test_local_virtualization.py
+python3 dev/test_runner.py -- ha-ops/tests/test_local_virtualization.py
 ```
 
 The smaller groups omit worker startup overhead. Each command can run alone
@@ -206,11 +281,11 @@ in a fresh Python process. For narrower iteration, select a class or name:
 
 ```sh
 # Fast policy matrix without real Git Apply fixtures
-python3 -m pytest ha-ops/tests/test_backup_continuation.py::BackupPolicyTests
+python3 dev/test_runner.py -- ha-ops/tests/test_backup_continuation.py::BackupPolicyTests
 # Save and Apply behavior inside the larger server group
-python3 -m pytest -n auto ha-ops/tests/test_server.py -k 'save or apply'
+python3 dev/test_runner.py -- -n auto ha-ops/tests/test_server.py -k 'save or apply'
 # One independently collected backup counterexample (quote spaces/brackets)
-python3 -m pytest 'ha-ops/tests/test_backup_continuation.py::test_real_retry_rejects_ambiguous_post_creation_inventory_in_either_order[duplicate slug before]'
+python3 dev/test_runner.py -- 'ha-ops/tests/test_backup_continuation.py::test_real_retry_rejects_ambiguous_post_creation_inventory_in_either_order[duplicate slug before]'
 ```
 
 The nine preview decision scenarios run the complete production frontend module
@@ -231,7 +306,7 @@ contract assertions alone cannot establish rendered behavior.
 
 ```sh
 # Portable ordinary-directory fixture: Git mechanics and staging guards only
-python3 -m pytest ha-ops/tests/test_native_topology.py
+python3 dev/test_runner.py -- ha-ops/tests/test_native_topology.py
 # Real Linux bind mounts, full container replacement, persistence and index audit
 python3 ha-ops/tests/integration/run_native_topology.py
 ```
@@ -239,8 +314,8 @@ python3 ha-ops/tests/integration/run_native_topology.py
 Native-tree step 3 has a separate dormant inventory contract:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_inventory.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_inventory.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_inventory.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_inventory.py
 ```
 
 The Linux command is mandatory for step 3's actual `/proc/self/mountinfo`
@@ -252,8 +327,8 @@ No production inventory import, workflow activation or live HA access is used.
 Native-tree step 4 has a separate dormant Git adapter contract:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_git.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_git.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_git.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_git.py
 ```
 
 Both commands use disposable Git/resource fixtures. The Linux command is
@@ -280,8 +355,8 @@ No production import, workflow activation, network or live HA write is used.
 Native-tree step 6.5 has a dormant physical disk/accounting contract:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_disk.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_disk.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_disk.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_disk.py
 ```
 
 The Linux command uses its default Linux `/tmp`; the output bind is virtiofs
@@ -317,10 +392,10 @@ Native-tree step 6.6 adds opt-in writable ext4 qualification without rerunning
 the older native API groups:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_local_virtualization.py ha-ops/tests/test_native_ext4.py ha-ops/tests/test_release_readiness.py
-python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile allocation --recreate --report dev/virtualization/.local/ext4-allocation-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
-python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile bytes --report dev/virtualization/.local/ext4-bytes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
-python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile inodes --report dev/virtualization/.local/ext4-inodes-report.json -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_local_virtualization.py ha-ops/tests/test_native_ext4.py ha-ops/tests/test_release_readiness.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile allocation --recreate --report dev/virtualization/.local/ext4-allocation-report.json -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile bytes --report dev/virtualization/.local/ext4-bytes-report.json -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . --ext4 --ext4-profile inodes --report dev/virtualization/.local/ext4-inodes-report.json -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_ext4.py
 ```
 
 All three real profiles and allocation recreation are required; host skips
@@ -375,8 +450,8 @@ for evidence boundaries and remaining migration blockers.
 ## Inactive native operation state
 
 ```sh
-python3 -m pytest ha-ops/tests/test_native_operations.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_operations.py
+python3 dev/test_runner.py -- ha-ops/tests/test_native_operations.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_operations.py
 # Full container replacement with the same disposable persistent data bind
 python3 dev/virtualization/ha_ops_dev.py run --input . --recreate -- python3 ha-ops/tests/test_native_operations.py --container-recreation
 ```
@@ -393,8 +468,8 @@ Save, Apply or migration. See [the state contract](ha-ops/docs/native-operation-
 ## Metadata candidate evaluation
 
 ```sh
-python3 -m pytest -q ha-ops/tests/test_metadata_evaluation.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_metadata_evaluation.py
+python3 dev/test_runner.py -- -q ha-ops/tests/test_metadata_evaluation.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_metadata_evaluation.py
 ```
 
 The first command runs three portable invalid-outcome guards and explicitly
@@ -444,8 +519,8 @@ splitting them adds collection cost without addressing the measured tail.
 ## Measuring changes
 
 ```sh
-python3 -m pytest -n auto ha-ops/tests --durations=15
-python3 -m pytest -n auto ha-ops/tests/test_backup_continuation.py \
+python3 dev/test_runner.py -- -n auto ha-ops/tests --durations=15
+python3 dev/test_runner.py -- -n auto ha-ops/tests/test_backup_continuation.py \
   -k 'invalid_inventory_families or ambiguous_post_creation or error_response_with_backup_data' \
   --durations=10
 ```
@@ -470,8 +545,8 @@ before an authorized push when the unchanged hook will run the same gate.
 ## Dormant fixed native metadata adapter
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_metadata.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q -s ha-ops/tests/test_native_metadata.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_metadata.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q -s ha-ops/tests/test_native_metadata.py
 ```
 
 Both commands are required for step 6.8. The generic existing Linux image uses
@@ -501,7 +576,7 @@ no live HA query, setup or download is part of this test command:
 
 ```sh
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
-  python3 -m pytest -p no:cacheprovider -n 2 ha-ops/tests/test_native_save.py
+  python3 dev/test_runner.py -- -p no:cacheprovider -n 2 ha-ops/tests/test_native_save.py
 ```
 
 The wrapper uses isolated fixtures and its own cleanup. Candidate coverage spans
@@ -523,8 +598,8 @@ whole-repository/release-readiness gate. See [the candidate contract](ha-ops/doc
 Run portable codec/owner and focused transport checks with bytecode/cache disabled:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_operations.py ha-ops/tests/test_native_publication.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -n 2 ha-ops/tests/test_native_publication.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_operations.py ha-ops/tests/test_native_publication.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -n 2 ha-ops/tests/test_native_publication.py
 ```
 
 The latter uses only the existing qualified local profile, disposable tmpfs Git
@@ -539,8 +614,8 @@ capacity, creates only its dedicated bounded loop fixture outside the applicatio
 container, and removes its exact mount/backing/loop/container afterwards:
 
 ```sh
-python3 dev/virtualization/ha_ops_dev.py run --ext4 --input . -- python3 -m pytest -p no:cacheprovider -s ha-ops/tests/test_native_ext4.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -n 1 ha-ops/tests/test_native_publication.py -k tmpfs_actual_allocation
+python3 dev/virtualization/ha_ops_dev.py run --ext4 --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -s ha-ops/tests/test_native_ext4.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -n 1 ha-ops/tests/test_native_publication.py -k tmpfs_actual_allocation
 ```
 
 The `loose-index-worktree-save` matrix row retains its original semantics and
@@ -590,7 +665,7 @@ NativeSave/Disk/store/publication seams. Run it with the adjacent native groups
 in the existing cached Linux environment:
 
 ```sh
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_scope.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_scope.py
 ```
 
 The portable constructor/codec/forecast-interception checks do not substitute for
@@ -677,8 +752,8 @@ the cached repository-owned Linux runner. No installation, download, live HA or
 configured remote is part of these commands:
 
 ```sh
-PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
-python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 -m pytest -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
+PYTHONDONTWRITEBYTECODE=1 python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
+python3 dev/virtualization/ha_ops_dev.py run --input . -- python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_native_migration.py
 ```
 
 The Linux group proves real SHA-1/SHA-256 index/ref/ignored/pending inventory,
@@ -722,7 +797,7 @@ proofs discard the old UUID and recover only through public diagnostics:
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
   env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
       GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-  python3 -m pytest -n 4 -p no:cacheprovider -q \
+  python3 dev/test_runner.py -- -n 4 -p no:cacheprovider -q \
     -o tmp_path_retention_policy=failed \
     ha-ops/tests/test_native_migration_transition.py
 ```
@@ -743,7 +818,7 @@ focused groups. Use the cached Linux runner and all four fixture identity fields
 python3 dev/virtualization/ha_ops_dev.py run --input . -- \
   env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
       GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
-  python3 -m pytest -p no:cacheprovider -n 2 -q ha-ops/tests/test_native_migration_git_candidate.py
+  python3 dev/test_runner.py -- -p no:cacheprovider -n 2 -q ha-ops/tests/test_native_migration_git_candidate.py
 ```
 
 The real SHA1/SHA256 fixtures prove frozen remote ancestry, independent object

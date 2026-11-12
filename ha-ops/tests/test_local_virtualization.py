@@ -748,6 +748,7 @@ def test_toolchain_symlink_is_never_read_before_host_setup(tmp_path, monkeypatch
     tools_dir.mkdir(parents=True)
     copied_wrapper = tools_dir / "ha_ops_dev.py"
     copied_wrapper.write_bytes(SOURCE.read_bytes())
+    (repository / "dev/test_runner.py").write_bytes((SOURCE.parent.parent / "test_runner.py").read_bytes())
     outside = tmp_path / "outside-toolchain.json"
     outside.write_text(json.dumps({**pinned_toolchain(), "docker_cli": "outside-value"}))
     (tools_dir / "toolchain.json").symlink_to(outside)
@@ -1485,8 +1486,14 @@ def test_generic_cleanup_failure_preserves_fixture_and_closes_anchor(tmp_path, m
         captured.append(owned)
         return owned
     monkeypatch.setattr(subject, "OwnedDirectory", capture)
-    with pytest.raises(subject.Refused, match="remove failed"):
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "evidence")
+    with pytest.raises(subject.Refused, match="create failed"):
         subject.generic_run(Path("input"), ["true"])
+    manifest = json.loads(next(subject.DIAGNOSTICS.glob("run-*/manifest.json")).read_text())
+    assert manifest["failure"] == "Refused"
+    assert manifest["status"] == "failed"
+    assert manifest["primary_error"] == "create failed"
+    assert any("container cleanup" in error and "remove failed" in error for error in manifest["cleanup_errors"])
     assert len(list(subject.RUNS.iterdir())) == 1
     assert all(owned.root is None for owned in captured)
 

@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tarfile
+import importlib.util
 import uuid
 
 
@@ -45,6 +46,11 @@ BUILD_INPUTS = {
     "container_probe.py": ROOT / "ha-ops/tests/integration/container_probe.py",
 }
 TOOLCHAIN = {}
+_guard_spec = importlib.util.spec_from_file_location("ha_ops_test_guard", ROOT / "dev/test_runner.py")
+guard = importlib.util.module_from_spec(_guard_spec)
+_guard_spec.loader.exec_module(guard)
+DIAGNOSTICS = LOCAL / "diagnostics"
+
 
 
 class Refused(RuntimeError):
@@ -125,6 +131,19 @@ def active_context():
 
 
 def docker(*args, input=None, timeout=600, check=True):
+    if args and args[0] in {"logs", "wait"}:
+        code, path = guard.supervise(["docker", "--host", ENDPOINT, *args], env=docker_env(),
+                                     timeout=min(timeout, 10) if args[0] == "logs" else timeout, artifact_root=DIAGNOSTICS,
+                                     metadata={"kind": "docker_" + args[0], "_console": False})
+        manifest = json.loads((path / "manifest.json").read_text())
+        result = subprocess.CompletedProcess(args, manifest.get("raw_returncode"), (path / "stdout.log").read_bytes(),
+                                             (path / "stderr.log").read_bytes())
+        result.supervisor_exit_code = code
+        result.watchdog_reason = manifest.get("reason")
+        result.evidence_path = str(path)
+        if code and check:
+            raise Refused("Bounded Docker " + args[0] + " failed; evidence=" + str(path))
+        return result
     return invoke(["docker", "--host", ENDPOINT, *args], env=docker_env(), input=input,
                   timeout=timeout, check=check)
 
@@ -439,7 +458,7 @@ def setup(*, exact_sources=()):
 
 
 def owned_container(name, run_id):
-    result = docker("container", "inspect", name, check=False)
+    result = docker("container", "inspect", name, timeout=10, check=False)
     if result.returncode:
         if "no such" in result.stderr.decode(errors="replace").lower():
             return None
@@ -460,7 +479,7 @@ def remove_owned(name, run_id):
     failures = []
     errors = (OSError, RuntimeError, subprocess.SubprocessError, ValueError)
     try:
-        docker("rm", "--force", container_id)
+        docker("rm", "--force", container_id, timeout=10)
     except errors as error:
         failures.append(f"removal: {error}")
     try:
@@ -713,9 +732,108 @@ def copy_input(source, destination, *, expected=None):
         owned.close()
 
 
+def protected_command(command):
+    """Normalize only documented argv forms; shell/Python programs are opt-outs."""
+    command = list(command)
+    prefix = []
+    if command and Path(command[0]).name == "env":
+        prefix.append(command.pop(0))
+        while command and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", command[0], re.DOTALL):
+            prefix.append(command.pop(0))
+        if command and command[0].startswith("-"):
+            raise Refused("Protected env form accepts NAME=VALUE assignments only")
+    if not command:
+        raise Refused("Missing command")
+    executable = Path(command[0]).name
+    offset = 3 if re.fullmatch(r"python(?:3(?:\.[0-9]+)?)?", executable) and command[1:3] == ["-m", "pytest"] else 1 if executable in {"pytest", "pytest-3"} else None
+    if offset is not None:
+        return prefix + ["python3", "dev/test_runner.py", "--artifacts", "/workspace/output/test-diagnostics", "--", *command[offset:]]
+    if executable.startswith("python") and len(command) > 1 and command[1] in {"dev/test_runner.py", "/workspace/input/dev/test_runner.py"}:
+        # The writable bind is mandatory even for an already canonical invocation.
+        if "--artifacts" in command or any(value.startswith("--artifacts=") for value in command):
+            raise Refused("Container canonical runner owns --artifacts")
+        return prefix + command[:2] + ["--artifacts", "/workspace/output/test-diagnostics", *command[2:]]
+    return prefix + command
+
+
+def persist_inner(output, evidence):
+    source = output / "test-diagnostics"
+    if not source.exists():
+        return
+    no_symlinks(source)
+    children = list(source.iterdir())
+    if len(children) > 16:
+        raise Refused("Too many nested diagnostic runs")
+    target = evidence.path / "inner"
+    target.mkdir(mode=0o700, exist_ok=True)
+    for run in children:
+        no_symlinks(run)
+        if not re.fullmatch(r"run-[0-9a-f]{32}", run.name) or not run.is_dir():
+            raise Refused("Unexpected inner diagnostic entry")
+        destination = target / run.name
+        destination.mkdir(mode=0o700, exist_ok=True)
+        for name in ("manifest.json", "stdout.log", "stderr.log", "stdout.tail.log", "stderr.tail.log"):
+            path = no_symlinks(run / name)
+            if not path.is_file() or path.stat().st_size > guard.CAP + 65536:
+                raise Refused("Invalid or oversize inner diagnostic file")
+            with guard.private_file(destination / name, "wb") as handle:
+                handle.write(path.read_bytes())
+
+
+def container_wait(container_id, run_id, evidence):
+    """Retain bounded logs/state even when wait fails, before exact removal."""
+    first, waited, code = None, None, None
+    errors = []
+    try:
+        waited = docker("wait", container_id, timeout=1800, check=False)
+        if getattr(waited, "watchdog_reason", None) == "timeout":
+            raise subprocess.TimeoutExpired("owned Docker wait", 1800, output=waited.stdout, stderr=waited.stderr)
+        if (getattr(waited, "watchdog_reason", "completed") != "completed" or
+                getattr(waited, "supervisor_exit_code", waited.returncode) or waited.returncode):
+            raise Refused("Docker wait client exit " + str(waited.returncode))
+        code = int(waited.stdout.strip())
+    except BaseException as error:
+        first = error
+    finally:
+        try:
+            logs = docker("logs", container_id, timeout=10, check=False)
+            log_reason = getattr(logs, "watchdog_reason", "completed")
+            log_code = getattr(logs, "supervisor_exit_code", logs.returncode)
+            evidence.data.setdefault("log_captures", []).append({"raw_returncode": logs.returncode,
+                "supervisor_exit_code": log_code, "watchdog_reason": log_reason,
+                "evidence_path": getattr(logs, "evidence_path", None)})
+            if logs.returncode or log_code or log_reason != "completed":
+                errors.append("log capture incomplete: reason=" + str(log_reason) + "; supervisor=" + str(log_code) + "; raw=" + str(logs.returncode))
+            evidence.feed("stdout", logs.stdout, final=True)
+            evidence.feed("stderr", logs.stderr, final=True)
+        except BaseException as error:
+            errors.append("log capture: " + type(error).__name__)
+        try:
+            inspected = json.loads(docker("container", "inspect", container_id, timeout=10).stdout)[0]
+            if inspected.get("Id") != container_id or inspected.get("Config", {}).get("Labels", {}).get("ha-ops.dev.run") != run_id:
+                raise Refused("Container evidence identity changed")
+            state = inspected.get("State", {})
+            evidence.data.setdefault("containers", []).append({"id": container_id,
+                "docker_wait_returncode": waited.returncode if waited is not None else None,
+                "watchdog_reason": getattr(waited, "watchdog_reason", None),
+                "supervisor_exit_code": getattr(waited, "supervisor_exit_code", None),
+                "wait_evidence_path": getattr(waited, "evidence_path", None),
+                "wait_exit_code": code, "state": {key: state[key] for key in ("ExitCode", "OOMKilled", "Status") if key in state},
+                "wait_failure": type(first).__name__ if first else None})
+        except BaseException as error:
+            errors.append("state capture: " + type(error).__name__)
+        evidence.data.setdefault("capture_errors", []).extend(errors)
+    if first is not None:
+        raise first
+    if errors:
+        raise Refused("Container evidence capture incomplete: " + ", ".join(errors))
+    return code
+
+
 def generic_run(input_path, command, recreate=False):
     if not command:
         raise Refused("A command after -- is required")
+    command = protected_command(command)
     input_source = ROOT / input_path
     input_snapshot = snapshot_input(input_source)
     capacity(HERE, HOST_RESERVE + SETUP_HEADROOM + RUN_HEADROOM + input_snapshot["total"])
@@ -725,14 +843,13 @@ def generic_run(input_path, command, recreate=False):
     run_dir = RUNS / run_id
     run_dir.mkdir(mode=0o700)
     owned = OwnedDirectory(run_dir)
+    evidence = guard.Evidence(DIAGNOSTICS, {"kind": "container", "run_id": run_id})
     name = "ha-ops-dev-" + run_id
-    created_id = None
-    create_attempted = False
+    created_id, create_attempted, first, code, failures = None, False, None, None, []
+    source, output = run_dir / "input", run_dir / "output"
     try:
-        source = run_dir / "input"
-        output = run_dir / "output"
         copy_input(input_source, source, expected=input_snapshot)
-        output.mkdir()
+        output.mkdir(mode=0o700)
         setup_data = setup(exact_sources=(source, output))
         for attempt in range(2 if recreate else 1):
             args = ["create", "--name", name, "--label", f"ha-ops.dev.run={run_id}",
@@ -756,25 +873,47 @@ def generic_run(input_path, command, recreate=False):
             if inspected["HostConfig"]["NetworkMode"] != "none":
                 raise Refused("Container network isolation failed")
             docker("start", created_id)
-            result = docker("wait", created_id, timeout=1800)
-            logs = docker("logs", created_id)
-            sys.stdout.buffer.write(logs.stdout)
-            sys.stderr.buffer.write(logs.stderr)
-            code = int(result.stdout.strip())
-            if code != 0:
-                return code
+            code = container_wait(created_id, run_id, evidence)
+            if code:
+                break
             if recreate and attempt == 0:
                 remove_owned(created_id, run_id)
-                created_id = None
-                create_attempted = False
-        return code
+                created_id, create_attempted = None, False
+    except BaseException as error:
+        first = error
     finally:
         try:
             if create_attempted:
                 remove_owned(created_id or name, run_id)
-            owned.remove()
-        finally:
+        except BaseException as error:
+            failures.append("container cleanup: " + type(error).__name__ + ": " + guard.redact(str(error))[:1024])
+        try:
+            if output.exists():
+                persist_inner(output, evidence)
+        except BaseException as error:
+            failures.append("inner evidence: " + type(error).__name__)
+        if not failures:
+            try:
+                owned.remove()
+            except BaseException as error:
+                failures.append("fixture cleanup: " + type(error).__name__)
+        try:
             owned.close()
+        except BaseException as error:
+            failures.append("fixture descriptor: " + type(error).__name__)
+        try:
+            evidence.finish(status="passed" if first is None and not failures and code == 0 else "failed",
+                            command_exit_code=code, failure=type(first).__name__ if first else None,
+                            primary_error=guard.redact(str(first))[:1024] if first else None,
+                            cleanup_errors=failures)
+        except BaseException as error:
+            failures.append("evidence finalization: " + type(error).__name__)
+            guard.notice("Container evidence finalization failed; primary=" + (type(first).__name__ if first else str(code)))
+    if first is not None:
+        raise first
+    if failures:
+        raise Refused("Container run incomplete: " + ", ".join(failures))
+    return code
 
 
 EXT4_HELPER = HERE / "ext4_fixture.py"
@@ -1002,6 +1141,7 @@ def verify_ext4_container(inspected, container_id, run_id, source, output, fixtu
 def ext4_run(input_path, command, *, profile="allocation", recreate=False, report=None):
     if not command or os.getuid() == 0 or profile not in EXT4_SIZES:
         raise Refused("Ext4 needs a command, bounded profile and nonroot application UID")
+    command = protected_command(command)
     input_source = ROOT / input_path
     snapshot = snapshot_input(input_source)
     capacity(HERE, HOST_RESERVE + RUN_HEADROOM + EXT4_SIZES[profile] + snapshot["total"])
@@ -1015,6 +1155,7 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
     def cleanup_failure(phase, error):
         failures.append({'phase': phase, 'failure': failure_payload(error)})
         cleanup_causes.append(error)
+    evidence = guard.Evidence(DIAGNOSTICS, {"kind": "ext4_container", "run_id": run_id})
     result = {"status": "started", "run_id": run_id, "profile": profile, "containers": []}
     setup_attempted = False
     try:
@@ -1068,16 +1209,13 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
             verify_ext4_container(inspected, container_id, run_id, source, output, fixture, user)
             result["containers"].append({"id": container_id, "name": name, "security": inspected["HostConfig"], "mounts": inspected["Mounts"]})
             docker("start", container_id)
-            code = int(docker("wait", container_id, timeout=1800).stdout.strip())
-            logs = docker("logs", container_id)
-            sys.stdout.buffer.write(logs.stdout); sys.stderr.buffer.write(logs.stderr)
+            code = container_wait(container_id, run_id, evidence)
             if proof_path.exists():
                 proof = json.loads(proof_path.read_text())
                 result.setdefault("proofs", []).append(proof)
             else:
                 proof = None
             if code:
-                result["command_failure_logs"] = (logs.stdout + logs.stderr)[-65536:].decode(errors="replace")
                 raise Refused("Ext4 proof command failed with exit " + str(code))
             if proof is None: raise Refused("Ext4 proof report is absent")
             validate_ext4_proof(proof, run_id=run_id, profile=profile, attempt=attempt, token=attempt_token, fixture=fixture, previous=previous)
@@ -1093,6 +1231,9 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
         for name in names:
             try: remove_owned(name, run_id)
             except BaseException as error: cleanup_failure("container " + name, error)
+        try:
+            if 'output' in locals() and output.exists(): persist_inner(output, evidence)
+        except BaseException as error: cleanup_failure("inner evidence", error)
         if not failures and setup_attempted:
             try:
                 result["cleanup"] = ext4_guest("cleanup", run_id, profile)
@@ -1119,6 +1260,11 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
         if first is None: first = error
         result.update(status="failed", error=str(first), failure=failure_payload(first),
                       report_failure=failure_payload(error))
+    try:
+        evidence.finish(status="failed" if first is not None else "passed", failure=type(first).__name__ if first else None, cleanup_errors=failures)
+    except BaseException as error:
+        cleanup_failure("evidence finalization", error)
+        if first is None: first = error
     if first is not None:
         diagnostics = {key: result.get(key) for key in ('error', 'failure', 'body_failure', 'cleanup_errors', 'report_failure')}
         refused = Refused("Ext4 incomplete: " + json.dumps(diagnostics, sort_keys=True))
@@ -1314,7 +1460,7 @@ def main():
             cleanup_run(args.run, RUNS / args.run)
     except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         diagnostic = "; diagnostics=" + json.dumps(failure_payload(error), sort_keys=True) if getattr(args, "ext4", False) else ""
-        print(f"Local runner refused: {error}{diagnostic}", file=sys.stderr)
+        guard.notice(f"Local runner refused: {error}{diagnostic}")
         return 1
     return 0
 

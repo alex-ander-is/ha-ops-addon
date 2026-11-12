@@ -25,7 +25,19 @@ intentional versus unsafe shortcuts.
 
 ## Test scheduling and final coverage
 
-Read `TESTING.md` before choosing test commands. During development run the
+Read `TESTING.md` before choosing test commands. Use the canonical
+`python3 dev/test_runner.py -- ...` entrypoint for normal pytest runs, including
+recognized Linux/ext4 wrapper forms. Unexpected crash/hang remains blocking:
+autonomously inspect preserved output/progress, raw status, configuration and
+versions; isolate tests/config/runtime/product versus diagnostic causes using a
+minimal independent reproducer and controls. Check authoritative upstream bugs
+and this project's Backlog, then propose and implement the evidence-backed fix
+within agreed scope; obtain agreement for broader outcome changes. Merely logging
+and stopping is insufficient. Do not retry until green, skip/xfail, raise timeout
+or globally accept expected crashes. Intentional crash/stress requires an
+explicit isolated child fixture whose parent asserts status and durable evidence.
+Follow TESTING's evidence ownership, limits and diagnostic opt-out boundaries.
+ During development run the
 specific reproduction/regression and affected adjacent contracts. Freeze code
 before one final complete verification cycle; do not repeat the full suite per
 edit or reviewer. After a failure, rerun failed and affected dependent cases;
@@ -100,7 +112,7 @@ use broad deletion/process killing, remove user TODOs, discard unrelated changes
 or clear/close the shared persistent browser profile or user-owned pages. Report
 any retained session or uncertain ownership rather than silently deleting it.
 Inspect the final staged file list/diff, run `git diff --cached --check` and
-`python3 -m pytest ha-ops/tests/test_release_readiness.py` before the commit step.
+`python3 dev/test_runner.py -- ha-ops/tests/test_release_readiness.py` before the commit step.
 Keep local fixture paths, scratch outputs and current run IDs out of release
 inputs, including documentation examples; prefer `mktemp` with guaranteed cleanup.
 Repeat relevant review/checks if cleanup changes tracked content. The unchanged
