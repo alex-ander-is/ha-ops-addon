@@ -394,6 +394,7 @@ def test_generic_run_rejects_file_swap_after_preflight_without_vm_or_docker(tmp_
     repository.mkdir()
     monkeypatch.setattr(subject, "ROOT", repository)
     monkeypatch.setattr(subject, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "diagnostics")
     source = repository / "fixture"
     source.mkdir()
     safe = source / "safe.py"
@@ -502,6 +503,7 @@ def test_generic_run_rejects_bad_mount_and_cleans_exact_container(tmp_path, monk
     subject = wrapper()
     monkeypatch.setattr(subject, "ROOT", tmp_path)
     monkeypatch.setattr(subject, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "diagnostics")
     subject.RUNS.mkdir()
     (tmp_path / "input.txt").write_text("fixture")
     monkeypatch.setattr(subject, "setup", lambda **kw: {"image": "ha-ops-dev:fixed", "platform": "linux/arm64"})
@@ -689,6 +691,7 @@ def test_directory_entry_race_discards_fixture_before_vm(tmp_path, monkeypatch, 
         extra.write_text("Z")
     monkeypatch.setattr(subject, "ROOT", repository)
     monkeypatch.setattr(subject, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "diagnostics")
     original_read = subject.os.read
     changed = False
     def racing_read(handle, count):
@@ -1011,6 +1014,7 @@ def test_generic_run_emits_stderr_and_nonzero_exit(tmp_path, monkeypatch, capfd)
     subject = wrapper()
     monkeypatch.setattr(subject, "ROOT", tmp_path)
     monkeypatch.setattr(subject, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "diagnostics")
     subject.RUNS.mkdir()
     (tmp_path / "input.txt").write_text("fixture")
     monkeypatch.setattr(subject, "setup", lambda **kw: {"image": "image", "platform": "linux/arm64"})
@@ -1419,6 +1423,7 @@ def test_parent_cleanup_keeps_creation_identity_on_failure(tmp_path, monkeypatch
     (repository / "input").write_text("fixture")
     monkeypatch.setattr(subject, "ROOT", repository)
     monkeypatch.setattr(subject, "RUNS", tmp_path / "runs")
+    monkeypatch.setattr(subject, "DIAGNOSTICS", tmp_path / "diagnostics")
     monkeypatch.setattr(subject, "capacity", lambda *a: 40 * subject.GIB)
     monkeypatch.setattr(subject, "ready", lambda *a, **kw: {})
     monkeypatch.setattr(subject, "remove_owned", lambda *a: None)
@@ -1712,6 +1717,7 @@ def test_ext4_failures_never_publish_success_and_preserve_cleanup_order(boundary
     monkeypatch.setattr(os, "getgid", lambda: 1000)
     subject = wrapper(); run_dirs = tmp_path / 'runs'; run_dirs.mkdir(); events = []; reports = []
     monkeypatch.setattr(subject, 'ROOT', tmp_path); monkeypatch.setattr(subject, 'HERE', tmp_path); monkeypatch.setattr(subject, 'RUNS', run_dirs)
+    monkeypatch.setattr(subject, 'DIAGNOSTICS', tmp_path / 'diagnostics')
     monkeypatch.setattr(subject, 'snapshot_input', lambda p: {'total': 10})
     monkeypatch.setattr(subject, 'copy_input', lambda src, dst, **k: dst.mkdir())
     monkeypatch.setattr(subject, 'capacity', lambda *a: 10**10)
@@ -2123,7 +2129,7 @@ def test_ext4_all_finalizers_preserve_primary_and_independent_structured_failure
     monkeypatch.setattr(os, "getuid", lambda: 1000)
     monkeypatch.setattr(os, "getgid", lambda: 1000)
     subject = wrapper(); runs = tmp_path / 'runs'; runs.mkdir(); events = []; reports = []; environment = {}; run = []
-    attrs = {'ROOT': tmp_path, 'HERE': tmp_path, 'RUNS': runs, 'snapshot_input': lambda p: {'total': 10},
+    attrs = {'ROOT': tmp_path, 'HERE': tmp_path, 'RUNS': runs, 'DIAGNOSTICS': tmp_path / 'diagnostics', 'snapshot_input': lambda p: {'total': 10},
              'copy_input': lambda src, dst, **k: dst.mkdir(), 'capacity': lambda *a: 10**10, 'make_context': lambda: b'',
              'load_toolchain': lambda c: None, 'installed': lambda: None, 'ready': lambda: {}, 'verify_source': lambda p: None,
              'guest_platform': lambda: 'linux/arm64', 'fingerprint': lambda c: 'fixture', 'image_present': lambda i: True,
