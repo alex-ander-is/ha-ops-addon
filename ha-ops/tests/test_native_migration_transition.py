@@ -193,13 +193,90 @@ def test_journal_shape_corruption_and_foreign_prefix_refuse(tmp_path):
     with pytest.raises(n.Blocked):t.Transition(p).read()
 
 
+def assert_dormant_transition_imports(module,source):
+    """Only Review's existing lazy, private rename calls may import the executor."""
+    if module in ('native_migration_transition.py','native_disk.py','native_migration_git_candidate.py'):return
+    tree=ast.parse(source)
+    parents={child:node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    for node in ast.walk(tree):
+        detail=f'{module}:{getattr(node,"lineno",0)}: {ast.unparse(node)}'
+        if isinstance(node,ast.ImportFrom):
+            assert node.module!='native_migration_transition',detail
+        if not isinstance(node,ast.Import):continue
+        for item in node.names:
+            if item.name!='native_migration_transition':continue
+            assert module=='native_migration_review.py' and item.asname,detail
+            method=parents[node]
+            while not isinstance(method,(ast.FunctionDef,ast.AsyncFunctionDef,ast.Lambda,ast.ClassDef,ast.Module)):
+                method=parents[method]
+            owner=parents.get(method)
+            assert (isinstance(method,ast.FunctionDef) and method.name in ('_save_receipt','_capture','open_content')
+                    and isinstance(owner,ast.ClassDef) and owner.name=='Review'
+                    and isinstance(parents[owner],ast.Module)),detail
+            alias=item.asname
+            for use in ast.walk(method):
+                detail=f'{module}:{method.name}: {ast.unparse(use)}'
+                if isinstance(use,ast.Name) and use.id==alias:
+                    attribute=parents[use];call=parents.get(attribute)
+                    assert (isinstance(use.ctx,ast.Load) and isinstance(attribute,ast.Attribute)
+                            and attribute.value is use and attribute.attr=='_rename_noreplace'
+                            and isinstance(call,ast.Call) and call.func is attribute),detail
+                # Binding names not represented as Name(Store), including nested scopes.
+                if isinstance(use,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef,ast.arg)):
+                    assert (use.arg if isinstance(use,ast.arg) else use.name)!=alias,detail
+                if isinstance(use,(ast.Import,ast.ImportFrom)):
+                    for binding in use.names:
+                        if use is node and binding is item:continue
+                        assert (binding.asname or binding.name.split('.')[0])!=alias,detail
+                if isinstance(use,ast.ExceptHandler):assert use.name!=alias,detail
+                if isinstance(use,(ast.Global,ast.Nonlocal)):assert alias not in use.names,detail
+
+
+def test_dormant_review_private_rename_imports_are_accepted():
+    source='class Review:\n'
+    for method in ('_save_receipt','_capture','open_content'):
+        source+=f'    def {method}(self):\n'
+        source+='        import native_migration_transition as private_rename\n'
+        source+='        private_rename._rename_noreplace(a,b,c,d)\n'
+        source+='        self._effect("rename",lambda:private_rename._rename_noreplace(a,b,c,d))\n'
+    assert_dormant_transition_imports('native_migration_review.py',source)
+
+
+@pytest.mark.parametrize('module,source',[
+    ('server.py','import native_migration_transition as transition'),
+    ('native_migration_review.py','import native_migration_transition as transition'),
+    ('native_migration_review.py','class Review:\n    import native_migration_transition as transition'),
+    ('native_migration_review.py','class Other:\n    def _capture(self):\n        import native_migration_transition as transition'),
+    ('native_migration_review.py','class Review:\n    def other(self):\n        import native_migration_transition as transition'),
+    ('native_migration_review.py','class Review:\n    def _capture(self):\n        def nested():\n            import native_migration_transition as transition'),
+])
+def test_dormant_transition_import_rejects_unapproved_scope(module,source):
+    with pytest.raises(AssertionError):assert_dormant_transition_imports(module,source)
+
+
+@pytest.mark.parametrize('body',[
+    'import native_migration_transition',
+    'from native_migration_transition import Transition',
+    'from native_migration_transition import _rename_noreplace',
+    'transition.Transition()', 'transition.Transition', 'transition.Confirmation',
+    'transition.other()', 'return transition', 'consume(transition)', 'other=transition',
+    'return transition._rename_noreplace', 'other=transition._rename_noreplace', 'transition()',
+    'transition=other', 'del transition', 'import other as transition',
+    'from other import value as transition', 'def transition(): pass', 'class transition: pass',
+    'def nested(transition): pass', 'lambda transition: None',
+    'try: pass\nexcept Exception as transition: pass',
+])
+def test_dormant_transition_import_rejects_executor_escape_or_rebinding(body):
+    source=('class Review:\n    def _capture(self):\n'
+            '        import native_migration_transition as transition\n'
+            +''.join('        '+line+'\n' for line in body.splitlines()))
+    with pytest.raises(AssertionError):assert_dormant_transition_imports('native_migration_review.py',source)
+
+
 def test_dormant_import_and_exact_syscall_trace_contract():
     app=Path(t.__file__).parent
     for path in app.glob('*.py'):
-        if path.name in ('native_migration_transition.py','native_disk.py','native_migration_git_candidate.py'):continue
-        for node in ast.walk(ast.parse(path.read_text())):
-            if isinstance(node,ast.Import):assert all(item.name!='native_migration_transition' for item in node.names)
-            if isinstance(node,ast.ImportFrom):assert node.module!='native_migration_transition'
+        assert_dormant_transition_imports(path.name,path.read_text())
     tree=ast.parse(Path(t.__file__).read_text())
     # Every executor mutator is passed through the single action hook. The
     # no-replace ctypes adapter is itself wrapped at its only call site.
