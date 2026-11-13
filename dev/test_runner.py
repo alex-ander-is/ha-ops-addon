@@ -2,6 +2,7 @@
 """Bounded external pytest supervisor. Raw Python is a diagnostic opt-out."""
 import argparse
 import configparser
+import errno
 import fcntl
 import importlib.metadata
 import io
@@ -27,6 +28,9 @@ CAP = 1024 * 1024
 LINE_CAP = 8192
 GRACE = 0.5
 DRAIN = 1.0
+# A hostile invocation must not supply an endless stream of adopted children.
+# The terminal WNOHANG/ECHILD check also consumes one of these syscall slots.
+MAX_OWNED_REAP_CALLS = 4096
 
 
 class Refused(ValueError):
@@ -410,6 +414,33 @@ def no_core():
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
 
 
+class OwnedChildReaper:
+    """Nonblocking, child-only cleanup; one count/time budget per invocation."""
+    def __init__(self):
+        self.remaining = MAX_OWNED_REAP_CALLS
+        self.deadline = None
+
+    def drain(self, pgid):
+        if pgid <= 1:
+            raise ValueError('Owned child reaping requires a positive invocation PGID > 1')
+        if self.deadline is None:
+            self.deadline = time.monotonic() + DRAIN
+        while True:
+            if self.remaining <= 0:
+                raise RuntimeError('Owned child reap syscall limit reached; cleanup unproven')
+            if time.monotonic() >= self.deadline:
+                raise RuntimeError('Owned child reap deadline reached; cleanup unproven')
+            self.remaining -= 1
+            try:
+                child, _ = os.waitpid(-pgid, os.WNOHANG)
+            except OSError as error:
+                if error.errno == errno.ECHILD or isinstance(error, ChildProcessError):
+                    return
+                raise
+            if child == 0:
+                return
+
+
 def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=None, metadata=None):
     if not math.isfinite(timeout) or timeout <= 0:
         raise Refused('Deadline must be positive and finite')
@@ -419,6 +450,7 @@ def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=Non
     began = time.monotonic()
     cleanup_at, end_drain, leader_at = None, None, None
     kill_sent, cleanup_unknown, omitted_errors = False, False, 0
+    adopted = OwnedChildReaper()
 
     def record(phase, error):
         nonlocal omitted_errors
@@ -442,6 +474,16 @@ def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=Non
         except BaseException as error:
             cleanup_unknown = True
             record(phase, error)
+
+    def reap_adopted(phase):
+        nonlocal cleanup_unknown
+        try:
+            adopted.drain(process.pid)
+            return True
+        except BaseException as error:
+            cleanup_unknown = True
+            record(phase, error)
+            return False
 
     try:
         selector = selectors.DefaultSelector()
@@ -477,6 +519,9 @@ def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=Non
                     errors.append('Pipe drain deadline reached')
                 break
             if raw is not None and not selector.get_map():
+                # poll() has reaped the leader. Only now may waitpid select
+                # adopted children without stealing Popen's return status.
+                reaped = reap_adopted('post-leader owned child reap')
                 try:
                     os.killpg(process.pid, 0)
                 except ProcessLookupError:
@@ -485,7 +530,8 @@ def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=Non
                     cleanup_unknown = True
                     record('owned group probe', error)
                 else:
-                    errors.append('Owned descendants survived the leader')
+                    errors.append('Owned descendants survived the leader' if reaped else
+                                  'Owned process group remained after incomplete child reap')
                 group_action(signal.SIGTERM, 'post-leader TERM')
                 group_action(signal.SIGKILL, 'post-leader KILL')
                 break
@@ -510,6 +556,17 @@ def supervise(command, *, timeout=1800, artifact_root=DEFAULT_ARTIFACTS, env=Non
             observed = attempt('child reap', lambda: process.wait(timeout=DRAIN))
             if observed is not None:
                 raw = observed
+                if reap_adopted('final owned child reap'):
+                    try:
+                        os.killpg(process.pid, 0)
+                    except ProcessLookupError:
+                        pass
+                    except BaseException as error:
+                        cleanup_unknown = True
+                        record('final owned group probe', error)
+                    else:
+                        cleanup_unknown = True
+                        errors.append('Owned process group remained after final cleanup')
             else:
                 cleanup_unknown = True
             mapping = attempt('pipe inventory', lambda: list(selector.get_map().values())) if selector is not None else []

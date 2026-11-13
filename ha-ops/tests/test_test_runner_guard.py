@@ -1,5 +1,6 @@
 """Intentional process death is confined to disposable children and asserted here."""
 import importlib.util
+import errno
 import fcntl
 import json
 import os
@@ -892,3 +893,237 @@ def test_nonzero_child_status_remains_primary_after_cleanup_refusal(tmp_path, mo
     assert code == 73 and manifest['raw_returncode'] == 73
     assert manifest['status'] == 'failed' and manifest['reason'] == 'completed'
     assert manifest['process_group_cleanup'] == 'incomplete or unknown'
+
+
+@pytest.mark.parametrize('terminal', [0, 'ECHILD', 'child-error'])
+def test_owned_child_reaper_selects_only_exact_group(tmp_path, monkeypatch, terminal):
+    calls = []
+    def waiting(selector, flags):
+        calls.append((selector, flags))
+        if len(calls) == 1: return 456, 73 << 8
+        if terminal == 'ECHILD': raise OSError(errno.ECHILD, 'fixture no children')
+        if terminal == 'child-error': raise ChildProcessError('fixture no children')
+        return 0, 0
+    monkeypatch.setattr(guard.os, 'waitpid', waiting)
+    guard.OwnedChildReaper().drain(123)
+    assert calls == [(-123, os.WNOHANG)] * 2
+
+
+@pytest.mark.parametrize('pgid', [-123, -1, 0, 1])
+def test_owned_child_reaper_refuses_unrestricted_selectors(monkeypatch, pgid):
+    monkeypatch.setattr(guard.os, 'waitpid', lambda *args: pytest.fail('unowned wait'))
+    with pytest.raises(ValueError): guard.OwnedChildReaper().drain(pgid)
+
+
+@pytest.mark.parametrize('children,exhausted', [(0, False), (2, False), (3, True)])
+def test_owned_child_reap_syscall_budget_is_shared(monkeypatch, children, exhausted):
+    monkeypatch.setattr(guard, 'MAX_OWNED_REAP_CALLS', 3)
+    calls = []
+    def waiting(*args):
+        calls.append(args)
+        return (456, 0) if len(calls) <= children else (0, 0)
+    monkeypatch.setattr(guard.os, 'waitpid', waiting)
+    reaper = guard.OwnedChildReaper()
+    if exhausted:
+        with pytest.raises(RuntimeError, match='syscall limit'): reaper.drain(123)
+    else:
+        reaper.drain(123)
+    assert len(calls) <= 3
+    # A second phase cannot renew the invocation's finite syscall allowance.
+    reaper.remaining = 0
+    with pytest.raises(RuntimeError, match='syscall limit'): reaper.drain(123)
+    assert len(calls) <= 3
+
+
+def test_owned_child_reap_elapsed_budget_is_not_renewed(monkeypatch):
+    ticks = iter([10, 10, 11, 12])
+    monkeypatch.setattr(guard.time, 'monotonic', lambda: next(ticks))
+    calls = []
+    monkeypatch.setattr(guard.os, 'waitpid', lambda *args: (calls.append(args) or (456, 0)))
+    reaper = guard.OwnedChildReaper()
+    with pytest.raises(RuntimeError, match='deadline'): reaper.drain(123)
+    with pytest.raises(RuntimeError, match='deadline'): reaper.drain(123)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('phase', ['post-leader', 'final'])
+@pytest.mark.parametrize('failure', [PermissionError, InterruptedError, RuntimeError])
+@pytest.mark.parametrize('raw', [0, 73])
+def test_owned_child_reap_fault_keeps_raw_and_finalizes(tmp_path, monkeypatch, phase, failure, raw):
+    real_popen, real_evidence = guard.subprocess.Popen, guard.Evidence
+    children, captured = [], []
+    def popen(*args, **kwargs):
+        child = real_popen(*args, **kwargs); children.append(child); return child
+    def evidence(*args, **kwargs):
+        value = real_evidence(*args, **kwargs); captured.append(value); return value
+    drains, observed_statuses = [], []
+    def drain(self, pgid):
+        observed_statuses.append((children[0].returncode, pgid))
+        drains.append(pgid)
+        if phase == 'post-leader' or len(drains) == 2:
+            raise failure('fixture adopted child reap refusal')
+    monkeypatch.setattr(guard.subprocess, 'Popen', popen)
+    monkeypatch.setattr(guard, 'Evidence', evidence)
+    monkeypatch.setattr(guard.OwnedChildReaper, 'drain', drain)
+    status, path = guard.supervise([sys.executable, '-c', 'import sys;sys.exit(' + str(raw) + ')'], artifact_root=tmp_path)
+    manifest = json.loads((path / 'manifest.json').read_text())
+    assert status == (raw or 1) and manifest['raw_returncode'] == raw
+    assert manifest['reason'] == 'completed' and manifest['status'] == 'failed'
+    assert manifest['process_group_cleanup'] == 'incomplete or unknown'
+    assert any(phase + ' owned child reap' in error for error in manifest['errors'])
+    assert observed_statuses == [(raw, children[0].pid)] * 2
+    assert all(stream['file'].closed for stream in captured[0].streams.values())
+    assert not captured[0].sink.flags
+
+
+def test_failed_leader_wait_never_reaps_adopted_children(tmp_path, monkeypatch):
+    real_popen, real_selector = guard.subprocess.Popen, guard.selectors.DefaultSelector
+    children, drains = [], []
+    def popen(*args, **kwargs):
+        child = real_popen(*args, **kwargs); children.append(child)
+        child.real_wait = child.wait
+        child.wait = lambda **kwargs: (_ for _ in ()).throw(PermissionError('fixture leader wait refusal'))
+        return child
+    def selector():
+        value = real_selector()
+        value.select = lambda *args: (_ for _ in ()).throw(RuntimeError('fixture controller failure'))
+        return value
+    monkeypatch.setattr(guard.subprocess, 'Popen', popen)
+    monkeypatch.setattr(guard.selectors, 'DefaultSelector', selector)
+    monkeypatch.setattr(guard.OwnedChildReaper, 'drain', lambda *args: drains.append(args))
+    try:
+        status, path = guard.supervise([sys.executable, '-c', 'import time;time.sleep(10)'], artifact_root=tmp_path)
+        manifest = json.loads((path / 'manifest.json').read_text())
+        assert status != 0 and manifest['raw_returncode'] is None
+        assert manifest['reason'] == 'controller_error'
+        assert not drains
+    finally:
+        for child in children: child.real_wait(timeout=2)
+
+
+@pytest.mark.parametrize('primary', ['timeout', 'interrupted', 'controller_error'])
+def test_final_owned_reap_failure_preserves_primary_reason(tmp_path, monkeypatch, primary):
+    if primary != 'timeout':
+        real_selector = guard.selectors.DefaultSelector
+        def selector():
+            value = real_selector()
+            error = KeyboardInterrupt if primary == 'interrupted' else RuntimeError
+            value.select = lambda *args: (_ for _ in ()).throw(error('fixture controller failure'))
+            return value
+        monkeypatch.setattr(guard.selectors, 'DefaultSelector', selector)
+    monkeypatch.setattr(guard.OwnedChildReaper, 'drain', lambda *args: (_ for _ in ()).throw(PermissionError('fixture final adopted child failure')))
+    status, path = guard.supervise([sys.executable, '-c', 'import time;time.sleep(10)'],
+                                   timeout=.05 if primary == 'timeout' else 3, artifact_root=tmp_path)
+    manifest = json.loads((path / 'manifest.json').read_text())
+    assert status == {'timeout': 124, 'interrupted': 130, 'controller_error': 137}[primary]
+    assert manifest['reason'] == primary and manifest['raw_returncode'] < 0
+    assert manifest['process_group_cleanup'] == 'incomplete or unknown'
+    assert any('final owned child reap' in error for error in manifest['errors'])
+
+
+def test_owned_reap_exhaustion_stays_red_with_bounded_errors(tmp_path, monkeypatch):
+    monkeypatch.setattr(guard, 'MAX_OWNED_REAP_CALLS', 0)
+    status, path, manifest = run_child(tmp_path, 'print("successful leader")')
+    assert status == 1 and manifest['raw_returncode'] == 0
+    assert manifest['process_group_cleanup'] == 'incomplete or unknown'
+    assert len(manifest['errors']) == 2
+    assert all('syscall limit' in error for error in manifest['errors'])
+
+
+def test_final_owned_group_persistence_remains_unknown_and_red(tmp_path, monkeypatch):
+    real_probe, probes = guard.os.killpg, []
+    def probing(pgid, number):
+        if number == 0:
+            probes.append(pgid)
+            if len(probes) == 2: return  # Fixture models late adoption/death.
+        return real_probe(pgid, number)
+    monkeypatch.setattr(guard.os, 'killpg', probing)
+    status, path, manifest = run_child(tmp_path, 'print("successful leader")')
+    assert status == 1 and manifest['raw_returncode'] == 0
+    assert manifest['process_group_cleanup'] == 'incomplete or unknown'
+    assert 'Owned process group remained after final cleanup' in manifest['errors']
+    assert probes == [manifest['owned_pgid']] * 2
+
+
+def _proc_identity(pid):
+    fields = Path('/proc/' + str(pid) + '/stat').read_text().rsplit(')', 1)[1].split()
+    return {'state': fields[0], 'ppid': int(fields[1]), 'pgid': int(fields[2])}
+
+
+def owned_zombie_driver(directory, *, require_pid1):
+    """Disposable Linux init/subreaper proof; never enable subreaping in pytest."""
+    assert sys.platform == 'linux'
+    if require_pid1:
+        assert os.getpid() == 1, 'real PID1 qualification requires a container init invocation'
+    else:
+        import ctypes
+        assert ctypes.CDLL(None, use_errno=True).prctl(36, 1, 0, 0, 0) == 0
+    directory = Path(directory); directory.mkdir(parents=True, exist_ok=True)
+    original_drain = guard.OwnedChildReaper.drain
+    observations, results = [], []
+    foreign = os.fork()
+    if foreign == 0:
+        os.setsid(); os._exit(37)
+    owned = []
+    try:
+        for mode in ('ordinary', 'zombie', 'live'):
+            pidfile = directory / (mode + '.pid')
+            child_code = ("import os,time,pathlib\n"
+                          "pid=os.fork()\n"
+                          "if pid==0:\n"
+                          " os.close(1);os.close(2)\n"
+                          + (" os._exit(23)\n" if mode == 'zombie' else " time.sleep(60);os._exit(0)\n") +
+                          "pathlib.Path(" + repr(str(pidfile)) + ").write_text(str(pid))\n"
+                          + ("while pathlib.Path('/proc/'+str(pid)+'/stat').read_text().rsplit(')',1)[1].split()[0]!='Z':time.sleep(.001)\n" if mode == 'zombie' else '') +
+                          "os._exit(0)\n")
+            seen = []
+            def drain(self, pgid):
+                if mode != 'ordinary' and not seen:
+                    pid = int(pidfile.read_text()); owned.append((pgid, pid))
+                    identity = _proc_identity(pid)
+                    assert identity['ppid'] == os.getpid() and identity['pgid'] == pgid
+                    assert (identity['state'] == 'Z') == (mode == 'zombie')
+                    seen.append(identity); observations.append({'mode': mode, **identity})
+                return original_drain(self, pgid)
+            guard.OwnedChildReaper.drain = drain
+            code = 'print("ordinary control")' if mode == 'ordinary' else child_code
+            status, path = guard.supervise([sys.executable, '-u', '-c', code], timeout=3,
+                                           artifact_root=directory / 'evidence', metadata={'_console': False})
+            manifest = json.loads((path / 'manifest.json').read_text())
+            results.append({'mode': mode, 'status': status, 'manifest': str(path / 'manifest.json')})
+            assert manifest['raw_returncode'] == 0
+            assert status == 0 if mode != 'live' else status != 0
+            if mode == 'zombie':
+                assert seen and not Path('/proc/' + pidfile.read_text()).exists()
+                with pytest.raises(ProcessLookupError): os.killpg(manifest['owned_pgid'], 0)
+            if mode == 'live':
+                assert 'Owned descendants survived the leader' in manifest['errors']
+        assert os.waitpid(foreign, 0) == (foreign, 37 << 8)
+        foreign = None
+        report = {'pid': os.getpid(), 'pid1': require_pid1, 'observations': observations, 'results': results}
+        (directory / 'owned-zombie-proof.json').write_text(json.dumps(report, indent=2))
+        return report
+    finally:
+        guard.OwnedChildReaper.drain = original_drain
+        # Only this disposable fixture's known child PIDs/groups may be cleaned.
+        for pgid, pid in owned:
+            try: os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError: pass
+            try: os.waitpid(pid, 0)
+            except ChildProcessError: pass
+        if foreign is not None:
+            try: os.waitpid(foreign, 0)
+            except ChildProcessError: pass
+
+
+@pytest.mark.skipif(sys.platform != 'linux', reason='Linux adoption proof; real PID1 is a separate mandatory driver')
+def test_owned_zombie_adoption_in_disposable_subreaper(tmp_path):
+    status, path = guard.supervise([sys.executable, '-u', __file__, '--owned-zombie-subreaper', str(tmp_path / 'probe')],
+                                   timeout=10, artifact_root=tmp_path / 'outer')
+    assert status == 0, (path / 'stderr.log').read_text()
+    assert json.loads((tmp_path / 'probe/owned-zombie-proof.json').read_text())['pid1'] is False
+
+
+if __name__ == '__main__':
+    assert len(sys.argv) == 3 and sys.argv[1] in ('--owned-zombie-pid1', '--owned-zombie-subreaper')
+    print(json.dumps(owned_zombie_driver(sys.argv[2], require_pid1=sys.argv[1] == '--owned-zombie-pid1')))

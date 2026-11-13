@@ -27,6 +27,21 @@ are outside process-group containment; the Linux container adds an ownership
 boundary. This prevents the reproduced timed-dump trigger on these paths, not
 arbitrary native memory defects or test code directly calling faulthandler.
 
+After reaping the leader, the supervisor nonblockingly reaps already exited
+adopted children only in that invocation's exact process group. Descendant exit
+statuses never replace the leader's raw status. A shared 4096-syscall/one-second
+reaping budget bounds both post-leader and final cleanup; exhaustion or refusal
+remains red with incomplete/unknown cleanup. A group still present after the
+initial drain remains red even if later owned cleanup succeeds.
+
+The Linux subreaper regression runs in a fresh disposable child. Mandatory real
+PID1 qualification separately invokes
+`python3 ha-ops/tests/test_test_runner_guard.py --owned-zombie-pid1 /workspace/output/owned-zombie-proof`
+as the disposable container's init process through the development wrapper's
+diagnostic command path. It asserts actual PID1 adoption, zombie state and exact
+PGID before reaping, ordinary/zombie success, live-descendant failure and a
+foreign child's untouched status. Nested pytest alone does not qualify PID1.
+
 Each run prints a unique private evidence directory under
 `dev/virtualization/.local/diagnostics` (override with `--artifacts PATH` on the
 host). Its atomic manifest records running/final status, deadline, raw status,
