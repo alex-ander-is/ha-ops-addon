@@ -111,18 +111,27 @@ def test_config_terminator_fails_closed(tmp_path, monkeypatch):
     with pytest.raises(guard.Refused): guard.pytest_command([])
 
 
-@pytest.mark.parametrize('workers', [[], ['-n', '2']])
+@pytest.mark.parametrize('workers', [['-n', '0'], ['-n', '2']])
 def test_collection_no_tests_and_xdist_no_restart(tmp_path, monkeypatch, workers):
     monkeypatch.chdir(tmp_path)
-    (tmp_path / 'test_probe.py').write_text('def test_ok(): assert True\n')
-    command = guard.pytest_command([*workers, 'test_probe.py'])
+    monkeypatch.setenv('PYTEST_ADDOPTS', '-k absent -n 2 --dist worksteal')
+    (tmp_path / 'pytest.ini').write_text('[pytest]\n')
+    (tmp_path / 'test_probe.py').write_text('from pathlib import Path\ndef test_ok():\n assert sum(range(10)) == 45\n Path("assertion-ran").write_text("yes")\n')
+    env = os.environ.copy()
+    env.pop('PYTEST_ADDOPTS', None)
+    command = guard.pytest_command([*workers, 'test_probe.py'], env)
     assert '--max-worker-restart=0' in command
-    status, _ = guard.supervise(command, timeout=15, artifact_root=tmp_path / 'evidence')
-    assert status == 0
-    status, _ = guard.supervise(guard.pytest_command(['--collect-only', 'test_probe.py']), timeout=5, artifact_root=tmp_path / 'evidence')
-    assert status == 0
-    status, _ = guard.supervise(guard.pytest_command(['-k', 'absent', 'test_probe.py']), timeout=5, artifact_root=tmp_path / 'evidence')
-    assert status == 5
+    status, path = guard.supervise(command, env=env, timeout=15, artifact_root=tmp_path / 'evidence')
+    manifest = json.loads((path / 'manifest.json').read_text())
+    assert status == 0, manifest
+    assert manifest['raw_returncode'] == 0 and manifest['status'] == 'passed'
+    assert (tmp_path / 'assertion-ran').read_text() == 'yes'
+    for arguments, expected in [(['--collect-only'], 0), (['-k', 'absent'], 5)]:
+        command = guard.pytest_command([*arguments, 'test_probe.py'], env)
+        status, path = guard.supervise(command, env=env, timeout=5, artifact_root=tmp_path / 'evidence')
+        manifest = json.loads((path / 'manifest.json').read_text())
+        assert status == expected, manifest
+        assert manifest['raw_returncode'] == expected
 
 
 def wrapper():

@@ -11,6 +11,7 @@ import unicodedata
 import unittest
 import uuid
 from unittest import mock
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from email.message import Message
 from pathlib import Path
@@ -39,6 +40,38 @@ def load_server():
     sys.modules["server"] = server
     spec.loader.exec_module(server)
     return server
+
+
+class BackgroundJobOwner:
+    """Keep real web workers inside the lifetime of their disposable fixture."""
+
+    def __init__(self, web):
+        self.web = web
+        self.threads = []
+        self.joined = 0
+
+    def __enter__(self):
+        self.original = self.web.start_background
+
+        def start(*args, **kwargs):
+            thread = self.original(*args, **kwargs)
+            self.threads.append(thread)
+            return thread
+
+        self.web.start_background = start
+        return self
+
+    def join(self):
+        # A joined worker may itself have started another owned worker.
+        while self.joined < len(self.threads):
+            self.threads[self.joined].join()
+            self.joined += 1
+
+    def __exit__(self, *_exc):
+        try:
+            self.join()
+        finally:
+            self.web.start_background = self.original
 
 
 def load_i18n():
@@ -12102,6 +12135,69 @@ devices:
         repo, original, target = fixture.seed_incident(ctx, service_checkout, unpublished)
         return fixture, ctx, repo, original, target
 
+    def test_background_owner_joins_post_terminal_writes_before_mutation_and_cleanup(self):
+        server = load_server()
+        web = server.web
+        original_start = web.start_background
+        for fail_body in (False, True):
+            with self.subTest(fail_body=fail_body):
+                terminal = threading.Event()
+                release = threading.Event()
+                joining = threading.Event()
+                observations = []
+                observer = None
+                with tempfile.TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    try:
+                        expected = self.assertRaisesRegex(AssertionError, "injected body failure") if fail_body else nullcontext()
+                        with expected:
+                            with BackgroundJobOwner(web) as workers:
+                                def job():
+                                    terminal.set()
+                                    release.wait()
+                                    (root / "final-write").write_text("complete")
+
+                                thread = web.start_background(job)
+                                real_join = thread.join
+
+                                def observed_join():
+                                    joining.set()
+                                    real_join()
+
+                                thread.join = observed_join
+
+                                def release_after_join_started():
+                                    try:
+                                        self.assertTrue(joining.wait(3))
+                                        self.assertTrue(terminal.wait(3))
+                                        self.assertTrue(thread.is_alive())
+                                        self.assertTrue(root.is_dir())
+                                        self.assertFalse((root / "legacy-state").exists())
+                                        self.assertFalse((root / "final-write").exists())
+                                    except BaseException as error:
+                                        observations.append(error)
+                                    finally:
+                                        release.set()
+
+                                observer = threading.Thread(target=release_after_join_started)
+                                observer.start()
+                                self.assertIs(workers.threads[0], thread)
+                                self.assertTrue(terminal.wait(3))
+                                if fail_body:
+                                    raise AssertionError("injected body failure")
+                                workers.join()
+                                self.assertEqual((root / "final-write").read_text(), "complete")
+                                (root / "legacy-state").write_text("304/305")
+                    finally:
+                        release.set()
+                        if observer is not None:
+                            observer.join()
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual((root / "final-write").read_text(), "complete")
+                    self.assertEqual(observations, [])
+                    self.assertIs(web.start_background, original_start)
+                self.assertFalse(root.exists())
+
     def test_reset_exact_force_update_legacy_incident(self):
         for service_checkout in (False, True):
             with self.subTest(service_checkout=service_checkout), tempfile.TemporaryDirectory() as tmp:
@@ -12109,44 +12205,47 @@ devices:
                 self.assertEqual(self.git(["rev-list", "--left-right", "--count", "main...origin/main"], repo).stdout.strip(), "1\t1")
                 live_before = {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()}
                 import web
-                preview_id = str(uuid.uuid4())
-                preview = web.dispatch_command(ctx, "preview", {"command_id": preview_id,
-                    "generation": ctx.read_state()["operation_generation"], "payload": {}})
-                self.assertTrue(preview["ok"], preview)
-                self.assertTrue(self.wait_until(lambda: (ctx.read_state()["command_records"].get(preview_id) or {}).get("status") == "terminal"))
-                preview_result = ctx.read_state()["command_records"][preview_id]["result"]
-                self.assertIs(preview_result["ok"], False)
-                self.assertIs(preview_result["safe_terminal"], True)
-                self.assertIn("commits absent from origin", ctx.read_state()["last_message"])
-                ctx.write_state({**fixture.legacy_updates(), "last_preview_paths": ["old"], "last_save_preview_paths": ["old"],
-                                 "apply_preview_selected_paths": ["old"], "save_preview_selected_paths": ["old"]})
-                # Model the exact old accepted304 -> preview-clear305 transition.
-                ctx.operation_store.write_state({"operation_generation": 305})
-                self.assertEqual(ctx.read_state()["active_operation"]["accepted_generation"], 304)
-                new_id = str(uuid.uuid4())
-                import web
-                if not service_checkout:
-                    old_records = set(ctx.read_state()["command_records"])
-                    response = self.post_json_context(web, ctx, "/reset-git-state")
-                    self.assertEqual(response.responses, [200])
-                    result = json.loads(response.wfile.getvalue())
-                    new_id = (set(ctx.read_state()["command_records"]) - old_records).pop()
-                else:
-                    result = web.dispatch_command(ctx, "reset_git_state", {"command_id": new_id, "generation": 305, "payload": {}},
-                                                  start_job=lambda target, *args, **kw: web.start_reserved_background(ctx, target, *args, **kw))
-                self.assertTrue(result["ok"], result)
-                self.assertTrue(self.wait_until(lambda: (ctx.read_state()["command_records"].get(new_id) or {}).get("status") == "terminal"))
-                after = ctx.read_state()
-                self.assertTrue(after["command_records"][new_id]["result"]["ok"], after)
-                self.assertIsNone(after["active_operation"])
-                self.assertIsNone(after["reset_intent"])
-                self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
-                self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
-                self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/main"], repo).stdout.split()[0], target)
-                self.assertEqual(self.repo_status(repo), "")
-                self.assertEqual(live_before, {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()})
-                for key in ("last_preview_paths", "last_save_preview_paths", "apply_preview_selected_paths", "save_preview_selected_paths"):
-                    self.assertEqual(after[key], [])
+                with BackgroundJobOwner(web) as workers:
+                    preview_id = str(uuid.uuid4())
+                    preview = web.dispatch_command(ctx, "preview", {"command_id": preview_id,
+                        "generation": ctx.read_state()["operation_generation"], "payload": {}})
+                    self.assertTrue(preview["ok"], preview)
+                    workers.join()
+                    self.assertEqual(ctx.read_state()["command_records"][preview_id]["status"], "terminal")
+                    preview_result = ctx.read_state()["command_records"][preview_id]["result"]
+                    self.assertIs(preview_result["ok"], False)
+                    self.assertIs(preview_result["safe_terminal"], True)
+                    self.assertIn("commits absent from origin", ctx.read_state()["last_message"])
+                    ctx.write_state({**fixture.legacy_updates(), "last_preview_paths": ["old"], "last_save_preview_paths": ["old"],
+                                     "apply_preview_selected_paths": ["old"], "save_preview_selected_paths": ["old"]})
+                    # Model the exact old accepted304 -> preview-clear305 transition.
+                    ctx.operation_store.write_state({"operation_generation": 305})
+                    self.assertEqual(ctx.read_state()["active_operation"]["accepted_generation"], 304)
+                    new_id = str(uuid.uuid4())
+                    import web
+                    if not service_checkout:
+                        old_records = set(ctx.read_state()["command_records"])
+                        response = self.post_json_context(web, ctx, "/reset-git-state")
+                        self.assertEqual(response.responses, [200])
+                        result = json.loads(response.wfile.getvalue())
+                        new_id = (set(ctx.read_state()["command_records"]) - old_records).pop()
+                    else:
+                        result = web.dispatch_command(ctx, "reset_git_state", {"command_id": new_id, "generation": 305, "payload": {}},
+                                                      start_job=lambda target, *args, **kw: web.start_reserved_background(ctx, target, *args, **kw))
+                    self.assertTrue(result["ok"], result)
+                    workers.join()
+                    self.assertEqual(ctx.read_state()["command_records"][new_id]["status"], "terminal")
+                    after = ctx.read_state()
+                    self.assertTrue(after["command_records"][new_id]["result"]["ok"], after)
+                    self.assertIsNone(after["active_operation"])
+                    self.assertIsNone(after["reset_intent"])
+                    self.assertEqual(self.git(["rev-parse", "main"], repo).stdout.strip(), target)
+                    self.assertEqual(self.git(["rev-parse", "refs/ha-ops/recovery/reset/" + original], repo).stdout.strip(), original)
+                    self.assertEqual(self.git(["ls-remote", "origin", "refs/heads/main"], repo).stdout.split()[0], target)
+                    self.assertEqual(self.repo_status(repo), "")
+                    self.assertEqual(live_before, {str(p): p.read_bytes() for p in ctx.config_dir.rglob("*") if p.is_file()})
+                    for key in ("last_preview_paths", "last_save_preview_paths", "apply_preview_selected_paths", "save_preview_selected_paths"):
+                        self.assertEqual(after[key], [])
 
     def test_reset_preserves_truly_unpublished_tip(self):
         with tempfile.TemporaryDirectory() as tmp:
