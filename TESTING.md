@@ -253,26 +253,81 @@ uses the machine's physical CPU count. Workers are separate processes, which
 isolates module globals and mocks; each real workflow uses disposable local
 Git/config fixtures and fake Supervisor calls, never a live HA installation.
 
-## Selectable groups
+## Generated inventory and conservative plans
 
-Every Python test file belongs to one of these groups. Counts are collected
-pytest items including the preview decision guards (2746 total); remaining
-`subTest` loops exercise additional cases within some items.
+`dev/test_plan.py` generates the authoritative concrete node/area/dependency map
+from actual pinned pytest collection. No maintained table of per-file counts is
+a coverage inventory. The map includes every original parametrized ID, active
+fixture provider chains, local AST import closure, source/config/data hashes (including documentation and images) and
+explicit unresolved influences. Active local pytest hooks contribute to every
+node's provenance, and actual discovered items are checked against final
+collection so silent plugin removal cannot shrink the inventory. It is deterministic for unchanged inputs.
 
-| Group | Files under `ha-ops/tests/` | Items | Coverage |
-| --- | --- | ---: | --- |
-| Server and workflows | `test_server.py` | 440 | Save/Apply previews, Git branches, conflicts, protected storage, rollback, cleanup, migration, state, transport, UI source contracts, diagnostics, and local harness safety |
-| Backups | `test_backup_continuation.py` | 160 | Backup classification and creation policy, real Apply refusal/retry/acknowledgement, crash recovery, and HTTP/WebSocket replay |
-| Client commands | `test_client_contract.py` | 22 | Durable command claims, concurrency, preview identities, stale selections, recovery, and client/server boundaries |
-| Preview decisions | `test_preview_decisions.py` | 46 | Complete frontend module with inert Lit/Vaadin imports: local edits, content lifetime, synchronous final batches, refusal dismissal, real-operation fences, and native checkbox guards |
-| Registry and layout | `test_registry_diff.py`, `test_heap_layout.py` | 10 | Semantic registry diffs, root heap discovery, and rejection of retired layout/settings |
-| Native topology fixture | `test_native_topology.py` | 61 | Explicit Git root mechanics, exact index audit, blockers, persistence fixtures, Docker runner failure handling and topology workflow dependency coverage; real mounts require the separate runner |
-| Native state | `test_native_operations.py` | 418 | Inactive durable candidates, bounded retention/checkpoints/policy provenance, generation replay, explicit schema-1 upgrade, exact streaming large artifacts, lifecycle, empty-store high-water integrity, corruption, crash/reopen and independent recovery pins; container replacement is a separate local runner probe |
-| Native inventory | `test_native_inventory.py` | 252 | Dormant metadata-only byte-path inventory, scope-local diagnostics/blockers, both-phase stability and fallback proof, semantic parent safety independent of observed kind, retained parent/root acquisition failures, escaped LF/CR exclusion and scaffold fences, known-secret exclusions, component-fenced mounts and aliases, exact scope whitelist, separate effective-ignore/index audits, no-write/race/FIFO guards; real Linux mountinfo requires the local wrapper |
-| Native Git adapter | `test_native_git.py` | 563 | Dormant fixed routing, kind-specific NUL byte records and real independent Git status axes/intent-to-add, complete tracked status with scoped untracked requests, exact bounded blobs and existing-object reuse proofs, complete selected/unselected blob dependencies and generated root/subtree destinations, ref CAS/uncertainty with malformed loose/packed storage and diagnostic refusal, complete private indexes with prior-evidence validation, no-checkout owned worktrees with bounded descriptors, verified sequential reopens, exact parent reservations and substitution non-adoption, real process interruption, kernel leases, foreign-resource preservation and durable addressed cleanup debt; full Unix byte identities require the local Linux wrapper |
-| Native disk | `test_native_disk.py` | 649 | Dormant physical byte/inode accounting with user backups excluded; one actual immutable initial snapshot/forecast and phase scanner/capacity/Git sentinels, issued Snapshot/Plan refusal and context GC, bounded owner resource/state transitions and lifecycle fencing, exact raw marker/backlink controls, direct-ref alias refusal and pinned NativeGit replacement semantics, Repack membership fingerprints, private persisted journal/state and symmetric snapshot/current owner-lock presence and stable receipts with disclosed pre-first-observation limits, whole initial packed grammar and one explicit packed/peeled OID batch, descriptor-held proved absence versus acquisition uncertainty across initial/guard/phase Git/owner/output routes and monotone control presence, finite known-leaf loss refusal with real same/different-inode restoration and full Save reflog preimage retention, one initial artifact content verification, typed creation receipts retaining the original floor and nonblocking locks; real allocation, byte paths, mount aliases and process locks require the local runner |
-| Local virtualization wrapper | `test_local_virtualization.py` | 103 | Setup, input isolation, exact bind sources, container ownership, and failure cleanup; real mounts require the local runner |
-| Release safeguards | `test_release_readiness.py`, `test_pre_push_hook.py`, `test_release_script.py` | 22 | Release metadata, historical changelog placement, terminology, hook gate, release classification, tags, and failure rollback |
+```sh
+artifacts=$(mktemp -d)
+python3 dev/test_plan.py collect --output "$artifacts/map.json" --artifacts "$artifacts/collection"
+python3 dev/test_plan.py plan --map "$artifacts/map.json" --base origin/main --output "$artifacts/plan.json"
+python3 dev/test_plan.py run --map "$artifacts/map.json" --plan "$artifacts/plan.json" --artifacts "$artifacts/execution"
+```
+
+`--base` is an existing local commit/ref; without it, the planner verifies the
+configured upstream and uses its merge base, including **all** unpublished
+commits plus staged, unstaged and untracked paths. It never defaults to `HEAD^`.
+Rename endpoints, deletions and unpublished changes later reverted also
+participate. Committed, staged and unstaged layers are unioned independently;
+dirty restoration cannot cancel an unpublished/index change. Every ID has an inclusion/exclusion
+reason. Missing bases, stale maps, unknown paths, dynamic imports (including aliases), wildcard imports, runtime calls
+(filesystem/process/HTTP/Git/environment) and other unresolved influences expand selection to full.
+Stale maps must be recollected before execution. Saved decisions and their
+current Git basis are recomputed, and a fresh full-scope collection before
+dispatch detects environment-driven changes to the complete test universe. Inventory/plan success means
+selection evidence only; it is never a passed test run.
+
+The first scheduler supports qualified independent **host** jobs only. It uses
+one protected runner invocation at a time with explicit xdist `worksteal` argv,
+workers = min(available CPU, selected work, qualified host cap 10). Affinity is
+used when available; the CPU-count fallback and chosen count are recorded.
+The cap reuses the host independent-disposable-fixture qualification below;
+it does not qualify arbitrary filesystem or platform work. A repository resource
+lock prevents overlapping scheduler invocations. Parent `PYTEST_ADDOPTS` is
+cleared only in owned children; bytecode writes are disabled there and
+generated `__pycache__`/`.pyc` files are consistently excluded from change inputs; configured filters and any deselection are
+refused. Exact original selectors are split into sequential disjoint batches
+of at most eight files, each at most 64 KiB of UTF-8 bytes.
+
+Small semantic rules in `dev/test_plan_rules.json` assign resource profiles;
+concrete test membership is generated. Unmatched work is unknown/blocked, and
+conflicting applicable profiles are unqualified/blocked. API-derived calls such
+as `os.statvfs` additionally require an exclusive resource profile regardless
+of the test's name. Resource symbols are traced across the entire local
+test/fixture/plugin dependency closure, including callable assignments and
+helper indirection; a broad host family cannot override that requirement.
+Unresolved wildcard imports, dynamic loaders, reflective dispatch and
+ambiguous/missing source provenance also force an unqualified blocked profile
+through every test/fixture/plugin dependency. Literal dynamic loads are
+conservatively blocked in this stage; an ordinary host family cannot certify
+their resource use. The owned infrastructure uses static imports and explicit
+attribute access so it requires no resource-uncertainty exemption.
+Unknown runtime-call influence is stored once per source category, with a
+shared `source_analysis` table for provenance rather than duplicating every
+call name through every test. Only the portable planner infrastructure family currently
+has an explicit default host qualification. A separately qualified disposable
+fixture project may pass `collect --rules relative/rules.json`; its semantic
+rules are fingerprinted inside that repository and cannot remove platform
+proofs or exceed the host cap. Capacity/statvfs/ENOSPC/inode and
+exclusive-volume work is blocked pending a qualified exclusive-volume route;
+separate tmp directories never qualify that route. Linux, ext4, original-App
+runtime, browser and PID1 requirements remain explicitly incomplete. Required
+profiles are never satisfied by host skips. Consequently this first-stage `run`
+returns nonzero/incomplete even when all dispatched host jobs pass; inspect
+`host_status`, `blocked`, `required_proofs`, and each retained job's manifest and
+full machine-readable setup/call/teardown records. Failed, skipped, duplicated,
+missing, interrupted or timed-out outcomes cannot qualify. There is no receipt
+reuse. Source/test/config changes invalidate saved maps and plans; recollect
+after refresh, restart or version changes rather than resuming stale work.
+
+The complete pre-push gate and every mandatory platform proof below remain
+unchanged. The following selectors are convenient development examples only.
 
 ```sh
 # Server and workflows

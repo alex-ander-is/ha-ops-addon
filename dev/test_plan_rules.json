@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "profiles": {
+    "host": {
+      "cap": 10
+    }
+  },
+  "required_proofs": [
+    "linux",
+    "exclusive-volume-ext4",
+    "original-app-runtime",
+    "browser",
+    "pid1"
+  ],
+  "rules": [
+    {
+      "name": "portable-planner-infrastructure",
+      "pattern": "(^|/)test_test_plan\\.py::",
+      "profile": "host"
+    },
+    {
+      "name": "exclusive-capacity",
+      "pattern": "(?i)(statvfs|enospc|inode|exhaust|exclusive.mount|physical.delta|capacity|admission)",
+      "profile": "exclusive-volume-ext4"
+    },
+    {
+      "name": "linux-native",
+      "pattern": "(?i)(test_native_|test_migration_)",
+      "profile": "linux"
+    },
+    {
+      "name": "runtime",
+      "pattern": "(?i)(test_runtime|test_original_app)",
+      "profile": "original-app-runtime"
+    },
+    {
+      "name": "browser",
+      "pattern": "(?i)(browser|playwright)",
+      "profile": "browser"
+    }
+  ],
+  "exclusive_api_pattern": "(^|\\.)(statvfs|disk_usage|fallocate|mount)$"
+}
