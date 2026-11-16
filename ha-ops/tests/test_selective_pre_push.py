@@ -104,7 +104,7 @@ def test_unknown_blocks_no_full_fallback_explicit_full_exact(repo):
     assert plan['errors'] and not any(row['selected'] for row in plan['decisions'])
     full = gate.make_plan(repo, inventory, records(repo, base), full=True)
     assert not full['errors'] and all(row['selected'] for row in full['decisions'])
-    assert gate.areas_for_path('ha-ops/app/server.py', inventory['nodes'])[1]
+    assert gate.areas_for_path('ha-ops/app/server.py', inventory['nodes']) == ({'reset', 'native-disk'}, None)
 
 
 def machine(ids, workers=2):
@@ -971,3 +971,233 @@ else:
     result = subprocess.run([sys.executable, '-c', program, str(ROOT / 'dev'), str(policy_dir), str(repo), kind],
                             timeout=3, capture_output=True)
     assert result.returncode == 0, result.stderr.decode()
+
+
+# Frozen diagnostic *paths*, not test IDs: collection still supplies membership.
+REVIEWED_DIAGNOSTIC_PATHS = [
+    '.github/workflows/local-virtualization.yml',
+    '.github/workflows/native-topology.yml',
+    '.gitignore',
+    'TODO.md',
+    'UI_COMPONENT_AUDIT.md',
+    'ha-ops/Dockerfile',
+    'ha-ops/app/app_context.py',
+    'ha-ops/app/backups.py',
+    'ha-ops/app/dev_harness.py',
+    'ha-ops/app/direct_access.py',
+    'ha-ops/app/direct_auth.py',
+    'ha-ops/app/git_auth.py',
+    'ha-ops/app/i18n.py',
+    'ha-ops/app/jobs.py',
+    'ha-ops/app/server.py',
+    'ha-ops/app/state.py',
+    'ha-ops/app/static/ha-ops.css',
+    'ha-ops/app/static/ha-ops.js',
+    'ha-ops/app/supervisor.py',
+    'ha-ops/app/sync.py',
+    'ha-ops/app/web.py',
+    'ha-ops/build.yaml',
+    'ha-ops/frontend/package-lock.json',
+    'ha-ops/frontend/package.json',
+    'ha-ops/frontend/src/ha-ops.js',
+    'ha-ops/runtime-apk-aarch64.lock',
+    'ha-ops/runtime-apk-amd64.lock',
+    'ha-ops/runtime-install.sh',
+    'ha-ops/runtime-pip.lock',
+    'ha-ops/runtime-profile.json',
+    'ha-ops/tests/browser/README.md',
+    'ha-ops/tests/browser/backup-continuation.mjs',
+    'ha-ops/tests/browser/direct-access.mjs',
+    'ha-ops/tests/browser/direct_fixture.py',
+    'ha-ops/tests/browser/folder-scope.mjs',
+    'ha-ops/tests/browser/folder_scope_fixture.py',
+    'ha-ops/tests/browser/linux_bridge.py',
+    'ha-ops/tests/browser/migration-review-interception-test.mjs',
+    'ha-ops/tests/browser/migration-review-interception.mjs',
+    'ha-ops/tests/browser/migration-review-lifecycle.mjs',
+    'ha-ops/tests/browser/migration-review.mjs',
+    'ha-ops/tests/browser/migration_review_fixture.py',
+    'ha-ops/tests/browser/native_apply_fixture.py',
+    'ha-ops/tests/browser/preview-decisions-source.cjs',
+    'ha-ops/tests/browser/reset-git-state.mjs',
+    'ha-ops/tests/browser/reset_git_state_fixture.py',
+    'ha-ops/tests/browser/run.mjs',
+    'ha-ops/tests/browser/storage-compact.mjs',
+    'ha-ops/tests/browser/storage-header-source.cjs',
+    'ha-ops/tests/browser/storage_compact_fixture.py',
+    'ha-ops/tests/integration/Dockerfile',
+    'ha-ops/tests/integration/container_probe.py',
+    'ha-ops/tests/integration/fixture_cleanup.py',
+    'ha-ops/tests/integration/run_native_topology.py',
+    'ha-ops/tests/native_topology_helpers.py',
+    'ha-ops/tests/network_publication_helpers.py',
+    'requirements-dev.txt',
+]
+
+
+def semantic_inventory():
+    sources = ['server', 'client_contract', 'preview_decisions', 'migration_review_bridge',
+               'native_migration_review', 'native_migration_review_http', 'native_storage',
+               'native_compact', 'native_scope', 'native_apply', 'native_topology',
+               'native_network_publication', 'local_virtualization', 'release_readiness',
+               'selective_pre_push', 'native_future_collected']
+    result = data([('ha-ops/tests/test_' + stem + '.py', 'test_case') for stem in sources])
+    result['nodes'].extend(data([('ha-ops/tests/test_server.py', name) for name in
+                                ('test_reset', 'test_log_scroll', 'test_command')])['nodes'])
+    return result
+
+
+@pytest.mark.parametrize('path', REVIEWED_DIAGNOSTIC_PATHS)
+def test_reviewed_historical_diagnostic_has_explained_coverage(repo, monkeypatch, path):
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: ([path], []))
+    plan = gate.make_plan(repo, semantic_inventory(), '')
+    assert plan['mode'] == 'selective' and plan['errors'] == []
+    chosen = [row for row in plan['decisions'] if row['selected']]
+    if path in gate.DOCUMENTATION:
+        assert not chosen
+    else:
+        assert chosen and all(path in row['reason'] for row in chosen)
+
+
+@pytest.mark.parametrize('path', [
+    '.gitignore', 'requirements-dev.txt', 'ha-ops/Dockerfile',
+    'ha-ops/frontend/package.json', 'ha-ops/frontend/src/ha-ops.js',
+    'ha-ops/app/server.py', 'ha-ops/app/app_context.py', 'ha-ops/dev_harness.py',
+    'ha-ops/tests/browser/run.mjs',
+])
+def test_reviewed_shared_boundaries_include_new_collected_category(path):
+    nodes = semantic_inventory()['nodes']
+    areas, error = gate.areas_for_path(path, nodes)
+    assert not error and areas == {gate.category(node) for node in nodes}
+    assert 'native-future_collected' in areas
+
+
+@pytest.mark.parametrize('filename,primary', [
+    ('reset_git_state_fixture.py', {'reset'}),
+    ('preview-decisions-source.cjs', {'ui-common'}),
+    ('migration_review_fixture.py', {'migration', 'native-migration_review', 'native-migration_review_http'}),
+    ('storage_compact_fixture.py', {'native-storage', 'native-compact'}),
+    ('direct_fixture.py', {'backend-common'}),
+    ('backup-continuation.mjs', {'backend-common'}),
+    ('folder_scope_fixture.py', {'native-scope', 'native-apply'}),
+])
+def test_browser_semantic_primary_adjacent_and_reverse_edges(filename, primary):
+    path = 'ha-ops/tests/browser/' + filename
+    nodes = semantic_inventory()['nodes']
+    nodes[-1]['dependencies'] = [path]
+    areas, error = gate.areas_for_path(path, nodes)
+    assert not error
+    assert primary | gate.MIXED_AREAS | {'ui-common'} <= areas
+    # A syntactically discovered additional consumer can never narrow policy.
+    extra = data([('ha-ops/tests/test_native_additional.py', 'test_case')])['nodes'][0]
+    extra['dependencies'] = [path]
+    assert 'native-additional' in gate.areas_for_path(path, nodes + [extra])[0]
+    assert 'native-future_collected' not in areas
+
+
+@pytest.mark.parametrize('path', [
+    'ha-ops/app/future.py', 'ha-ops/app/future.json', 'ha-ops/app/native_future.py',
+    'ha-ops/app/native_future/native_git.py', 'ha-ops/app/native_future_collected.py',
+    'ha-ops/frontend/src/future.js',
+    'ha-ops/tests/browser/future.mjs', 'ha-ops/tests/browser/deleted_helper.py',
+    'ha-ops/tests/integration/future.py', 'ha-ops/tests/data/future.json',
+    '.github/workflows/future.yml', 'ha-ops/runtime-future.lock', 'FUTURE.md',
+    'other/server.py', 'other/reset_git_state_fixture.py',
+])
+def test_future_semantic_inputs_block_even_when_fingerprinted_or_imported(repo, monkeypatch, path):
+    inventory = semantic_inventory()
+    inventory['inputs'][path] = {'digest': 'known does not mean reviewed'}
+    inventory['nodes'][0]['dependencies'] = [path]
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: ([path], []))
+    plan = gate.make_plan(repo, inventory, '')
+    assert plan['errors'] and plan['mode'] == 'selective'
+    assert not any('No surviving collected category' in error for error in plan['errors'])
+
+
+@pytest.mark.parametrize('path', ['ha-ops/app/server.py', 'ha-ops/app/reset_git.py',
+                                 'ha-ops/tests/test_reset_git.py', 'ha-ops/frontend/src/ha-ops.js',
+                                 'ha-ops/tests/browser/reset-git-state.mjs', '.gitignore'])
+@pytest.mark.parametrize('transform', [lambda p: './' + p, lambda p: '/' + p,
+                                     lambda p: 'other/../' + p, lambda p: 'other//' + p,
+                                     lambda p: p.replace('/', '//'), lambda p: p + '/',
+                                     lambda p: p.replace('/', '\\')])
+def test_every_semantic_rule_requires_canonical_repository_path(path, transform):
+    altered = transform(path)
+    if altered == path:
+        return
+    areas, error = gate.areas_for_path(altered, semantic_inventory()['nodes'])
+    assert not areas and error
+
+
+@pytest.mark.parametrize('filename', sorted(gate.BROWSER_FAMILIES))
+def test_deleted_required_browser_family_and_rename_endpoint_still_block(repo, monkeypatch, filename):
+    path = 'ha-ops/tests/browser/' + filename
+    for missing in gate.BROWSER_FAMILIES[filename] | gate.MIXED_AREAS | {'ui-common'}:
+        inventory = semantic_inventory()
+        inventory['nodes'] = [n for n in inventory['nodes'] if gate.category(n) != missing]
+        monkeypatch.setattr(gate, 'change_basis', lambda *a: ([path], []))
+        assert 'Required category has no collected tests: ' + missing in gate.make_plan(repo, inventory, '')['errors']
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: ([path, 'ha-ops/tests/browser/future-name.mjs'], []))
+    assert any('future-name.mjs' in e for e in gate.make_plan(repo, semantic_inventory(), '')['errors'])
+
+
+def test_future_reset_only_boundary_excludes_logs_and_unrelated_native():
+    inventory = semantic_inventory()
+    for node in inventory['nodes']:
+        node['dependencies'] = ['ha-ops/app/reset_git.py']
+    assert gate.areas_for_path('ha-ops/app/reset_git.py', inventory['nodes']) == ({'reset', 'backend-common'}, None)
+
+
+@pytest.mark.parametrize('filename', ['test_server.py', 'test_client_contract.py'])
+def test_mixed_module_reverse_consumers_add_native_and_non_native_categories(repo, monkeypatch, filename):
+    source = 'ha-ops/tests/' + filename
+    inventory = semantic_inventory()
+    consumers = data([('ha-ops/tests/test_native_apply.py', 'test_imported_fixture'),
+                      ('ha-ops/tests/test_local_virtualization.py', 'test_imported_fixture')])['nodes']
+    for node in consumers:
+        node['dependencies'] = [source]
+    inventory['nodes'].extend(consumers)
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: ([source], []))
+    plan = gate.make_plan(repo, inventory, '')
+    assert not plan['errors']
+    assert {row['category'] for row in plan['decisions'] if row['selected']} == (
+        gate.MIXED_AREAS | {'native-apply', 'virtualization'})
+    assert all(source in row['reason'] for row in plan['decisions'] if row['selected'])
+
+
+@pytest.mark.parametrize('filename', ['test_server.py', 'test_client_contract.py'])
+@pytest.mark.parametrize('operation', ['delete', 'rename'])
+@pytest.mark.parametrize('missing', sorted(gate.MIXED_AREAS))
+def test_mixed_reverse_consumers_never_erase_deleted_required_family(repo, monkeypatch, filename, operation, missing):
+    source = 'ha-ops/tests/' + filename
+    inventory = semantic_inventory()
+    inventory['nodes'] = [node for node in inventory['nodes'] if gate.category(node) != missing]
+    for node in inventory['nodes']:
+        if gate.category(node) in {'native-apply', 'virtualization'}:
+            node['dependencies'] = [source]
+    changed = [source] + (['ha-ops/tests/test_renamed_mixed.py'] if operation == 'rename' else [])
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: (changed, []))
+    plan = gate.make_plan(repo, inventory, '')
+    assert 'Required category has no collected tests: ' + missing in plan['errors']
+    assert {'native-apply', 'virtualization'} <= {row['category'] for row in plan['decisions'] if row['selected']}
+
+
+@pytest.mark.parametrize('path', ['release-policy.py', 'dev/helper.py',
+                                 'dev/virtualization/helper.py', '.githooks/pre-push', 'README.md'])
+def test_other_reviewed_inputs_keep_additive_reverse_consumers(path):
+    nodes = semantic_inventory()['nodes']
+    consumer = next(node for node in nodes if gate.category(node) == 'native-apply')
+    consumer['dependencies'] = [path]
+    areas, error = gate.areas_for_path(path, nodes)
+    assert not error and 'native-apply' in areas
+
+
+def test_reverse_consumers_cannot_admit_future_unknown_input(repo, monkeypatch):
+    path = 'ha-ops/app/unreviewed_future.py'
+    inventory = semantic_inventory()
+    for node in inventory['nodes']:
+        node['dependencies'] = [path]
+    monkeypatch.setattr(gate, 'change_basis', lambda *a: ([path], []))
+    plan = gate.make_plan(repo, inventory, '')
+    assert any('Unknown influence: ' + path in error for error in plan['errors'])
+    assert not any(row['selected'] for row in plan['decisions'])

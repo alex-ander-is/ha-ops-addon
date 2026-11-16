@@ -118,41 +118,116 @@ def change_basis(root, records, full=False):
     return sorted(p for p in paths if not shared.generated_path(p)), refs
 
 
+# Exact reviewed shared inputs. These compose backend dispatch, generated UI and
+# source-contract checks across domains; all *generated* categories are the safe
+# boundary. This is deliberately not an app/*.py or packaging-directory rule.
+SHARED_INPUTS = frozenset({
+    '.gitignore', 'requirements-dev.txt', 'ha-ops/Dockerfile', 'ha-ops/build.yaml',
+    'ha-ops/runtime-apk-aarch64.lock', 'ha-ops/runtime-apk-amd64.lock',
+    'ha-ops/runtime-install.sh', 'ha-ops/runtime-pip.lock', 'ha-ops/runtime-profile.json',
+    'ha-ops/frontend/package.json', 'ha-ops/frontend/package-lock.json',
+    'ha-ops/frontend/src/ha-ops.js', 'ha-ops/frontend/dist/ha-ops.js',
+    'ha-ops/app/static/ha-ops.js', 'ha-ops/app/server.py', 'ha-ops/dev_harness.py',
+    *('ha-ops/app/' + name + '.py' for name in (
+        'app_context', 'backups', 'dev_harness', 'direct_access', 'direct_auth',
+        'git_auth', 'i18n', 'jobs', 'state', 'supervisor', 'sync', 'web')),
+})
+# Native module names are reviewed too: a new module needs a semantic decision
+# even when a newly collected test happens to give it a matching category.
+NATIVE_INPUTS = frozenset('ha-ops/app/native_' + name + '.py' for name in (
+    'apply', 'status', 'scope', 'migration_transition', 'storage', 'operations',
+    'migration', 'inventory', 'publication', 'services', 'preview', 'save', 'git',
+    'metadata', 'disk', 'recovery', 'migration_git_candidate', 'runtime',
+    'migration_review', 'migration_review_http'))
+DOCUMENTATION = frozenset({'AGENTS.md', 'TESTING.md', 'README.md', 'Backlog.md',
+                           'TODO.md', 'UI_COMPONENT_AUDIT.md', 'ha-ops/tests/browser/README.md'})
+# Browser operations also exercise mixed HTTP/state and shared UI contracts.
+# Required primary families survive deletion; broad adjacent families below are
+# intersected with current membership so optional families are not invented.
+UI_AREAS = MIXED_AREAS | {'ui-common', 'migration', 'release', 'native-apply',
+                         'native-apply_integration', 'native-migration_review_http'}
+BROWSER_FAMILIES = {
+    'reset-git-state.mjs': {'reset'}, 'reset_git_state_fixture.py': {'reset'},
+    'preview-decisions-source.cjs': {'ui-common'},
+    'migration-review.mjs': {'migration', 'native-migration_review', 'native-migration_review_http'},
+    'migration-review-lifecycle.mjs': {'migration', 'native-migration_review', 'native-migration_review_http'},
+    'migration-review-interception.mjs': {'migration', 'native-migration_review', 'native-migration_review_http'},
+    'migration-review-interception-test.mjs': {'migration', 'native-migration_review', 'native-migration_review_http'},
+    'migration_review_fixture.py': {'migration', 'native-migration_review', 'native-migration_review_http'},
+    'storage-compact.mjs': {'native-storage', 'native-compact'},
+    'storage-header-source.cjs': {'native-storage', 'native-compact'},
+    'storage_compact_fixture.py': {'native-storage', 'native-compact'},
+    'direct-access.mjs': {'backend-common'}, 'direct_fixture.py': {'backend-common'},
+    'backup-continuation.mjs': {'backend-common'},
+    'folder-scope.mjs': {'native-scope', 'native-apply'},
+    'folder_scope_fixture.py': {'native-scope', 'native-apply'},
+}
+SHARED_BROWSER = frozenset('ha-ops/tests/browser/' + name for name in
+                           ('run.mjs', 'native_apply_fixture.py', 'linux_bridge.py'))
+TOPOLOGY_INPUTS = frozenset({
+    'ha-ops/tests/native_topology_helpers.py', 'ha-ops/tests/integration/Dockerfile',
+    'ha-ops/tests/integration/container_probe.py', 'ha-ops/tests/integration/fixture_cleanup.py',
+    'ha-ops/tests/integration/run_native_topology.py', '.github/workflows/native-topology.yml',
+})
+
+
 def areas_for_path(path, nodes):
-    """Only qualified module boundaries are narrow; mixed source hunks block."""
+    """Reviewed semantic authority first; AST reverse edges only add coverage."""
     categories = {category(node) for node in nodes}
-    canonical_path = (Path(path).as_posix() == path and '..' not in Path(path).parts and '\\' not in path)
+    canonical = (bool(path) and not Path(path).is_absolute() and
+                 Path(path).as_posix() == path and '..' not in Path(path).parts and
+                 path != '.' and '\\' not in path)
+    if not canonical:
+        return set(), 'Unknown influence: ' + path + '; noncanonical repository path'
+
+    def reviewed(areas):
+        # dependencies is the existing transitive AST closure. It cannot prove
+        # absence of dynamic/data/process influence and never admits a new path.
+        reverse = {category(node) for node in nodes if path in node.get('dependencies', [])}
+        return set(areas) | reverse, None
+
     python_name = re.fullmatch(r'[a-z_][a-z0-9_]*\.py', Path(path).name) is not None
-    collected_python = (canonical_path and python_name and path.startswith('ha-ops/tests/') and
+    collected_python = (python_name and path.startswith('ha-ops/tests/') and
                         any(node['source'] == path for node in nodes))
     declared_root_module = re.fullmatch(r'ha-ops/tests/test_[a-z0-9_]+\.py', path) is not None
     if collected_python or declared_root_module:
         if Path(path).name in MIXED:
-            # Any changed mixed module can have lost a family entirely. Current
-            # survivors cannot prove its former membership; retain every declared
-            # family for edits, partial/full deletion and both rename endpoints.
-            return set(MIXED_AREAS), None
+            return reviewed(MIXED_AREAS)
         surviving = {category(node) for node in nodes if node['source'] == path}
-        return surviving or {category({'source': path, 'id': path + '::deleted'})}, None
-    if path in ('AGENTS.md', 'TESTING.md', 'README.md', 'Backlog.md') or path.startswith('ha-ops/docs/') and path.endswith('.md'):
-        return set(), None
+        return reviewed(surviving or {category({'source': path, 'id': path + '::deleted'})})
+    if path in DOCUMENTATION or path.startswith('ha-ops/docs/') and path.endswith('.md'):
+        return reviewed(set())
+    if path in SHARED_INPUTS or path in SHARED_BROWSER:
+        # Shared browser runner/bridge/harness serves every operation and its
+        # backend/source-contract consumers, including newly collected families.
+        return reviewed(categories)
+    if path in TOPOLOGY_INPUTS or path == 'ha-ops/tests/network_publication_helpers.py':
+        required = {'native-topology'} if path in TOPOLOGY_INPUTS else {'native-network_publication', 'native-scope'}
+        return reviewed(required | {c for c in categories if c.startswith('native-')} |
+                        (categories & {'virtualization', 'release', 'runner'}))
+    if path == '.github/workflows/local-virtualization.yml':
+        return reviewed({'virtualization', 'runner'} | (categories & {'native-topology'}))
+    browser = 'ha-ops/tests/browser/'
+    if path.startswith(browser) and path[len(browser):] in BROWSER_FAMILIES:
+        return reviewed(BROWSER_FAMILIES[path[len(browser):]] | MIXED_AREAS |
+                        {'ui-common'} | (categories & UI_AREAS))
+    if path == 'ha-ops/app/static/ha-ops.css':
+        return reviewed({'ui-common'} | (categories & UI_AREAS))
     if path in ('release', 'publish-release', 'release-policy.py', 'ha-ops/config.yaml', 'ha-ops/CHANGELOG.md'):
-        return {'release'}, None
+        return reviewed({'release'})
     if path.startswith('dev/virtualization/'):
-        return {'virtualization', 'runner'}, None
+        return reviewed({'virtualization', 'runner'})
     if path.startswith(('dev/', '.githooks/')):
-        return {'runner'}, None
+        return reviewed({'runner'})
     if path == 'ha-ops/app/reset_git.py':
+        # Existing qualified feature boundary: shared server AST imports would
+        # otherwise spuriously turn a Reset-only change into Logs/native work.
         return {'reset', 'backend-common'}, None
-    if path.startswith('ha-ops/app/native_') and path.endswith('.py'):
+    if path in NATIVE_INPUTS:
         area = 'native-' + Path(path).stem[7:]
-        return {c for c in categories if c.startswith('native-')} | {area, 'backend-common'}, None
-    if path.startswith('ha-ops/frontend/src/'):
-        if Path(path).name == 'migration-review.js':
-            return {'migration', 'ui-common'}, None
-        return set(), 'Unqualified mixed frontend boundary: ' + path
-    if path in ('ha-ops/app/server.py', 'ha-ops/frontend/dist/ha-ops.js'):
-        return set(), 'Unqualified mixed application boundary: ' + path
+        return reviewed({c for c in categories if c.startswith('native-')} | {area, 'backend-common'})
+    if path == 'ha-ops/frontend/src/migration-review.js':
+        return reviewed({'migration', 'ui-common'})
     return set(), 'Unknown influence: ' + path + '; add a reviewed semantic rule or explicitly request --full'
 
 
@@ -170,10 +245,6 @@ def make_plan(root, data, records, full=False):
         areas, error = areas_for_path(path, data['nodes'])
         if error and not full:
             errors.append(error)
-        if path.startswith('ha-ops/tests/') and not areas:
-            # Removed tests need a surviving category, never a guessed green.
-            if not path.endswith('.md') and not full:
-                errors.append('No surviving collected category for changed test: ' + path)
         for area in areas:
             selected_areas.add(area)
             reasons[area].append(path)

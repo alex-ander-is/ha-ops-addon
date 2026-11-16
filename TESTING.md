@@ -1,13 +1,67 @@
 # Testing HA Ops
 
+## Continuing selective test work
+
+The canonical push gate is `dev/selective_pre_push.py`; the older diagnostic
+`dev/test_plan.py` `run_plan` API is not that gate. Its historical cache comments
+must not be applied to the canonical receipt workflow described below.
+
+Collection generates concrete test membership. Reviewed file rules determine
+semantic coverage; AST reverse dependency categories only add coverage after a
+path has authority. A fingerprint, collected importer, or empty AST `unknown`
+list does not qualify a new semantic input or a receipt. Exact shared server,
+built UI, dependency and runtime inputs intentionally select every current
+category while retaining **selective** mode and actual changed-path reasons.
+A large unpublished history can therefore legitimately select all categories.
+A later Reset-only source change retains its narrow Reset/backend boundary and
+excludes Logs. Historical unknown-path and duplicate helper diagnostics were
+policy gaps; regenerate the current plan rather than carrying their counts
+forward. New unsupported modules, data, browser scripts or workflows require
+review; there is no automatic full fallback. Full selection is an explicit choice.
+
+For continuation from a clean context:
+
+1. Work in the intended checkout; isolate concurrent work in separate worktrees.
+   Freeze the exact implementation before collection or execution. Do not mix
+   evidence or changes from another worktree or a later source snapshot.
+2. Obtain actual hook records (local ref/SHA and advertised remote ref/SHA), then
+   run `python3 dev/selective_pre_push.py --plan-only --records FILE`. This freshly
+   collects membership and unions **every unpublished commit**, including reverted
+   intermediate paths, plus index, worktree and untracked layers. A final tree
+   diff or an assumed remote-tracking base is insufficient.
+3. Inspect `plan.json` errors, concrete decisions and category reasons. Use
+   `python3 dev/test_runner.py -- -p no:cacheprovider -q ha-ops/tests/test_selective_pre_push.py`
+   for policy regressions. A zero-error plan proves selection only; it does not
+   prove test execution, platform qualification, or successful publication.
+4. Execute through the canonical gate and satisfy the unchanged release gate and
+   relevant platform sections below. Only the reviewed complete Reset category
+   currently has production receipt qualification. Exclusive ext4/resource
+   refusal requires its isolated route; host jobs/skips cannot qualify Linux,
+   original App image, browser, or PID1 obligations. Keep immutable source,
+   runtime and fixture identities with evidence; changed recipes require new proof.
+
+Known traps and their durable guards:
+
+| Trap | Required handling and repository evidence |
+| --- | --- |
+| Timed faulthandler SIGSEGV trigger | Disable timed dumps while retaining fatal handling; see [protected runner regressions](ha-ops/tests/test_test_runner_guard.py) and supervisor rules below. |
+| Passed test body with interrupted/red controller | Require final machine/controller accounting, exit, cleanup and all phases; `test_strict_receipt_controller_rejects_invalid_finalization` and `test_strict_receipt_machine_rejects_partial_false_success` in [selective tests](ha-ops/tests/test_selective_pre_push.py). |
+| Background Reset work races state 304/305 injection or temporary cleanup | Join all recorded workers first; see `BackgroundJobOwner` and Reset lifecycle regressions in [server tests](ha-ops/tests/test_server.py). |
+| Nested pytest inherits configuration/environment or competes with ordinary tests | Preserve protected child isolation, at most ten ordinary workers and the later at-most-two-worker isolated phase; [planner tests](ha-ops/tests/test_test_plan.py) and `test_ordinary_finishes_before_all_nested_timing_families`. |
+| Empty AST unknown list, external/editable/shadow imports | Positive bounded input/runtime qualification remains mandatory; `test_closed_literal_source_requires_positive_qualification` and `test_receipt_admission_requires_closed_runtime_influence`. |
+| Reset receipt generalized to other tests/platforms | The filtered immutable Reset input/profile requires both inner canonical and outer isolation proof; see `dev/test_receipt_linux.py`, `dev/test_receipt_reset_policy.json` and the receipt section below. |
+| FIFO or oversized cache/policy/source input hangs | Keep bounded regular-file reads; `test_nonregular_receipt_evidence_rejected_in_bounded_owned_child` and `test_qualified_policy_and_sources_use_strict_bounded_owned_child_reads`. |
+| Source staging outside the known ignored repository contour | Keep owned staging inside the wrapper checkout, never a macOS `/var` alias or foreign worktree; `test_qualified_source_stage_is_owned_inside_wrapper_repository`. |
+| Empty controlled Git template removes normal exclude support | Retain `.git/info/exclude`; `test_clean_git_template_preserves_normal_owned_info_exclude`. |
+| Host terminal variables churn a Linux receipt | Bind actual Linux execution environment/tool identity; `test_fixed_linux_runtime_ignores_unused_host_terminal_env_and_git_config`. |
+
 ## Protected normal test execution
 
 Use `python3 dev/test_runner.py -- <pytest arguments>` for normal host tests.
 Pre-push uses `dev/selective_pre_push.py` to collect current concrete membership,
 explain affected categories and execute only those categories. Actual hook ref
 records cover every unpublished commit plus index, worktree and untracked layers.
-Unknown paths, mixed application boundaries and unverified bases block with an
-explanation. Inspect evidence with `--plan-only --records FILE`; explicit
+Unknown semantic inputs and unverified bases block with an explanation. Inspect evidence with `--plan-only --records FILE`; explicit
 `HA_OPS_PRE_PUSH_MODE=full` (or `--full`) selects the complete inventory.
 No automatic full-suite fallback is used. Selected complete categories automatically
 reuse applicable canonical success receipts from the private Git-common directory
