@@ -3,7 +3,16 @@
 ## Protected normal test execution
 
 Use `python3 dev/test_runner.py -- <pytest arguments>` for normal host tests.
-Pre-push keeps the complete original suite and uses this runner. It forces
+Pre-push keeps the complete original suite and uses this runner in two sequential
+foreground phases. The ordinary `-n auto ha-ops/tests` phase excludes exactly
+`test_test_runner_guard.py` and `test_test_plan.py` with explicit `--ignore` paths.
+The second phase explicitly selects both files with `-n 2`, isolating their nested
+supervisor and planner contracts from ordinary-suite concurrency. Either phase's
+nonzero status blocks the push; phase one failure prevents phase two. Recursive
+ordinary discovery retains new test files, and a missing required isolated path
+fails collection. This schedule is qualified with pinned pytest 8.4.2 and
+pytest-xdist 3.8.0; it does not establish the exact cause of an observed timeout
+or replace mandatory Linux/runtime proofs. The runner forces
 `faulthandler_timeout=0` after configuration, environment and CLI overrides,
 keeps fatal faulthandler enabled, and disables xdist worker restarts and known
 retry plugins. Selectors, worker count, capture and pytest exit semantics remain
@@ -222,7 +231,11 @@ Run commands from the repository root with the dependencies pinned in
 ## Full verification
 
 ```sh
-python3 dev/test_runner.py -- -n auto ha-ops/tests
+python3 dev/test_runner.py -- -n auto \
+  --ignore=ha-ops/tests/test_test_runner_guard.py \
+  --ignore=ha-ops/tests/test_test_plan.py ha-ops/tests && \
+python3 dev/test_runner.py -- -n 2 \
+  ha-ops/tests/test_test_runner_guard.py ha-ops/tests/test_test_plan.py
 ```
 
 For the isolated Linux runner, pass fixture-only Git identities explicitly and
@@ -234,8 +247,16 @@ python3 dev/virtualization/ha_ops_dev.py run --input . -- \
   env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
       GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
   python3 dev/test_runner.py -- -n 2 -p no:cacheprovider \
-    -o tmp_path_retention_policy=failed ha-ops/tests \
-    -k 'not test_clean_git_checkout_imports_server and not test_generated_frontend_bundle_has_narrow_whitespace_check_exception'
+    -o tmp_path_retention_policy=failed \
+    --ignore=ha-ops/tests/test_test_runner_guard.py \
+    --ignore=ha-ops/tests/test_test_plan.py ha-ops/tests \
+    -k 'not test_clean_git_checkout_imports_server and not test_generated_frontend_bundle_has_narrow_whitespace_check_exception' && \
+python3 dev/virtualization/ha_ops_dev.py run --input . -- \
+  env GIT_AUTHOR_NAME=Fixture GIT_AUTHOR_EMAIL=fixture@example.invalid \
+      GIT_COMMITTER_NAME=Fixture GIT_COMMITTER_EMAIL=fixture@example.invalid \
+  python3 dev/test_runner.py -- -n 2 -p no:cacheprovider \
+    -o tmp_path_retention_policy=failed \
+    ha-ops/tests/test_test_runner_guard.py ha-ops/tests/test_test_plan.py
 ```
 
 The read-only runner input intentionally excludes `.git`. Run the two tests
@@ -589,7 +610,11 @@ splitting them adds collection cost without addressing the measured tail.
 ## Measuring changes
 
 ```sh
-python3 dev/test_runner.py -- -n auto ha-ops/tests --durations=15
+python3 dev/test_runner.py -- -n auto \
+  --ignore=ha-ops/tests/test_test_runner_guard.py \
+  --ignore=ha-ops/tests/test_test_plan.py ha-ops/tests --durations=15 && \
+python3 dev/test_runner.py -- -n 2 \
+  ha-ops/tests/test_test_runner_guard.py ha-ops/tests/test_test_plan.py --durations=15
 python3 dev/test_runner.py -- -n auto ha-ops/tests/test_backup_continuation.py \
   -k 'invalid_inventory_families or ambiguous_post_creation or error_response_with_backup_data' \
   --durations=10

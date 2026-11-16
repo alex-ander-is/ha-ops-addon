@@ -97,5 +97,10 @@ if [ "$requires_release_check" = "1" ]; then
 fi
 
 echo "Running HA Ops tests before push..."
-echo "Running parallel test group..."
-python3 dev/test_runner.py -- -n auto ha-ops/tests
+echo "Running ordinary parallel test group..."
+python3 dev/test_runner.py -- -n auto \
+  --ignore=ha-ops/tests/test_test_runner_guard.py \
+  --ignore=ha-ops/tests/test_test_plan.py ha-ops/tests
+echo "Running isolated supervisor contract group..."
+python3 dev/test_runner.py -- -n 2 \
+  ha-ops/tests/test_test_runner_guard.py ha-ops/tests/test_test_plan.py
