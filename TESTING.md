@@ -3,16 +3,21 @@
 ## Protected normal test execution
 
 Use `python3 dev/test_runner.py -- <pytest arguments>` for normal host tests.
-Pre-push keeps the complete original suite and uses this runner in two sequential
-foreground phases. The ordinary `-n auto ha-ops/tests` phase excludes exactly
-`test_test_runner_guard.py` and `test_test_plan.py` with explicit `--ignore` paths.
-The second phase explicitly selects both files with `-n 2`, isolating their nested
-supervisor and planner contracts from ordinary-suite concurrency. Either phase's
-nonzero status blocks the push; phase one failure prevents phase two. Recursive
-ordinary discovery retains new test files, and a missing required isolated path
-fails collection. This schedule is qualified with pinned pytest 8.4.2 and
-pytest-xdist 3.8.0; it does not establish the exact cause of an observed timeout
-or replace mandatory Linux/runtime proofs. The runner forces
+Pre-push uses `dev/selective_pre_push.py` to collect current concrete membership,
+explain affected categories and execute only those categories. Actual hook ref
+records cover every unpublished commit plus index, worktree and untracked layers.
+Unknown paths, mixed application boundaries and unverified bases block with an
+explanation. Inspect evidence with `--plan-only --records FILE`; explicit
+`HA_OPS_PRE_PUSH_MODE=full` (or `--full`) selects the complete inventory.
+No automatic full-suite fallback or previous green receipt is used.
+Ordinary jobs use the bounded cap (at most ten workers), followed by a separate
+at-most-two-worker phase for `test_test_runner_guard.py`, `test_test_plan.py` and
+`test_selective_pre_push.py`. Exact machine accounting rejects missing, duplicate,
+unexpected, failed and xfail outcomes. Host skips are recorded as not proven;
+existing Linux/ext4/runtime/browser/PID1 obligations remain separate.
+Semantic categories are a reviewed coverage boundary, not arbitrary dynamic
+runtime dependency inference. New unsupported boundaries require a reviewed rule
+or explicit full selection. Release checks remain unchanged. The runner forces
 `faulthandler_timeout=0` after configuration, environment and CLI overrides,
 keeps fatal faulthandler enabled, and disables xdist worker restarts and known
 retry plugins. Selectors, worker count, capture and pytest exit semantics remain
@@ -268,19 +273,20 @@ python3 dev/test_runner.py -- -p no:cacheprovider -q \
   ha-ops/tests/test_server.py::ServerTests::test_generated_frontend_bundle_has_narrow_whitespace_check_exception
 ```
 
-The pre-push hook runs this entire suite. Focused groups below shorten the
-development feedback loop; they do not replace that gate. `-n auto` already
+The pre-push hook selects explained affected categories from this suite. Focused
+groups below shorten the development feedback loop; they do not replace that gate. `-n auto` already
 uses the machine's physical CPU count. Workers are separate processes, which
 isolates module globals and mocks; each real workflow uses disposable local
 Git/config fixtures and fake Supervisor calls, never a live HA installation.
 
-## Generated inventory and conservative plans
+## Diagnostic inventory and conservative plans
 
 `dev/test_plan.py` generates the authoritative concrete node/area/dependency map
 from actual pinned pytest collection. No maintained table of per-file counts is
 a coverage inventory. The map includes every original parametrized ID, active
 fixture provider chains, local AST import closure, source/config/data hashes (including documentation and images) and
-explicit unresolved influences. Active local pytest hooks contribute to every
+explicit unresolved influences. This older diagnostic planner is not the pre-push
+selector; its full fallback is diagnostic only. Active local pytest hooks contribute to every
 node's provenance, and actual discovered items are checked against final
 collection so silent plugin removal cannot shrink the inventory. It is deterministic for unchanged inputs.
 
@@ -347,8 +353,8 @@ missing, interrupted or timed-out outcomes cannot qualify. There is no receipt
 reuse. Source/test/config changes invalidate saved maps and plans; recollect
 after refresh, restart or version changes rather than resuming stale work.
 
-The complete pre-push gate and every mandatory platform proof below remain
-unchanged. The following selectors are convenient development examples only.
+The selective pre-push gate and every mandatory platform proof below remain
+separate. The following selectors are convenient development examples only.
 
 ```sh
 # Server and workflows

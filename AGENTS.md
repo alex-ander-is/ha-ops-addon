@@ -13,7 +13,7 @@ Publish only by invoking `./publish-release`; do not call `git push` directly. I
 Before any special approval or non-obvious tool request, explain what the request will do, why it is needed, what files or external state it can touch, and whether the task can continue without it. This applies to elevated commands, plugin installs, GUI/browser openings, network access, destructive actions, and long generated commands. Ordinary file reads and short local tests do not need this preface.
 When a bug is found or fixed, always add or update regression tests that fail on the bug and pass with the fix. Do this automatically; the user should not need to ask for tests. For visual UI behavior, run the affected flow with Playwright, inspect the resulting screenshot or DOM evidence, and keep fixing until the rendered UI matches the user-visible contract; do not treat green non-visual unit tests as sufficient for a visual feature.
 If tests are red after your changes, fix them yourself without waiting for an explicit user command or approval, then report what failed and what was fixed. If the fix belongs to the current unpushed work, include it in the current change set. If it fixes an older unrelated bug, make a separate commit named `Bugfix: ...`.
-Avoid redundant test runs. This repository has a pre-push hook that runs the HA Ops test suite; do not also run that exact suite manually immediately before pushing unless code changed after the last run or you need faster feedback before committing. Prefer pushing branch and tags together when practical so the hook runs once.
+Avoid redundant test runs. This repository has a pre-push hook that selects explained affected HA Ops categories; do not also run that exact suite manually immediately before pushing unless code changed after the last run or you need faster feedback before committing. Prefer pushing branch and tags together when practical so the hook runs once.
 When adding a new feature that persists UI or workflow state, define how that state is cleared on refresh, restart, and version update. Add or update tests that prove stale state does not reappear without the user starting that feature again.
 Disabled buttons must be visibly disabled on their own, not only slightly different from enabled buttons. Use a pale gray background, muted text, and muted border for every disabled button, and keep this rule for new UI.
 For UI work, use Vaadin OSS components and Vaadin-first patterns before custom controls. Do not introduce Vaadin Commercial Features unless the user explicitly approves the dependency and licensing impact.
@@ -39,7 +39,7 @@ explicit isolated child fixture whose parent asserts status and durable evidence
 Follow TESTING's evidence ownership, limits and diagnostic opt-out boundaries.
  During development run the
 specific reproduction/regression and affected adjacent contracts. Freeze code
-before one final complete verification cycle; do not repeat the full suite per
+before one final required affected-category verification cycle; do not repeat the full suite per
 edit or reviewer. After a failure, rerun failed and affected dependent cases;
 repeat the whole cycle only when a change invalidates the other evidence.
 Preserve mandatory platform proofs and the final repository/pre-push gate.
@@ -71,7 +71,9 @@ they do not directly assert `statvfs` deltas.
 
 The foreman coordinates one coverage map for the sealed source snapshot:
 collected IDs, completed outcomes, justified skips and required Linux/runtime
-proofs. Final disjoint partitions must cover the complete required set. Reuse
+proofs. Final disjoint partitions must cover the complete selected required set; pre-push
+selects explained categories by default, unknown influence blocks, and full-suite
+selection requires explicit `HA_OPS_PRE_PUSH_MODE=full`. Reuse
 unchanged valid expensive proofs with explicit applicability; do not call an
 interrupted or failed overall invocation successful because a subset passed.
 Diagnose runner failures and recheck affected cases before qualifying delivery.
@@ -115,8 +117,8 @@ Inspect the final staged file list/diff, run `git diff --cached --check` and
 `python3 dev/test_runner.py -- ha-ops/tests/test_release_readiness.py` before the commit step.
 Keep local fixture paths, scratch outputs and current run IDs out of release
 inputs, including documentation examples; prefer `mktemp` with guaranteed cleanup.
-Repeat relevant review/checks if cleanup changes tracked content. The unchanged
-pre-push hook remains the full-suite gate; do not repeat that suite immediately
+Repeat relevant review/checks if cleanup changes tracked content. The
+pre-push hook remains the explained affected-category gate; do not repeat that suite immediately
 before publishing. Restore any targeted stash of user changes exactly after
 publication and clean any new task scratch created by delivery checks.
 

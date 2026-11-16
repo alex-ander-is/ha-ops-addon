@@ -29,11 +29,12 @@ class PrePushHookTests(unittest.TestCase):
             f'#!{sys.executable}\n'
             'import json, os, sys\n'
             'from pathlib import Path\n'
-            'if sys.argv[1:2] == ["dev/test_runner.py"]:\n'
+            'if sys.argv[1:2] == ["dev/selective_pre_push.py"]:\n'
             '    log = Path(os.environ["PYTHON_COMMAND_LOG"])\n'
             '    phase = len(log.read_text().splitlines()) + 1 if log.exists() else 1\n'
             '    with log.open("a") as stream:\n'
             '        stream.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+            '    Path(os.environ["PYTHON_COMMAND_LOG"] + ".records").write_text(Path(sys.argv[3]).read_text())\n'
             '    sys.exit(int(os.environ.get(f"HOOK_PHASE_{phase}_STATUS", "0")))\n'
             f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n'
         )
@@ -112,62 +113,21 @@ class PrePushHookTests(unittest.TestCase):
         result = self.invoke_hook(self.branch_push_stdin(head))
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Running HA Ops tests before push", result.stdout)
+        self.assertIn("Running explained selective HA Ops tests before push", result.stdout)
         self.assertEqual(self.logged_commands(), self.expected_commands())
+        self.assertEqual(Path(str(self.python_command_log) + ".records").read_text(), self.branch_push_stdin(head))
 
     @staticmethod
     def expected_commands():
-        return [
-            ["dev/test_runner.py", "--", "-n", "auto",
-             "--ignore=ha-ops/tests/test_test_runner_guard.py",
-             "--ignore=ha-ops/tests/test_test_plan.py", "ha-ops/tests"],
-            ["dev/test_runner.py", "--", "-n", "2",
-             "ha-ops/tests/test_test_runner_guard.py", "ha-ops/tests/test_test_plan.py"],
-        ]
+        return [["dev/selective_pre_push.py", "--records", "RECORDS"]]
 
     def logged_commands(self):
-        return [json.loads(line) for line in self.python_command_log.read_text().splitlines()]
+        return [[*json.loads(line)[:2], "RECORDS"] for line in self.python_command_log.read_text().splitlines()]
 
     def test_ordinary_failure_preserves_status_and_stops_before_isolated_group(self):
         result = self.invoke_hook("", HOOK_PHASE_1_STATUS="37")
         self.assertEqual(result.returncode, 37, result.stderr)
         self.assertEqual(self.logged_commands(), self.expected_commands()[:1])
-
-    def test_isolated_failure_preserves_status(self):
-        result = self.invoke_hook("", HOOK_PHASE_2_STATUS="43")
-        self.assertEqual(result.returncode, 43, result.stderr)
-        self.assertEqual(self.logged_commands(), self.expected_commands())
-
-    def collect_phase(self, phase):
-        command = self.expected_commands()[phase]
-        return subprocess.run(
-            [sys.executable, str(ROOT / command[0]), "--artifacts", str(self.root.resolve() / "evidence"),
-             *command[1:], "--collect-only", "-q", "-p", "no:cacheprovider"],
-            cwd=self.repo, text=True, capture_output=True, timeout=30,
-        )
-
-    def test_recursive_ordinary_selector_discovers_new_tests(self):
-        self.write_file("ha-ops/tests/test_future_ordinary.py", "def test_new_case(): pass\n")
-        self.write_file("ha-ops/tests/test_test_runner_guard.py", "def test_guard(): pass\n")
-        self.write_file("ha-ops/tests/test_test_plan.py", "def test_planner(): pass\n")
-        result = self.collect_phase(0)
-        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
-        self.assertIn("test_future_ordinary.py", result.stdout)
-        self.assertIn("test_new_case", result.stdout)
-        self.assertNotIn("test_test_runner_guard.py", result.stdout)
-        self.assertNotIn("test_test_plan.py", result.stdout)
-
-    def test_missing_required_isolated_path_fails_qualification(self):
-        for missing, present in (
-            ("test_test_runner_guard.py", "test_test_plan.py"),
-            ("test_test_plan.py", "test_test_runner_guard.py"),
-        ):
-            with self.subTest(missing=missing):
-                (self.repo / "ha-ops/tests" / missing).unlink(missing_ok=True)
-                self.write_file(f"ha-ops/tests/{present}", "def test_required(): pass\n")
-                result = self.collect_phase(1)
-                self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assertIn(missing, result.stderr + result.stdout)
 
     def test_rejects_push_when_remote_main_moved(self):
         self.write_file("ha-ops/app.py", "print('remote change')\n")
@@ -202,7 +162,7 @@ class PrePushHookTests(unittest.TestCase):
         result = self.invoke_hook(stdin)
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Running HA Ops tests before push", result.stdout)
+        self.assertIn("Running explained selective HA Ops tests before push", result.stdout)
         self.assertNotIn("Verified minor release", result.stdout)
 
     def test_rejects_patch_classification_for_minor_bump(self):

@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+records_file=$(mktemp "${TMPDIR:-/tmp}/ha-ops-pre-push.XXXXXX")
+trap 'rm -f "$records_file"' EXIT HUP INT TERM
+cat > "$records_file"
+
 ZERO_SHA=0000000000000000000000000000000000000000
 REMOTE_NAME=${1:-origin}
 requires_release_check=0
@@ -23,7 +27,7 @@ do
       fi
       ;;
   esac
-done
+done < "$records_file"
 
 if [ "$requires_release_check" = "1" ]; then
   remote_main=$(git ls-remote --heads "$REMOTE_NAME" refs/heads/main | awk '{print $1}')
@@ -96,11 +100,5 @@ if [ "$requires_release_check" = "1" ]; then
   fi
 fi
 
-echo "Running HA Ops tests before push..."
-echo "Running ordinary parallel test group..."
-python3 dev/test_runner.py -- -n auto \
-  --ignore=ha-ops/tests/test_test_runner_guard.py \
-  --ignore=ha-ops/tests/test_test_plan.py ha-ops/tests
-echo "Running isolated supervisor contract group..."
-python3 dev/test_runner.py -- -n 2 \
-  ha-ops/tests/test_test_runner_guard.py ha-ops/tests/test_test_plan.py
+echo "Running explained selective HA Ops tests before push..."
+python3 dev/selective_pre_push.py --records "$records_file"

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a conservative pytest inventory, explain impact, and execute host jobs.
 
-Inventory and plans are evidence of selection only. They never waive the full
+Inventory and plans are evidence of selection only. They do not implement the selective
 pre-push gate or qualify required Linux, volume, runtime, browser or PID1 proofs.
 """
 import argparse
