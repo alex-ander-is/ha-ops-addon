@@ -11,6 +11,8 @@ import sys
 import tempfile
 
 import test_plan as shared
+import test_receipts as receipts
+import test_receipt_linux as qualified_linux
 
 ISOLATED = {'test_test_runner_guard.py', 'test_test_plan.py', 'test_selective_pre_push.py'}
 MIXED = {'test_server.py', 'test_client_contract.py'}
@@ -191,9 +193,23 @@ def make_plan(root, data, records, full=False):
             'category_counts': dict(Counter(row['category'] for row in decisions if row['selected']))}
 
 
+
+def verification_plan(data, area):
+    if area != 'reset':
+        raise shared.Refused('Only reviewed Reset category verification is supported')
+    decisions = [{'id': node['id'], 'category': category(node), 'selected': category(node) == area,
+                  'reason': 'explicit local category verification'} for node in data['nodes']]
+    count = sum(row['selected'] for row in decisions)
+    if not count:
+        raise shared.Refused('Empty verification category')
+    return {'schema': 1, 'mode': 'category-verification', 'verified_category': area,
+            'changed': [], 'refs': [], 'errors': [], 'decisions': decisions,
+            'inputs': data['inputs'], 'tools': data['tools'],
+            'inventory_digest': shared.digest(shared.canonical(data).encode()), 'category_counts': {area: count}}
+
 def verify_outcomes(record, expected, workers):
     """Exact machine accounting, with host skips explicitly unproven."""
-    if record.get('errors') or record.get('deselected') or record.get('exitstatus') != 0:
+    if record.get('errors') or record.get('deselected') or not receipts.zero(record.get('exitstatus')):
         raise shared.Refused('Failed/error/deselected machine record')
     reports = defaultdict(list)
     for row in record['reports']:
@@ -201,7 +217,7 @@ def verify_outcomes(record, expected, workers):
     if set(reports) != set(expected):
         raise shared.Refused('Missing/unexpected runtime outcome')
     collections = record['worker_collections'] if workers else [record['collected']]
-    if not collections or any(Counter(ids) != Counter(expected) for ids in collections):
+    if len(collections) != (workers or 1) or any(Counter(ids) != Counter(expected) for ids in collections):
         raise shared.Refused('Runtime collection differs from selection')
     skipped = []
     for nodeid, phases in reports.items():
@@ -243,22 +259,64 @@ def execute(root, data, plan, records, artifacts, *, launch=None):
     if plan['errors']:
         raise shared.Refused('; '.join(plan['errors']))
     def fresh():
-        if shared.validate_map(root, data) or make_plan(root, data, records, plan['mode'] == 'full') != plan:
+        current_plan = (verification_plan(data, plan['verified_category']) if plan['mode'] == 'category-verification' else
+                        make_plan(root, data, records, plan['mode'] == 'full'))
+        if shared.validate_map(root, data) or current_plan != plan:
             raise shared.Refused('Selection inputs changed; recollect')
     fresh()
     selected = [row['id'] for row in plan['decisions'] if row['selected']]
     unsafe = [node['id'] for node in data['nodes'] if node['id'] in set(selected) and unsafe_host_node(node)]
     if unsafe:
         raise shared.Refused('Exclusive resource proof requires qualified isolated Linux/ext4 route: ' + ', '.join(unsafe))
-    ordinary = [node for node in selected if Path(node.split('::')[0]).name not in ISOLATED]
-    isolated = [node for node in selected if node not in ordinary]
-    result = {'status': 'passed', 'jobs': [], 'not_proven': [], 'platform_proofs': 'separate existing qualification obligations; host skips do not prove them'}
+    groups = defaultdict(list)
+    for node in data['nodes']:
+        if node['id'] in set(selected):
+            groups[category(node)].append(node)
+    result = {'status': 'passed', 'jobs': [], 'not_proven': [], 'categories': {},
+              'platform_proofs': 'separate existing qualification obligations; host skips do not prove them'}
     cpu, _ = shared.available_cpus()
     cap = min(10, data['rules']['profiles']['host']['cap'], cpu)
-    for phase, ids in [('ordinary', ordinary), ('isolated', isolated)]:
-        for index, batch in enumerate(shared.selector_batches(ids)):
+    store = receipts.Store(root)
+    candidates, retained_jobs, initial = {}, {}, {}
+
+    def bound(area, nodes, profile):
+        return receipts.binding(root, data, area, nodes, profile, category)
+
+    # Ordinary work always precedes the bounded isolated controller phase.
+    for area, nodes in sorted(groups.items(), key=lambda pair: (any(Path(n['source']).name in ISOLATED for n in pair[1]), pair[0])):
+        isolated = any(Path(node['source']).name in ISOLATED for node in nodes)
+        phase = 'isolated' if isolated else 'ordinary'
+        batches = list(shared.selector_batches([node['id'] for node in nodes]))
+        try:
+            qualified_linux.contract(root, data, area, nodes)
+            linux_route = True
+        except (shared.Refused, OSError, ValueError, KeyError):
+            linux_route = False
+        profile = {'route': 'qualified-reset-linux-v1' if linux_route else 'canonical-host', 'phase': phase, 'dist': 'worksteal',
+                   'workers': [min(2 if isolated else min(cap, 8) if linux_route else cap, sum(len(ids) for ids in batch)) for batch in batches]}
+        current = None
+        try:
+            current = bound(area, nodes, profile)
+            initial[area] = (nodes, profile, current)
+            reusable, reason = store.lookup(area, current)
+        except shared.Refused as error:
+            reusable, reason = False, str(error)
+        fresh()
+        if linux_route and current is None:
+            raise shared.Refused('Qualified Linux input binding is unavailable: ' + reason)
+        if reusable:
+            if bound(area, nodes, profile) != current:
+                raise shared.Refused('Receipt inputs changed during lookup')
+            result['categories'][area] = {'status': 'reused', 'reason': reason,
+                                          'binding': shared.digest(shared.canonical(current).encode())}
+            continue
+        result['categories'][area] = {'status': 'executed', 'reason': reason}
+        category_jobs, complete = [], current is not None
+        for index, batch in enumerate(batches):
             fresh()
-            job = artifacts / (phase + '-' + str(index))
+            if current is not None and bound(area, nodes, profile) != current:
+                raise shared.Refused('Receipt inputs changed before dispatch')
+            job = artifacts / (area + '-' + phase + '-' + str(index))
             job.mkdir(mode=0o700)
             arguments, expected = [], []
             for number, entries in enumerate(batch):
@@ -266,35 +324,71 @@ def execute(root, data, plan, records, artifacts, *, launch=None):
                 selector.write_text('\n'.join(entries) + '\n')
                 arguments.append('@' + str(selector))
                 expected.extend(entries)
-            workers = min(2 if phase == 'isolated' else cap, len(expected))
-            record, evidence = launch(root, ['-n', str(workers), '--dist', 'worksteal', *arguments], job / 'execution')
-            result['not_proven'].extend(verify_outcomes(record, expected, workers))
+            workers = profile['workers'][index]
+            launch_args = ['-n', str(workers), '--dist', 'worksteal', *arguments]
+            if linux_route:
+                record, evidence = qualified_linux.launch(root, data, nodes, launch_args, job / 'execution', current['inputs'])
+            else:
+                record, evidence = launch(root, launch_args, job / 'execution')
+            skipped = verify_outcomes(record, expected, workers)
+            result['not_proven'].extend(skipped)
             fresh()
-            result['jobs'].append({'phase': phase, 'workers': workers, 'expected': expected, **evidence})
+            if current is not None and bound(area, nodes, profile) != current:
+                raise shared.Refused('Receipt inputs changed during execution')
+            if skipped:
+                complete = False
+                result['categories'][area]['proof'] = 'not-proven: skipped nodes'
+            elif complete:
+                try:
+                    captured = evidence.get('qualified_job') if linux_route else receipts.capture(root, record, evidence, expected, workers, arguments, job / 'execution')
+                    receipts.validate_job(captured)
+                    key = shared.digest(shared.canonical(captured).encode())
+                    retained_jobs[key] = captured
+                    category_jobs.append(key)
+                except (shared.Refused, KeyError, OSError, TypeError, ValueError) as error:
+                    complete = False
+                    result['categories'][area]['proof'] = 'not-proven: ' + str(error)
+            result['jobs'].append({'category': area, 'phase': phase, 'workers': workers, 'expected': expected, **evidence})
+        if complete:
+            candidates[area] = {'binding': current, 'jobs': category_jobs}
+            result['categories'][area]['proof'] = 'complete success candidate'
+    # No publication until every sibling job and final authoritative freshness
+    # check succeeds. Old independent success is preserved after any later failure.
+    fresh()
+    for area, (nodes, profile, current) in initial.items():
+        if bound(area, nodes, profile) != current:
+            raise shared.Refused('Receipt inputs changed before publication')
+    store.publish(candidates, retained_jobs)
+
     return result
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument('--records', type=Path, required=True)
+    parser.add_argument('--records', type=Path)
+    parser.add_argument('--verify-category', choices=['reset'])
     parser.add_argument('--artifacts', type=Path)
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--full', action='store_true', default=os.environ.get('HA_OPS_PRE_PUSH_MODE') == 'full')
     args = parser.parse_args(argv)
+    if args.verify_category and (args.records or args.full):
+        parser.error('--verify-category is exclusive with --records/--full')
+    if not args.verify_category and not args.records:
+        parser.error('--records is required for push verification')
     root = args.root.resolve()
     artifacts = args.artifacts or Path(tempfile.mkdtemp(prefix='ha-ops-selective-prepush-'))
     artifacts.mkdir(mode=0o700, parents=True, exist_ok=True)
     print('Selective pre-push evidence: ' + str(artifacts), flush=True)
     try:
-        records = args.records.read_text()
+        records = args.records.read_text() if args.records else ''
         common = Path(os.fsdecode(shared.git(root, 'rev-parse', '--git-common-dir')).strip())
         common = common if common.is_absolute() else root / common
         with (common / 'test-plan-host.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             data, _ = shared.inventory(root, ['ha-ops/tests'], artifacts / 'collection')
             shared.write_json(artifacts / 'inventory.json', data)
-            plan = make_plan(root, data, records, args.full)
+            plan = verification_plan(data, args.verify_category) if args.verify_category else make_plan(root, data, records, args.full)
             shared.write_json(artifacts / 'plan.json', plan)
             print(json.dumps({'mode': plan['mode'], 'categories': plan['category_counts'], 'errors': plan['errors']}), flush=True)
             if plan['errors']:

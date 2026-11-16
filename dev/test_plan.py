@@ -142,7 +142,7 @@ def guarded(root, arguments, directory, *, collect=False, deadline=1800):
         raise Refused('Protected invocation failed: ' + str(directory))
     if record.get('schema') != SCHEMA or record.get('errors') or record.get('deselected'):
         raise Refused('Collection errors/deselection in owned evidence')
-    return record, {'argv': command, 'manifest': str(manifests[0]), 'records': str(output)}
+    return record, {'argv': command, 'manifest': str(manifests[0]), 'records': str(output), 'outer_returncode': result.returncode}
 
 
 def source_graph(root, names):

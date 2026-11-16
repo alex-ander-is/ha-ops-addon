@@ -9,7 +9,58 @@ records cover every unpublished commit plus index, worktree and untracked layers
 Unknown paths, mixed application boundaries and unverified bases block with an
 explanation. Inspect evidence with `--plan-only --records FILE`; explicit
 `HA_OPS_PRE_PUSH_MODE=full` (or `--full`) selects the complete inventory.
-No automatic full-suite fallback or previous green receipt is used.
+No automatic full-suite fallback is used. Selected complete categories automatically
+reuse applicable canonical success receipts from the private Git-common directory
+`ha-ops-test-receipts-v1/latest.json`. A miss executes that category through the
+same protected runner. `result.json` explains reused/executed categories, misses,
+and skipped/not-proven evidence; plan-only never creates successful proof.
+
+Receipts bind exact current node metadata/membership, category source and fixture/
+import closure, all common tracked/untracked source/config/data inputs (including
+uncollected helpers and global hooks), file presence/type/mode, scheduler/runner
+code, effective child environment digest, runtime/packages/executable identity,
+Git configuration digest and the actual host phase/worker profile. Independently
+collected unrelated test modules outside the closure do not invalidate a category.
+Raw environment values are never stored. Any unresolved node/runtime dependency
+influence refuses receipt admission; an unknown-influence label alone cannot bind
+external/ignored filesystem data, dynamic imports or process/network behavior.
+An empty lexical `unknown` list also grants no authority: imports may resolve to
+external startup, editable or shadow modules whose mutable inputs are unbounded.
+A separate positive reviewed execution/input qualification is required. The reviewed Reset profile uses the existing cached immutable Linux image through
+the owned wrapper. It copies only the bound input namespace, uses a read-only root
+and source mount, separate owned tmp/output, no network/devices/privilege, fixed
+Python/Git environment and fixture identity, and requires absent default `/data`.
+The reviewed source policy pins the full App, both mixed modules, Reset fixture
+and instrumentation. Any covered source, membership, global fixture/config or
+image change refuses qualification until reviewed again. Both original inner
+canonical machine/controller and outer isolation, exit/OOM/cleanup must pass.
+Other production categories remain ineligible. The explicitly qualified disposable mechanism test injects
+unit-only authority and does not establish production eligibility.
+Such categories still execute on each invocation. The AST inventory has no lexically closed real category. Positive qualification
+is therefore separate and restricted to the reviewed complete Reset category;
+other unknown categories continue to execute without reusable proof. Explicit local `python3 dev/selective_pre_push.py --verify-category reset`
+collects and verifies every current Reset ID and can populate its qualified
+receipt. This option is exclusive with hook records/full mode and grants no push
+approval; actual hook change-basis/unknown/resource blockers remain mandatory.
+The profile requires the reviewed image already cached and the existing VM ready;
+it never installs, starts a VM, builds or pulls. Platform/ext4/browser/PID1 proof
+is not implied. Unrelated collected test modules outside the dependency closure
+are physically excluded from this profile's copied input. Runner, release and virtualization
+categories remain ineligible because their checkout/controller dependencies need
+separate qualification; they still execute. Other required platform routes and
+all unknown/unsafe selection errors remain blocking before receipt lookup.
+
+Only original final passed/completed controller evidence with strict integer
+zero statuses and exact all-passed setup/call/teardown and worker collections
+can create a receipt. Skips/xfails and legacy summaries never qualify. Publication
+occurs atomically only after the entire selective invocation succeeds and inputs
+remain fresh; later failure preserves earlier independent receipts. The bounded
+index retains latest per-category bindings and shared referenced original JSON
+evidence, pruning obsolete owned blobs on replacement. Corrupt, unsupported,
+missing or symlinked evidence is a miss/block. Delete only this exact owned cache
+to clear receipts; source/runtime/profile updates invalidate them automatically.
+This local integrity check is not an attestation against its owner. Original runner
+artifact directories retain their existing explicit-cleanup policy.
 Ordinary jobs use the bounded cap (at most ten workers), followed by a separate
 at-most-two-worker phase for `test_test_runner_guard.py`, `test_test_plan.py` and
 `test_selective_pre_push.py`. Exact machine accounting rejects missing, duplicate,

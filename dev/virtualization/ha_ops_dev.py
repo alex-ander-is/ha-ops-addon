@@ -830,7 +830,7 @@ def container_wait(container_id, run_id, evidence):
     return code
 
 
-def generic_run(input_path, command, recreate=False):
+def generic_run(input_path, command, recreate=False, *, receipt_profile=None):
     if not command:
         raise Refused("A command after -- is required")
     command = protected_command(command)
@@ -850,10 +850,23 @@ def generic_run(input_path, command, recreate=False):
     try:
         copy_input(input_source, source, expected=input_snapshot)
         output.mkdir(mode=0o700)
-        setup_data = setup(exact_sources=(source, output))
+        if receipt_profile is None:
+            setup_data = setup(exact_sources=(source, output))
+        else:
+            # Receipt execution never installs, starts a VM, builds or pulls.
+            endpoint_info()
+            vm_capacity()
+            for bind in (source, output):
+                verify_source(bind)
+            image = receipt_profile['image']
+            observed = json.loads(docker('image', 'inspect', image).stdout)[0]
+            if observed['Id'] != image or observed['Os'] + '/' + observed['Architecture'] != receipt_profile['platform']:
+                raise Refused('Qualified cached image identity differs')
+            setup_data = {'image': image, 'platform': receipt_profile['platform']}
         for attempt in range(2 if recreate else 1):
             args = ["create", "--name", name, "--label", f"ha-ops.dev.run={run_id}",
                     "--network", "none", "--read-only", "--tmpfs", "/tmp:exec",
+                    *(["--pull", "never"] if receipt_profile is not None else []),
                     "--mount", f"type=bind,source={source},target=/workspace/input,readonly",
                     "--mount", f"type=bind,source={output},target=/workspace/output",
                     "--workdir", "/workspace/input", "--platform", setup_data["platform"],
@@ -872,6 +885,20 @@ def generic_run(input_path, command, recreate=False):
                 raise Refused("Container mount inspection failed")
             if inspected["HostConfig"]["NetworkMode"] != "none":
                 raise Refused("Container network isolation failed")
+            if receipt_profile is not None:
+                security = {'image': inspected.get('Image'),
+                            'readonly': inspected['HostConfig'].get('ReadonlyRootfs'),
+                            'network': inspected['HostConfig'].get('NetworkMode'),
+                            'tmpfs': inspected['HostConfig'].get('Tmpfs'),
+                            'privileged': inspected['HostConfig'].get('Privileged'),
+                            'devices': inspected['HostConfig'].get('Devices'),
+                            'mounts': [{'destination': k, 'rw': mounts[k]['RW']} for k in sorted(mounts)],
+                            'command': command}
+                if (security['image'] != receipt_profile['image'] or security['readonly'] is not True or
+                        security['network'] != 'none' or security['tmpfs'] != {'/tmp': 'exec'} or
+                        security['privileged'] is not False or security['devices'] not in (None, [])):
+                    raise Refused('Qualified container security profile differs')
+                evidence.data['receipt_profile'] = security
             docker("start", created_id)
             code = container_wait(created_id, run_id, evidence)
             if code:
@@ -890,6 +917,12 @@ def generic_run(input_path, command, recreate=False):
         try:
             if output.exists():
                 persist_inner(output, evidence)
+                if receipt_profile is not None:
+                    machine = no_symlinks(output / 'test-plan.json')
+                    if not machine.is_file() or machine.stat().st_size > 64 * 1024 * 1024:
+                        raise Refused('Missing/oversize qualified machine evidence')
+                    with guard.private_file(evidence.path / 'test-plan.json', 'wb') as handle:
+                        handle.write(machine.read_bytes())
         except BaseException as error:
             failures.append("inner evidence: " + type(error).__name__)
         if not failures:
@@ -913,7 +946,7 @@ def generic_run(input_path, command, recreate=False):
         raise first
     if failures:
         raise Refused("Container run incomplete: " + ", ".join(failures))
-    return code
+    return (code, evidence.path) if receipt_profile is not None else code
 
 
 EXT4_HELPER = HERE / "ext4_fixture.py"
