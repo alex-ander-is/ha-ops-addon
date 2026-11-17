@@ -10,6 +10,24 @@ For a user-requested App fix or feature, passing verification means the change i
 Classify every App release from the actual diff before choosing its version: `major` for incompatible changes (`X++`, including `0.Y.Z` to `1.0.0`), `minor` for new or changed compatible functionality (`Y++`), and `patch` only for compatible fixes, documentation, tests, packaging metadata, or internal maintenance (`Z++`). State the classification and reason before publishing, especially when it differs from recent version history. Do not use the number of previous patch releases as the default classification.
 Use `./release --kind major|minor|patch` to calculate the next version, enter the changelog and impact reason, and stage release files. When publication is authorized, confirm its final prompt to create the behavior-focused release commit with `Release-Type` and `Release-Impact` trailers, tag it, and publish. Otherwise, stop at the final prompt, create that commit and annotated tag locally, and verify them with `release-policy.py check` against the previous version tag. The pre-push hook and `./publish-release` must reject a release whose version increment, commit classification, changelog, or tag disagree. A future explicit request to release authorizes the complete local commit/tag and publication sequence unless the user excludes a step; changing this rule or the release tooling alone does not authorize a new release.
 Publish only by invoking `./publish-release`; do not call `git push` directly. It must verify the expected `origin`, current branch, matching local tag, and release classification before publishing branch and tag together. Never move an existing tag or force-push without explicit approval. A release request does not authorize deployment or live Home Assistant changes.
+
+After every authorized GitHub push, continue through remote CI verification using
+`git-commit-discipline` and its `references/github-ci-delivery.md` procedure.
+`./publish-release` returning successfully is publication only. Match pushed
+branch/tag commits, wait for every applicable workflow/job/check, and investigate
+non-green outcomes before declaring delivery successful. The App release tag may
+be an ancestor of main when only tooling/tests/instructions follow it; preserve
+`publish-release`'s no-unreleased-App-changes invariant instead of requiring equal
+branch/tag SHAs. Record the actual SHA for each CI result and do not invent a
+missing tag run when the pushed workflow configuration does not trigger one. Discover expected runs
+from the pushed workflow definitions, including `.github/workflows/`; do not
+accept an empty run list or one green workflow as complete CI. If `gh` is absent,
+use approved GitHub API/browser access. A local pre-push test waiver does not waive
+CI monitoring. Respect explicit user-deferred fixes; report actual red/pending/
+unverified CI without changing tests or workflows to manufacture green results.
+This is an agent follow-through obligation; it does not authorize deployment,
+force pushes, tag movement, or publishing a local-only instructions commit.
+
 Before any special approval or non-obvious tool request, explain what the request will do, why it is needed, what files or external state it can touch, and whether the task can continue without it. This applies to elevated commands, plugin installs, GUI/browser openings, network access, destructive actions, and long generated commands. Ordinary file reads and short local tests do not need this preface.
 When a bug is found or fixed, always add or update regression tests that fail on the bug and pass with the fix. Do this automatically; the user should not need to ask for tests. For visual UI behavior, run the affected flow with Playwright, inspect the resulting screenshot or DOM evidence, and keep fixing until the rendered UI matches the user-visible contract; do not treat green non-visual unit tests as sufficient for a visual feature.
 If tests are red after your changes, fix them yourself without waiting for an explicit user command or approval, then report what failed and what was fixed. If the fix belongs to the current unpushed work, include it in the current change set. If it fixes an older unrelated bug, make a separate commit named `Bugfix: ...`.
