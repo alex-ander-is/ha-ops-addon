@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.6.2
+
+Repair stale direct setup authorization without changing its security protocol.
+- Fetch a fresh context-bound nonce for each explicit Allow click, preserve popup handling, and prevent duplicate requests.
+- Validate and capture the direct address, preserve actionable refusal feedback, and confirm remembered access only after the direct session succeeds.
+- Report diagnostics failures separately from authorization and cover idle enrollment and failure recovery with focused browser regressions.
+
 ## 2.6.1
 
 Restore fresh App installation with the unchanged reviewed runtime

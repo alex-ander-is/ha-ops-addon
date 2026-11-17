@@ -51,8 +51,10 @@ def ingress_request(handler, ctx):
     match = re.fullmatch(r'(?:/api/hassio_ingress/[^/]+)?/api/direct-access/(setup|allow)', path)
     if not match:
         return False
+    failure = 'Direct browser authorization unavailable. Reopen HA Ops through Home Assistant and try again.'
     try:
         context = ingress_context(handler)
+        failure = 'Direct access is unavailable. Check the configured direct listener and App options.'
         authority = getattr(ctx, 'direct_authority', None)
         if authority is None:
             raise Refused(getattr(ctx, 'direct_error', 'Direct access is unavailable'))
@@ -61,20 +63,26 @@ def ingress_request(handler, ctx):
             payload = dict(nonce=authority.nonce(context), https=bool(options.get('direct_https', False)), suggested_port=8100, message='Port 8100 is a suggestion; use the host port configured in Home Assistant.')
         elif match[1] == 'allow' and handler.command == 'POST':
             if handler.headers.get('Origin') != context[0] or handler.headers.get('Sec-Fetch-Site') == 'cross-site':
+                failure = 'Browser authorization origin refused. Reopen HA Ops through Home Assistant and try again.'
                 raise Refused('Browser authorization origin refused')
+            failure = 'Invalid authorization request. Reopen setup and try Allow this browser again.'
             body = json_body(handler)
             if set(body) != {'nonce', 'address'} or not all(isinstance(v, str) for v in body.values()):
                 raise Refused('Invalid browser authorization request')
+            failure = 'Enter a valid direct HTTP or HTTPS address matching the configured listener scheme.'
             selected = origin(body['address'])
             if selected.startswith('https:') != bool(ctx.load_options().get('direct_https', False)):
                 raise Refused('Use the configured direct HTTP or HTTPS scheme')
+            failure = 'Browser authorization refused. Try Allow this browser again for a fresh authorization request.'
             payload = dict(url=authority.issue(body['nonce'], context, selected))
         else:
             handler.send_json(dict(ok=False, message='Method not allowed'), 405)
             return True
         handler.send_json(dict(ok=True, **payload))
-    except (Refused, OSError, ValueError):
-        handler.send_json(dict(ok=False, message='Direct browser authorization unavailable. Check direct access configuration and reopen setup.'), 403)
+    except Refused:
+        handler.send_json(dict(ok=False, message=failure), 403)
+    except (OSError, ValueError):
+        handler.send_json(dict(ok=False, message='Direct browser authorization unavailable. Check direct access configuration and try again.'), 403)
     return True
 
 

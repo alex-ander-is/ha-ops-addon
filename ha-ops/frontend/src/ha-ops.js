@@ -2258,7 +2258,7 @@ export function suggestedDirectAddress(hostname, https = false, port = 8100) {
 }
 
 class HaOpsDirect extends LitElement {
-  static properties = { direct: {type: Boolean}, address: {state: true}, message: {state: true}, setup: {state: true}, snapshot: {state: true}, busy: {state: true} };
+  static properties = { direct: {type: Boolean}, address: {state: true}, message: {state: true}, setup: {state: true}, snapshot: {state: true}, busy: {state: true}, sessionActive: {state: true}, diagnosticsError: {state: true} };
   static styles = css`
     :host{display:block;font:16px system-ui;color:#243443}section{padding:20px;margin:16px auto;max-width:900px;border:1px solid #d6dde4;border-radius:12px;background:#fff}p{line-height:1.5}vaadin-text-field{width:100%}vaadin-button{margin:8px 8px 0 0}vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}pre{white-space:pre-wrap;overflow-wrap:anywhere} .actions{display:flex;flex-wrap:wrap} h2{font-size:1.2rem}`;
   constructor() { super(); this.direct = location.pathname === '/direct/'; this.address = ''; this.message = ''; this.busy = false; }
@@ -2276,33 +2276,62 @@ class HaOpsDirect extends LitElement {
     catch(error) { this.message = error.message; }
   }
   async allow() {
-    // Open during the user gesture; never open a window after awaiting the network.
+    if(this.busy) return;
+    let address;
+    try {
+      const url = new URL(this.address);
+      if(!/^https?:\/\/[^/?#\\]+\/?$/i.test(this.address) || (url.port && Number(url.port) < 1) || !['http:', 'https:'].includes(url.protocol) || url.username || url.password || !['','/'].includes(url.pathname) || url.search || url.hash || /[\s\x00-\x1f\x7f]/.test(this.address)) throw Error();
+      address = this.address;
+    } catch { this.message = 'Enter an HTTP or HTTPS address with its configured host port.'; return; }
+    // Preserve the click gesture while obtaining a fresh context-bound nonce.
     const tab = window.open('about:blank', '_blank');
     if(!tab) { this.message = 'Popup blocked. Allow popups and try Allow this browser again.'; return; }
     tab.opener = null; this.busy = true;
+    this.message = 'Preparing browser authorization…';
     try {
-      const result = await this.api('api/direct-access/allow', {method:'POST', body:JSON.stringify({nonce:this.setup.nonce,address:this.address})});
+      const setup = await this.api('api/direct-access/setup', {cache:'no-store'});
+      if(tab.closed) throw Error('Authorization window closed. Try Allow this browser again.');
+      const result = await this.api('api/direct-access/allow', {method:'POST', body:JSON.stringify({nonce:setup.nonce,address})});
+      if(tab.closed) throw Error('Authorization window closed. Try Allow this browser again.');
       tab.location.href = result.url;
-      this.message = 'Authorization opened in a new window. This browser will remember direct access.';
-    } catch(error) { tab.close(); this.message = error.message; }
-    finally { this.busy = false; await this.loadSetup(); }
+      this.message = 'Authorization window opened. Check that window to confirm direct access.';
+    } catch(error) { tab.close(); this.message = error.message + (/try .*again/i.test(error.message) ? '' : ' Try Allow this browser again.'); }
+    finally { this.busy = false; }
   }
   open() {
     try { const url = new URL(this.address); if(!['http:', 'https:'].includes(url.protocol) || url.username || url.password || !['','/'].includes(url.pathname) || url.search || url.hash) throw Error(); window.open(url.origin + '/direct/', '_blank', 'noopener'); }
     catch { this.message = 'Enter an HTTP or HTTPS address with its configured host port.'; }
   }
   async loadDirect() {
+    clearTimeout(this.timer);
+    this.sessionActive = false;
+    this.message = 'Checking browser authorization…';
+    this.diagnosticsError = '';
     try {
       await window.haOpsBootstrap;
       await this.api('api/session');
-      this.snapshot = await this.api('api/status'); this.message = '';
-      if(this.directUnavailable)this.renderRoot.querySelector('ha-ops-migration-review')?.load();
-      this.directUnavailable=false;
-    } catch(error) { this.message = error.message; this.directUnavailable=true; this.renderRoot.querySelector('ha-ops-migration-review')?.invalidate('Connection changed. Start a new explicit review.'); }
+      this.sessionActive = true;
+      this.message = '';
+      try {
+        this.snapshot = await this.api('api/status');
+        if(this.directUnavailable)this.renderRoot.querySelector('ha-ops-migration-review')?.load();
+        this.directUnavailable=false;
+      } catch(error) {
+        this.snapshot = null;
+        this.diagnosticsError = 'Diagnostics unavailable. ' + error.message;
+        this.directUnavailable=true;
+        this.renderRoot.querySelector('ha-ops-migration-review')?.invalidate('Connection changed. Start a new explicit review.');
+      }
+    } catch(error) {
+      this.snapshot = null;
+      this.message = error.message;
+      this.directUnavailable=true;
+      this.renderRoot.querySelector('ha-ops-migration-review')?.invalidate('Connection changed. Start a new explicit review.');
+    }
     if(this.isConnected) this.timer = setTimeout(()=>this.loadDirect(), 3000);
   }
   render() {
-    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.message || 'Remembered browser access is active.'}</p>${this.snapshot ? html`${this.snapshot.migration_review ? html`<ha-ops-migration-review .endpoint=${this.snapshot.migration_review.endpoint}></ha-ops-migration-review>` : nothing}<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
+    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.sessionActive ? 'Remembered browser access is active.' : this.message || 'Checking browser authorization…'}</p>${this.diagnosticsError ? html`<p role="status">${this.diagnosticsError}</p>` : nothing}${this.snapshot ? html`${this.snapshot.migration_review ? html`<ha-ops-migration-review .endpoint=${this.snapshot.migration_review.endpoint}></ha-ops-migration-review>` : nothing}<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : this.sessionActive ? html`<p>Direct access is authorized. Diagnostics will retry automatically.</p>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
     return html`<section data-testid="direct-access-entry"><h2>Direct recovery access</h2><p>Remember this browser for access while Core or ingress is unavailable. HTTP is supported on your trusted LAN; HTTPS is optional.</p><vaadin-text-field label="Direct address" placeholder="http://homeassistant.local:8100" .value=${this.address} @value-changed=${e=>{this.address=e.detail.value;}}></vaadin-text-field><p>Port 8100 is a suggestion. Enter the host port configured for HA Ops.</p><div class="actions"><vaadin-button ?disabled=${!this.setup || !this.address || this.busy} @click=${()=>this.allow()}>Allow this browser</vaadin-button><vaadin-button ?disabled=${!this.address} @click=${()=>this.open()}>Open in new window</vaadin-button><vaadin-button @click=${()=>{this.message='You can authorize this browser later. Ingress remains available.';}}>Set up later</vaadin-button></div><p role="status">${this.message}</p></section>`;
   }
 }
