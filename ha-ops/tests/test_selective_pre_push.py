@@ -1367,8 +1367,29 @@ def test_generic_linux_recipes_bound_complete_json_argument_and_exact_coverage()
     assert len(jobs) > 1
     assert [nodeid for job in jobs for nodeid in job['selected']] == [node['id'] for node in inventory]
     for job in jobs:
+        assert len(job['selected']) <= isolated.MAX_LINUX_NODES
         assert job['attempts'] == [job['selected']]
         assert len(json.dumps(job, separators=(',', ':')).encode()) <= isolated.MAX_RECIPE_BYTES
+
+
+def test_generic_linux_short_selectors_split_serial_work_without_losing_nodes():
+    isolated = gate.execution_linux
+    inventory = [{'id': 'test_' + str(i), 'source': 'test_native_disk.py'} for i in range(97)]
+    jobs = isolated.jobs([(node, 'linux') for node in inventory], inventory)
+    assert [len(job['selected']) for job in jobs] == [32, 32, 32, 1]
+    assert [nodeid for job in jobs for nodeid in job['selected']] == [node['id'] for node in inventory]
+    assert all(job['attempts'] == [job['selected']] for job in jobs)
+
+
+def test_linux_controller_binding_uses_redacted_url_parameter_summary():
+    isolated = gate.execution_linux
+    node = 'ha-ops/tests/test_native_network_publication.py::test_route[https://user:secret@example.com/repo]'
+    summary = isolated.controller_selectors([node])
+    assert len(summary) == 1
+    assert summary[0].startswith(node.split('[', 1)[0])
+    assert 'secret' not in summary[0]
+    assert summary[0] != node
+    assert isolated.controller_selectors(['plain.py::test_one']) == ['plain.py::test_one']
 
 
 @pytest.mark.parametrize('malformed', [None, 0, '', [], {}, True])

@@ -50,6 +50,8 @@ EXT4_ENV = ('ROOT', 'PROFILE', 'RUN', 'DEVICE', 'REPORT', 'PRIOR_REPORT', 'TOKEN
 # Linux limits each exec argument to 128 KiB. Keep the complete JSON argument
 # below 60 KiB, including its repeated selected/attempt accounting namespace.
 MAX_RECIPE_BYTES = 60 * 1024
+# Bound serial work as well as transport size within the child's 240s budget.
+MAX_LINUX_NODES = 32
 
 
 def route(node, unsafe, families):
@@ -88,7 +90,8 @@ def jobs(nodes, inventory):
             for nodeid in selected:
                 candidate = batch + [nodeid]
                 recipe = {'profile': profile, 'selected': candidate, 'attempts': [candidate]}
-                if len(json.dumps(recipe, separators=(',', ':')).encode()) > MAX_RECIPE_BYTES:
+                if (len(candidate) > MAX_LINUX_NODES or
+                        len(json.dumps(recipe, separators=(',', ':')).encode()) > MAX_RECIPE_BYTES):
                     if not batch:
                         raise shared.Refused('Linux selector exceeds bounded recipe transport')
                     result.append({'profile': profile, 'selected': batch, 'attempts': [batch]})
@@ -122,6 +125,15 @@ def containers_success(outer, count):
                 row.get('state', {}).get('OOMKilled') is not False or
                 not receipts.zero(row.get('state', {}).get('ExitCode')) or row.get('state', {}).get('Status') != 'exited'):
             raise shared.Refused('Failed execution-only container')
+
+
+def controller_selectors(expected):
+    """Match the protected controller's bounded, credential-redacted summary."""
+    params = ['--rootdir', '/workspace/input', '-p', 'test_plan_plugin', '-p',
+              'no:cacheprovider', '-n', '1', '--dist', 'worksteal', *expected]
+    redact = linux.wrapper().guard.redact
+    return [redact(value)[:256] for value in params[:64]
+            if '.py' in value and not value.startswith('-')]
 
 
 def launch(root, data, recipe, directory):
@@ -173,7 +185,7 @@ def launch(root, data, recipe, directory):
             name = 'test-plan.json' if recipe['profile'] == 'linux' else 'test-plan-' + recipe['profile'] + '-' + str(attempt) + '.json'
             record = receipts.strict_json(receipts.regular_bytes(evidence / name))
             # Controller command binds each exact attempt; do not rely on glob order.
-            matching = [c for c in controllers if c.get('selectors') == [value[:256] for value in ['--rootdir', '/workspace/input', '-p', 'test_plan_plugin', '-p', 'no:cacheprovider', '-n', '1', '--dist', 'worksteal', *expected][:64] if '.py' in value and not value.startswith('-')]]
+            matching = [c for c in controllers if c.get('selectors') == controller_selectors(expected)]
             if len(matching) != 1:
                 raise shared.Refused('Missing exact attempt controller binding')
             records.append(record)
