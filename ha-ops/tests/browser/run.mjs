@@ -4,6 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const directLayoutOnly = process.argv.includes("--direct-layout-only");
+if (directLayoutOnly && (!process.env.HA_OPS_BROWSER_CDP_URL || !process.env.HA_OPS_BROWSER_ARTIFACTS_DIR)) {
+  throw new Error("Direct layout checks require HA_OPS_BROWSER_CDP_URL and an external HA_OPS_BROWSER_ARTIFACTS_DIR; browser startup is not owned by this mode.");
+}
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const appRoot = path.resolve(here, "../..");
 const repoRoot = path.resolve(appRoot, "..");
@@ -560,7 +565,82 @@ async function runGitAccessOnly() {
   } finally { await cleanupOwned(context, child, root); }
 }
 
-if (process.argv.includes("--git-access-only")) {
+async function runDirectLayoutOnly() {
+  const { child, ready, root } = await startHarness();
+  let context, cdpBrowser;
+  const evidence = { viewports: [], pageErrors: [], loadingCount: null };
+  const reportPath = path.join(artifactsDir, "direct-layout-dom.json");
+  try {
+    const fixture = await ready;
+    assert(realpathSync(root) === realpathSync(fixture.root), "Unexpected harness root");
+    context = await openPersistentBrowser();
+    cdpBrowser = context.browser();
+    const page = await openOwnedPage(context);
+    page.on("pageerror", error => evidence.pageErrors.push(error.message));
+    if (process.env.HA_OPS_LAYOUT_BASELINE_BUNDLE) {
+      await page.route("**/ha-ops.js", route => route.fulfill({ contentType: "text/javascript", body: readFileSync(process.env.HA_OPS_LAYOUT_BASELINE_BUNDLE) }));
+    }
+    await page.goto(fixture.baseUrl);
+    await page.getByTestId("git-access-section").waitFor();
+    await page.getByTestId("managed-targets-section").waitFor();
+    await page.locator("ha-ops-direct").evaluate(async component => { await component.updateComplete; });
+    for (const width of [1440, 1920, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      const metrics = await page.locator("ha-ops-app").evaluate(async app => {
+        await app.updateComplete;
+        const root = app.renderRoot;
+        const components = [...root.querySelectorAll("ha-ops-direct")];
+        const direct = components[0];
+        await direct.updateComplete;
+        const section = direct.renderRoot.querySelector("section");
+        const git = root.querySelector('[data-testid="git-access-section"]');
+        const managed = root.querySelector('[data-testid="managed-targets-section"]');
+        const rect = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+        return { count: components.length, section: rect(section), git: rect(git), managed: rect(managed),
+          ordered: Boolean(git.compareDocumentPosition(direct) & Node.DOCUMENT_POSITION_FOLLOWING) && Boolean(direct.compareDocumentPosition(managed) & Node.DOCUMENT_POSITION_FOLLOWING),
+          directChild: direct.parentElement === git.parentElement && direct.parentElement === managed.parentElement,
+          inHeader: Boolean(root.querySelector(".top-grid ha-ops-direct")),
+          documentOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 2,
+          sectionOverflow: section.scrollWidth > section.clientWidth + 2 };
+      });
+      evidence.viewports.push({ width, ...metrics });
+      writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
+      assert(metrics.count === 1 && metrics.ordered && metrics.directChild && !metrics.inHeader, `${width}: direct setup order/count: ${JSON.stringify(metrics)}`);
+      assert(metrics.section.top >= metrics.git.bottom && metrics.managed.top >= metrics.section.bottom, `${width}: direct setup vertical order`);
+      for (const neighbor of [metrics.git, metrics.managed]) {
+        assert(Math.abs(metrics.section.left - neighbor.left) <= 2 && Math.abs(metrics.section.right - neighbor.right) <= 2, `${width}: inner setup edges differ: ${JSON.stringify(metrics)}`);
+      }
+      assert(!metrics.documentOverflow && !metrics.sectionOverflow, `${width}: horizontal overflow: ${JSON.stringify(metrics)}`);
+    }
+    evidence.loadingCount = await page.locator("ha-ops-app").evaluate(async app => {
+      const original = app.view;
+      try {
+        app.view = {};
+        await app.updateComplete;
+        return app.renderRoot.querySelectorAll("ha-ops-direct").length;
+      } finally { app.view = original; await app.updateComplete; }
+    });
+    assert(evidence.loadingCount === 0, "Loading view flashed direct setup");
+    assert(await page.locator("ha-ops-direct").count() === 1, "Restored view duplicated direct setup");
+    assert(evidence.pageErrors.length === 0, `Page errors: ${evidence.pageErrors.join(" | ")}`);
+    evidence.ok = true;
+    console.log(JSON.stringify({ ok: true, domEvidence: reportPath }));
+  } finally {
+    try {
+      writeFileSync(reportPath, JSON.stringify(evidence, null, 2));
+    } finally {
+      try { await cleanupOwned(context, child, root); }
+      finally {
+        // For connectOverCDP this disconnects our client, preserving the shared browser.
+        await cdpBrowser?.close();
+      }
+    }
+  }
+}
+
+if (directLayoutOnly) {
+  await runDirectLayoutOnly();
+} else if (process.argv.includes("--git-access-only")) {
   await runGitAccessOnly();
 } else {
 const { child, ready, root: fixtureRoot } = await startHarness();

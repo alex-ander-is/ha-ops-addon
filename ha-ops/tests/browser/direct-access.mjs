@@ -72,9 +72,15 @@ async function enrollmentChecks(fixture, context, record) {
   const opened=ingress.waitForEvent('popup');await allow.click();const direct=await record(await opened);
   await direct.waitForFunction(()=>document.querySelector('ha-ops-direct')?.renderRoot?.textContent.includes('Checking browser authorization'));
   assert(!await direct.getByText('Remembered browser access is active.',{exact:true}).count(),'Pending session falsely reports active access');
+  assert(!await direct.getByTestId('direct-authorization-success').count()&&!await direct.getByTestId('direct-authorization-info').count(),'Pending session showed success or remembered-access guidance');
   await sessionGate.finish(removeSessionGate);
   await direct.getByTestId('native-diagnostics').waitFor();
   await direct.getByText('Remembered browser access is active.',{exact:true}).waitFor();
+  const success=direct.getByTestId('direct-authorization-success');
+  const guidance='You can close this tab. This browser will remain authorized. Bookmark this page to open direct access again.';
+  await success.getByRole('heading',{name:'Direct access is ready',exact:true}).waitFor();
+  assert(await success.locator('ha-ops-status-badge[severity=success]').getAttribute('label')==='Browser authorized','Confirmed session lacks success badge');
+  await direct.getByTestId('direct-authorization-info').getByText(guidance,{exact:true}).waitFor();
   assert(direct.url()===fixture.direct,'Authorization grant fragment not cleared');
   assert(await direct.evaluate(()=>window.opener===null),'Direct popup retained its opener');
   assert(events.map(e=>e.kind).join(',')==='setup,setup,allow','Idle authorization did not refresh setup exactly once before one POST');
@@ -125,6 +131,8 @@ async function enrollmentChecks(fixture, context, record) {
   await direct.locator('ha-ops-direct').evaluate(app=>app.loadDirect());
   await direct.getByText('Remembered browser access is active.',{exact:true}).waitFor();
   await direct.getByText('Diagnostics unavailable. Fixture diagnostics offline.',{exact:true}).waitFor();
+  assert(await success.count()===1,'Diagnostics failure removed confirmed authorization success');
+  await direct.getByTestId('direct-authorization-info').getByText(guidance,{exact:true}).waitFor();
   assert(!await direct.getByTestId('native-diagnostics').count(),'Stale diagnostics retained after status failure');
   assert(!await direct.getByText('Allow this browser from the HA Ops page in Home Assistant.',{exact:false}).count(),'Confirmed direct session incorrectly requests enrollment after diagnostics fail');
   await direct.getByText('Direct access is authorized. Diagnostics will retry automatically.',{exact:true}).waitFor();
@@ -134,13 +142,16 @@ async function enrollmentChecks(fixture, context, record) {
   await direct.locator('ha-ops-direct').evaluate(app=>app.loadDirect());
   await direct.getByText('Fixture session refused.',{exact:true}).waitFor();
   assert(!await direct.getByText('Remembered browser access is active.',{exact:true}).count()&&!await direct.getByTestId('native-diagnostics').count(),'Failed session retained active state or stale diagnostics');
+  assert(!await direct.getByTestId('direct-authorization-success').count()&&!await direct.getByTestId('direct-authorization-info').count(),'Failed session retained success or remembered-access guidance');
+  const successDOM=await direct.locator('ha-ops-direct').evaluate(component=>({success:!!component.renderRoot.querySelector('[data-testid=direct-authorization-success]'),info:!!component.renderRoot.querySelector('[data-testid=direct-authorization-info]')}));
   await removeSessionRefusal();
   const failed=await record(await context.newPage());
   await ownRoute(failed,fixture.direct+'bootstrap',route=>route.fulfill({status:403,contentType:'application/json',body:'{"ok":false}'}));
   await failed.goto(fixture.direct+'#grant=fixture-invalid-grant');
   await failed.getByText('Authorization expired. Allow this browser from Home Assistant again.',{exact:true}).waitFor();
   assert(!await failed.getByText('Remembered browser access is active.',{exact:true}).count(),'Failed bootstrap reported active access');
-  const proof={ok:true,proof:'Enrollment-only real Authority and DirectServer; initial nonce expiry, fresh single-click enrollment, pending/failed sessions, cleared grant fragment, null opener, invalid address, blocked popup, setup/POST denial, retry, busy reentry, captured address, native disabled styles, stable parent feedback and independent diagnostics failure.',native_bridge:false};
+  assert(!await failed.getByTestId('direct-authorization-success').count()&&!await failed.getByTestId('direct-authorization-info').count(),'Failed bootstrap showed success or remembered-access guidance');
+  const proof={ok:true,authorizationFeedback:{confirmed:true,pendingHidden:true,failedHidden:true,diagnosticsFailurePreservesSuccess:true,failedSessionDOM:successDOM},proof:'Enrollment-only real Authority and DirectServer; initial nonce expiry, fresh single-click enrollment, pending/failed sessions, cleared grant fragment, null opener, invalid address, blocked popup, setup/POST denial, retry, busy reentry, captured address, native disabled styles, stable parent feedback and independent diagnostics failure.',native_bridge:false};
   writeFileSync(path.join(artifacts,'enrollment-report.json'),JSON.stringify(proof,null,2));console.log(JSON.stringify(proof));
   } catch(error) {failure=error;}
   finally {

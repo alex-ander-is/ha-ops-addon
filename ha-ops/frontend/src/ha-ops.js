@@ -1544,7 +1544,7 @@ class HaOpsApp extends LitElement {
 
   render() {
     if (!Object.keys(this.view || {}).length) {
-      return html`<main><ha-ops-direct></ha-ops-direct><section class="card wide" role="status"><h1>HA Ops</h1><p>Loading…</p></section></main>`;
+      return html`<main><section class="card wide" role="status"><h1>HA Ops</h1><p>Loading…</p></section></main>`;
     }
     const blocked = this.mutationBlocked();
     const pending = Boolean(this.state.deleted_devices_pending_confirmation);
@@ -1554,7 +1554,6 @@ class HaOpsApp extends LitElement {
     const displayedStatus = this.connection === "unknown" ? "unknown" : status === "success" ? TEXT.statusDone || "done" : status;
     return html`
       <main>
-        <ha-ops-direct></ha-ops-direct>
         ${(this.view.migration_review || window.__HA_OPS_MIGRATION_REVIEW__) ? html`<ha-ops-migration-review .endpoint=${(this.view.migration_review || window.__HA_OPS_MIGRATION_REVIEW__).endpoint}></ha-ops-migration-review>` : nothing}
         <div class="top-grid">
           <section class="card control-card">
@@ -1711,6 +1710,7 @@ class HaOpsApp extends LitElement {
         <div id="reactive-previews" data-testid="reactive-previews">${this.previewTemplate()}</div>
         ${this.renderInternalIdsPreview(controlsBlocked)}
         ${this.renderGitAccess()}
+        <ha-ops-direct class="wide"></ha-ops-direct>
         ${this.view.native_discovery?.qualified === true ? html`<ha-ops-folder-scope class="wide"
           .model=${this.view.native_discovery} @discovery-request=${event=>this.discoveryRequest(event)}></ha-ops-folder-scope>` : html`<section class="card wide" data-testid="managed-targets-section"><h2>${t("heading.managed_targets")}</h2>
           <p>${t("notice.managed_targets")}</p>
@@ -2260,7 +2260,7 @@ export function suggestedDirectAddress(hostname, https = false, port = 8100) {
 class HaOpsDirect extends LitElement {
   static properties = { direct: {type: Boolean}, address: {state: true}, message: {state: true}, setup: {state: true}, snapshot: {state: true}, busy: {state: true}, sessionActive: {state: true}, diagnosticsError: {state: true} };
   static styles = css`
-    :host{display:block;font:16px system-ui;color:#243443}section{padding:20px;margin:16px auto;max-width:900px;border:1px solid #d6dde4;border-radius:12px;background:#fff}p{line-height:1.5}vaadin-text-field{width:100%}vaadin-button{margin:8px 8px 0 0}vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}pre{white-space:pre-wrap;overflow-wrap:anywhere} .actions{display:flex;flex-wrap:wrap} h2{font-size:1.2rem}`;
+    :host{display:block;font:16px system-ui;color:#243443}section{padding:20px;margin:16px auto;max-width:900px;border:1px solid #d6dde4;border-radius:12px;background:#fff}p{line-height:1.5}vaadin-text-field{width:100%}vaadin-button{margin:8px 8px 0 0}vaadin-button[disabled]{background:#eee;color:#8b9299;border:1px solid #d5d9dd;opacity:1}pre{white-space:pre-wrap;overflow-wrap:anywhere} .actions{display:flex;flex-wrap:wrap} h2{font-size:1.2rem}:host(.wide) section{max-width:none;margin:0}.authorization-success{padding:16px;border:1px solid #8fc99a;border-radius:8px;background:#edf8ef}.authorization-success h2{margin:12px 0 8px}.authorization-info{margin-top:12px;padding:12px 16px;border:1px solid #9ccbe5;border-radius:8px;background:#eef7fc}.authorization-info p{margin:0}.diagnostics-warning{padding:12px;border:1px solid #e2bf76;border-radius:8px;background:#fff8e8}`;
   constructor() { super(); this.direct = location.pathname === '/direct/'; this.address = ''; this.message = ''; this.busy = false; }
   connectedCallback() { super.connectedCallback(); if(this.direct) this.loadDirect(); else this.loadSetup(); }
   disconnectedCallback() { clearTimeout(this.timer); super.disconnectedCallback(); }
@@ -2331,7 +2331,7 @@ class HaOpsDirect extends LitElement {
     if(this.isConnected) this.timer = setTimeout(()=>this.loadDirect(), 3000);
   }
   render() {
-    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1><p role="status">${this.sessionActive ? 'Remembered browser access is active.' : this.message || 'Checking browser authorization…'}</p>${this.diagnosticsError ? html`<p role="status">${this.diagnosticsError}</p>` : nothing}${this.snapshot ? html`${this.snapshot.migration_review ? html`<ha-ops-migration-review .endpoint=${this.snapshot.migration_review.endpoint}></ha-ops-migration-review>` : nothing}<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : this.sessionActive ? html`<p>Direct access is authorized. Diagnostics will retry automatically.</p>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
+    if(this.direct) return html`<section data-testid="direct-ui"><h1>HA Ops direct access</h1>${this.sessionActive ? html`<div class="authorization-success" data-testid="direct-authorization-success" role="status"><ha-ops-status-badge severity="success" label="Browser authorized"></ha-ops-status-badge><h2>Direct access is ready</h2><p>Remembered browser access is active.</p></div><div class="authorization-info" data-testid="direct-authorization-info"><p>You can close this tab. This browser will remain authorized. Bookmark this page to open direct access again.</p></div>` : html`<p role="status">${this.message || 'Checking browser authorization…'}</p>`}${this.diagnosticsError ? html`<p class="diagnostics-warning" role="status">${this.diagnosticsError}</p>` : nothing}${this.snapshot ? html`${this.snapshot.migration_review ? html`<ha-ops-migration-review .endpoint=${this.snapshot.migration_review.endpoint}></ha-ops-migration-review>` : nothing}<p>${this.snapshot.reason}</p><vaadin-details summary="Durable operation diagnostics" opened><pre data-testid="native-diagnostics">${JSON.stringify(this.snapshot,null,2)}</pre></vaadin-details><vaadin-button disabled>Native Apply unavailable</vaadin-button><vaadin-button disabled>Recovery unavailable</vaadin-button>` : this.sessionActive ? html`<p>Direct access is authorized. Diagnostics will retry automatically.</p>` : html`<p>Allow this browser from the HA Ops page in Home Assistant. You can set it up later and continue using ingress.</p>`}</section>`;
     return html`<section data-testid="direct-access-entry"><h2>Direct recovery access</h2><p>Remember this browser for access while Core or ingress is unavailable. HTTP is supported on your trusted LAN; HTTPS is optional.</p><vaadin-text-field label="Direct address" placeholder="http://homeassistant.local:8100" .value=${this.address} @value-changed=${e=>{this.address=e.detail.value;}}></vaadin-text-field><p>Port 8100 is a suggestion. Enter the host port configured for HA Ops.</p><div class="actions"><vaadin-button ?disabled=${!this.setup || !this.address || this.busy} @click=${()=>this.allow()}>Allow this browser</vaadin-button><vaadin-button ?disabled=${!this.address} @click=${()=>this.open()}>Open in new window</vaadin-button><vaadin-button @click=${()=>{this.message='You can authorize this browser later. Ingress remains available.';}}>Set up later</vaadin-button></div><p role="status">${this.message}</p></section>`;
   }
 }

@@ -2,6 +2,12 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.6.3
+
+Place direct-access setup between Git Access and Managed Targets at full width.
+
+- Show confirmed direct-access success and explain closing the tab and bookmarking the page.
+
 ## 2.6.2
 
 Repair stale direct setup authorization without changing its security protocol.
