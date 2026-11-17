@@ -204,7 +204,8 @@ async function badges() {
   assert(renderText(app.render()).includes('.severity=pending decision .label=pending decision data-status-code=pending decision'),'pending status precedence changed');
   app.backendVersion=''; assert(renderText(app.render()).includes('severity="version" .label= data-testid="version-badge"'),'empty version bootstrap changed'); checks++;
   const original=fs.readFileSync(sourcePath,'utf8');
-  assert.equal((original.match(/<ha-ops-status-badge\b/g)||[]).length,6,'all six application badge sites share one component');
+  assert.equal((original.match(/<ha-ops-status-badge\b/g)||[]).length,7,'all seven application badge sites share one component');
+  assert(/data-testid="direct-authorization-success"[^>]*>\s*<ha-ops-status-badge\b/.test(original),'direct authorization success must use the shared badge component');
   assert.equal((original.match(/<vaadin-badge\b/g)||[]).length,1,'native markup belongs only to shared component');
   assert(!original.includes('class="badge')&&!original.includes('class=${`badge'));
   assert(!original.includes('--vaadin-badge-background: #fffbeb'));
