@@ -52,29 +52,25 @@ The existing `folder-scope.mjs` and `storage-compact.mjs` accept this variable a
 own/close only their newly created test pages. A profile-in-use error is not a
 reason to use a temporary profile or terminate another task's browser.
 
-### Fresh-install blockers observed on October 27, 2026
+### Fresh-install packaging repair in 2.6.1
 
-The updated cached ARM64 App image builds and passes `native_runtime.qualify()`.
-Its complete `/app` manifest matches the current source. This does **not** prove
-a fresh Supervisor installation: an actual local install in HA Ops Lab failed.
+The October 27, 2026 HA Ops Lab install exposed two independent failures:
+Supervisor 2026.10.4 rejected digest-valued `build.yaml` overrides and selected
+`latest`, while reviewed Alpine APK URLs returned HTTP 404. Cached ARM64 image
+qualification concealed both failures.
 
-* Supervisor 2026.10.4 rejects the `@sha256:...` form in `build.yaml`'s
-  `build_from` values and falls back to `ghcr.io/home-assistant/base:latest`.
-  The supported build configuration must retain an explicitly qualified base;
-  silently accepting that fallback is not a fix.
-* The ARM64 APK lock currently contains four URLs returning HTTP 404:
-  `c-ares-1.34.8-r0.apk`, `ca-certificates-bundle-20260909-r0.apk`,
-  `curl-8.22.0-r0.apk` and `libexpat-2.8.5-r0.apk`. Retained build layers hide
-  this failure. The installer intentionally refuses an unavailable artifact.
-  Resolving artifact delivery or choosing a new runtime profile needs explicit
-  implementation and requalification; do not remove hashes/signature checks,
-  silently change versions, or treat a local cache as proof of fresh install.
+The repair removes `build.yaml` and pins the immutable multiarchitecture base
+index directly in Dockerfile. The same 56 signed packages per architecture are
+retained as two fixed GitHub Release `2.6.1` assets. The installer verifies the
+bundle SHA256 before extraction, exact APK membership and every original package
+hash before trusted, offline APK installation. Original lock URLs are provenance
+only; runtime versions and signatures remain unchanged.
 
-The local App was discovered but remains **uninstalled** after this failed
-attempt. No native activation, migration, Apply or production publication was
-performed. Resolve these packaging defects before claiming HAOS installation
-or step-6.29 end-to-end readiness. ARM64 execution does not qualify AMD64; the
-existing runtime document records that architecture's outstanding proof.
+A fresh production-URL ARM build and `native_runtime.qualify()` after publication
+are required proof; earlier cached builds and fixture-transport builds do not
+satisfy it. This packaging repair does not itself install or activate the App in
+HA Ops Lab, prove step-6.29 HAOS end-to-end readiness, or qualify AMD64 execution.
+See the runtime document for recorded execution evidence and remaining proofs.
 
 `ha_ops_dev.py` owns a persistent Colima profile named `ha-ops-dev`. It is for
 development and tests only; nothing under this directory is copied into the

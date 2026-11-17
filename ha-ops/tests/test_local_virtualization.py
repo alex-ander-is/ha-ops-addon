@@ -161,11 +161,19 @@ def test_advertised_architectures_have_installable_profiles():
     import yaml
     root = SOURCE.parents[2]
     config = yaml.safe_load((root / 'ha-ops/config.yaml').read_text())
-    build = yaml.safe_load((root / 'ha-ops/build.yaml').read_text())
-    assert set(config['arch']) == set(build['build_from']) == {'aarch64', 'amd64'}
+    assert not (root / 'ha-ops/build.yaml').exists()
+    assert set(config['arch']) == {'aarch64', 'amd64'}
+    dockerfile = (root / 'ha-ops/Dockerfile').read_text()
+    assert dockerfile.startswith('FROM ' + runtime_wrapper().BASE_INDEX + '\n')
+    assert 'BUILD_FROM' not in dockerfile
+    assert 'BUILD_FROM' not in (root / 'dev/virtualization/runtime_qualification.py').read_text()
     for architecture in config['arch']:
         assert (root / ('ha-ops/runtime-apk-' + architecture + '.lock')).is_file()
-    assert 'aarch64|amd64)' in (root / 'ha-ops/runtime-install.sh').read_text()
+    installer = (root / 'ha-ops/runtime-install.sh').read_text()
+    for architecture in config['arch']:
+        assert architecture + ') bundle_sha=' in installer
+    assert 'releases/download/2.6.1/runtime-apk-$arch.tar.gz' in installer
+    assert 'apk add --no-network' in installer and 'allow-untrusted' not in installer.replace('# APK\'s trusted keyring verifies package signatures; no allow-untrusted/network.', '')
     profile = json.loads((root / 'ha-ops/runtime-profile.json').read_text())
     assert 'x86_64' not in profile['qualified']
 
@@ -2423,7 +2431,7 @@ def test_runtime_negative_probe_names_consumers_and_cleans_on_interrupt(outcome,
         assert args[0] == 'run' and '--name' in args and '--label' in args
         consumers.append(args[args.index('--name') + 1])
         if outcome == 'timeout': raise first
-        return subprocess.CompletedProcess(args, 1, b'FAILED Pinned runtime artifact unavailable', b'')
+        return subprocess.CompletedProcess(args, 1, b'FAILED APK closure mismatch Invalid runtime bundle entries tar:', b'')
     monkeypatch.setattr(subject.vm, 'docker', execute)
     removed = []
     monkeypatch.setattr(subject.vm, 'remove_owned', lambda name, owner: removed.append(name))
@@ -2589,7 +2597,7 @@ def test_runtime_post_copy_chmod_failure_reclaims_owned_input(tmp_path, monkeypa
 
 def test_runtime_negative_probe_does_not_publish_success_before_cleanup(tmp_path, monkeypatch, capsys):
     subject, runs, cache, docker = runtime_lifecycle_fixture(tmp_path, monkeypatch)
-    monkeypatch.setattr(subject.vm, 'docker', lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, b'FAILED Pinned runtime artifact unavailable', b''))
+    monkeypatch.setattr(subject.vm, 'docker', lambda *args, **kwargs: subprocess.CompletedProcess(args, 1, b'FAILED APK closure mismatch Invalid runtime bundle entries tar:', b''))
     def refuse(*args):
         raise subject.vm.Refused('persistent removal failure')
     monkeypatch.setattr(subject.vm, 'remove_owned', refuse)
@@ -3440,3 +3448,48 @@ def test_ext4_real_startup_allocations_finalize_evidence_without_unanchored_dele
         if boundary in ('mkdir-foreign', 'owner-replaced'):
             assert (Path(debt) / 'foreign').read_text() == 'preserve'
         assert all(path.exists() for path in retained)
+
+
+@pytest.mark.parametrize('kind', ['bundle-checksum', 'checksum', 'missing', 'extra', 'duplicate', 'nested', 'symlink', 'malformed', 'unsupported', 'download'])
+def test_runtime_installer_rejects_unreviewed_bundles_before_apk(tmp_path, kind):
+    import hashlib
+    import io
+    import re
+    import tarfile
+    content = b'reviewed fixture'
+    package = 'fixture-1.0-r0.apk'
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+        names = [] if kind == 'missing' else [package]
+        if kind == 'extra': names.append('extra-1.0-r0.apk')
+        if kind == 'duplicate': names.append(package)
+        if kind == 'nested': names = ['nested/' + package]
+        for name in names:
+            info = tarfile.TarInfo(name); info.size = len(content)
+            if kind == 'symlink': info.type = tarfile.SYMTYPE; info.linkname = '/tmp/foreign'; info.size = 0
+            archive.addfile(info, io.BytesIO(content))
+    bundle = b'invalid archive' if kind == 'malformed' else stream.getvalue()
+    source = tmp_path / 'bundle.tar.gz'; source.write_bytes(bundle)
+    digest = '0' * 64 if kind == 'bundle-checksum' else hashlib.sha256(bundle).hexdigest()
+    checksum = '0' * 64 if kind == 'checksum' else hashlib.sha256(content).hexdigest()
+    (tmp_path / 'runtime-apk-aarch64.lock').write_text(checksum + '  https://dl-cdn.alpinelinux.org/alpine/v3.24/main/aarch64/' + package + '\n')
+    original = (SOURCE.parents[2] / 'ha-ops/runtime-install.sh').read_text()
+    changed = re.sub(r'bundle_sha=[a-f0-9]{64}', 'bundle_sha=' + digest, original).replace('/tmp/', str(tmp_path) + '/')
+    prelude = '''wget() { cp "$FIXTURE_BUNDLE" "$3"; }
+apk() { echo UNEXPECTED_APK; exit 90; }
+pip3() { echo UNEXPECTED_PIP; exit 91; }
+'''
+    if kind == 'download': prelude += 'wget() { return 1; }\n'
+    # A bad bundle must fail before tar is even invoked.
+    if kind == 'bundle-checksum': prelude += 'tar() { echo UNEXPECTED_TAR; exit 92; }\n'
+    script = tmp_path / 'installer.sh'; script.write_text(prelude + changed)
+    result = subprocess.run(['/bin/sh', str(script), 'unknown' if kind == 'unsupported' else 'aarch64'],
+        env={**os.environ, 'FIXTURE_BUNDLE': str(source)}, capture_output=True, text=True, timeout=10)
+    logs = result.stdout + result.stderr
+    assert result.returncode != 0 and 'UNEXPECTED_' not in logs
+    expected = {'bundle-checksum': 'FAILED', 'checksum': 'FAILED', 'missing': 'closure mismatch',
+        'extra': 'closure mismatch', 'duplicate': 'Invalid runtime bundle entries', 'nested': 'Invalid runtime bundle entries',
+        'symlink': 'Invalid runtime bundle entries', 'unsupported': 'Unsupported App architecture',
+        'download': 'Pinned runtime bundle unavailable', 'malformed': 'tar:'}[kind]
+    assert expected in logs
+    assert not list(tmp_path.glob('runtime-apks.*'))

@@ -6,6 +6,8 @@ Receiver tooling is a remote peer, never part of the App client filesystem.
 """
 import argparse
 import hashlib
+import io
+import tarfile
 import json
 import os
 from pathlib import Path
@@ -21,10 +23,8 @@ import tempfile
 import ha_ops_dev as vm
 
 APP = vm.ROOT / 'ha-ops'
-BASES = {
-    'aarch64': 'ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:1b29b917841ca169fa3bece7bb03ae366e9df94a4d382698796a44c5abb3f2b5',
-    'amd64': 'ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:59c99f645cd5bc2e20ca8acac0a6a6163749720e1a1fcdd49bcb5702b5db9688',
-}
+BASE_INDEX = 'ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5'
+BASES = dict.fromkeys(('aarch64', 'amd64'), BASE_INDEX)
 PACKAGES = 'bash curl diffutils git=2.54.0-r0 mosquitto-clients openssh-client openssh-keygen py3-pip py3-yaml python3 rsync'
 CACHE = vm.LOCAL / 'runtime-cache'
 DEPENDENCY_TREES = {}
@@ -761,7 +761,7 @@ def build():
         image = 'ha-ops-runtime:' + snapshot['digest'][:20] if 'digest' in snapshot else 'ha-ops-runtime:' + uuid.uuid4().hex[:20]
         build_started = True
         result = vm.docker('build', '--platform', platform, '--build-arg', 'BUILD_ARCH=' + arch,
-            '--build-arg', 'BUILD_FROM=' + BASES[arch], '--tag', image, str(source), timeout=1200, check=False)
+            '--tag', image, str(source), timeout=1200, check=False)
         build_finished = True
         status.update(stdout=result.stdout.decode(errors='replace'), stderr=result.stderr.decode(errors='replace'), returncode=result.returncode)
         sys.stdout.buffer.write(result.stdout); sys.stderr.buffer.write(result.stderr)
@@ -852,7 +852,7 @@ with tempfile.TemporaryDirectory() as t:
 
 
 def check_lock_failure(report):
-    """Prove changed checksums/missing archives stop before package install."""
+    """Prove bundle, closure and APK failures offline before package install."""
     vm.ready()
     arch = {'linux/arm64': 'aarch64', 'linux/amd64': 'amd64'}[vm.guest_platform()]
     owner = uuid.uuid4().hex
@@ -866,25 +866,42 @@ def check_lock_failure(report):
         root.mkdir(parents=True)
         fixture = RuntimeFixture(root)
         script = root / 'runtime-install.sh'
-        fixture.write(script.name, (APP / 'runtime-install.sh').read_bytes())
-        checksum, url = (APP / ('runtime-apk-' + arch + '.lock')).read_text().splitlines()[0].split()
-        for kind in ('checksum', 'missing'):
+        original = (APP / 'runtime-install.sh').read_text()
+        for kind in ('bundle-checksum', 'checksum', 'missing', 'extra', 'duplicate', 'malformed'):
+            content = b'reviewed-package-fixture'
+            package_hash = hashlib.sha256(content).hexdigest()
             lock = root / ('runtime-apk-' + arch + '.lock')
-            changed = ('0' * 64 + '  ' + url if kind == 'checksum' else
-                       checksum + '  ' + url.rsplit('/', 1)[0] + '/ha-ops-deliberately-absent-0.0.0-r0.apk')
-            fixture.write(lock.name, (changed + '\n').encode())
+            fixture.write(lock.name, ((('0' * 64 if kind == 'checksum' else package_hash) +
+                '  https://dl-cdn.alpinelinux.org/alpine/v3.24/main/' + arch + '/fixture-1.0-r0.apk\n')).encode())
+            stream = io.BytesIO()
+            with tarfile.open(fileobj=stream, mode='w:gz') as archive:
+                names = [] if kind == 'missing' else ['fixture-1.0-r0.apk']
+                if kind == 'extra': names.append('extra-1.0-r0.apk')
+                if kind == 'duplicate': names.append('fixture-1.0-r0.apk')
+                for member in names:
+                    info = tarfile.TarInfo(member); info.size = len(content)
+                    archive.addfile(info, io.BytesIO(content))
+            bundle = b'invalid archive' if kind == 'malformed' else stream.getvalue()
+            fixture.write('bundle.tar.gz', bundle)
+            digest = '0' * 64 if kind == 'bundle-checksum' else hashlib.sha256(bundle).hexdigest()
+            changed = re.sub(r'bundle_sha=[a-f0-9]{64}', 'bundle_sha=' + digest, original)
+            # Offline transport and tripwires are disposable proof inputs only.
+            prelude = "wget() { cp /fixture/bundle.tar.gz \"$3\"; }; apk() { echo UNEXPECTED_APK; exit 90; }; pip3() { echo UNEXPECTED_PIP; exit 91; };\n"
+            fixture.write(script.name, (prelude + changed).encode())
             vm.verify_source(root)
             name = 'ha-ops-runtime-negative-' + owner + '-' + kind
             consumers.append(name)
-            result = vm.docker('run', '--rm', '--name', name, '--label', 'ha-ops.dev.run=' + owner, '--read-only', '--tmpfs', '/tmp', '--entrypoint', '/bin/sh',
-                '--mount', f'type=bind,source={script},target=/runtime-install.sh,readonly',
+            result = vm.docker('run', '--rm', '--name', name, '--label', 'ha-ops.dev.run=' + owner, '--read-only', '--network', 'none', '--tmpfs', '/tmp', '--entrypoint', '/bin/sh',
+                '--mount', f'type=bind,source={root},target=/fixture,readonly',
                 '--mount', f'type=bind,source={lock},target=/tmp/{lock.name},readonly',
-                BASES[arch], '/runtime-install.sh', arch, timeout=120, check=False)
+                BASES[arch], '/fixture/runtime-install.sh', arch, timeout=120, check=False)
             logs = (result.stdout + result.stderr).decode(errors='replace')
-            expected = 'FAILED' if kind == 'checksum' else 'Pinned runtime artifact unavailable'
-            if result.returncode == 0 or expected not in logs or 'Installing ' in logs:
+            expected = {'bundle-checksum': 'FAILED', 'checksum': 'FAILED',
+                'missing': 'APK closure mismatch', 'extra': 'APK closure mismatch',
+                'duplicate': 'Invalid runtime bundle entries', 'malformed': 'tar:'}[kind]
+            if result.returncode == 0 or expected not in logs or 'UNEXPECTED_' in logs:
                 raise vm.Refused('Pinned artifact negative proof did not fail closed: ' + kind + '\n' + logs)
-            rows.append({'case': kind, 'returncode': result.returncode, 'logs': logs})
+            rows.append({'case': kind, 'returncode': result.returncode, 'logs': logs, 'network': 'none'})
         result_report['status'] = 'passed'
     except BaseException as error:
         first = error

@@ -2,6 +2,14 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.6.1
+
+Restore fresh App installation with the unchanged reviewed runtime
+
+- Pin the immutable multiarchitecture HA base directly in Dockerfile and remove the deprecated Supervisor build override.
+- Install the existing signed, SHA256-locked APK closure from two retained release assets; verify bundle identity, exact membership and every package before offline APK installation.
+- Preserve runtime versions, trusted package signatures and pip hashes; fail closed if an exact release asset is unavailable or changed.
+
 ## 2.6.0
 
 Recover divergent Git state through Reset Git State

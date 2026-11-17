@@ -7,17 +7,21 @@ OpenSSH, HTTPS helper and linked libraries.
 
 ## Reproducible package profile
 
-`build.yaml` pins the effective Supervisor base for each declared maintained
-architecture. The Dockerfile's architecture-neutral default is the immutable
-HA base `3.24-2026.08.0` OCI index
-`sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5`.
-The per-platform digests are recorded in `build.yaml`.
+The Dockerfile pins the immutable architecture-neutral HA base
+`3.24-2026.08.0` OCI index
+`sha256:93ef607824e3f27e868f11b10938283a98bf880ed57bcf8eaa81c6c2d521f6f5`
+directly in `FROM`. Docker selects the target platform from that index.
+There is no `BUILD_FROM` override or deprecated `build.yaml`.
 
 `runtime-apk-aarch64.lock` and `runtime-apk-amd64.lock` contain the entire
 resolved installation closure: 56 exact archive URLs and SHA256 hashes per
 architecture, including dependencies that upgrade packages inherited from the
-immutable base. Installation downloads only these archives, checks every hash,
-then uses APK's trusted signature verification with `--no-network`. There is no
+immutable base. Installation downloads one architecture-specific `runtime-apk-ARCH.tar.gz`
+asset from this repository's GitHub Release `2.6.1`, checks its committed bundle
+SHA256 before extraction, rejects unsafe entries and any missing/extra/duplicate
+APK, checks every original package hash, then uses APK's trusted signature
+verification with `--no-network`. The lock URLs retain original Alpine provenance;
+they are not download fallbacks. There is no
 version-range or current-index fallback. Inherited packages remain fixed by the
 base digest. `runtime-pip.lock` pins both architecture-specific CPython 3.14
 musllinux annotatedyaml artifacts by URL/hash and rfc8785 by version/hash.
@@ -28,12 +32,13 @@ The resolved candidate uses Git `2.54.0-r0`, Python `3.14.8-r0`, OpenSSH
 `8.22.0-r0`, and zlib `1.3.2-r1`. Full package and executable/library identities
 are in the canonical `runtime-profile.json`.
 
-Alpine/PyPI/HA wheel retention is outside this repository's control. The local
-runner retains checksum-verifiable archives in `.local/runtime-cache` for
-evidence; the normal install does not silently use that cache or promise old
-URLs indefinitely. If an exact artifact disappears, the build stops with an
-explicit profile-resolution/requalification diagnosis. Do not replace a pin
-with `latest`, remove a checksum, or disable APK signatures.
+GitHub Release asset and PyPI/HA wheel availability remain external dependencies.
+Missing or changed exact artifacts fail closed; no current-index, local-cache or
+newer-version fallback exists. The local runtime cache is retained evidence only.
+The `2.6.1` packaging repair preserves the admitted package and binary identities.
+Prior cached-image qualification does not prove the repaired production transport:
+a fresh production-URL ARM build and runtime qualification must be recorded after
+both approved assets are publicly available. This does not qualify AMD64 execution.
 
 ## Admission and architecture
 
@@ -137,7 +142,7 @@ python3 dev/virtualization/runtime_qualification.py run --group ext4 --ext4-prof
 ```
 
 For an upgrade, first review and update the candidate base digests in the
-Dockerfile, `build.yaml` and resolver, and the exact Git pin in the resolver's
+Dockerfile and resolver, and the exact Git pin in the resolver's
 `PACKAGES` constant. Resolving intentionally changes lock inputs. Review signed-source provenance,
 exact closure/hash changes and the observed immutable image before editing the
 admitted tuple; `probe` never self-approves its output. Rebuild after a tuple
