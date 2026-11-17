@@ -12,7 +12,7 @@ import tempfile
 import uuid
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixture_cleanup import open_directory_chain, remove_tree
+from fixture_cleanup import OwnedDirectory, open_directory_chain, remove_tree
 
 
 SLUG = "fixture_ha_ops"
@@ -248,8 +248,78 @@ def verify_vm_sources(sources, profile, fixture_guard=None):
                 marker.unlink(missing_ok=True)
 
 
+def clear_owned_fixture(directory, image, run_id, owner):
+    """Use root only inside an exact owned bind; keep the host-owned root held."""
+    directory = Path(directory)
+    def unchanged():
+        actual = os.stat(directory, follow_symlinks=False)
+        held = os.fstat(owner.root)
+        if not stat.S_ISDIR(actual.st_mode) or (actual.st_dev, actual.st_ino) != (held.st_dev, held.st_ino):
+            raise CleanupFailure("Topology cleanup root identity changed")
+    unchanged()
+    source = (Path(__file__).parent / 'fixture_cleanup.py').read_text()
+    # The existing descriptor walker unlinks symlinks without following them.
+    # Refuse nested mounts before giving it access to the held root.
+    held = os.fstat(owner.root)
+    script = source + "\nEXPECTED_ROOT = " + repr((held.st_dev, held.st_ino)) + "\n" + """
+root = os.open('/fixture', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    held = os.fstat(root)
+    if (held.st_dev, held.st_ino) != EXPECTED_ROOT:
+        raise RuntimeError('Foreign fixture root refused')
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        target = line.split()[4]
+        if target.startswith('/fixture/'):
+            raise RuntimeError('Nested fixture mount refused')
+    _empty_directory(root)
+finally:
+    os.close(root)
+"""
+    name = 'native-topology-' + run_id + '-cleanup'
+    container = None
+    attempted = False
+    first = None
+    failures = []
+    try:
+        attempted = True
+        container = docker(['create', '--name', name, '--label', 'ha-ops.dev.run=' + run_id,
+            '--network', 'none', '--read-only', '--pull', 'never', '--cap-drop', 'ALL', '--cap-add', 'DAC_OVERRIDE', '--security-opt', 'no-new-privileges',
+            '--mount', 'type=bind,source=' + str(directory) + ',target=/fixture,bind-propagation=rprivate',
+            image, 'python3', '-c', script]).decode().strip()
+        inspected = json.loads(docker(['container', 'inspect', container]))[0]
+        host = inspected['HostConfig']
+        mounts = inspected['Mounts']
+        if (inspected.get('Id') != container or inspected['Config']['Labels'].get('ha-ops.dev.run') != run_id or
+                inspected['Config'].get('User', '') not in ('', '0', '0:0') or
+                host.get('NetworkMode') != 'none' or host.get('ReadonlyRootfs') is not True or
+                host.get('Privileged') is not False or host.get('CapDrop') != ['ALL'] or host.get('CapAdd') not in (['DAC_OVERRIDE'], ['CAP_DAC_OVERRIDE']) or
+                host.get('Devices') not in (None, []) or
+                host.get('SecurityOpt') != ['no-new-privileges'] or
+                len(mounts) != 1 or mounts[0].get('Type') != 'bind' or mounts[0].get('Source') != str(directory) or
+                mounts[0].get('Destination') != '/fixture' or mounts[0].get('RW') is not True or
+                mounts[0].get('Propagation') != 'rprivate'):
+            raise CleanupFailure('Topology cleanup container isolation changed')
+        unchanged()
+        docker(['start', container])
+        status = docker(['wait', container]).decode().strip()
+        state = json.loads(docker(['container', 'inspect', container]))[0]['State']
+        if status != '0' or type(state.get('ExitCode')) is not int or state['ExitCode'] != 0 or state.get('OOMKilled') is not False or state.get('Status') != 'exited':
+            raise CleanupFailure('Topology cleanup container failed')
+        unchanged()
+    except BaseException as error:
+        first = error
+    finally:
+        if attempted:
+            try:
+                remove_owned(container or name, run_id)
+            except BaseException as error:
+                failures.append(str(error))
+    if first is not None or failures:
+        raise CleanupFailure('Owned fixture cleanup incomplete: ' + str(first) + '; removal=' + repr(failures)) from first
+
+
 def exercise(directory, image, first, second, *, skip_build=False, retain_image=False,
-             run_id=None, vm_profile=None, container_platform=None, fixture_guard=None):
+             run_id=None, vm_profile=None, container_platform=None, fixture_guard=None, fixture_owner=None):
     directory = Path(os.path.abspath(directory))
     if fixture_guard:
         fixture_guard.validate()
@@ -322,7 +392,22 @@ def exercise(directory, image, first, second, *, skip_build=False, retain_image=
         result["inspect_bind_type_source_rw"] = "passed"
         return result
     finally:
-        cleanup(image, (first, second), retain_image=retain_image, run_id=run_id)
+        primary = sys.exc_info()[1]
+        if fixture_owner is None:
+            cleanup(image, (first, second), retain_image=retain_image, run_id=run_id)
+        else:
+            failures = []
+            try:
+                cleanup(image, (first, second), retain_image=True, run_id=run_id)
+                clear_owned_fixture(directory, image, run_id, fixture_owner)
+            except BaseException as error:
+                failures.append(error)
+            try:
+                cleanup(image, (), retain_image=retain_image, run_id=run_id)
+            except BaseException as error:
+                failures.append(error)
+            if failures:
+                raise CleanupFailure('Topology primary=' + repr(primary) + '; cleanup=' + repr(failures)) from primary
 
 
 def main():
@@ -348,6 +433,7 @@ def main():
         if not args.platform:
             parser.error("reusable mode requires an explicit Linux platform")
     fixture_guard = None
+    fixture_owner = None
     try:
         if args.skip_build or args.retain_image:
             fixture_guard = FixtureGuard(args.fixture_root)
@@ -379,35 +465,38 @@ def main():
                     fixture_guard.validate()
             else:
                 args.fixture_root.mkdir(parents=True, exist_ok=False)
+            if fixture_guard is None:
+                fixture_owner = OwnedDirectory(args.fixture_root)
             try:
                 result = exercise(args.fixture_root, image, first, second,
                                   skip_build=args.skip_build, retain_image=args.retain_image,
                                   run_id=generated_run_id, vm_profile=args.vm_profile,
-                                  container_platform=args.platform, fixture_guard=fixture_guard)
+                                  container_platform=args.platform, fixture_guard=fixture_guard, fixture_owner=fixture_owner)
             except CleanupFailure as error:
                 raise CleanupFailure(f"Run {generated_run_id}: {error}") from error
             except BaseException:
                 if fixture_guard:
                     fixture_guard.remove()
                 else:
-                    shutil.rmtree(args.fixture_root)
+                    fixture_owner.remove()
                 raise
             else:
                 if fixture_guard:
                     fixture_guard.remove()
                 else:
-                    shutil.rmtree(args.fixture_root)
+                    fixture_owner.remove()
         else:
             directory = tempfile.mkdtemp(prefix="native-topology-")
+            fixture_owner = OwnedDirectory(directory)
             try:
-                result = exercise(directory, image, first, second, run_id=generated_run_id)
+                result = exercise(directory, image, first, second, run_id=generated_run_id, fixture_owner=fixture_owner)
             except CleanupFailure as error:
                 raise CleanupFailure(f"Run {generated_run_id}; retained fixture {directory}: {error}") from error
             except BaseException:
-                shutil.rmtree(directory)
+                fixture_owner.remove()
                 raise
             else:
-                shutil.rmtree(directory)
+                fixture_owner.remove()
         result["docker"] = versions
         result["status"] = "passed"
         rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
@@ -421,6 +510,8 @@ def main():
     finally:
         if fixture_guard:
             fixture_guard.close()
+        if fixture_owner:
+            fixture_owner.close()
 
 
 if __name__ == "__main__":

@@ -126,6 +126,13 @@ class ReleaseScriptTests(unittest.TestCase):
         run(["git", "add", "publish-release.note"], self.repo)
         maintenance = run(["git", "commit", "-m", "Fix release tooling"], self.repo)
         self.assertEqual(maintenance.returncode, 0, maintenance.stderr)
+        # origin already published the release plus tooling. Another tooling-only
+        # commit must fast-forward that branch without inventing an App release.
+        published = run(["git", "rev-parse", "HEAD"], self.repo).stdout.strip()
+        self.assertEqual(run(["git", "update-ref", "refs/remotes/origin/main", published], self.repo).returncode, 0)
+        (self.repo / "delivery.note").write_text("Further tooling maintenance.\n")
+        self.assertEqual(run(["git", "add", "delivery.note"], self.repo).returncode, 0)
+        self.assertEqual(run(["git", "commit", "-m", "Improve delivery tooling"], self.repo).returncode, 0)
 
         fake_bin = self.repo.parent / f"{self.repo.name}-fake-bin"
         fake_bin.mkdir()
@@ -146,6 +153,16 @@ class ReleaseScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("push origin main 2.0.1", push_log.read_text())
+
+        tree = run(["git", "rev-parse", "HEAD^{tree}"], self.repo).stdout.strip()
+        divergent = run(["git", "commit-tree", tree, "-p", "2.0.1^{commit}", "-m", "Divergent remote tooling"], self.repo)
+        self.assertEqual(divergent.returncode, 0, divergent.stderr)
+        self.assertEqual(run(["git", "update-ref", "refs/remotes/origin/main", divergent.stdout.strip()], self.repo).returncode, 0)
+        rejected_divergence = run(["./publish-release"], self.repo, env=env)
+        self.assertNotEqual(rejected_divergence.returncode, 0)
+        self.assertIn("HEAD is not a fast-forward of origin/main", rejected_divergence.stderr)
+        self.assertEqual(push_log.read_text().count("push origin main 2.0.1"), 1)
+        self.assertEqual(run(["git", "update-ref", "refs/remotes/origin/main", published], self.repo).returncode, 0)
 
         (self.repo / "ha-ops/app.py").write_text("print('unreleased app change')\n")
         run(["git", "add", "ha-ops/app.py"], self.repo)

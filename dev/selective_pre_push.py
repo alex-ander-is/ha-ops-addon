@@ -13,6 +13,7 @@ import tempfile
 import test_plan as shared
 import test_receipts as receipts
 import test_receipt_linux as qualified_linux
+import test_execution_linux as execution_linux
 
 ISOLATED = {'test_test_runner_guard.py', 'test_test_plan.py', 'test_selective_pre_push.py'}
 MIXED = {'test_server.py', 'test_client_contract.py'}
@@ -215,6 +216,9 @@ def areas_for_path(path, nodes):
         return reviewed({'ui-common'} | (categories & UI_AREAS))
     if path in ('release', 'publish-release', 'release-policy.py', 'ha-ops/config.yaml', 'ha-ops/CHANGELOG.md'):
         return reviewed({'release'})
+    if path == 'dev/test_execution_linux.py':
+        return reviewed({'runner', 'virtualization'} | {category(node) for node in nodes
+            if Path(node['source']).name in EXCLUSIVE_FAMILIES or node['id'] in execution_linux.SAVE})
     if path.startswith('dev/virtualization/'):
         return reviewed({'virtualization', 'runner'})
     if path.startswith(('dev/', '.githooks/')):
@@ -266,8 +270,8 @@ def make_plan(root, data, records, full=False):
 
 
 def verification_plan(data, area):
-    if area != 'reset':
-        raise shared.Refused('Only reviewed Reset category verification is supported')
+    if area not in {category(node) for node in data['nodes']}:
+        raise shared.Refused('Unknown verification category: ' + area)
     decisions = [{'id': node['id'], 'category': category(node), 'selected': category(node) == area,
                   'reason': 'explicit local category verification'} for node in data['nodes']]
     count = sum(row['selected'] for row in decisions)
@@ -279,21 +283,31 @@ def verification_plan(data, area):
             'inventory_digest': shared.digest(shared.canonical(data).encode()), 'category_counts': {area: count}}
 
 def verify_outcomes(record, expected, workers):
-    """Exact machine accounting, with host skips explicitly unproven."""
-    if record.get('errors') or record.get('deselected') or not receipts.zero(record.get('exitstatus')):
+    """Exact machine accounting; a skipped peer never relaxes phase shape."""
+    if (type(record) is not dict or type(record.get('schema')) is not int or record.get('schema') != 1 or
+            record.get('errors') != [] or record.get('deselected') != [] or not receipts.zero(record.get('exitstatus'))):
         raise shared.Refused('Failed/error/deselected machine record')
+    if (type(expected) is not list or not expected or not all(type(node) is str for node in expected) or
+            len(expected) != len(set(expected)) or type(workers) is not int or not 0 <= workers <= 10):
+        raise shared.Refused('Invalid runtime selection/worker shape')
     reports = defaultdict(list)
+    if type(record.get('reports')) is not list:
+        raise shared.Refused('Missing runtime phases')
     for row in record['reports']:
+        if (type(row) is not dict or type(row.get('id')) is not str or row['id'] not in expected or
+                row.get('when') not in ('setup', 'call', 'teardown') or
+                row.get('outcome') not in ('passed', 'skipped') or row.get('xfail') is not False):
+            raise shared.Refused('Invalid/failed/xfail runtime phase')
         reports[row['id']].append(row)
     if set(reports) != set(expected):
         raise shared.Refused('Missing/unexpected runtime outcome')
-    collections = record['worker_collections'] if workers else [record['collected']]
-    if len(collections) != (workers or 1) or any(Counter(ids) != Counter(expected) for ids in collections):
+    collections = record.get('worker_collections') if workers else [record.get('collected')]
+    if (type(collections) is not list or len(collections) != (workers or 1) or
+            any(type(ids) is not list or not all(type(node) is str for node in ids) or
+                Counter(ids) != Counter(expected) for ids in collections)):
         raise shared.Refused('Runtime collection differs from selection')
     skipped = []
     for nodeid, phases in reports.items():
-        if any(p['xfail'] or p['outcome'] not in ('passed', 'skipped') for p in phases):
-            raise shared.Refused('Failed/xfail outcome: ' + nodeid)
         names = Counter(p['when'] for p in phases)
         if any(p['outcome'] == 'skipped' for p in phases):
             if names not in (Counter(('setup', 'teardown')), Counter(('setup', 'call', 'teardown'))):
@@ -301,6 +315,8 @@ def verify_outcomes(record, expected, workers):
             skipped.append(nodeid)
         elif names != Counter(('setup', 'call', 'teardown')):
             raise shared.Refused('Missing/duplicate runtime phase: ' + nodeid)
+    if not skipped:
+        receipts.machine_success(record, expected, workers)
     return sorted(skipped)
 
 
@@ -336,12 +352,15 @@ def execute(root, data, plan, records, artifacts, *, launch=None):
             raise shared.Refused('Selection inputs changed; recollect')
     fresh()
     selected = [row['id'] for row in plan['decisions'] if row['selected']]
-    unsafe = [node['id'] for node in data['nodes'] if node['id'] in set(selected) and unsafe_host_node(node)]
-    if unsafe:
-        raise shared.Refused('Exclusive resource proof requires qualified isolated Linux/ext4 route: ' + ', '.join(unsafe))
+    # Resolve the entire selection before cache access or any dispatch.
+    routes = {node['id']: execution_linux.route(node, unsafe_host_node(node), EXCLUSIVE_FAMILIES)
+              for node in data['nodes'] if node['id'] in set(selected)}
+    resource_nodes = [(node, routes[node['id']]) for node in data['nodes']
+                      if node['id'] in routes and routes[node['id']] != 'host']
+    resource_jobs = execution_linux.jobs(resource_nodes, data['nodes'])
     groups = defaultdict(list)
     for node in data['nodes']:
-        if node['id'] in set(selected):
+        if node['id'] in set(selected) and routes[node['id']] == 'host':
             groups[category(node)].append(node)
     result = {'status': 'passed', 'jobs': [], 'not_proven': [], 'categories': {},
               'platform_proofs': 'separate existing qualification obligations; host skips do not prove them'}
@@ -366,7 +385,10 @@ def execute(root, data, plan, records, artifacts, *, launch=None):
         profile = {'route': 'qualified-reset-linux-v1' if linux_route else 'canonical-host', 'phase': phase, 'dist': 'worksteal',
                    'workers': [min(2 if isolated else min(cap, 8) if linux_route else cap, sum(len(ids) for ids in batch)) for batch in batches]}
         current = None
+        split_resource = any(category(node) == area for node, _ in resource_nodes)
         try:
+            if split_resource:
+                raise shared.Refused('Execution-only split category has no receipt authority')
             current = bound(area, nodes, profile)
             initial[area] = (nodes, profile, current)
             reusable, reason = store.lookup(area, current)
@@ -423,6 +445,35 @@ def execute(root, data, plan, records, artifacts, *, launch=None):
         if complete:
             candidates[area] = {'binding': current, 'jobs': category_jobs}
             result['categories'][area]['proof'] = 'complete success candidate'
+    # Owned resource jobs are sequential and execution-only: no binding/lookup.
+    resource_covered = []
+    for index, recipe in enumerate(resource_jobs):
+        fresh()
+        records_out, evidence = execution_linux.launch(root, data, recipe, artifacts / ('resource-' + str(index)))
+        if len(records_out) != len(recipe['attempts']):
+            raise shared.Refused('Missing execution-only attempt')
+        for attempt, (record, expected) in enumerate(zip(records_out, recipe['attempts'])):
+            skipped = verify_outcomes(record, expected, 1)
+            if record['worker_collections'] != [expected]:
+                raise shared.Refused('Isolated recipe collection order changed')
+            if set(skipped) - execution_linux.DEFERRED:
+                raise shared.Refused('Unexpected isolated skip: ' + ', '.join(skipped))
+            result['not_proven'].extend(skipped)
+            result['jobs'].append({'phase': 'resource', 'workers': 1, 'attempt': attempt,
+                                   'expected': expected, **evidence})
+        resource_covered.extend(recipe['selected'])
+        fresh()
+        for nodeid in recipe['selected']:
+            area = category(next(node for node in data['nodes'] if node['id'] == nodeid))
+            entry = result['categories'].setdefault(area, {'status': 'executed', 'reason': 'execution-only isolated route'})
+            entry.setdefault('routes', []).append({'profile': recipe['profile'], 'selected': nodeid})
+            entry['proof'] = 'execution-only; no receipt authority'
+        # A category split between host and isolated jobs is never receiptable.
+        for area in list(candidates):
+            if any(category(node) == area for node, _ in resource_nodes):
+                candidates.pop(area)
+    if Counter(resource_covered) != Counter(node['id'] for node, _ in resource_nodes):
+        raise shared.Refused('Execution-only selected coverage differs')
     # No publication until every sibling job and final authoritative freshness
     # check succeeds. Old independent success is preserved after any later failure.
     fresh()
@@ -438,7 +489,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--records', type=Path)
-    parser.add_argument('--verify-category', choices=['reset'])
+    parser.add_argument('--verify-category')
     parser.add_argument('--artifacts', type=Path)
     parser.add_argument('--plan-only', action='store_true')
     parser.add_argument('--full', action='store_true', default=os.environ.get('HA_OPS_PRE_PUSH_MODE') == 'full')

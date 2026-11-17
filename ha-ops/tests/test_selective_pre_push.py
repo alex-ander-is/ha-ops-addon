@@ -203,13 +203,13 @@ def test_resource_class_api_and_profile_refuse_host_without_blanket_native():
 
 
 def test_exclusive_case_blocks_before_any_dispatch(repo, monkeypatch, tmp_path):
-    inventory = data([('ha-ops/tests/test_native_disk.py', 'test_linux_real_allocations_with_capped_initial_capacity_warning')])
+    inventory = data([('ha-ops/tests/test_future.py', 'test_linux_real_allocations_with_capped_initial_capacity_warning')])
     plan = {'errors': [], 'mode': 'full', 'decisions': [{'id': node['id'], 'selected': True} for node in inventory['nodes']]}
     monkeypatch.setattr(gate.shared, 'validate_map', lambda *a: [])
     monkeypatch.setattr(gate, 'make_plan', lambda *a: plan)
     def forbidden(*a):
         pytest.fail('Exclusive case entered host launch')
-    with pytest.raises(gate.shared.Refused, match='qualified isolated'):
+    with pytest.raises(gate.shared.Refused, match='Unreviewed exclusive isolated'):
         gate.execute(repo, inventory, plan, '', tmp_path, launch=forbidden)
 
 
@@ -539,7 +539,7 @@ def test_matching_receipt_never_bypasses_unknown_selection_or_unsafe_route(repo,
     inventory['nodes'][0]['profile'] = 'exclusive-volume-ext4'
     monkeypatch.setattr(gate.shared, 'validate_map', lambda *a: [])
     monkeypatch.setattr(gate, 'make_plan', lambda *a: plan)
-    with pytest.raises(gate.shared.Refused, match='qualified isolated'):
+    with pytest.raises(gate.shared.Refused, match='Unreviewed exclusive isolated'):
         gate.execute(repo, inventory, plan, '', tmp_path_factory.mktemp('unsafe-receipt'))
 
 
@@ -1201,3 +1201,196 @@ def test_reverse_consumers_cannot_admit_future_unknown_input(repo, monkeypatch):
     plan = gate.make_plan(repo, inventory, '')
     assert any('Unknown influence: ' + path in error for error in plan['errors'])
     assert not any(row['selected'] for row in plan['decisions'])
+
+
+def test_reviewed_execution_only_route_map_is_exact_and_future_unsafe_refuses():
+    isolated = gate.execution_linux
+    assert len(isolated.HOST) == 11 and len(isolated.SAVE) == 4
+    for nodeid in isolated.HOST:
+        node = {'id': nodeid, 'source': nodeid.split('::')[0]}
+        assert isolated.route(node, True, gate.EXCLUSIVE_FAMILIES) == 'host'
+    for nodeid in isolated.SAVE:
+        node = {'id': nodeid, 'source': nodeid.split('::')[0]}
+        assert isolated.route(node, True, gate.EXCLUSIVE_FAMILIES) == 'linux'
+    for nodeid in [next(iter(isolated.SAVE)).replace('hash-object', 'future-command') + '-new',
+                   'ha-ops/tests/test_future.py::test_enospc']:
+        with pytest.raises(gate.shared.Refused, match='Unreviewed'):
+            isolated.route({'id': nodeid, 'source': nodeid.split('::')[0]}, True, gate.EXCLUSIVE_FAMILIES)
+
+
+def test_ext4_support_is_complete_ordered_and_recreation_only_second_attempt():
+    isolated = gate.execution_linux
+    ids = [nodeid for recipe in isolated.RECIPES.values() for nodeid in recipe] + [isolated.RECREATION, isolated.COMPACT]
+    inventory = [{'id': nodeid, 'source': nodeid.split('::')[0]} for nodeid in ids]
+    recipes = isolated.jobs([(node, isolated.route(node, True, gate.EXCLUSIVE_FAMILIES)) for node in inventory], inventory)
+    assert {row['profile'] for row in recipes} == {'allocation', 'bytes', 'inodes'}
+    selected = [nodeid for row in recipes for nodeid in row['selected']]
+    assert sorted(selected) == sorted(ids)
+    for row in recipes:
+        first = row['attempts'][0]
+        assert first[:len(isolated.RECIPES[row['profile']])] == isolated.RECIPES[row['profile']]
+        assert first[-1] == isolated.RECREATION
+        assert row['attempts'][1:] == ([[isolated.RECREATION]] if row['profile'] == 'allocation' else [])
+    with pytest.raises(gate.shared.Refused, match='Unmapped ext4'):
+        isolated.route({'id': isolated.PREFIX + 'test_future', 'source': isolated.PREFIX.split('::')[0]}, True, gate.EXCLUSIVE_FAMILIES)
+    with pytest.raises(gate.shared.Refused, match='Missing mandatory'):
+        isolated.jobs([(inventory[0], 'allocation')], inventory[:1])
+
+
+def test_execution_route_never_host_or_receipt_and_stale_sibling_blocks(repo, monkeypatch, tmp_path):
+    inventory = data([('ha-ops/tests/test_native_disk.py', 'test_disk')])
+    plan = {'errors': [], 'mode': 'full', 'decisions': [{'id': node['id'], 'selected': True} for node in inventory['nodes']]}
+    monkeypatch.setattr(gate.shared, 'validate_map', lambda *a: [])
+    monkeypatch.setattr(gate, 'make_plan', lambda *a: plan)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Execution-only route entered host or receipt lookup')
+    monkeypatch.setattr(gate.receipts.Store, 'lookup', forbidden)
+    calls = []
+    def launch(root, data, recipe, directory):
+        calls.append(recipe)
+        return [machine(recipe['attempts'][0], 1)], {}
+    monkeypatch.setattr(gate.execution_linux, 'launch', launch)
+    result = gate.execute(repo, inventory, plan, '', tmp_path, launch=forbidden)
+    assert calls[0]['profile'] == 'linux'
+    assert result['categories']['native-disk']['proof'] == 'execution-only; no receipt authority'
+    calls.clear()
+    monkeypatch.setattr(gate.shared, 'validate_map', lambda *a: ['changed'] if calls else [])
+    with pytest.raises(gate.shared.Refused, match='Selection inputs changed'):
+        gate.execute(repo, inventory, plan, '', tmp_path, launch=forbidden)
+
+
+@pytest.mark.parametrize('change', ['bool', 'schema', 'workers', 'skip', 'xfail'])
+def test_execution_machine_strict_supported_proof(change):
+    record = machine(['node'], 1)
+    if change == 'bool': record['exitstatus'] = False
+    if change == 'schema': record['schema'] = True
+    if change == 'workers': record['worker_collections'] *= 2
+    if change == 'skip': record['reports'][1]['outcome'] = 'skipped'
+    if change == 'xfail': record['reports'][1]['xfail'] = True
+    if change == 'skip':
+        # Accounting preserves skipped as unproven; the isolated proof gate rejects it.
+        assert gate.verify_outcomes(record, ['node'], 1) == ['node']
+        assert 'node' not in gate.execution_linux.DEFERRED
+    else:
+        with pytest.raises(gate.shared.Refused):
+            gate.verify_outcomes(record, ['node'], 1)
+
+
+@pytest.mark.parametrize('field,value', [('supervisor_exit_code', False), ('wait_exit_code', True), ('docker_wait_returncode', None), ('watchdog_reason', 'timeout')])
+def test_execution_outer_never_accepts_partial_or_boolean_success(field, value):
+    row = {'wait_exit_code': 0, 'docker_wait_returncode': 0, 'supervisor_exit_code': 0,
+           'watchdog_reason': 'completed', 'wait_failure': None,
+           'state': {'ExitCode': 0, 'OOMKilled': False, 'Status': 'exited'}}
+    row[field] = value
+    outer = {'status': 'passed', 'failure': None, 'cleanup_errors': [], 'capture_errors': [], 'containers': [row]}
+    with pytest.raises(gate.shared.Refused):
+        gate.execution_linux.containers_success(outer, 1)
+
+
+def test_execution_adapter_input_selects_its_reviewed_resource_and_controller_consumers():
+    nodes = data([('ha-ops/tests/test_native_disk.py', 'test_disk'),
+                  ('ha-ops/tests/test_native_ext4.py', 'test_kernel_byte_enospc'),
+                  ('ha-ops/tests/test_native_git.py', 'test_git')])['nodes']
+    assert gate.areas_for_path('dev/test_execution_linux.py', nodes) == ({'runner', 'virtualization', 'native-disk', 'native-ext4'}, None)
+
+
+@pytest.mark.parametrize('attempt', ['0', '1'])
+def test_execution_child_preserves_only_ext4_allowlist_and_exact_attempt(monkeypatch, attempt):
+    isolated = gate.execution_linux
+    monkeypatch.setattr(isolated.sys, 'platform', 'linux')
+    monkeypatch.setattr(isolated.linux, 'prepare_child_environment', lambda: dict(isolated.linux.ENV))
+    fields = {'ROOT': '/workspace/ext4', 'PROFILE': 'allocation', 'RUN': 'a' * 32,
+              'DEVICE': '7:3', 'REPORT': '/workspace/output/current.json',
+              'PRIOR_REPORT': '/workspace/output/prior.json', 'TOKEN': 'b' * 32, 'ATTEMPT': attempt}
+    for key, value in fields.items(): monkeypatch.setenv('HA_OPS_EXT4_' + key, value)
+    monkeypatch.setenv('HA_OPS_EXT4_UNREVIEWED', 'must-not-survive')
+    monkeypatch.setenv('PYTEST_ADDOPTS', '--unreviewed')
+    captured = {}
+    def execve(program, command, environment):
+        captured.update(command=command, environment=environment)
+    monkeypatch.setattr(isolated.os, 'execve', execve)
+    isolated.child({'profile': 'allocation', 'attempts': [['first.py::case'], ['recreate.py::case']]})
+    env, command = captured['environment'], captured['command']
+    assert {key for key in env if key.startswith('HA_OPS_EXT4_')} == {'HA_OPS_EXT4_' + key for key in fields}
+    assert 'PYTEST_ADDOPTS' not in env
+    assert all(env[key] == isolated.linux.ENV[key] for key in ('GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL'))
+    assert env['TEST_PLAN_OUTPUT'].endswith('allocation-' + attempt + '.json')
+    assert command[-1] == ('first.py::case' if attempt == '0' else 'recreate.py::case')
+    assert command[command.index('-n') + 1] == '1'
+
+
+@pytest.mark.parametrize('field,value', [('ROOT', '/foreign'), ('PROFILE', 'bytes'), ('TOKEN', 'foreign'), ('ATTEMPT', '2'), ('RUN', '')])
+def test_execution_child_refuses_altered_ext4_binding_before_exec(monkeypatch, field, value):
+    isolated = gate.execution_linux
+    monkeypatch.setattr(isolated.sys, 'platform', 'linux')
+    monkeypatch.setattr(isolated.linux, 'prepare_child_environment', lambda: dict(isolated.linux.ENV))
+    fields = {'ROOT': '/workspace/ext4', 'PROFILE': 'allocation', 'RUN': 'a' * 32,
+              'DEVICE': '7:3', 'REPORT': '/workspace/output/current.json',
+              'PRIOR_REPORT': '/workspace/output/prior.json', 'TOKEN': 'b' * 32, 'ATTEMPT': '0'}
+    fields[field] = value
+    for key, value in fields.items(): monkeypatch.setenv('HA_OPS_EXT4_' + key, value)
+    monkeypatch.setattr(isolated.os, 'execve', lambda *args: pytest.fail('Altered binding executed'))
+    with pytest.raises(gate.shared.Refused):
+        isolated.child({'profile': 'allocation', 'attempts': [['first.py::case']]})
+
+
+@pytest.mark.parametrize('expected_skip', [True, False])
+def test_execution_expected_deferred_skip_is_unproven_and_unexpected_skip_blocks_publication(repo, monkeypatch, tmp_path, expected_skip):
+    nodeid = next(iter(gate.execution_linux.DEFERRED)) if expected_skip else 'ha-ops/tests/test_native_disk.py::test_disk'
+    inventory = data([(nodeid.split('::')[0], nodeid.split('::', 1)[1])])
+    plan = {'errors': [], 'mode': 'full', 'decisions': [{'id': nodeid, 'selected': True}]}
+    monkeypatch.setattr(gate.shared, 'validate_map', lambda *a: [])
+    monkeypatch.setattr(gate, 'make_plan', lambda *a: plan)
+    published = []
+    monkeypatch.setattr(gate.receipts.Store, 'lookup', lambda *a: pytest.fail('Execution route looked up receipt'))
+    monkeypatch.setattr(gate.receipts.Store, 'publish', lambda *a: published.append(a[1:]))
+    def launch(root, data, recipe, directory):
+        record = machine([nodeid], 1); record['reports'][1]['outcome'] = 'skipped'
+        return [record], {}
+    monkeypatch.setattr(gate.execution_linux, 'launch', launch)
+    if expected_skip:
+        result = gate.execute(repo, inventory, plan, '', tmp_path)
+        assert result['not_proven'] == [nodeid]
+        assert published == [({}, {})]
+    else:
+        with pytest.raises(gate.shared.Refused, match='Unexpected isolated skip'):
+            gate.execute(repo, inventory, plan, '', tmp_path)
+        assert published == []
+
+
+def test_generic_linux_recipes_bound_complete_json_argument_and_exact_coverage():
+    import json
+    isolated = gate.execution_linux
+    inventory = [{'id': 'ha-ops/tests/test_native_disk.py::test_' + str(i) + '_' + 'x' * 180,
+                  'source': 'ha-ops/tests/test_native_disk.py'} for i in range(1500)]
+    jobs = isolated.jobs([(node, 'linux') for node in inventory], inventory)
+    assert len(jobs) > 1
+    assert [nodeid for job in jobs for nodeid in job['selected']] == [node['id'] for node in inventory]
+    for job in jobs:
+        assert job['attempts'] == [job['selected']]
+        assert len(json.dumps(job, separators=(',', ':')).encode()) <= isolated.MAX_RECIPE_BYTES
+
+
+@pytest.mark.parametrize('malformed', [None, 0, '', [], {}, True])
+@pytest.mark.parametrize('target,phase', [('passed-peer', 'setup'), ('deferred-peer', 'call'), ('deferred-peer', 'teardown')])
+@pytest.mark.parametrize('deferred_skip', [True, False])
+def test_deferred_skip_never_relaxes_strict_boolean_phase_schema(malformed, target, phase, deferred_skip):
+    deferred = next(iter(gate.execution_linux.DEFERRED))
+    expected = ['passed-peer', deferred]
+    record = machine(expected, 1)
+    if deferred_skip:
+        next(row for row in record['reports'] if row['id'] == deferred and row['when'] == 'call')['outcome'] = 'skipped'
+    nodeid = 'passed-peer' if target == 'passed-peer' else deferred
+    next(row for row in record['reports'] if row['id'] == nodeid and row['when'] == phase)['xfail'] = malformed
+    with pytest.raises(gate.shared.Refused):
+        gate.verify_outcomes(record, expected, 1)
+
+
+@pytest.mark.parametrize('field,value', [('reports', None), ('worker_collections', None), ('schema', True)])
+def test_deferred_skip_never_relaxes_top_level_machine_shape(field, value):
+    deferred = next(iter(gate.execution_linux.DEFERRED))
+    record = machine(['peer', deferred], 1)
+    next(row for row in record['reports'] if row['id'] == deferred and row['when'] == 'call')['outcome'] = 'skipped'
+    record[field] = value
+    with pytest.raises(gate.shared.Refused):
+        gate.verify_outcomes(record, ['peer', deferred], 1)

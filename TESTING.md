@@ -35,8 +35,10 @@ For continuation from a clean context:
    prove test execution, platform qualification, or successful publication.
 4. Execute through the canonical gate and satisfy the unchanged release gate and
    relevant platform sections below. Only the reviewed complete Reset category
-   currently has production receipt qualification. Exclusive ext4/resource
-   refusal requires its isolated route; host jobs/skips cannot qualify Linux,
+   currently has production receipt qualification. Reviewed exclusive resource selections run sequentially in the cached Linux
+   wrapper with one worker; ext4 selections use ordered allocation/bytes/inodes
+   support recipes, with allocation recreation. These execution-only routes have
+   no receipt authority; host jobs/skips cannot qualify Linux,
    original App image, browser, or PID1 obligations. Keep immutable source,
    runtime and fixture identities with evidence; changed recipes require new proof.
 
@@ -92,9 +94,10 @@ Other production categories remain ineligible. The explicitly qualified disposab
 unit-only authority and does not establish production eligibility.
 Such categories still execute on each invocation. The AST inventory has no lexically closed real category. Positive qualification
 is therefore separate and restricted to the reviewed complete Reset category;
-other unknown categories continue to execute without reusable proof. Explicit local `python3 dev/selective_pre_push.py --verify-category reset`
-collects and verifies every current Reset ID and can populate its qualified
-receipt. This option is exclusive with hook records/full mode and grants no push
+other unknown categories continue to execute without reusable proof. Explicit local `python3 dev/selective_pre_push.py --verify-category CATEGORY`
+collects and verifies every current ID in a known collected category. Only Reset
+can populate its already qualified receipt; resource categories use execution-only
+Linux/ext4 routes with exact machine/controller/cleanup evidence. This option is exclusive with hook records/full mode and grants no push
 approval; actual hook change-basis/unknown/resource blockers remain mandatory.
 The profile requires the reviewed image already cached and the existing VM ready;
 it never installs, starts a VM, builds or pulls. Platform/ext4/browser/PID1 proof
@@ -102,7 +105,13 @@ is not implied. Unrelated collected test modules outside the dependency closure
 are physically excluded from this profile's copied input. Runner, release and virtualization
 categories remain ineligible because their checkout/controller dependencies need
 separate qualification; they still execute. Other required platform routes and
-all unknown/unsafe selection errors remain blocking before receipt lookup.
+all unknown/unmapped unsafe selection errors remain blocking before receipt lookup.
+The execution-only adapter in `dev/test_execution_linux.py` predeclares selected
+ownership separately from mandatory repeated ext4 support. Unexpected isolated
+skips fail; the original-App receiver and intentionally unsupported SSH readback
+combination remain explicitly not proven when skipped. Generic Linux proof does
+not satisfy original-App, browser, PID1, or separately opt-in migration-review ext4
+obligations. No execution-only route looks up or creates a receipt.
 
 Only original final passed/completed controller evidence with strict integer
 zero statuses and exact all-passed setup/call/teardown and worker collections
@@ -1143,3 +1152,10 @@ UTF-8 text windows around all 2/3/4-byte boundary splits. Raw page bytes and SHA
 remain unchanged. The real Linux migration browser verifies first/next/reverse/
 direct-last split characters, labeled text ranges, and explicit malformed-text
 refusal. Run these on the same sealed source as Review/Disk/ext4 coverage.
+
+The direct native topology integration cleans root-created bind contents through
+an exact labelled, networkless cleanup container before removing its held host
+fixture root. It reuses descriptor-anchored deletion, refuses nested mounts and
+foreign identities, and retains the fixture and original failure when cleanup
+cannot be proven. This avoids assuming that an unprivileged CI user can unlink
+files within root-owned directories.

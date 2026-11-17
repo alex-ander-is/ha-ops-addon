@@ -43,8 +43,8 @@ tag_version="$(git show "$release_commit:ha-ops/config.yaml" | awk -F'"' '/^vers
   exit 1
 }
 remote_base="$(git rev-parse origin/main)"
-git merge-base --is-ancestor "$remote_base" "$release_commit" || {
-  printf 'release %s is not based on origin/main\n' "$tag" >&2
+git merge-base --is-ancestor "$remote_base" HEAD || {
+  printf 'HEAD is not a fast-forward of origin/main for release %s\n' "$tag" >&2
   exit 1
 }
 base="$(git describe --tags --abbrev=0 "$release_commit^" | sed 's/^v//')"

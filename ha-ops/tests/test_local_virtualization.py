@@ -1557,7 +1557,7 @@ def ext4_helper():
 
 def ext4_inspection():
     expected = {'/workspace/input': ('/input', False), '/workspace/output': ('/output', True), '/workspace/ext4': ('/guest/mount', True)}
-    return {'Id': 'container', 'Config': {'User': '501:1000', 'Labels': {'ha-ops.dev.run': 'a' * 32}},
+    return {'Image': 'imageid', 'Id': 'container', 'Config': {'User': '501:1000', 'Labels': {'ha-ops.dev.run': 'a' * 32}},
             'HostConfig': {'Privileged': False, 'Devices': [], 'CapAdd': [], 'CapDrop': ['ALL'],
                            'SecurityOpt': ['no-new-privileges'], 'ReadonlyRootfs': True, 'NetworkMode': 'none'},
             'Mounts': [{'Type': 'bind', 'Destination': k, 'Source': v[0], 'RW': v[1], 'Propagation': 'rprivate'} for k, v in expected.items()]}
@@ -3319,3 +3319,124 @@ def test_runtime_fallback_finalizes_parent_only_anchor_without_reuse_collateral(
             assert subject.DEPENDENCY_OWNERS[dependency] is anchor
             assert subject.DEPENDENCY_CLOSE_DEBT[dependency]['close_outcome'] == 'uncertain'
     finally: close(state['guard'])
+
+
+@pytest.mark.parametrize('fault', ['none', 'symlink', 'fifo', 'missing'])
+def test_ext4_machine_evidence_retained_before_owned_output_cleanup(tmp_path, fault):
+    subject = wrapper()
+    output = tmp_path / 'output'; output.mkdir()
+    evidence_dir = tmp_path / 'evidence'; evidence_dir.mkdir()
+    class Evidence:
+        path = evidence_dir
+        data = {}
+    evidence = Evidence()
+    machine = output / 'test-plan-allocation-0.json'
+    if fault == 'none': machine.write_text('{"exitstatus":0}')
+    if fault == 'symlink': machine.symlink_to(tmp_path / 'foreign')
+    if fault == 'fifo': os.mkfifo(machine)
+    if fault == 'none':
+        subject.persist_machines(output, evidence, 'allocation', [{'id': 'owned-container'}])
+        assert (evidence_dir / machine.name).read_text() == '{"exitstatus":0}'
+        assert evidence.data['machine_records'] == [{'profile': 'allocation', 'attempt': 0, 'container': 'owned-container', 'file': machine.name}]
+        machine.unlink(); output.rmdir()
+        assert (evidence_dir / machine.name).is_file()
+    else:
+        with pytest.raises((subject.Refused, FileNotFoundError)):
+            subject.persist_machines(output, evidence, 'allocation', [{'id': 'owned-container'}])
+
+
+def test_ext4_machine_copy_runs_before_host_fixture_removal():
+    source = SOURCE.read_text()
+    body = source[source.index('def ext4_run('):source.index('def write_report(')]
+    assert body.index('persist_machines(output') < body.index('owned.remove()') < body.index('evidence.finish(')
+    assert 'return (0, evidence.path) if return_evidence else 0' in body
+
+
+def test_real_descriptor_snapshot_has_bounded_json_evidence_before_fixture_allocation(tmp_path, monkeypatch):
+    subject = wrapper()
+    monkeypatch.setattr(subject, 'ROOT', tmp_path)
+    monkeypatch.setattr(subject, 'HERE', tmp_path)
+    monkeypatch.setattr(subject, 'RUNS', tmp_path / 'runs')
+    monkeypatch.setattr(subject, 'mount_points', lambda: {tmp_path})
+    monkeypatch.setattr(subject, 'capacity', lambda *args: None)
+    monkeypatch.setattr(subject.os, 'getuid', lambda: 501)
+    source = tmp_path / 'source'; source.mkdir()
+    (source / 'nested').mkdir(); (source / 'nested/file').write_bytes(b'actual source')
+    snapshot = subject.snapshot_input(source)
+    assert () in snapshot['records'] and isinstance(snapshot['source'], Path)
+    identity = subject.source_snapshot_evidence(snapshot)
+    assert json.loads(json.dumps(identity)) == identity
+    assert identity['entries'] == 3 and len(identity['manifest_sha256']) == 64
+    assert len(json.dumps(identity)) < 1024
+    assert subject.source_snapshot_evidence(snapshot) == identity
+    def failed_evidence(root, metadata):
+        assert metadata['source_snapshot'] == identity
+        json.dumps(metadata)
+        raise OSError('evidence init failed')
+    monkeypatch.setattr(subject.guard, 'Evidence', failed_evidence)
+    with pytest.raises(OSError, match='evidence init failed'):
+        subject.ext4_run(source, ['fixture'])
+    assert list(subject.RUNS.iterdir()) == []
+
+
+@pytest.mark.parametrize('boundary', ['mkdir', 'mkdir-foreign', 'owner', 'owner-replaced'])
+def test_ext4_real_startup_allocations_finalize_evidence_without_unanchored_deletion(tmp_path, monkeypatch, boundary):
+    subject = wrapper()
+    monkeypatch.setattr(subject, 'ROOT', tmp_path)
+    monkeypatch.setattr(subject, 'HERE', tmp_path)
+    monkeypatch.setattr(subject, 'RUNS', tmp_path / 'runs')
+    monkeypatch.setattr(subject, 'DIAGNOSTICS', tmp_path / 'diagnostics')
+    monkeypatch.setattr(subject, 'LOCAL', tmp_path / 'local')
+    monkeypatch.setattr(subject, 'mount_points', lambda: {tmp_path})
+    monkeypatch.setattr(subject, 'capacity', lambda *args: None)
+    monkeypatch.setattr(subject.os, 'getuid', lambda: 501)
+    source = tmp_path / 'source'; source.mkdir()
+    (source / 'file').write_bytes(b'actual source')
+    captured = []
+    original_evidence = subject.guard.Evidence
+    class RealEvidence(original_evidence):
+        def __init__(self, root, metadata):
+            super().__init__(root, metadata)
+            captured.append(self)
+    monkeypatch.setattr(subject.guard, 'Evidence', RealEvidence)
+    original_mkdir = Path.mkdir
+    primary = OSError('causal startup allocation failure')
+    retained = []
+    def mkdir(path, *args, **kwargs):
+        if path.parent == subject.RUNS and boundary.startswith('mkdir'):
+            if boundary == 'mkdir-foreign':
+                original_mkdir(path, *args, **kwargs)
+                (path / 'foreign').write_text('preserve')
+            raise primary
+        return original_mkdir(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'mkdir', mkdir)
+    def owner(path):
+        if boundary == 'owner-replaced':
+            moved = path.with_name(path.name + '-retained')
+            path.rename(moved); retained.append(moved)
+            original_mkdir(path)
+            (path / 'foreign').write_text('preserve')
+        raise primary
+    monkeypatch.setattr(subject, 'OwnedDirectory', owner)
+    monkeypatch.setattr(subject, 'docker', lambda *args, **kwargs: pytest.fail('startup failure reached Docker'))
+    with pytest.raises(subject.Refused) as caught:
+        subject.ext4_run(source, ['fixture'], report=tmp_path / 'report.json')
+    assert caught.value.__cause__ is primary
+    assert caught.value.failure['error'] == str(primary)
+    evidence = captured[0]
+    assert evidence.data['status'] == 'failed'
+    assert evidence.data['primary_error']['error'] == str(primary)
+    assert all(stream['file'].closed for stream in evidence.streams.values())
+    assert evidence.sink.flags == {}
+    final = json.loads((evidence.path / 'manifest.json').read_text())
+    assert final['status'] == 'failed' and final['failure'] == 'OSError'
+    if boundary == 'mkdir':
+        assert list(subject.RUNS.iterdir()) == []
+        assert final['cleanup_errors'] == [] and final['allocation']['created'] is False
+    else:
+        debt = final['allocation']['retained_unanchored']
+        assert Path(debt).exists() and final['allocation']['anchored'] is False
+        assert any(row['phase'] == 'host fixture unanchored' for row in final['cleanup_errors'])
+        if boundary in ('mkdir-foreign', 'owner-replaced'):
+            assert (Path(debt) / 'foreign').read_text() == 'preserve'
+        assert all(path.exists() for path in retained)

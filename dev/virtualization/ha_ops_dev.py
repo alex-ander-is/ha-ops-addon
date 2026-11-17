@@ -780,6 +780,27 @@ def persist_inner(output, evidence):
                 handle.write(path.read_bytes())
 
 
+def persist_machines(output, evidence, profile, containers):
+    """Retain bounded per-attempt machine records before owned output removal."""
+    rows = []
+    for attempt, container in enumerate(containers):
+        name = 'test-plan-' + profile + '-' + str(attempt) + '.json'
+        path = no_symlinks(output / name)
+        if not path.is_file() or path.stat().st_size > 64 * 1024 * 1024:
+            raise Refused('Missing/oversize execution machine evidence: ' + name)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, 'rb') as source:
+            if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                raise Refused('Execution machine is not regular')
+            raw = source.read(64 * 1024 * 1024 + 1)
+            if len(raw) > 64 * 1024 * 1024:
+                raise Refused('Oversize execution machine evidence')
+        with guard.private_file(evidence.path / name, 'wb') as handle:
+            handle.write(raw)
+        rows.append({'profile': profile, 'attempt': attempt, 'container': container['id'], 'file': name})
+    evidence.data['machine_records'] = rows
+
+
 def container_wait(container_id, run_id, evidence):
     """Retain bounded logs/state even when wait fails, before exact removal."""
     first, waited, code = None, None, None
@@ -1171,7 +1192,23 @@ def verify_ext4_container(inspected, container_id, run_id, source, output, fixtu
         raise Refused("Exact private ext4 container mounts failed")
 
 
-def ext4_run(input_path, command, *, profile="allocation", recreate=False, report=None):
+def source_snapshot_evidence(snapshot):
+    """Bounded JSON identity; descriptor-only tuple maps stay internal."""
+    manifest = {
+        'source': str(snapshot.get('source', '')),
+        'total': snapshot['total'],
+        'records': [[list(path), kind, list(signature)]
+                    for path, (kind, signature) in sorted(snapshot.get('records', {}).items())],
+        'children': [[list(path), list(names)]
+                     for path, names in sorted(snapshot.get('children', {}).items())],
+        'mounts': sorted(str(path) for path in snapshot.get('mounts', ())),
+    }
+    encoded = json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()
+    return {'source': manifest['source'], 'total': manifest['total'],
+            'entries': len(manifest['records']), 'manifest_sha256': hashlib.sha256(encoded).hexdigest()}
+
+
+def ext4_run(input_path, command, *, profile="allocation", recreate=False, report=None, return_evidence=False):
     if not command or os.getuid() == 0 or profile not in EXT4_SIZES:
         raise Refused("Ext4 needs a command, bounded profile and nonroot application UID")
     command = protected_command(command)
@@ -1181,17 +1218,26 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
     no_symlinks(RUNS); RUNS.mkdir(parents=True, exist_ok=True)
     run_id = uuid.uuid4().hex
     run_dir = RUNS / run_id
-    run_dir.mkdir(mode=0o700)
-    owned = OwnedDirectory(run_dir)
+    source_identity = source_snapshot_evidence(snapshot)
     names, first, failures = [], None, []
     cleanup_causes = []
+    owned, allocation_attempted, created = None, False, False
     def cleanup_failure(phase, error):
         failures.append({'phase': phase, 'failure': failure_payload(error)})
         cleanup_causes.append(error)
-    evidence = guard.Evidence(DIAGNOSTICS, {"kind": "ext4_container", "run_id": run_id})
-    result = {"status": "started", "run_id": run_id, "profile": profile, "containers": []}
+    result = {"status": "started", "run_id": run_id, "profile": profile, "containers": [],
+              "source_snapshot": source_identity}
     setup_attempted = False
+    # Pure identity preparation precedes resources. Once Evidence succeeds,
+    # every subsequent startup/body failure enters the same terminal finalizer.
+    evidence = guard.Evidence(DIAGNOSTICS, {"kind": "ext4_container", "run_id": run_id,
+        "profile": profile, "source_snapshot": source_identity, "command": command})
     try:
+        result["evidence"] = str(evidence.path)
+        allocation_attempted = True
+        run_dir.mkdir(mode=0o700)
+        created = True
+        owned = OwnedDirectory(run_dir)
         source, output = run_dir / "input", run_dir / "output"
         copy_input(input_source, source, expected=snapshot); output.mkdir(mode=0o700)
         # This opt-in route requires the reusable VM/image; it never builds or
@@ -1225,7 +1271,7 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
             name = "ha-ops-dev-" + run_id + "-ext4-" + str(attempt)
             names.append(name)
             args = ["create", "--name", name, "--label", "ha-ops.dev.run=" + run_id,
-                    "--network", "none", "--read-only", "--tmpfs", "/tmp", "--user", user,
+                    "--network", "none", "--read-only", "--pull", "never", "--tmpfs", "/tmp", "--user", user,
                     "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                     "--mount", f"type=bind,source={source},target=/workspace/input,readonly,bind-propagation=rprivate",
                     "--mount", f"type=bind,source={output},target=/workspace/output,bind-propagation=rprivate",
@@ -1236,10 +1282,12 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
                     "--env", "HA_OPS_EXT4_PRIOR_REPORT=/workspace/output/" + prior_name,
                     "--env", "HA_OPS_EXT4_TOKEN=" + attempt_token,
                     "--env", "HA_OPS_EXT4_ATTEMPT=" + str(attempt), "--workdir", "/workspace/input",
-                    "--platform", target_platform, image, *command]
+                    "--platform", target_platform, image_id, *command]
             container_id = docker(*args).stdout.decode().strip()
             inspected = json.loads(docker("container", "inspect", container_id).stdout)[0]
             verify_ext4_container(inspected, container_id, run_id, source, output, fixture, user)
+            if inspected.get("Image") != image_id:
+                raise Refused("Ext4 cached image identity changed")
             result["containers"].append({"id": container_id, "name": name, "security": inspected["HostConfig"], "mounts": inspected["Mounts"]})
             docker("start", container_id)
             code = container_wait(container_id, run_id, evidence)
@@ -1265,7 +1313,10 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
             try: remove_owned(name, run_id)
             except BaseException as error: cleanup_failure("container " + name, error)
         try:
-            if 'output' in locals() and output.exists(): persist_inner(output, evidence)
+            if 'output' in locals() and output.exists():
+                persist_inner(output, evidence)
+                if return_evidence:
+                    persist_machines(output, evidence, profile, result['containers'])
         except BaseException as error: cleanup_failure("inner evidence", error)
         if not failures and setup_attempted:
             try:
@@ -1275,11 +1326,24 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
                 if result["image_id_after_cleanup"] != image_id: raise Refused("Reusable image changed during cleanup")
                 result["vm_after_cleanup"] = endpoint_info().get("Name")
             except BaseException as error: cleanup_failure("guest fixture", error)
-        if not failures:
-            try: owned.remove()
-            except BaseException as error: cleanup_failure("host fixture", error)
-        try: owned.close()
-        except BaseException as error: cleanup_failure("host descriptor", error)
+        result["allocation"] = {"attempted": allocation_attempted, "created": created,
+                                "anchored": owned is not None}
+        if owned is not None:
+            if not failures:
+                try: owned.remove()
+                except BaseException as error: cleanup_failure("host fixture", error)
+            try: owned.close()
+            except BaseException as error: cleanup_failure("host descriptor", error)
+        elif allocation_attempted:
+            # mkdir may have collided with a foreign entry or ownership opening
+            # may have failed after creation. No descriptor means no deletion
+            # authority, even if the pathname currently appears empty.
+            try:
+                if created or run_dir.exists() or run_dir.is_symlink():
+                    result["allocation"]["retained_unanchored"] = str(run_dir)
+                    cleanup_failure("host fixture unanchored", Refused("Retained path without exact cleanup authority: " + str(run_dir)))
+            except BaseException as error:
+                cleanup_failure("host fixture ownership unknown", error)
     body_failure = failure_payload(first) if first is not None else None
     if first is None and cleanup_causes:
         first = cleanup_causes[0]
@@ -1294,7 +1358,9 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
         result.update(status="failed", error=str(first), failure=failure_payload(first),
                       report_failure=failure_payload(error))
     try:
-        evidence.finish(status="failed" if first is not None else "passed", failure=type(first).__name__ if first else None, cleanup_errors=failures)
+        evidence.finish(status="failed" if first is not None else "passed", failure=type(first).__name__ if first else None,
+                        primary_error=failure_payload(first) if first is not None else None,
+                        allocation=result["allocation"], cleanup_errors=failures)
     except BaseException as error:
         cleanup_failure("evidence finalization", error)
         if first is None: first = error
@@ -1306,7 +1372,7 @@ def ext4_run(input_path, command, *, profile="allocation", recreate=False, repor
         refused.report_failure = result.get('report_failure')
         refused.report = result
         raise refused from first
-    return 0
+    return (0, evidence.path) if return_evidence else 0
 
 
 def write_report(path, payload):

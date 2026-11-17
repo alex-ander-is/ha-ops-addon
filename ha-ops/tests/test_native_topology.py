@@ -409,3 +409,59 @@ def test_owned_cleanup_checks_absence_and_later_resources_after_failure(monkeypa
         ["container", "inspect", "second"], ["rm", "--force", "second"], ["container", "inspect", "second"],
         ["image", "rm", "fixture-image"], ["image", "inspect", "fixture-image"],
     ]
+
+
+@pytest.mark.parametrize('spelling', ['DAC_OVERRIDE', 'CAP_DAC_OVERRIDE'])
+@pytest.mark.parametrize('fault', ['none', 'root-replaced', 'label', 'bind', 'network', 'readonly', 'privileged', 'capability', 'extra-capability', 'oom', 'exit', 'helper-failure'])
+def test_ci_owned_cleanup_accepts_exact_authority_and_refuses_incomplete(tmp_path, monkeypatch, fault, spelling):
+    runner = runner_module()
+    directory = tmp_path / 'owned'; directory.mkdir()
+    owner = runner.OwnedDirectory(directory)
+    removed = []; calls = []
+    run = 'a' * 32
+    if fault == 'root-replaced':
+        directory.rename(tmp_path / 'retained')
+        directory.mkdir()
+    def docker(args, **kwargs):
+        calls.append(args)
+        if args[0] == 'create':
+            assert '--cap-drop' in args and args[args.index('--cap-add') + 1] == 'DAC_OVERRIDE'
+            assert 'Nested fixture mount refused' in args[-1]
+            assert 'Foreign fixture root refused' in args[-1]
+            return b'owned-id'
+        if args[:2] == ['container', 'inspect']:
+            info = {'Id': 'owned-id', 'Config': {'Labels': {'ha-ops.dev.run': run}, 'User': ''},
+                    'HostConfig': {'NetworkMode': 'none', 'ReadonlyRootfs': True, 'Privileged': False,
+                                   'CapDrop': ['ALL'], 'CapAdd': [spelling], 'SecurityOpt': ['no-new-privileges']},
+                    'Mounts': [{'Type': 'bind', 'Source': str(directory), 'Destination': '/fixture', 'RW': True, 'Propagation': 'rprivate'}],
+                    'State': {'ExitCode': 0, 'OOMKilled': False, 'Status': 'exited'}}
+            if fault == 'label': info['Config']['Labels']['ha-ops.dev.run'] = 'foreign'
+            if fault == 'bind': info['Mounts'][0]['Source'] = str(tmp_path)
+            if fault == 'network': info['HostConfig']['NetworkMode'] = 'host'
+            if fault == 'readonly': info['HostConfig']['ReadonlyRootfs'] = False
+            if fault == 'privileged': info['HostConfig']['Privileged'] = True
+            if fault == 'capability': info['HostConfig']['CapAdd'] = ['SYS_ADMIN']
+            if fault == 'extra-capability': info['HostConfig']['CapAdd'] = [spelling, 'CHOWN']
+            if fault == 'oom': info['State']['OOMKilled'] = True
+            if fault == 'exit': info['State']['ExitCode'] = True
+            return json.dumps([info]).encode()
+        if args[0] == 'wait':
+            if fault == 'helper-failure': raise RuntimeError('helper failed')
+            return b'0'
+        return b''
+    monkeypatch.setattr(runner, 'docker', docker)
+    monkeypatch.setattr(runner, 'remove_owned', lambda *args: removed.append(args))
+    try:
+        if fault == 'none':
+            runner.clear_owned_fixture(directory, 'cached-image', run, owner)
+        else:
+            with pytest.raises(runner.CleanupFailure):
+                runner.clear_owned_fixture(directory, 'cached-image', run, owner)
+        if fault == 'root-replaced':
+            assert calls == [] and removed == []
+        else:
+            assert removed == [('owned-id', run)]
+        if fault in ('label', 'bind', 'network', 'readonly', 'privileged', 'capability', 'extra-capability'):
+            assert not any(row[0] == 'start' for row in calls)
+    finally:
+        owner.close()
