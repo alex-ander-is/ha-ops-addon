@@ -17,6 +17,58 @@ import pytest
 HELPER = Path(__file__).parent / "browser" / "preview-decisions-source.cjs"
 
 
+def test_backend_heap_refusal_matches_production_frontend_warning_and_local_lifetime():
+    """Bridge actual command refusal/projection, rather than cloning UI identity."""
+    import test_backup_continuation
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node frontend runtime required for complete-module behavior regressions")
+    case = test_backup_continuation.BackupContinuationTests()
+    try:
+        case.setUp()
+        _, _, selected = case.six_path_heap_preview()
+        case.refuse()
+        projected = case.server.web._snapshot_payload(case.ctx)["state"]
+        script = HELPER.read_text().split("const groups={", 1)[0] + r'''
+const backend=JSON.parse(fs.readFileSync(0,'utf8'));
+const diagnostic=preview();diagnostic.state=backend.state;diagnostic.willUpdate();
+assert(diagnostic.backupWarning,'actual backend refusal must match production frontend identity');
+assert(!diagnostic.backupRefusal,'new page must not inherit continuation authority');
+const p=preview();p.state={...backend.state,apply_backup_refusal:null};p.willUpdate();
+assert.equal(p.selectedPaths.length,0);
+for(const selected of backend.selected)p.onPreviewSelect(event({path:selected,selected:true}));
+p.runFinalAction();p.running=false;p.state=backend.state;
+assert(p.backupRefusal,'same mounted submitted draft must expose continuation');
+assert.deepEqual([...p.selectedPaths],backend.selected);
+const current=structuredClone(p.state);
+const target=Object.keys(current.last_preview_live_fingerprints).find(key=>typeof current.last_preview_live_fingerprints[key]==='object');
+assert(target,'fixture must contain a production structured heap fingerprint');
+for(const key of ['hash','counts','ids']){
+  const changed=structuredClone(current),heap=changed.last_preview_live_fingerprints[target];
+  if(key==='hash')heap.hash='sha256:changed';else if(key==='counts')heap.counts.scripts++;else heap.ids.scripts.push('changed');
+  p.state=changed;assert(!p.backupWarning,key);assert(!p.backupRefusal,key);
+}
+p.state=current;
+const selectedPath=backend.selected[0];
+p.onPreviewSelect(event({path:selectedPath,selected:false}));p.onPreviewSelect(event({path:selectedPath,selected:true}));
+assert(p.backupWarning);assert(!p.backupRefusal,'reverting edit must not revive continuation');
+p.state={...current,last_message:'same-content update'};p.willUpdate();assert(!p.backupRefusal);
+const reloaded=preview();reloaded.state=current;reloaded.willUpdate();
+assert(reloaded.backupWarning);assert(!reloaded.backupRefusal);assert.equal(reloaded.selectedPaths.length,0);
+assert.equal(reloaded.events.length,0,'diagnostic display must not send a command');
+console.log(JSON.stringify({completeProductionModule:true,rendered:false,backendProducedRefusal:true,result:'passed'}));
+'''
+        # Keep __dirname bound to the existing helper without creating a new
+        # source/helper path outside the approved test contour.
+        wrapper = "new Function('require','__dirname'," + json.dumps(script) + ")(require," + json.dumps(str(HELPER.parent)) + ");"
+        result = subprocess.run([node, "-e", wrapper], input=json.dumps({"state": projected, "selected": selected}),
+                                capture_output=True, text=True, timeout=30, env=os.environ.copy())
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(result.stdout)["backendProducedRefusal"] is True
+    finally:
+        case.doCleanups()
+
+
 @pytest.mark.parametrize("scenario", [
     "local", "lifetime", "final", "backup", "fences", "native", "lazyDiff", "transport", "badges",
 ])

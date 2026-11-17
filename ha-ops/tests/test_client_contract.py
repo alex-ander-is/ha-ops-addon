@@ -22,9 +22,62 @@ import state  # noqa: E402
 import web  # noqa: E402
 import app_context  # noqa: E402
 import sync  # noqa: E402
+import heap_fingerprint  # noqa: E402
 
 
 class ClientContractTests(unittest.TestCase):
+    def heap_preview_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "automations.yaml").write_text("- id: auto\n  alias: Automation\n")
+            (root / "scripts.yaml").write_text("script_one:\n  alias: Script\n")
+            (root / "scenes.yaml").write_text("- id: scene\n  name: Scene\n")
+            fingerprint = heap_fingerprint.fingerprint_heaps(root)
+        current = state.default_state()
+        current.update(last_preview_paths=["homeassistant/automations.yaml"],
+                       last_preview_live_fingerprints={"homeassistant": fingerprint, "legacy": "sha256:scalar"})
+        return current
+
+    def test_structured_heap_identity_round_trip_and_snapshot_independence(self):
+        current = self.heap_preview_state()
+        captured = web.preview_identity_for_state(current, "apply")
+        expected = copy.deepcopy(current["last_preview_live_fingerprints"])
+        self.assertEqual(captured["live_fingerprints"], expected)
+        for encoded in (captured, json.dumps(captured), [json.dumps(captured)]):
+            self.assertEqual(web._parse_preview_identity(encoded), captured)
+        reordered = copy.deepcopy(captured)
+        heap = reordered["live_fingerprints"]["homeassistant"]
+        reordered["live_fingerprints"]["homeassistant"] = dict(reversed(list(heap.items())))
+        web.assert_preview_decision_identity(current, "apply", {"preview_identity": reordered})
+        parsed = web._parse_preview_identity(captured)
+        parsed_heap = parsed["live_fingerprints"]["homeassistant"]
+        parsed_heap["hash"] = "parsed-only"
+        parsed_heap["counts"]["scripts"] += 1
+        parsed_heap["ids"]["scripts"].append("parsed-only")
+        self.assertEqual(captured["live_fingerprints"], expected)
+        source = current["last_preview_live_fingerprints"]["homeassistant"]
+        source["hash"] = "changed"; source["counts"]["scripts"] += 1; source["ids"]["scripts"].append("source-only")
+        self.assertEqual(captured["live_fingerprints"], expected)
+        self.assertEqual(captured["live_fingerprints"]["legacy"], "sha256:scalar")
+
+    def test_structured_heap_identity_rejects_each_nested_change_and_old_repr(self):
+        current = self.heap_preview_state()
+        identity = web.preview_identity_for_state(current, "apply")
+        variants = []
+        for key in ("hash", "counts", "ids"):
+            candidate = copy.deepcopy(identity)
+            heap = candidate["live_fingerprints"]["homeassistant"]
+            if key == "hash": heap[key] = "sha256:changed"
+            elif key == "counts": heap[key]["scripts"] += 1
+            else: heap[key]["scripts"].append("changed")
+            variants.append(candidate)
+        old = copy.deepcopy(identity)
+        old["live_fingerprints"] = {key: str(value) for key, value in current["last_preview_live_fingerprints"].items()}
+        variants.append(old)
+        for candidate in variants:
+            with self.subTest(candidate=candidate), self.assertRaises(web.StalePreviewDecision):
+                web.assert_preview_decision_identity(current, "apply", {"preview_identity": candidate})
+
     def reset_legacy_state(self):
         spec = importlib.util.spec_from_file_location("reset_fixture_contract", APP.parent / "tests/browser/reset_git_state_fixture.py")
         fixture = importlib.util.module_from_spec(spec)

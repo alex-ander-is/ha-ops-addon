@@ -141,6 +141,84 @@ class BackupContinuationTests(unittest.TestCase):
             payload.update(backup_mode=mode, backup_refusal_id=(state.get("apply_backup_refusal") or {}).get("operation_id"))
         return {"command_id": str(uuid.uuid4()), "command": "apply", "generation": state["operation_generation"], "payload": payload}
 
+    def six_path_heap_preview(self):
+        """Production preview with all heap kinds and a strict partial selection."""
+        git_files = {
+            "configuration.yaml": "homeassistant:\n  name: Git\n",
+            "automations.yaml": "- id: auto\n  alias: Git Automation\n",
+            "scripts.yaml": "script_one:\n  alias: Git Script\n",
+            "scenes.yaml": "- id: scene\n  name: Git Scene\n",
+            "packages/first.yaml": "input_boolean:\n  git_first:\n",
+            "packages/second.yaml": "input_boolean:\n  git_second:\n",
+        }
+        live_files = {name: text.replace("Git", "Live").replace("git_", "live_") for name, text in git_files.items()}
+        seed = self.root / "seed"
+        for name, text in git_files.items():
+            target = seed / "homeassistant" / name
+            target.parent.mkdir(parents=True, exist_ok=True); target.write_text(live_files[name])
+            live = self.server.CONFIG_DIR / name
+            live.parent.mkdir(parents=True, exist_ok=True); live.write_text(live_files[name])
+        self.helper.git_commit_all(seed, "Add shared six-path baseline")
+        self.helper.git(["push", "origin", "main"], seed)
+        # These refs belong to the disposable fixture remote. Establish the
+        # shared baseline so added heap files exercise the non-conflict path.
+        for branch in ("ha-ops/ha-live", "ha-ops/base"):
+            self.helper.git(["branch", "-f", branch, "HEAD"], seed)
+        self.helper.git(["push", "--force", "origin", "ha-ops/ha-live", "ha-ops/base"], seed)
+        self.server.backup_manager_info = Mock(return_value={"backups": [backup_fixture(date=datetime.now(timezone.utc).isoformat())]})
+        self.assertTrue(self.server.run_preview_job(), self.ctx.read_state()["last_message"])
+        for name, text in git_files.items():
+            (seed / "homeassistant" / name).write_text(text)
+        self.helper.git_commit_all(seed, "Change six Git config paths")
+        self.helper.git(["push", "origin", "main"], seed)
+        self.assertTrue(self.server.run_preview_job(), self.ctx.read_state()["last_message"])
+        self.server.backup_manager_info = Mock(return_value={"backups": []})
+        current = self.ctx.read_state()
+        expected = sorted("homeassistant/" + name for name in git_files)
+        self.assertEqual(sorted(current["last_preview_paths"]), expected)
+        selected = ["homeassistant/automations.yaml", "homeassistant/packages/first.yaml", "homeassistant/scripts.yaml"]
+        self.ctx.write_state({"apply_preview_selected_paths": selected, "apply_preview_resolutions": {}})
+        return git_files, live_files, selected
+
+    def test_structured_heap_refusal_then_acknowledgement_applies_exactly_three_of_six(self):
+        import heap_fingerprint
+        git_files, live_files, selected = self.six_path_heap_preview()
+        current = self.ctx.read_state()
+        actual_heap = heap_fingerprint.fingerprint_heaps(self.server.CONFIG_DIR)
+        self.assertIn(actual_heap, list(current["last_preview_live_fingerprints"].values()))
+        envelope = self.envelope()
+        result, refused = self.send(envelope, http=True)
+        self.assertTrue(result["ok"], result)
+        refusal = refused["apply_backup_refusal"]
+        self.assertIsNotNone(refusal)
+        self.assertEqual(refusal["preview_identity"]["live_fingerprints"], current["last_preview_live_fingerprints"])
+        projected = self.server.web._snapshot_payload(self.ctx)["state"]
+        self.assertEqual(projected["apply_backup_refusal"], refusal)
+        self.assertEqual(projected["apply_preview_selected_paths"], selected)
+        for field in ("hash", "counts", "ids", "old_repr"):
+            with self.subTest(stale_field=field):
+                stale = self.envelope("acknowledge")
+                fingerprints = stale["payload"]["preview_identity"]["live_fingerprints"]
+                target = next(key for key, value in fingerprints.items() if isinstance(value, dict))
+                heap = fingerprints[target]
+                if field == "hash": heap["hash"] = "sha256:changed"
+                elif field == "counts": heap["counts"]["scripts"] += 1
+                elif field == "ids": heap["ids"]["scripts"].append("changed")
+                else: fingerprints[target] = str(heap)
+                result, unchanged = self.send(stale)
+                self.assertFalse(result["ok"], result)
+                self.assertEqual(unchanged, refused)
+        for name in git_files:
+            self.assertEqual((self.server.CONFIG_DIR / name).read_text(), live_files[name])
+        with patch.object(self.ctx, "ensure_fresh_system_backup", side_effect=AssertionError("backup gate called")):
+            result, applied = self.send(self.envelope("acknowledge"))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(applied["last_status"], "success", applied["last_details"])
+        for name in git_files:
+            expected = git_files[name] if "homeassistant/" + name in selected else live_files[name]
+            self.assertEqual((self.server.CONFIG_DIR / name).read_text(), expected, name)
+        self.assertIsNone(applied["apply_backup_refusal"])
+
     def send(self, envelope=None, http=False):
         envelope = envelope or self.envelope()
         if not http:

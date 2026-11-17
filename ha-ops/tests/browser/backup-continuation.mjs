@@ -249,7 +249,8 @@ try {
     await component.waitFor();
     await settle();
     assert(await component.evaluate(p => p.selectedPaths.length === 0), "continued diff selected paths automatically");
-    await component.getByRole("button", { name: "Select All", exact: true }).click();
+    await component.locator('ha-ops-preview-file').first().locator('vaadin-checkbox').click();
+    assert(await component.evaluate(p => p.paths.length === 2 && p.selectedPaths.length === 1), "fixture must retain a partial one-of-two draft");
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).waitFor();
     await settle();
     return component;
@@ -272,7 +273,7 @@ try {
     const before = await component.evaluate(p => ({ selected: [...p.selectedPaths], choices: { ...p.resolutions } }));
     await component.getByRole("button", { name: "Expand All", exact: true }).click();
     await page.waitForFunction(() => [...document.querySelector('ha-ops-preview[direction="apply"]').shadowRoot.querySelectorAll('ha-ops-preview-file')].every(r => r.diffState === 'loaded'));
-    await component.evaluate(p => { window.backupDraft = { p, rows: [...p.shadowRoot.querySelectorAll('ha-ops-preview-file')] }; });
+    await component.evaluate(p => { window.backupDraft = { p, selected: [...p.selectedPaths], rows: [...p.shadowRoot.querySelectorAll('ha-ops-preview-file')] }; });
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
     const retry = component.getByRole("button", { name: "Retry Git to HA", exact: true });
     const ack = component.getByRole("button", { name: "Acknowledge & Proceed", exact: true });
@@ -287,7 +288,9 @@ try {
     assert(await component.getByRole("button", { name: "Cancel", exact: true }).count() === 0, "unrequested Cancel");
     assert(await component.getByRole("button", { name: "Apply Git to HA", exact: true }).count() === 0, "Apply not replaced");
     const rejected = await state();
-    assert(await component.evaluate(p => p === window.backupDraft.p && window.backupDraft.rows.every(r => r.isConnected && r.expanded && r.diffState === 'loaded') && JSON.stringify(p.selectedPaths) === JSON.stringify(window.backupDraft.p.selectedPaths)), "backup refusal lost mounted review");
+    assert(await retry.isEnabled() && await ack.isEnabled(), "backup continuation actions must be enabled");
+    assert(Object.values(rejected.last_preview_live_fingerprints).some(value => value && typeof value === 'object' && value.counts && value.ids), "rendered fixture must exercise structured fingerprints");
+    assert(await component.evaluate(p => p === window.backupDraft.p && window.backupDraft.rows.every(r => r.isConnected && r.expanded && r.diffState === 'loaded') && JSON.stringify(p.selectedPaths) === JSON.stringify(window.backupDraft.selected)), "backup refusal lost mounted review");
     assert(JSON.stringify(before.selected) === JSON.stringify(rejected.apply_preview_selected_paths), "submitted selection lost");
     const dom = await component.evaluate(component => {
       const footer = component.shadowRoot.querySelector("footer");
@@ -377,9 +380,14 @@ try {
     await component.getByRole("button", { name: "Apply Git to HA", exact: true }).click();
     await ack.waitFor(); await settle();
     const diagnosticsBefore = await fixtureJson(`${baseUrl}__dev_harness__/diagnostics`);
+    const ackSelected = await component.evaluate(p => [...p.selectedPaths]);
+    assert(ackSelected.length === 1, "acknowledgement must retain the partial draft");
+    await component.evaluate(p => p.addEventListener('ha-ops-command', event => { window.backupAckPayload = structuredClone(event.detail.payload); }, { once: true }));
     await ack.click();
     await page.waitForFunction(() => { const app = document.querySelector("ha-ops-app"); return !app.mutationBlocked() && !app.state.apply_backup_refusal && app.state.last_status === "success" && app.state.last_action === "apply"; });
     const diagnosticsAfter = await fixtureJson(`${baseUrl}__dev_harness__/diagnostics`);
+    const acknowledged = await page.evaluate(() => window.backupAckPayload);
+    assert(acknowledged?.backup_mode === 'acknowledge' && JSON.stringify(acknowledged.selected_paths) === JSON.stringify(ackSelected), "acknowledgement broadened selected paths");
     assert(!(await state()).apply_backup_refusal, "acknowledgement kept warning");
     assert(await page.locator('.backup-warning-badge').count()===0 && await page.getByTestId('status-badge').getAttribute('severity')==='success','acknowledgement kept a stale badge');
     assert(diagnosticsBefore.counters.backup_gate_calls === diagnosticsAfter.counters.backup_gate_calls, "ack called backup gate");

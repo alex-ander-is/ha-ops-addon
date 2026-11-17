@@ -2,6 +2,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import base64
+import copy
 import hashlib
 import json
 import re
@@ -444,7 +445,7 @@ def _canonical_list(value):
 def _canonical_dict(value):
     if not isinstance(value, dict):
         return {}
-    return {str(key): str(value[key]) for key in sorted(value)}
+    return {str(key): copy.deepcopy(value[key]) for key in sorted(value)}
 
 
 def _cursor_identity(cursor):

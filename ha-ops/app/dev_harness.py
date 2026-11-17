@@ -377,7 +377,11 @@ class HarnessScenarioController:
                 "last_preview_deletions": 0,
                 "last_preview_storage_changes": False,
                 "last_preview_storage_paths": [],
-                "last_preview_live_fingerprints": {path: "live-fingerprint", second_path: "missing"},
+                "last_preview_live_fingerprints": {"homeassistant": {
+                    "version": 1, "hash": "sha256:harness-live-fingerprint",
+                    "counts": {"automations": 1, "scripts": 0, "scenes": 0},
+                    "ids": {"automations": ["harness-live"], "scripts": [], "scenes": []},
+                }},
                 "last_preview_warnings": [],
                 "last_preview_paths": [path, second_path],
                 "last_preview_conflicts": False,

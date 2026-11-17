@@ -2,6 +2,13 @@
 
 Released sections are immutable. Put every new change into a new version section.
 
+## 2.6.4
+
+Restore Acknowledge and Retry after backup refusal for Home Assistant heap previews.
+
+- Preserve structured live fingerprints across preview identity creation and validation.
+- Keep partial file selections and one-use backup acknowledgement checks intact.
+
 ## 2.6.3
 
 Place direct-access setup between Git Access and Managed Targets at full width.
